@@ -1,0 +1,26 @@
+#!/bin/sh
+#
+# PROVIDE: gravinet
+# REQUIRE: NETWORKING
+# KEYWORD: shutdown
+#
+# Add this to /etc/rc.conf to enable at boot:
+#   gravinet_enable="YES"
+#
+# Or: sysrc gravinet_enable=YES
+
+. /etc/rc.subr
+
+name="gravinet"
+desc="gravi[net] full-mesh encrypted overlay VPN daemon"
+rcvar=gravinet_enable
+
+load_rc_config "gravinet"
+
+: ${gravinet_enable:="NO"}
+
+pidfile="/var/run/gravinet.pid"
+command="/usr/sbin/daemon"
+command_args="-c -f -r -P ${pidfile} -t gravinet /usr/local/bin/gravinet run -config /usr/local/etc/gravinet/config.json"
+
+run_rc_command "$1"

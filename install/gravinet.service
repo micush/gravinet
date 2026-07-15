@@ -1,0 +1,13 @@
+[Unit]
+Description=gravi[net] full-mesh encrypted overlay VPN daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/gravinet run -config /etc/gravinet/config.json
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

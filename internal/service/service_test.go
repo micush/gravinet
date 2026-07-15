@@ -1,0 +1,226 @@
+package service
+
+import (
+	"net"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+)
+
+func testOpts() Options {
+	return Options{
+		Name:        "gravinet",
+		DisplayName: "gravinet",
+		Description: "test daemon",
+		ExecPath:    "/usr/local/bin/gravinet",
+		ConfigPath:  "/etc/gravinet/config.json",
+	}
+}
+
+func TestSystemdUnit(t *testing.T) {
+	o := testOpts()
+	o.User = "meshd"
+	u := SystemdUnit(o)
+	for _, want := range []string{
+		"Type=notify",
+		"ExecStart=/usr/local/bin/gravinet run -config /etc/gravinet/config.json",
+		"User=meshd",
+		"WantedBy=multi-user.target",
+	} {
+		if !strings.Contains(u, want) {
+			t.Errorf("systemd unit missing %q\n%s", want, u)
+		}
+	}
+	// These hardening directives break PAM web-admin login. They must never come
+	// back.
+	for _, banned := range []string{
+		"NoNewPrivileges",
+		"CapabilityBoundingSet",
+		"AmbientCapabilities",
+		"ProtectSystem",
+		"ProtectHome",
+		"PrivateUsers",
+		"PrivateTmp",
+		"RestrictSUIDSGID",
+	} {
+		if strings.Contains(u, banned) {
+			t.Errorf("systemd unit must NOT contain %q (it breaks PAM auth)\n%s", banned, u)
+		}
+	}
+}
+
+func TestLaunchdPlist(t *testing.T) {
+	p := LaunchdPlist(testOpts())
+	for _, want := range []string{
+		"<key>Label</key>",
+		"com.gravinet.daemon",
+		"<string>run</string>",
+		"<string>-config</string>",
+		"<key>RunAtLoad</key>",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("plist missing %q\n%s", want, p)
+		}
+	}
+}
+
+func TestLaunchdLabelConsistentAcrossUses(t *testing.T) {
+	o := testOpts()
+	label := LaunchdLabel(o)
+	if label != "com.gravinet.daemon" {
+		t.Fatalf("LaunchdLabel = %q, want %q", label, "com.gravinet.daemon")
+	}
+	// LaunchdPlist must derive its Label from the exact same helper, not a
+	// separately-hardcoded copy that could drift from it. (InstallPath does
+	// too, but it branches on runtime.GOOS internally, so asserting its darwin
+	// behavior here would fail this file on non-darwin test runs — that half
+	// is covered by darwin-only test files instead.)
+	if p := LaunchdPlist(o); !strings.Contains(p, "<string>"+label+"</string>") {
+		t.Fatalf("LaunchdPlist doesn't embed LaunchdLabel's value (%q):\n%s", label, p)
+	}
+}
+
+func TestRcdScript(t *testing.T) {
+	r := RcdScript(testOpts())
+	for _, want := range []string{
+		"# PROVIDE: gravinet",
+		"# REQUIRE: NETWORKING",
+		"# KEYWORD: shutdown",
+		". /etc/rc.subr",
+		`name="gravinet"`,
+		"rcvar=gravinet_enable",
+		`command="/usr/sbin/daemon"`,
+		"/usr/local/bin/gravinet run -config /etc/gravinet/config.json",
+		`run_rc_command "$1"`,
+	} {
+		if !strings.Contains(r, want) {
+			t.Errorf("rc.d script missing %q\n%s", want, r)
+		}
+	}
+	// rc.subr's own pidfile-based logic (status/poll, and check_pidfile in
+	// the stop override below) must still resolve to the daemon(8) supervisor
+	// via -P, not gravinet's own pid via -p: using -p there would reintroduce
+	// the bug daemon(8)'s own manual page warns about — `service gravinet
+	// stop` would signal gravinet directly, which daemon(8) (still watching
+	// under -r) then sees as an unexpected death and restarts, turning "stop"
+	// into "stop, then start again". See RcdScript's comment. A *separate*
+	// -p child_pidfile is expected now (see below) but must never be the one
+	// wired to rc.subr's own $pidfile variable.
+	if !strings.Contains(r, "-P ${pidfile}") {
+		t.Errorf("rc.d script must point rc.subr's pidfile logic at daemon(8)'s -P (supervisor pidfile)\n%s", r)
+	}
+	if strings.Contains(r, "-p ${pidfile}") {
+		t.Errorf("rc.d script must not wire daemon(8)'s -p (child pidfile) to rc.subr's own $pidfile var alongside -r\n%s", r)
+	}
+	// The dedicated child pidfile: only used by the bounded stop override's
+	// SIGKILL escalation, so it can reach gravinet's own pid directly instead
+	// of just the supervisor's.
+	if !strings.Contains(r, "-p ${child_pidfile}") {
+		t.Errorf("rc.d script must pass a separate -p child_pidfile for the stop override's SIGKILL escalation to target\n%s", r)
+	}
+	// Bounded stop: rc.subr's default stop_cmd (wait_for_pids) has no
+	// timeout and hangs forever if gravinet never exits — exactly what made
+	// install-freebsd.sh's upgrade-in-place step (which runs `service
+	// gravinet onestop`) hang. There must be an override that bounds the
+	// wait and escalates to SIGKILL rather than blocking indefinitely.
+	if !strings.Contains(r, `stop_cmd="gravinet_stop"`) {
+		t.Errorf("rc.d script must override stop_cmd with a bounded version, not rely on rc.subr's untimed default wait_for_pids\n%s", r)
+	}
+	if !strings.Contains(r, "kill -KILL") {
+		t.Errorf("rc.d script's stop override must escalate to SIGKILL if graceful shutdown doesn't finish in time\n%s", r)
+	}
+}
+
+func TestOpenBSDRcScript(t *testing.T) {
+	o := testOpts()
+	o.User = "_gravinet"
+	r := OpenBSDRcScript(o)
+	for _, want := range []string{
+		"#!/bin/ksh",
+		". /etc/rc.d/rc.subr",
+		`daemon="/usr/local/bin/gravinet"`,
+		`daemon_flags="run -config /etc/gravinet/config.json"`,
+		`daemon_user="_gravinet"`,
+		"rc_bg=YES", // gravinet doesn't fork; rc.subr must background it
+		"rc_cmd $1",
+	} {
+		if !strings.Contains(r, want) {
+			t.Errorf("openbsd rc.d script missing %q\n%s", want, r)
+		}
+	}
+	// OpenBSD's rc.subr dispatches via rc_cmd, not FreeBSD's run_rc_command,
+	// and there is no daemon(8) supervisor to wrap — pulling the FreeBSD
+	// machinery in here would be wrong, so guard against it drifting in.
+	for _, banned := range []string{
+		"run_rc_command",
+		"/usr/sbin/daemon",
+		"child_pidfile",
+	} {
+		if strings.Contains(r, banned) {
+			t.Errorf("openbsd rc.d script must NOT contain FreeBSD-ism %q\n%s", banned, r)
+		}
+	}
+}
+
+func TestWindowsInstallCommands(t *testing.T) {
+	c := WindowsInstallCommands(testOpts())
+	for _, want := range []string{"sc.exe create gravinet", "start= auto", "sc.exe description gravinet"} {
+		if !strings.Contains(c, want) {
+			t.Errorf("windows commands missing %q\n%s", want, c)
+		}
+	}
+}
+
+func TestDefaultsFromBinary(t *testing.T) {
+	o := Defaults()
+	if o.Name != "gravinet" || o.ExecPath == "" {
+		t.Fatalf("defaults not populated: %+v", o)
+	}
+}
+
+func TestNotifyReadyNoSocket(t *testing.T) {
+	os.Unsetenv("NOTIFY_SOCKET")
+	if err := NotifyReady(); err != nil {
+		t.Fatalf("NotifyReady with no socket should be a no-op, got %v", err)
+	}
+}
+
+func TestNotifyReadySendsReady(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("sd_notify is linux-only")
+	}
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "notify.sock")
+	addr := &net.UnixAddr{Name: sockPath, Net: "unixgram"}
+	conn, err := net.ListenUnixgram("unixgram", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	os.Setenv("NOTIFY_SOCKET", sockPath)
+	defer os.Unsetenv("NOTIFY_SOCKET")
+
+	done := make(chan string, 1)
+	go func() {
+		buf := make([]byte, 64)
+		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n, _, _ := conn.ReadFromUnix(buf)
+		done <- string(buf[:n])
+	}()
+
+	if err := NotifyReady(); err != nil {
+		t.Fatalf("NotifyReady: %v", err)
+	}
+	select {
+	case msg := <-done:
+		if msg != "READY=1" {
+			t.Fatalf("expected READY=1, got %q", msg)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("did not receive readiness notification")
+	}
+}
