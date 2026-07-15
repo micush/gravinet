@@ -4599,7 +4599,7 @@ function secNAT(c) {
     card.appendChild(netCardHead(cf, en, '/api/nat'));
 
     const rules = nat.rules||[];
-    let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>source</th><th>dest</th><th>translate</th><th>state</th></tr>';
+    let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>source</th><th>dest</th><th>translate</th></tr>';
     if (!rules.length) h += '<tr><td colspan="5" class="empty">no NAT rules — click + to add one</td></tr>';
     else rules.forEach((r, i) => {
       const tgt = r.interface ? (esc(r.translate||'masquerade')+' ('+esc(r.interface)+')') : esc(r.translate||'');
@@ -4608,10 +4608,10 @@ function secNAT(c) {
       h += '<tr class="natrow'+(enabled?'':' fw-disabled')+'" data-idx="'+i+'" data-enabled="'+(enabled?1:0)+'"'
         + ' data-source="'+esc(r.source||'')+'" data-dest="'+esc(r.dest||'')+'" data-translate="'+esc(r.translate||'')+'" data-iface="'+esc(r.interface||'')+'">'
         + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
+        + '<td class="nat-state">'+stTag+'</td>'
         + '<td class="nat-field nat-src-cell">'+esc(r.source||'any')+'</td>'
         + '<td class="nat-field nat-dst-cell">'+esc(r.dest||'any')+'</td>'
-        + '<td class="nat-field nat-tr-cell">'+tgt+'</td>'
-        + '<td class="nat-state">'+stTag+'</td></tr>';
+        + '<td class="nat-field nat-tr-cell">'+tgt+'</td></tr>';
     });
     const t = $('<div></div>'); t.innerHTML = h+'</table>'; card.appendChild(t);
     const table = t.querySelector('table');
@@ -4643,10 +4643,10 @@ function secNAT(c) {
 function natAddRow(table, net){
   const tr = document.createElement('tr');
   tr.innerHTML = '<td class="selcol"></td>'
+    + '<td class="nat-state"><span class="on">enabled</span></td>'
     + '<td><input class="nate-src" placeholder="any or CIDR" style="width:120px"></td>'
     + '<td><input class="nate-dst" placeholder="any or CIDR" style="width:120px"></td>'
-    + '<td><input class="nate-tr" value="masquerade" title="masquerade, a literal IPv4, or port-forward:IPv4" style="width:150px"> <select class="nate-iface" style="width:108px"><option value="">iface…</option></select></td>'
-    + '<td class="nat-state"><span class="on">enabled</span> <button class="sm nate-save">save</button> <button class="ghost sm nate-cancel">cancel</button></td>';
+    + '<td><input class="nate-tr" value="masquerade" title="masquerade, a literal IPv4, or port-forward:IPv4" style="width:150px"> <select class="nate-iface" style="width:108px"><option value="">iface…</option></select> <button class="sm nate-save">save</button> <button class="ghost sm nate-cancel">cancel</button></td>';
   if (!insertNewRow(table, tr)) return;
   const sel = tr.querySelector('.nate-iface');
   systemInterfaces().then(list => { sel.innerHTML = '<option value="">iface…</option>' + list.map(n => '<option value="'+esc(n)+'">'+esc(n)+'</option>').join(''); });
@@ -4674,10 +4674,9 @@ function startNATEdit(tr, net){
   const srcCell = tr.querySelector('.nat-src-cell');
   const dstCell = tr.querySelector('.nat-dst-cell');
   const trCell  = tr.querySelector('.nat-tr-cell');
-  const stCell  = tr.querySelector('.nat-state');
   srcCell.innerHTML = '<input class="nate-src" placeholder="any or CIDR" style="width:120px" value="'+esc(tr.dataset.source||'')+'">';
   dstCell.innerHTML = '<input class="nate-dst" placeholder="any or CIDR" style="width:120px" value="'+esc(tr.dataset.dest||'')+'">';
-  trCell.innerHTML  = '<input class="nate-tr" title="masquerade, a literal IPv4, or port-forward:IPv4" style="width:150px" value="'+esc(tr.dataset.translate||'')+'"> <select class="nate-iface" style="width:108px"><option value="">iface…</option></select>';
+  trCell.innerHTML  = '<input class="nate-tr" title="masquerade, a literal IPv4, or port-forward:IPv4" style="width:150px" value="'+esc(tr.dataset.translate||'')+'"> <select class="nate-iface" style="width:108px"><option value="">iface…</option></select> <button class="sm nate-save">save</button> <button class="ghost sm nate-cancel">cancel</button>';
   const sel = trCell.querySelector('.nate-iface');
   const curIface = tr.dataset.iface || '';
   systemInterfaces().then(list => {
@@ -4685,7 +4684,6 @@ function startNATEdit(tr, net){
     if (curIface && !opts.includes(curIface)) opts.push(curIface); // keep an iface no longer present
     sel.innerHTML = '<option value="">iface…</option>' + opts.map(n => '<option value="'+esc(n)+'"'+(n===curIface?' selected':'')+'>'+esc(n)+'</option>').join('');
   });
-  stCell.innerHTML = '<button class="sm nate-save">save</button> <button class="ghost sm nate-cancel">cancel</button>';
   tr.querySelector('.nate-cancel').onclick = () => refresh();
   tr.querySelector('.nate-save').onclick = async () => {
     const r = await api('/api/nat', { method:'POST', body: JSON.stringify({

@@ -37,6 +37,42 @@ assuming it didn't happen.
 
 ---
 
+## v447 — 2026-07-15
+
+Moved the NAT table's state column from last to first (right after the
+checkbox column, before source), matching the Rules table's column
+order from v443. `startNATEdit`/`natAddRow` select cells by class, not
+position, so reordering the `<td>`s in `secNAT` was the only strictly
+required change — but that alone would have put the add/edit save-cancel
+buttons (which the state cell used to host, being last) in the *first*
+column instead, which would have been inconsistent with the Rules
+table's own convention: there, the state cell is a pure indicator/toggle
+that inline editing never touches, and save/cancel always live in the
+last field cell. Matched that exactly rather than leaving NAT's edit
+flow with mismatched button placement between add and edit: `natAddRow`
+now shows a static "enabled" span in the (now first) state cell and
+save/cancel in the translate cell; `startNATEdit` no longer touches
+`.nat-state` at all — the enabled/disabled tag stays untouched with its
+own separate double-click toggle during inline editing, same as the
+Rules table already does for `.fw-state`.
+
+**What changed:** `secNAT`'s header and row-building strings reordered
+(state second, before source). `natAddRow` rebuilt: static "enabled"
+indicator in the state cell, save/cancel moved into the translate cell.
+`startNATEdit` rebuilt: dropped its `stCell` lookup and the innerHTML
+swap that used to turn the state cell into save/cancel buttons; both
+buttons now render as part of the translate cell's edit markup instead.
+
+**Verified:** `go build ./...` (JS lives in a Go raw string; the package
+still needs to compile). Embedded-script `node --check` and the
+backtick-count sanity check (v433, exactly 2) both clean. Parsed the
+rendered header and a sample row through jsdom and confirmed the header
+reads `state, source, dest, translate` and the row's cell classes land
+in `nat-state, nat-src-cell, nat-dst-cell, nat-tr-cell` order — actually
+checked the DOM output rather than just eyeballing the template strings.
+
+---
+
 ## v446 — 2026-07-15
 
 Removed NAT's `direction` field per feedback questioning why it existed
