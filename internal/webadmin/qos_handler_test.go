@@ -79,3 +79,62 @@ func TestHandleQoSRuleEnableDisable(t *testing.T) {
 		t.Error("disabling a missing rule should be rejected")
 	}
 }
+
+// TestHandleQoSServices covers a rule defined by named service(s) — the
+// firewall-consistent form — through the same /api/qos endpoint: add and
+// delete round-trip a Services list without any proto/port.
+func TestHandleQoSServices(t *testing.T) {
+	cfgPath := t.TempDir() + "/cfg.json"
+	cfg := &config.Config{
+		PrimaryPort: 65432, EnableIPv4: true,
+		WebAdmin: config.WebAdmin{Listen: "127.0.0.1:8443"},
+		Networks: []config.Network{{ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24"}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.SaveTo(cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	cred, _ := GenerateCredential("admin", "pw", 10000)
+	wcfg := config.WebAdmin{AuthMode: "local", Users: []config.AdminUser{cred},
+		LoginBan: config.BanPolicy{MaxFailures: 3, WindowSeconds: 60, BanSeconds: 900}}
+	srv := New(wcfg, &stubBackend{}, logx.Default())
+	srv.SetConfigPath(cfgPath)
+	srv.SetReload(func() error { return nil })
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	c := sessionFor(t, ts)
+
+	post := func(body map[string]any) map[string]any {
+		b, _ := json.Marshal(body)
+		req, _ := http.NewRequest("POST", ts.URL+"/api/qos", bytes.NewReader(b))
+		req.AddCookie(c)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var out map[string]any
+		json.NewDecoder(resp.Body).Decode(&out)
+		return out
+	}
+
+	if ok, _ := post(map[string]any{"op": "add", "net": "lan", "services": []string{"ssh", "rdp"}, "class": 0})["ok"].(bool); !ok {
+		t.Fatal("add rejected")
+	}
+	got, _ := config.Load(cfgPath)
+	if len(got.Networks[0].QoS.Rules) != 1 {
+		t.Fatalf("rule should be present: %+v", got.Networks[0].QoS.Rules)
+	}
+	if svc := got.Networks[0].QoS.Rules[0].Services; len(svc) != 2 {
+		t.Fatalf("services = %v, want [ssh rdp]", svc)
+	}
+	if ok, _ := post(map[string]any{"op": "delete", "net": "lan", "services": []string{"ssh", "rdp"}})["ok"].(bool); !ok {
+		t.Fatal("delete rejected")
+	}
+	got, _ = config.Load(cfgPath)
+	if len(got.Networks[0].QoS.Rules) != 0 {
+		t.Fatalf("rule should be gone: %+v", got.Networks[0].QoS.Rules)
+	}
+}

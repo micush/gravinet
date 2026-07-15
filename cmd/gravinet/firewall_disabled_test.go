@@ -23,7 +23,7 @@ func TestDisabledFirewallKeepsRules(t *testing.T) {
 		},
 	}
 	var spec mesh.NetSpec
-	fillRuntimeSpec(&spec, n, nil, 0)
+	fillRuntimeSpec(&spec, n, nil, 0, nil)
 	if spec.FirewallEnabled {
 		t.Fatal("FirewallEnabled should be false")
 	}

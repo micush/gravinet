@@ -46,7 +46,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "447"
+	version = "450"
 	commit  = "none"
 )
 
@@ -958,7 +958,7 @@ func cmdRun(args []string) {
 					// Already up: apply the hot-reloadable runtime settings + keys.
 					var spec mesh.NetSpec
 					spec.ID = id
-					fillRuntimeSpec(&spec, n, newCfg.EffectiveFirewallExempt(), newCfg.NATStateTimeout)
+					fillRuntimeSpec(&spec, n, newCfg.EffectiveFirewallExempt(), newCfg.NATStateTimeout, newCfg.FirewallServices)
 					// fillRuntimeSpec doesn't resolve seeds (only buildOneNetSpec does
 					// at startup); resolve them here so a seed added at runtime is
 					// dialed live via ReloadRuntime's seed merge.
@@ -1953,7 +1953,7 @@ func buildOneNetSpec(n config.Network, cfg *config.Config, overlays []netip.Pref
 	spec.MulticastPPS = n.StormControl.MulticastPPS
 	spec.StormBurst = n.StormControl.Burst
 
-	fillRuntimeSpec(&spec, n, cfg.EffectiveFirewallExempt(), cfg.NATStateTimeout)
+	fillRuntimeSpec(&spec, n, cfg.EffectiveFirewallExempt(), cfg.NATStateTimeout, cfg.FirewallServices)
 	return spec, dev, nil
 }
 
@@ -2003,7 +2003,7 @@ func toMeshFirewallServices(svcs []config.FirewallService) []mesh.FirewallServic
 	return out
 }
 
-func fillRuntimeSpec(spec *mesh.NetSpec, n config.Network, exempts []config.FirewallExempt, natStateTimeout int) {
+func fillRuntimeSpec(spec *mesh.NetSpec, n config.Network, exempts []config.FirewallExempt, natStateTimeout int, fwServices []config.FirewallService) {
 	// Redistributed routes (hot-reloadable; applied live on reload). Disabled
 	// route entries are skipped.
 	for _, rt := range n.Routes {
@@ -2056,7 +2056,7 @@ func fillRuntimeSpec(spec *mesh.NetSpec, n config.Network, exempts []config.Fire
 		if classes < 1 {
 			classes = 5
 		}
-		spec.QoS = mesh.NewClassifier(classes, n.QoS.DefaultClass, qosClassRules(n.QoS.Rules), n.QoS.ClassDSCP)
+		spec.QoS = mesh.NewClassifier(classes, n.QoS.DefaultClass, qosClassRules(n.QoS.Rules, fwServices, n.Name), n.QoS.ClassDSCP)
 	}
 
 	// Firewall: the enabled flag governs *enforcement* (allow() short-circuits to
@@ -2782,12 +2782,80 @@ func fatal(format string, a ...any) {
 	os.Exit(1)
 }
 
-// protoNumber maps a config protocol name to its IP protocol number (0 = any).
+// protoNumber maps a config protocol name to its IP protocol number (0 =
+// any). Accepts the same tokens FirewallServicePort.Proto documents
+// (tcp|udp|icmp|<number>|any) so a named service's legs and a QoS rule's own
+// literal proto resolve identically.
+func protoNumber(name string) uint8 {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "", "any":
+		return 0
+	case "tcp":
+		return 6
+	case "udp":
+		return 17
+	case "icmp":
+		return 1
+	default:
+		if n, err := strconv.Atoi(strings.TrimSpace(name)); err == nil && n > 0 && n < 256 {
+			return uint8(n)
+		}
+		return 0
+	}
+}
+
+// qosLeg is one resolved protocol/port leg of a named service, as used by
+// qosServiceCatalog/qosClassRules below — the QoS analogue of mesh's fwLeg.
+type qosLeg struct {
+	proto            uint8
+	portMin, portMax uint16
+}
+
+// qosServiceCatalog resolves a node's named service catalog (the same
+// Config.FirewallServices firewall rules resolve their own Services field
+// against) into a lowercased-name -> legs lookup for qosClassRules. Mirrors
+// mesh's unexported svcLegs (internal/mesh/firewall.go) since QoS rules and
+// firewall rules both take the raw port_min/port_max==0 "any" convention
+// from the same FirewallService/FirewallServicePort shape.
+func qosServiceCatalog(svcs []config.FirewallService) map[string][]qosLeg {
+	cat := make(map[string][]qosLeg, len(svcs))
+	for _, s := range svcs {
+		key := strings.ToLower(strings.TrimSpace(s.Name))
+		if key == "" {
+			continue
+		}
+		var legs []qosLeg
+		for _, p := range s.Ports {
+			lo := uint16(p.PortMin)
+			hi := uint16(p.PortMax)
+			if hi == 0 {
+				hi = lo // a single port, or "any" when both are 0
+			}
+			legs = append(legs, qosLeg{proto: protoNumber(p.Proto), portMin: lo, portMax: hi})
+		}
+		cat[key] = legs
+	}
+	return cat
+}
+
 // qosClassRules maps a network's configured QoS rules into the engine's
 // ClassRule form, skipping disabled rules so a paused rule stays in config but
 // is never classified. Split out from fillRuntimeSpec so the disabled-skip is
 // directly testable (the compiled classifier is opaque).
-func qosClassRules(in []config.QoSRule) []mesh.ClassRule {
+//
+// A rule's literal Protocol/PortMin/PortMax and its named Services (resolved
+// against fwServices) are unioned exactly like FirewallRule unions its own
+// inline proto/port with its named services (see resolveLegs in
+// internal/mesh/firewall.go): each leg becomes its own ClassRule sharing the
+// rule's Class/DSCP, so traffic matching any of them lands in that class. A
+// rule naming an unknown service logs a warning and contributes nothing for
+// that name — the rest of the rule, if any, still applies — rather than
+// silently falling back to "match everything", which would turn a typo or a
+// since-deleted service into an unintended catch-all. A rule with neither a
+// literal leg nor any Services matches everything, unchanged from before
+// Services existed.
+func qosClassRules(in []config.QoSRule, fwServices []config.FirewallService, netName string) []mesh.ClassRule {
+	cat := qosServiceCatalog(fwServices)
 	rules := make([]mesh.ClassRule, 0, len(in))
 	for _, r := range in {
 		if r.Disabled {
@@ -2797,26 +2865,39 @@ func qosClassRules(in []config.QoSRule) []mesh.ClassRule {
 		if r.DSCP != nil {
 			dscp = *r.DSCP
 		}
-		rules = append(rules, mesh.ClassRule{
-			Proto:   protoNumber(r.Protocol),
-			PortMin: uint16(r.PortMin),
-			PortMax: uint16(r.PortMax),
-			DSCP:    dscp,
-			Class:   r.Class,
-		})
+		added := 0
+		hasInline := r.Protocol != "" && !strings.EqualFold(r.Protocol, "any")
+		hasPorts := r.PortMin != 0 || r.PortMax != 0
+		if hasInline || hasPorts {
+			rules = append(rules, mesh.ClassRule{
+				Proto: protoNumber(r.Protocol), PortMin: uint16(r.PortMin), PortMax: uint16(r.PortMax),
+				DSCP: dscp, Class: r.Class,
+			})
+			added++
+		}
+		for _, name := range r.Services {
+			key := strings.ToLower(strings.TrimSpace(name))
+			if key == "" {
+				continue
+			}
+			legs, ok := cat[key]
+			if !ok {
+				logx.Errorf("network %s: qos rule references unknown service %q, skipping", netName, name)
+				continue
+			}
+			for _, lg := range legs {
+				rules = append(rules, mesh.ClassRule{
+					Proto: lg.proto, PortMin: lg.portMin, PortMax: lg.portMax, DSCP: dscp, Class: r.Class,
+				})
+				added++
+			}
+		}
+		if added == 0 && len(r.Services) == 0 {
+			// No literal leg and no services named at all: the original
+			// "match anything" catch-all, unchanged from before Services
+			// existed.
+			rules = append(rules, mesh.ClassRule{DSCP: dscp, Class: r.Class})
+		}
 	}
 	return rules
-}
-
-func protoNumber(name string) uint8 {
-	switch strings.ToLower(name) {
-	case "tcp":
-		return 6
-	case "udp":
-		return 17
-	case "icmp":
-		return 1
-	default:
-		return 0
-	}
 }

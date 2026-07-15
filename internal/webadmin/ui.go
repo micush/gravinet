@@ -76,7 +76,7 @@ const indexHTML = `<!doctype html>
   .rail-chevron { font-size:24px; color:var(--mut); transition:transform .15s; display:inline-flex; align-items:center; justify-content:center; width:24px; height:24px; }
   .rail-group.collapsed .rail-chevron { transform:rotate(-90deg); }
   .rail-group.collapsed .rail-group-items { display:none; }
-  .rail-group .rail-tab { padding-left:30px; }
+  .rail-group .rail-tab { padding-left:58px; }
   .rail-group-items .rail-tab { text-transform:lowercase; }
   .rail-foot { flex-shrink:0; padding:8px 8px 10px; }
   .rail-foot .rail-tab { text-transform:uppercase; letter-spacing:.04em; }
@@ -882,7 +882,7 @@ function buildSearchIndex(){
       add(label, 'NAT rule \u00b7 '+cf.name, 'nat', cf.id, {kind:'nat', idx:i});
     });
     ((cf.qos||{}).rules||[]).forEach(r => {
-      add((r.protocol||'any')+' '+portLabel(r.port_min,r.port_max), 'QoS rule \u00b7 '+cf.name, 'qos', cf.id, {kind:'qos', proto:r.protocol||'', port:r.port_min});
+      add(qosSvcLabel(r)||'any', 'QoS rule \u00b7 '+cf.name, 'qos', cf.id, {kind:'qos', proto:r.protocol||'', port:r.port_min||0, services:(r.services||[]).join(',')}, (r.services||[]).join(' '));
     });
   }
 
@@ -936,7 +936,7 @@ function searchRowSelector(m){
     case 'dns-reject': return 'tr[data-rejdomain="'+CSS.escape(m.domain)+'"]';
     case 'fw': return 'tr[data-fwid="'+CSS.escape(String(m.id))+'"]';
     case 'nat': return 'tr.natrow[data-idx="'+CSS.escape(String(m.idx))+'"]';
-    case 'qos': return 'tr.qrow[data-proto="'+CSS.escape(m.proto)+'"][data-port="'+CSS.escape(String(m.port))+'"]';
+    case 'qos': return 'tr.qrow[data-proto="'+CSS.escape(m.proto)+'"][data-port="'+CSS.escape(String(m.port))+'"][data-services="'+CSS.escape(m.services||'')+'"]';
     case 'key': return 'td.klabel[data-slot="'+CSS.escape(String(m.slot))+'"]';
     case 'seed': return 'td.seed-addr[data-addr="'+CSS.escape(m.addr)+'"]';
     case 'peer': return '[data-peer="'+CSS.escape(m.nodeId)+'"]';
@@ -4704,40 +4704,30 @@ function qosClassLabel(i, classes){
   if (i===classes-1) return 'class '+i+' (bulk)';
   return 'class '+i;
 }
-function qosProtoOpts(sel){
-  sel = sel || '';
-  return [['','any'],['tcp','tcp'],['udp','udp'],['icmp','icmp']]
-    .map(p => '<option value="'+p[0]+'"'+(p[0]===sel?' selected':'')+'>'+p[1]+'</option>').join('');
-}
 function qosClassOpts(classes, sel){
   let o=''; for (let i=0;i<classes;i++) o += '<option value="'+i+'"'+(i===sel?' selected':'')+'>'+qosClassLabel(i,classes)+'</option>';
   return o;
 }
-function qosValidatePort(proto, raw){
-  const pv = (raw||'').trim();
-  if (pv){ const n=Number(pv); if (!Number.isInteger(n)||n<1||n>65535){ alert('port must be 1-65535'); return null; } return n; }
-  if (proto==='tcp' || proto==='udp'){ alert('port required for tcp/udp'); return null; }
-  return 0; // icmp / any: no port
-}
 
 function secQoS(c) {
   if (!state.cfg.length) return emptyCard(c, 'No networks.');
-  secHint(c, '5 priority classes (0 = highest, 4 = lowest/bulk). Unmatched traffic uses class 3 (normal). Strict priority — higher classes drain first under contention. Use + to add a rule, double-click a rule to edit it, double-click the state tag to toggle it, tick rows and use \u2212 to remove.');
+  secHint(c, '5 priority classes (0 = highest, 4 = lowest/bulk). Unmatched traffic uses class 3 (normal). Strict priority — higher classes drain first under contention. <b>match</b> takes a comma-separated mix of named services (the same catalog as Firewall \u203a Services) and raw <code>proto</code>/<code>proto/port</code> entries (e.g. <code>https, tcp/8443, udp/53</code>) \u2014 at most one raw entry per rule, any number of named services; leave it blank to match anything. Use + to add a rule, double-click a rule to edit it, double-click the state tag to toggle it, tick rows and use \u2212 to remove.');
   for (const cf of state.cfg) {
     const q = cf.qos||{}; const en = !!q.enabled; const classes = q.classes||5;
     const dflt = (q.default_class!=null)?q.default_class:3;
     const card = $('<div class="card"></div>');
     card.appendChild(netCardHead(cf, en, '/api/qos'));
     const rules = q.rules||[];
-    let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>protocol</th><th>port</th><th>class</th></tr>';
-    if (!rules.length) h += '<tr><td colspan="5" class="empty">no QoS rules — click + to add one</td></tr>';
+    let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>match</th><th>class</th></tr>';
+    if (!rules.length) h += '<tr><td colspan="4" class="empty">no QoS rules — click + to add one</td></tr>';
     else for (const r of rules) {
       const enabled = !r.disabled;
+      const svcTxt = qosSvcLabel(r);
       const stTag = '<span class="tag-toggle '+(enabled?'on':'off')+'" data-qosstate="1" title="double-click to '+(enabled?'disable':'enable')+'">'+(enabled?'enabled':'disabled')+'</span>';
-      h += '<tr class="qrow'+(enabled?'':' fw-disabled')+'" data-proto="'+esc(r.protocol||'')+'" data-port="'+esc(r.port_min)+'" data-class="'+esc(r.class)+'" data-enabled="'+(enabled?1:0)+'">'
+      h += '<tr class="qrow'+(enabled?'':' fw-disabled')+'" data-proto="'+esc(r.protocol||'')+'" data-port="'+esc(r.port_min||0)+'" data-services="'+esc((r.services||[]).join(','))+'" data-class="'+esc(r.class)+'" data-enabled="'+(enabled?1:0)+'">'
         + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
         + '<td class="q-state">'+stTag+'</td>'
-        + '<td class="q-proto">'+esc(r.protocol||'any')+'</td><td class="q-port">'+esc(portLabel(r.port_min,r.port_max))+'</td>'
+        + '<td class="q-services">'+esc(svcTxt||'any')+'</td>'
         + '<td class="q-class">'+esc(qosClassLabel(r.class,classes))+'</td></tr>';
     }
     const t = $('<div></div>'); t.innerHTML = h+'</table>'; card.appendChild(t);
@@ -4752,14 +4742,37 @@ function secQoS(c) {
     t.querySelectorAll('[data-qosstate]').forEach(tag => {
       tag.ondblclick = (e) => {
         e.stopPropagation();
-        toggleTagState(tag, '/api/qos', on => ({op:(on?'rule-enable':'rule-disable'),net:cf.name,proto:tag.closest('tr').dataset.proto,port:Number(tag.closest('tr').dataset.port)}));
+        toggleTagState(tag, '/api/qos', on => ({op:(on?'rule-enable':'rule-disable'),net:cf.name,proto:tag.closest('tr').dataset.proto,port:Number(tag.closest('tr').dataset.port),services:qosServicesFromRow(tag.closest('tr'))}));
       };
     });
     selAllWire(t);
     table._rowAdd = () => qosAddRow(table, cf.name, classes);
-    table._rowRemove = () => removeCheckedRows(table, tr => api('/api/qos',{method:'POST',body:JSON.stringify({op:'delete',net:cf.name,proto:tr.dataset.proto,port:Number(tr.dataset.port)})}));
+    table._rowRemove = () => removeCheckedRows(table, tr => api('/api/qos',{method:'POST',body:JSON.stringify({op:'delete',net:cf.name,proto:tr.dataset.proto,port:Number(tr.dataset.port),services:qosServicesFromRow(tr)})}));
     c.appendChild(card);
   }
+}
+
+// qosServicesFromRow reads a QoS row's data-services attribute (a
+// comma-joined list of named services, kept separate from the row's literal
+// proto/port so the two combine unambiguously) back into an array, filtering
+// out the stray empty string ''.split(',') would otherwise produce for a
+// rule with no services.
+function qosServicesFromRow(tr){
+  return (tr.dataset.services||'').split(',').map(s=>s.trim()).filter(Boolean);
+}
+
+// qosSvcLabel renders a rule's literal proto/port leg (if any) plus its named
+// services into one combined display/edit string, e.g. "tcp/443, ssh" —
+// mirrors fwSvcLabel (internal/mesh/firewall.go's resolveLegs union, shown
+// the same way there).
+function qosSvcLabel(r){
+  const parts = [];
+  if (r.protocol || r.port_min || r.port_max) {
+    const pl = portLabel(r.port_min, r.port_max);
+    parts.push((r.protocol||'any') + (pl==='any' ? '' : '/'+pl));
+  }
+  for (const s of (r.services||[])) parts.push(s);
+  return parts.join(', ');
 }
 
 // qosAddRow inserts a blank editable row at the top of the table; saving creates
@@ -4768,45 +4781,51 @@ function qosAddRow(table, net, classes){
   const tr = document.createElement('tr');
   tr.innerHTML = '<td class="selcol"></td>'
     + '<td class="q-state"><span class="on">enabled</span></td>'
-    + '<td><select class="qe-proto">'+qosProtoOpts('')+'</select></td>'
-    + '<td><input class="qe-port" placeholder="port" style="width:80px"></td>'
+    + '<td><span class="fwe-field"><input class="qe-services" placeholder="tcp/443, ssh, or blank for any" style="width:220px"></span></td>'
     + '<td><select class="qe-class">'+qosClassOpts(classes,3)+'</select> <button class="sm qe-save">save</button> <button class="ghost sm qe-cancel">cancel</button></td>';
   if (!insertNewRow(table, tr)) return;
+  fwCatalogCombobox(tr.querySelector('.qe-services'), () => (state.fwServices||[]).map(s=>s.name));
   tr.querySelector('.qe-cancel').onclick = () => refresh();
   tr.querySelector('.qe-save').onclick = () => {
-    const proto = tr.querySelector('.qe-proto').value;
-    const port = qosValidatePort(proto, tr.querySelector('.qe-port').value);
-    if (port===null) return;
-    edit('/api/qos', { op:'add', net:net, proto:proto, port:port, class:Number(tr.querySelector('.qe-class').value) });
+    const rule = qosCollectRule(tr); if (!rule) return;
+    edit('/api/qos', { op:'add', net:net, proto:rule.proto, port:rule.port, services:rule.services, class:rule.class });
   };
 }
 
+// qosCollectRule reads the combined match field (reusing fwParseSvc — same
+// "proto"/"proto/port"/named-service comma-separated grammar the firewall
+// rule editor uses) plus the class select into a rule payload. Returns null
+// (after alerting) if the field couldn't be parsed.
+function qosCollectRule(scope){
+  const parsed = fwParseSvc(scope.querySelector('.qe-services').value);
+  if (parsed.error){ alert(parsed.error); return null; }
+  return { proto: parsed.proto, port: parsed.port, services: parsed.services, class: Number(scope.querySelector('.qe-class').value) };
+}
 
-// startQoSEdit turns a QoS rule row into inline editors; saving re-keys the rule
-// by deleting the old (proto:port) and adding the edited one.
+// startQoSEdit turns a QoS rule row into an inline editor; saving re-keys the
+// rule by deleting the old (proto:port:services) and adding the edited one.
 function startQoSEdit(tr, net, classes){
-  if (tr.querySelector('.qe-proto')) return; // already editing
+  if (tr.querySelector('.qe-services')) return; // already editing
   const oldProto = tr.dataset.proto, oldPort = Number(tr.dataset.port);
+  const oldServices = qosServicesFromRow(tr);
   const wasDisabled = tr.dataset.enabled === '0';
-  const pc = tr.querySelector('.q-proto'), poc = tr.querySelector('.q-port'), cc = tr.querySelector('.q-class');
-  pc.innerHTML = '<select class="qe-proto">'+qosProtoOpts(oldProto)+'</select>';
-  poc.innerHTML = '<input class="qe-port" style="width:80px" value="'+esc(oldPort||'')+'">';
+  const sc = tr.querySelector('.q-services'), cc = tr.querySelector('.q-class');
+  const combo = qosSvcLabel({protocol:oldProto, port_min:oldPort, port_max:oldPort, services:oldServices});
+  sc.innerHTML = '<span class="fwe-field"><input class="qe-services" style="width:220px" value="'+esc(combo)+'"></span>';
   cc.innerHTML = '<select class="qe-class">'+qosClassOpts(classes, Number(tr.dataset.class))+'</select> <button class="sm qe-save">save</button>';
+  fwCatalogCombobox(sc.querySelector('.qe-services'), () => (state.fwServices||[]).map(s=>s.name));
   tr.ondblclick = null;
   cc.querySelector('.qe-save').onclick = async () => {
-    const proto = pc.querySelector('.qe-proto').value;
-    const port = qosValidatePort(proto, poc.querySelector('.qe-port').value);
-    if (port===null) return;
-    const klass = Number(cc.querySelector('.qe-class').value);
-    const dr = await api('/api/qos',{method:'POST',body:JSON.stringify({op:'delete',net:net,proto:oldProto,port:oldPort})});
+    const rule = qosCollectRule(tr); if (!rule) return;
+    const dr = await api('/api/qos',{method:'POST',body:JSON.stringify({op:'delete',net:net,proto:oldProto,port:oldPort,services:oldServices})});
     if (!dr.ok){ alert((dr.body&&dr.body.error)||'edit failed'); refresh(); return; }
-    const ar = await api('/api/qos',{method:'POST',body:JSON.stringify({op:'add',net:net,proto:proto,port:port,class:klass})});
+    const ar = await api('/api/qos',{method:'POST',body:JSON.stringify({op:'add',net:net,proto:rule.proto,port:rule.port,services:rule.services,class:rule.class})});
     if (!ar.ok){ alert((ar.body&&ar.body.error)||'edit failed'); refresh(); return; }
     // An edit re-keys the rule via delete+add, which would reset it to enabled;
     // carry the prior disabled state across so editing doesn't silently
     // re-enable a paused rule.
     if (wasDisabled){
-      const xr = await api('/api/qos',{method:'POST',body:JSON.stringify({op:'rule-disable',net:net,proto:proto,port:port})});
+      const xr = await api('/api/qos',{method:'POST',body:JSON.stringify({op:'rule-disable',net:net,proto:rule.proto,port:rule.port,services:rule.services})});
       if (!xr.ok) alert((xr.body&&xr.body.error)||'edit failed');
     }
     refresh();

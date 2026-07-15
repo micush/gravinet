@@ -735,12 +735,16 @@ func (s *Server) handleNAT(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleQoS: add / delete / enable / disable (whole classifier),
-// rule-enable / rule-disable (a single rule by proto/port), and mark / unmark
-// (a class's outbound DSCP override). Applied live by the reload.
+// rule-enable / rule-disable (a single rule by proto/port/services), and
+// mark / unmark (a class's outbound DSCP override). Applied live by the
+// reload. Services names entries in the node-global firewall service
+// catalog (Config.FirewallServices) — same catalog, same union-with-proto/
+// port convention as FirewallRule.Services.
 func (s *Server) handleQoS(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Op, Net, Proto string
 		Port, Class    int
+		Services       []string
 		DSCP           int
 	}
 	if !decode(w, r, &req) {
@@ -749,17 +753,17 @@ func (s *Server) handleQoS(w http.ResponseWriter, r *http.Request) {
 	err := s.mutateConfig(func(cfg *config.Config) error {
 		switch req.Op {
 		case "add":
-			return cfg.QoSAdd(req.Net, strings.ToLower(req.Proto), req.Port, req.Class)
+			return cfg.QoSAdd(req.Net, strings.ToLower(req.Proto), req.Port, req.Services, req.Class)
 		case "delete", "del", "remove":
-			return cfg.QoSDelete(req.Net, strings.ToLower(req.Proto), req.Port)
+			return cfg.QoSDelete(req.Net, strings.ToLower(req.Proto), req.Port, req.Services)
 		case "enable":
 			return cfg.QoSSetEnabled(req.Net, true)
 		case "disable":
 			return cfg.QoSSetEnabled(req.Net, false)
 		case "rule-enable":
-			return cfg.QoSRuleSetEnabled(req.Net, strings.ToLower(req.Proto), req.Port, true)
+			return cfg.QoSRuleSetEnabled(req.Net, strings.ToLower(req.Proto), req.Port, req.Services, true)
 		case "rule-disable":
-			return cfg.QoSRuleSetEnabled(req.Net, strings.ToLower(req.Proto), req.Port, false)
+			return cfg.QoSRuleSetEnabled(req.Net, strings.ToLower(req.Proto), req.Port, req.Services, false)
 		case "mark":
 			return cfg.QoSSetClassDSCP(req.Net, req.Class, req.DSCP)
 		case "unmark":

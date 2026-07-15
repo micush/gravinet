@@ -37,6 +37,122 @@ assuming it didn't happen.
 
 ---
 
+## v450 — 2026-07-15
+
+Fixed sidebar sub-menu indent for real this time. v448's fix (`30px` →
+`34px`) treated the problem as "a few pixels off" when it was actually a
+wrong reference point: a group label's text (e.g. "MESH") starts at `12px`
+(label padding) + `24px` (chevron box) + `7px` (flex gap) = `43px` from the
+rail's left edge, and `34px` — even after that bump — put child items to
+the *left* of that, not indented under it. Screenshot from the field showed
+`networks`/`keys`/`seeds`/`peers`/`bans` starting almost directly under the
+chevron instead of under the "MESH" label. `.rail-group .rail-tab`'s
+`padding-left` is now `58px` — `43px` (where the label text starts) plus
+roughly two more monospace character-widths, so children read as clearly
+nested under their group's label rather than sitting beside its chevron.
+
+**What changed:** one CSS rule in `internal/webadmin/ui.go`'s embedded
+`indexHTML` stylesheet — `.rail-group .rail-tab { padding-left:34px; }` →
+`padding-left:58px;`. No JS or markup changes.
+
+**Verified:** mocked the label/chevron/item layout pixel-for-pixel (same
+padding/gap/font-size values as the real CSS) with PIL and rendered it
+side-by-side with the reported screenshot to confirm items now sit visibly
+right of "MESH" before shipping, rather than trusting the arithmetic alone.
+`go build ./...` and `go vet ./...` clean; extracted the embedded script and
+ran `node --check` clean; backtick count in the raw string still exactly 2.
+
+---
+
+## v449 — 2026-07-15
+
+QoS rules can now be defined by named service, same as firewall rules — per
+feedback that firewall's move to a service catalog made QoS's own separate
+proto/port fields feel inconsistent. A `QoSRule` gained a `Services []string`
+field that names entries from the same node-global catalog firewall rules
+already resolve their own `Services` field against (`Config.FirewallServices`
+— there's exactly one catalog, shared by both), unioned with the rule's
+literal `Protocol`/`PortMin`/`PortMax` leg exactly the way `FirewallRule`
+unions its inline proto/port with its named services: a rule can carry a
+literal leg, any number of named services, or both, and traffic matching any
+of them lands in `Class`. A rule with none of those set still matches
+everything, unchanged from before `Services` existed — so every pre-existing
+QoS rule keeps working without modification.
+
+Threading a named reference through meant widening the match key `QoSAdd`/
+`QoSDelete`/`QoSRuleSetEnabled` use to find "the same rule" again: it used to
+be `(proto, port)`; a services-only rule has neither, so two such rules would
+otherwise collide on `("", 0)`. All three now take a `services []string`
+alongside proto/port, compared order- and case-insensitively
+(`sameServiceSet`) so a round trip through the UI's comma-separated field
+still finds the rule it means to.
+
+Resolution against the catalog happens where the classifier is actually
+built (`qosClassRules`, called from `fillRuntimeSpec` on every reload — QoS
+has no live incremental engine object the way firewall does, so there's
+nothing to recompile incrementally; reload already rebuilds it from scratch
+every time), not at config-save time — same reason firewall defers its own
+resolution to `compileRule`: a service can be renamed or have its ports
+edited after a rule references it, and the rule should pick up the change
+without needing to be re-saved itself. A rule naming an unknown service
+skips just that reference (logged) rather than falling back to matching
+everything, which would turn a typo or a since-deleted service into a
+silent catch-all — that fail-closed shape mirrors firewall's own compile
+error for an unknown service, just non-fatal here since a reload can't
+reject one bad rule out of a whole config the way a single API call can.
+
+**What changed:** `QoSRule.Services` added (`internal/config/config.go`).
+`QoSAdd`/`QoSDelete`/`QoSRuleSetEnabled` take a `services []string` param
+(`internal/config/ops.go`), matched via new `qosRuleKeyMatches`/
+`sameServiceSet` helpers. `qosClassRules` (`cmd/gravinet/main.go`) now takes
+the firewall service catalog and a network name (for the log line), resolves
+`Services` into one `mesh.ClassRule` leg per resolved service port (new
+`qosServiceCatalog`/`qosLeg`, mirroring mesh's own unexported `svcLegs`),
+and unions them with the literal leg. `protoNumber` extended to accept a raw
+numeric protocol, matching what `FirewallServicePort.Proto` already
+documented. `fillRuntimeSpec` gained a `fwServices` parameter, passed from
+both call sites' already-in-scope `Config.FirewallServices`. CLI: `gravinet
+qos add|delete|enable-rule|disable-rule` accept `service NAME[,NAME2,...]`
+as an alternative to `PROTO PORT` (new `parseQoSMatch`/`qosRuleMatchLabel`
+helpers, `cmd/gravinet/cli_config.go`). Webadmin: `/api/qos` request struct
+gained `Services`, threaded through every op. UI: the QoS table's separate
+`protocol`/`port` columns became one `match` column showing the same
+combined proto/port-plus-services text firewall rules show, edited with the
+same combined field, service-catalog combobox, and parser (`fwParseSvc`/
+`fwCatalogCombobox`, reused verbatim rather than reimplemented) firewall
+rules already use; `qosProtoOpts`/`qosValidatePort` (the old two-widget
+editor) removed as dead code. Global search's QoS index entry and
+jump-to-row selector now include services.
+
+**Verified:** `go build ./...` and `go vet ./...` clean. `go test
+./internal/config/... ./cmd/gravinet/... ./internal/webadmin/...` all pass,
+including new coverage: config-layer add/delete/enable-disable by service
+set (order/case-insensitive keying, `TestQoSRuleServices`), classifier
+resolution (service-alone expansion to multiple legs, service-plus-literal
+union, unknown-service skip without a catch-all fallback, and the
+no-match-fields catch-all still working, `TestQoSClassRulesServices`/
+`TestQoSClassRulesCatchAll`), and the webadmin endpoint end-to-end
+(`TestHandleQoSServices`). Extracted the embedded UI script and ran `node
+--check` clean; confirmed the raw-string backtick count is still exactly 2.
+
+---
+
+## v448 — 2026-07-15
+
+Fixed sidebar sub-menu alignment: when a `.rail-group` (a collapsible
+section under the chevron toggle, e.g. Settings) is expanded, its child
+`.rail-tab` items sat too close to the group label's left edge and looked
+misaligned against the chevron/label above them. Bumped
+`.rail-group .rail-tab`'s `padding-left` from `30px` to `34px` in
+`internal/webadmin/ui.go` so the sub-items sit 4px further right.
+
+**What changed:** one CSS rule in the embedded `indexHTML` stylesheet
+(`internal/webadmin/ui.go`) — `.rail-group .rail-tab { padding-left:30px; }`
+→ `padding-left:34px;`. No JS or markup changes; the chevron rotation and
+collapse/expand behavior are untouched.
+
+---
+
 ## v447 — 2026-07-15
 
 Moved the NAT table's state column from last to first (right after the

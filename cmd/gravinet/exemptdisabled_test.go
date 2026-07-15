@@ -19,7 +19,7 @@ func TestDisabledExemptNotInSpec(t *testing.T) {
 	}
 	n := config.Network{ID: "1234", Name: "lan", Enabled: true}
 	var spec mesh.NetSpec
-	fillRuntimeSpec(&spec, n, exempts, 0)
+	fillRuntimeSpec(&spec, n, exempts, 0, nil)
 
 	got := map[string]bool{}
 	for _, e := range spec.FirewallExempts {

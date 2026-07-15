@@ -876,17 +876,27 @@ const defaultQoSUpBytesPerSec = 125_000_000 // 1 Gbit/s
 // QoSRule assigns matching traffic to a priority class (0 = highest). A zero
 // Protocol/port means "any"; DSCP nil means "any".
 //
+// Services names entries from the node-global named service catalog
+// (Config.FirewallServices — the same catalog firewall rules resolve their
+// own Services field against; see FirewallRule.Services), unioned with the
+// literal Protocol/PortMin/PortMax leg exactly the way FirewallRule unions
+// its inline proto/port with its named services: a rule can carry a literal
+// leg, any number of named services, or both, and traffic matching any of
+// them lands in Class. A rule with none of Protocol/PortMin/PortMax/Services
+// set matches everything (a catch-all), same as before Services existed.
+//
 // Disabled follows the firewall-rule convention: the zero value is enabled, so
 // rules loaded from configs written before this field existed keep classifying.
 // A disabled rule is retained in config (so it can be re-enabled with its match
 // intact) but is skipped by the classifier.
 type QoSRule struct {
-	Protocol string `json:"protocol"` // "tcp","udp","icmp","any"/""
-	PortMin  int    `json:"port_min"`
-	PortMax  int    `json:"port_max"`
-	DSCP     *int   `json:"dscp,omitempty"` // nil = any
-	Class    int    `json:"class"`
-	Disabled bool   `json:"disabled,omitempty"` // true = rule is skipped; active by default
+	Protocol string   `json:"protocol"` // "tcp","udp","icmp","any"/"" — combined with Services
+	PortMin  int      `json:"port_min"`
+	PortMax  int      `json:"port_max"`
+	Services []string `json:"services,omitempty"` // named service-catalog entries (Config.FirewallServices), unioned with Protocol/PortMin/PortMax
+	DSCP     *int     `json:"dscp,omitempty"` // nil = any
+	Class    int      `json:"class"`
+	Disabled bool     `json:"disabled,omitempty"` // true = rule is skipped; active by default
 }
 
 // HostsSync controls writing peer hostnames into the OS hosts file.

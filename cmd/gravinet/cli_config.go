@@ -829,7 +829,9 @@ func cmdNAT(args []string) {
 
 func cmdQoS(args []string) {
 	if len(args) == 0 {
-		fatal("usage: gravinet qos <add PROTO PORT priority LEVEL|delete PROTO PORT|enable-rule PROTO PORT|disable-rule PROTO PORT|mark CLASS DSCP|unmark CLASS|enable|disable|list> [-net NAME]")
+		fatal("usage: gravinet qos <add MATCH priority LEVEL|delete MATCH|enable-rule MATCH|disable-rule MATCH|mark CLASS DSCP|unmark CLASS|enable|disable|list> [-net NAME]\n" +
+			"  MATCH is either 'PROTO PORT' or 'service NAME[,NAME2,...]' — the latter\n" +
+			"  names entries from the firewall's service catalog ('gravinet firewall service ...').")
 	}
 	sub := args[0]
 	netName, rest := extractOpt(args[1:], "net")
@@ -857,11 +859,7 @@ func cmdQoS(args []string) {
 			fmt.Println("  (no rules)")
 		}
 		for _, r := range n.QoS.Rules {
-			port := fmt.Sprintf("%d", r.PortMin)
-			if r.PortMax != r.PortMin {
-				port = fmt.Sprintf("%d-%d", r.PortMin, r.PortMax)
-			}
-			fmt.Printf("  %-4s port %-11s -> class %d (%s) %s\n", r.Protocol, port, r.Class, className(r.Class, n.QoS.Classes), onOff(!r.Disabled))
+			fmt.Printf("  %-28s -> class %d (%s) %s\n", qosRuleMatchLabel(r), r.Class, className(r.Class, n.QoS.Classes), onOff(!r.Disabled))
 		}
 		return
 	case "enable", "disable":
@@ -870,41 +868,39 @@ func cmdQoS(args []string) {
 		}
 		fmt.Printf("%sd QoS on %s\n", sub, n.Name)
 	case "enable-rule", "disable-rule":
-		if len(rest) < 2 {
-			fatal("usage: gravinet qos %s PROTO PORT", sub)
+		if len(rest) < 1 {
+			fatal("usage: gravinet qos %s MATCH", sub)
 		}
-		proto := strings.ToLower(rest[0])
-		port := mustPort(rest[1])
-		if err := cfg.QoSRuleSetEnabled(netName, proto, port, sub == "enable-rule"); err != nil {
+		proto, port, services, _ := parseQoSMatch(sub, rest)
+		if err := cfg.QoSRuleSetEnabled(netName, proto, port, services, sub == "enable-rule"); err != nil {
 			fatal("%v", err)
 		}
 		verb := "enabled"
 		if sub == "disable-rule" {
 			verb = "disabled"
 		}
-		fmt.Printf("%s QoS rule %s port %d on %s\n", verb, proto, port, n.Name)
+		fmt.Printf("%s QoS rule %s on %s\n", verb, qosRuleMatchLabel(config.QoSRule{Protocol: proto, PortMin: port, PortMax: port, Services: services}), n.Name)
 	case "add":
 		// gravinet qos add tcp 3389 priority highest
-		if len(rest) < 2 {
-			fatal("usage: gravinet qos add PROTO PORT priority LEVEL")
+		// gravinet qos add service ssh,rdp priority highest
+		if len(rest) < 1 {
+			fatal("usage: gravinet qos add MATCH priority LEVEL")
 		}
-		proto := strings.ToLower(rest[0])
-		port := mustPort(rest[1])
-		class := priorityToClass(kw(rest, "priority"), n.QoS.Classes)
-		if err := cfg.QoSAdd(netName, proto, port, class); err != nil {
+		proto, port, services, remainder := parseQoSMatch(sub, rest)
+		class := priorityToClass(kw(remainder, "priority"), n.QoS.Classes)
+		if err := cfg.QoSAdd(netName, proto, port, services, class); err != nil {
 			fatal("%v", err)
 		}
-		fmt.Printf("added QoS %s port %d -> class %d (%s) on %s\n", proto, port, class, className(class, n.QoS.Classes), n.Name)
+		fmt.Printf("added QoS %s -> class %d (%s) on %s\n", qosRuleMatchLabel(config.QoSRule{Protocol: proto, PortMin: port, PortMax: port, Services: services}), class, className(class, n.QoS.Classes), n.Name)
 	case "delete", "del", "remove":
-		if len(rest) < 2 {
-			fatal("usage: gravinet qos delete PROTO PORT")
+		if len(rest) < 1 {
+			fatal("usage: gravinet qos delete MATCH")
 		}
-		proto := strings.ToLower(rest[0])
-		port := mustPort(rest[1])
-		if err := cfg.QoSDelete(netName, proto, port); err != nil {
+		proto, port, services, _ := parseQoSMatch(sub, rest)
+		if err := cfg.QoSDelete(netName, proto, port, services); err != nil {
 			fatal("%v", err)
 		}
-		fmt.Printf("deleted QoS rule %s port %d on %s\n", proto, port, n.Name)
+		fmt.Printf("deleted QoS rule %s on %s\n", qosRuleMatchLabel(config.QoSRule{Protocol: proto, PortMin: port, PortMax: port, Services: services}), n.Name)
 	case "mark":
 		// gravinet qos mark 0 46   (mark class 0's traffic EF/DSCP 46)
 		if len(rest) < 2 {
@@ -939,6 +935,58 @@ func cmdQoS(args []string) {
 		fatal("unknown: gravinet qos %s", sub)
 	}
 	commitCfg(cfg, path)
+}
+
+// parseQoSMatch parses a qos subcommand's MATCH argument(s), which are either
+// "PROTO PORT" (a literal leg, unchanged from before named services existed)
+// or "service NAME[,NAME2,...]" (one or more entries from the firewall
+// service catalog — see FirewallService/QoSRule.Services). Returns the
+// resolved proto/port/services plus whatever args followed the match (e.g.
+// "priority LEVEL" for add).
+func parseQoSMatch(sub string, rest []string) (proto string, port int, services []string, remainder []string) {
+	if strings.EqualFold(rest[0], "service") {
+		if len(rest) < 2 {
+			fatal("usage: gravinet qos %s service NAME[,NAME2,...]", sub)
+		}
+		for _, s := range strings.Split(rest[1], ",") {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				services = append(services, s)
+			}
+		}
+		if len(services) == 0 {
+			fatal("usage: gravinet qos %s service NAME[,NAME2,...]", sub)
+		}
+		return "", 0, services, rest[2:]
+	}
+	if len(rest) < 2 {
+		fatal("usage: gravinet qos %s PROTO PORT", sub)
+	}
+	return strings.ToLower(rest[0]), mustPort(rest[1]), nil, rest[2:]
+}
+
+// qosRuleMatchLabel renders a rule's proto/port/services match for CLI
+// output, e.g. "tcp port 3389", "services ssh,rdp", or "any" for a catch-all.
+func qosRuleMatchLabel(r config.QoSRule) string {
+	var parts []string
+	if r.Protocol != "" || r.PortMin != 0 || r.PortMax != 0 {
+		port := fmt.Sprintf("%d", r.PortMin)
+		if r.PortMax != r.PortMin {
+			port = fmt.Sprintf("%d-%d", r.PortMin, r.PortMax)
+		}
+		proto := r.Protocol
+		if proto == "" {
+			proto = "any"
+		}
+		parts = append(parts, fmt.Sprintf("%s port %s", proto, port))
+	}
+	if len(r.Services) > 0 {
+		parts = append(parts, "services "+strings.Join(r.Services, ","))
+	}
+	if len(parts) == 0 {
+		return "any"
+	}
+	return strings.Join(parts, " + ")
 }
 
 // ---- bandwidth ---------------------------------------------------------------

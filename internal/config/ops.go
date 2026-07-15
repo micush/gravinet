@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -1491,8 +1492,12 @@ func (c *Config) QoSSetEnabled(netName string, on bool) error {
 	return nil
 }
 
-// QoSAdd adds a classification rule mapping proto/port to a class index.
-func (c *Config) QoSAdd(netName, proto string, port, class int) error {
+// QoSAdd adds a classification rule mapping proto/port and/or named services
+// (resolved against Config.FirewallServices at reload time, unioned exactly
+// like FirewallRule.Services — see QoSRule's doc comment) to a class index.
+// services may be nil/empty for a plain proto/port rule, matching the
+// pre-Services behavior exactly.
+func (c *Config) QoSAdd(netName, proto string, port int, services []string, class int) error {
 	n, err := c.PickNetwork(netName)
 	if err != nil {
 		return err
@@ -1515,12 +1520,14 @@ func (c *Config) QoSAdd(netName, proto string, port, class int) error {
 	}
 	n.QoS.Enabled = true
 	n.QoS.Rules = append(n.QoS.Rules, QoSRule{
-		Protocol: proto, PortMin: port, PortMax: port, Class: class,
+		Protocol: proto, PortMin: port, PortMax: port, Services: cloneQoSServices(services), Class: class,
 	})
 	return nil
 }
 
-func (c *Config) QoSDelete(netName, proto string, port int) error {
+// QoSDelete removes every QoS rule matching proto/port/services exactly (the
+// same key QoSAdd wrote it under — see qosRuleKeyMatches).
+func (c *Config) QoSDelete(netName, proto string, port int, services []string) error {
 	n, err := c.PickNetwork(netName)
 	if err != nil {
 		return err
@@ -1529,7 +1536,7 @@ func (c *Config) QoSDelete(netName, proto string, port int) error {
 	out := n.QoS.Rules[:0]
 	found := false
 	for _, r := range n.QoS.Rules {
-		if r.Protocol == proto && r.PortMin == port {
+		if qosRuleKeyMatches(r, proto, port, services) {
 			found = true
 			continue
 		}
@@ -1537,17 +1544,17 @@ func (c *Config) QoSDelete(netName, proto string, port int) error {
 	}
 	n.QoS.Rules = out
 	if !found {
-		return fmt.Errorf("no QoS rule for %s port %d", proto, port)
+		return fmt.Errorf("no QoS rule for %s", qosRuleKeyLabel(proto, port, services))
 	}
 	return nil
 }
 
 // QoSRuleSetEnabled enables or disables the classification rule(s) matching
-// proto/port. A disabled rule stays in config (match intact for re-enabling) but
-// is skipped by the classifier. It is keyed the same way as QoSDelete, so it
-// toggles every rule sharing that proto/port. This mirrors the per-rule
-// enable/disable used for firewall rules.
-func (c *Config) QoSRuleSetEnabled(netName, proto string, port int, on bool) error {
+// proto/port/services. A disabled rule stays in config (match intact for
+// re-enabling) but is skipped by the classifier. It is keyed the same way as
+// QoSDelete, so it toggles every rule sharing that key. This mirrors the
+// per-rule enable/disable used for firewall rules.
+func (c *Config) QoSRuleSetEnabled(netName, proto string, port int, services []string, on bool) error {
 	n, err := c.PickNetwork(netName)
 	if err != nil {
 		return err
@@ -1555,15 +1562,67 @@ func (c *Config) QoSRuleSetEnabled(netName, proto string, port int, on bool) err
 	proto = strings.ToLower(proto)
 	found := false
 	for i := range n.QoS.Rules {
-		if n.QoS.Rules[i].Protocol == proto && n.QoS.Rules[i].PortMin == port {
+		if qosRuleKeyMatches(n.QoS.Rules[i], proto, port, services) {
 			n.QoS.Rules[i].Disabled = !on
 			found = true
 		}
 	}
 	if !found {
-		return fmt.Errorf("no QoS rule for %s port %d", proto, port)
+		return fmt.Errorf("no QoS rule for %s", qosRuleKeyLabel(proto, port, services))
 	}
 	return nil
+}
+
+// qosRuleKeyMatches reports whether r was authored with the given
+// proto/port/services key — the same fields QoSAdd stores a rule under.
+// services is compared case-insensitively and order-independently, so a
+// round trip through the UI (which may reorder a comma-separated list)
+// still finds the rule it means to.
+func qosRuleKeyMatches(r QoSRule, proto string, port int, services []string) bool {
+	return r.Protocol == proto && r.PortMin == port && sameServiceSet(r.Services, services)
+}
+
+// sameServiceSet reports whether a and b name the same set of services,
+// ignoring case and order.
+func sameServiceSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	norm := func(in []string) []string {
+		out := make([]string, len(in))
+		for i, s := range in {
+			out[i] = strings.ToLower(strings.TrimSpace(s))
+		}
+		sort.Strings(out)
+		return out
+	}
+	na, nb := norm(a), norm(b)
+	for i := range na {
+		if na[i] != nb[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// cloneQoSServices copies a services slice, normalizing nil/empty to nil so
+// a rule with no services round-trips through JSON without an empty array.
+func cloneQoSServices(services []string) []string {
+	if len(services) == 0 {
+		return nil
+	}
+	return append([]string(nil), services...)
+}
+
+// qosRuleKeyLabel renders a proto/port/services key for error messages.
+func qosRuleKeyLabel(proto string, port int, services []string) string {
+	if len(services) == 0 {
+		return fmt.Sprintf("%s port %d", proto, port)
+	}
+	if proto == "" && port == 0 {
+		return fmt.Sprintf("services %s", strings.Join(services, ","))
+	}
+	return fmt.Sprintf("%s port %d + services %s", proto, port, strings.Join(services, ","))
 }
 
 // QoSSetClassDSCP overrides class's outbound DSCP mark. Every class already
