@@ -8,6 +8,49 @@ import (
 	"gravinet/internal/crypto"
 )
 
+// TestNATRuleSpecToRuleDetectsMode is toRule()'s direct unit coverage — the
+// higher-level tests below exercise it indirectly through a full engine, but
+// this pins the actual parsing: a bare masquerade/literal-address Translate
+// is SNAT, a "port-forward:<ipv4>" one is DNAT, matched case-insensitively
+// and with the target address trimmed, and an invalid or missing
+// port-forward target fails cleanly rather than silently falling through to
+// SNAT.
+func TestNATRuleSpecToRuleDetectsMode(t *testing.T) {
+	cases := []struct {
+		name      string
+		spec      NATRuleSpec
+		wantOK    bool
+		wantAct   natAction
+		wantToStr string
+	}{
+		{"literal SNAT", NATRuleSpec{Translate: "203.0.113.9"}, true, snatAction, "203.0.113.9"},
+		{"port-forward DNAT", NATRuleSpec{Translate: "port-forward:10.0.0.5"}, true, dnatAction, "10.0.0.5"},
+		{"port-forward mixed case", NATRuleSpec{Translate: "Port-Forward:10.0.0.5"}, true, dnatAction, "10.0.0.5"},
+		{"port-forward with whitespace", NATRuleSpec{Translate: "port-forward: 10.0.0.5 "}, true, dnatAction, "10.0.0.5"},
+		{"port-forward missing target", NATRuleSpec{Translate: "port-forward:"}, false, 0, ""},
+		{"port-forward bad target", NATRuleSpec{Translate: "port-forward:not-an-ip"}, false, 0, ""},
+		{"port-forward IPv6 target rejected", NATRuleSpec{Translate: "port-forward:fd00::1"}, false, 0, ""},
+		{"masquerade needs interface to resolve", NATRuleSpec{Translate: "masquerade"}, false, 0, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r, ok := c.spec.toRule()
+			if ok != c.wantOK {
+				t.Fatalf("toRule() ok = %v, want %v (rule=%+v)", ok, c.wantOK, r)
+			}
+			if !ok {
+				return
+			}
+			if r.action != c.wantAct {
+				t.Errorf("action = %v, want %v", r.action, c.wantAct)
+			}
+			if r.to.String() != c.wantToStr {
+				t.Errorf("to = %s, want %s", r.to, c.wantToStr)
+			}
+		})
+	}
+}
+
 func makeUDP(src, dst netip.Addr, sport, dport uint16, payload []byte) []byte {
 	ihl := 20
 	p := make([]byte, ihl+8+len(payload))
@@ -128,7 +171,7 @@ func TestNATMasqueradeEndToEnd(t *testing.T) {
 		NodeID: "A", Hostname: "A",
 		Nets: []NetSpec{{
 			ID: netID, Name: "n", Keys: ks, Dev: devA, Self4: a("10.0.0.1"),
-			NATEnabled: true, NAT: []NATRuleSpec{{Direction: "overlay2underlay", Source: "192.168.1.0/24", Translate: "10.0.0.1"}},
+			NATEnabled: true, NAT: []NATRuleSpec{{Source: "192.168.1.0/24", Translate: "10.0.0.1"}},
 		}},
 	})
 	trA, err := openTestTransport(engA)
@@ -206,7 +249,7 @@ func TestNATDoesNotMasqueradeSelfOverlaySource(t *testing.T) {
 		Nets: []NetSpec{{
 			ID: netID, Name: "n", Keys: ks, Dev: devA, Self4: a("10.0.0.1"),
 			NATEnabled: true,
-			NAT:        []NATRuleSpec{{Direction: "overlay2underlay", Source: "", Translate: "172.16.0.9"}},
+			NAT:        []NATRuleSpec{{Source: "", Translate: "172.16.0.9"}},
 		}},
 	})
 	trA, err := openTestTransport(engA)

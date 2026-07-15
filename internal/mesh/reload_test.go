@@ -32,7 +32,7 @@ func TestReloadRuntimeSwapsThrottleAndNAT(t *testing.T) {
 	spec := NetSpec{
 		ID: netID, ThrottleUp: 1_000_000, ThrottleDown: 2_000_000,
 		NATEnabled: true,
-		NAT:        []NATRuleSpec{{Direction: "overlay2underlay", Translate: "192.0.2.1"}},
+		NAT:        []NATRuleSpec{{Translate: "192.0.2.1"}},
 	}
 	if err := eng.ReloadRuntime(netID, spec); err != nil {
 		t.Fatalf("reload on: %v", err)
@@ -89,7 +89,7 @@ func TestNATMasqueradeInterface(t *testing.T) {
 	eng, ns := newReloadTestEngine(t, netID)
 	spec := NetSpec{
 		ID: netID, NATEnabled: true,
-		NAT: []NATRuleSpec{{Direction: "overlay2underlay", Translate: "masquerade", Interface: name}},
+		NAT: []NATRuleSpec{{Translate: "masquerade", Interface: name}},
 	}
 	if err := eng.ReloadRuntime(netID, spec); err != nil {
 		t.Fatal(err)

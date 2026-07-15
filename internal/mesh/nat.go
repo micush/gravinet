@@ -41,11 +41,17 @@ func interfaceIPv4(name string) (netip.Addr, bool) {
 //
 //   - SNAT (masquerade): rewrite the source of egress packets to a single
 //     address, with port translation so many internal hosts share it. Replies
-//     arriving on ingress have their destination restored. This is the
-//     overlay→underlay / overlay→overlay case.
+//     arriving on ingress have their destination restored.
 //   - DNAT (port-forward): rewrite the destination of ingress packets to an
-//     internal host. Replies leaving on egress have their source restored. This
-//     is the underlay→overlay case.
+//     internal host. Replies leaving on egress have their source restored.
+//
+// Which of the two a rule runs is carried by Translate itself (see
+// NATRuleSpec's doc comment) rather than a separate direction/mode field —
+// earlier versions had one, but it only ever expressed these same two
+// behaviors under three confusingly-overlapping labels (one of the three
+// was fully unimplemented dead weight), and Translate already has to name
+// the rewrite target regardless, so folding the choice in there removes a
+// whole field instead of just relabeling it.
 //
 // NAT is IPv4-only (IPv6 NAT is unusual and out of scope). It rewrites and
 // recomputes IPv4 + TCP/UDP checksums; other L4 protocols are translated at the
@@ -348,18 +354,33 @@ func (t *natTable) sweep(now time.Time) {
 
 // NATRuleSpec is the config-facing NAT rule.
 type NATRuleSpec struct {
-	Direction string // overlay2underlay | underlay2overlay | overlay2overlay
-	Source    string // CIDR/host or empty=any
-	Dest      string
-	Translate string // target address, or "masquerade"/empty with Interface set
+	Source string // CIDR/host or empty=any
+	Dest   string
+	// Translate names both the rewrite target and which mode the rule runs:
+	//   - "masquerade", or blank with Interface set: SNAT, rewrite source to
+	//     Interface's address.
+	//   - a literal IPv4: SNAT, rewrite source to that fixed address.
+	//   - "port-forward:<ipv4>": DNAT, rewrite destination to that address.
+	// See toRule for the parsing.
+	Translate string
 	Interface string // egress interface; its IPv4 is used when masquerading
 }
 
+// portForwardPrefix marks a Translate value as DNAT — see NATRuleSpec's doc
+// comment. Matched case-insensitively so "Port-Forward:" from a config an
+// operator hand-edited works the same as the lowercase form the admin UI
+// and CLI always write.
+const portForwardPrefix = "port-forward:"
+
 func (s NATRuleSpec) toRule() (natRule, bool) {
 	translate := strings.TrimSpace(s.Translate)
-	// Masquerade: when no explicit translate address is given (or it's the
-	// keyword "masquerade"), use the egress interface's primary IPv4.
-	if (translate == "" || strings.EqualFold(translate, "masquerade")) && s.Interface != "" {
+	action := snatAction
+	if rest, ok := cutPrefixFold(translate, portForwardPrefix); ok {
+		translate = strings.TrimSpace(rest)
+		action = dnatAction
+	} else if (translate == "" || strings.EqualFold(translate, "masquerade")) && s.Interface != "" {
+		// Masquerade: when no explicit translate address is given (or it's the
+		// keyword "masquerade"), use the egress interface's primary IPv4.
 		if ip, ok := interfaceIPv4(s.Interface); ok {
 			translate = ip.String()
 		} else {
@@ -378,12 +399,17 @@ func (s NATRuleSpec) toRule() (natRule, bool) {
 	if err != nil {
 		return natRule{}, false
 	}
-	r := natRule{src: src, dst: dst, to: to}
-	switch strings.ToLower(s.Direction) {
-	case "underlay2overlay":
-		r.action = dnatAction
-	default: // overlay2underlay, overlay2overlay
-		r.action = snatAction
+	return natRule{src: src, dst: dst, to: to, action: action}, true
+}
+
+// cutPrefixFold is strings.CutPrefix's case-insensitive counterpart — Go's
+// standard library doesn't have one. Only used for the short, fixed
+// portForwardPrefix keyword, so a simple length-bounded EqualFold on the
+// leading slice is all this needs, no need to pull in unicode-aware
+// case-folding machinery for something this narrow.
+func cutPrefixFold(s, prefix string) (rest string, ok bool) {
+	if len(s) < len(prefix) || !strings.EqualFold(s[:len(prefix)], prefix) {
+		return s, false
 	}
-	return r, true
+	return s[len(prefix):], true
 }

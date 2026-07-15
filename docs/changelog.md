@@ -37,6 +37,116 @@ assuming it didn't happen.
 
 ---
 
+## v446 — 2026-07-15
+
+Removed NAT's `direction` field per feedback questioning why it existed
+at all alongside `source`/`dest`. Checked before touching anything: the
+engine only ever read `direction` to pick SNAT vs DNAT
+(`internal/mesh/nat.go`), and of its three values —
+`overlay2underlay`/`underlay2overlay`/`overlay2overlay` — two
+(`overlay2underlay` and `overlay2overlay`) produced the exact same SNAT
+behavior. The field meant to distinguish them, `DestNetwork` ("used for
+overlay-to-overlay"), was declared on the config struct and never read
+anywhere — not passed into the mesh spec, not touched by the NAT engine.
+Picking `overlay2overlay` in the UI did something other than what its
+name implied.
+
+Per follow-up direction (find the real bit of information `direction`
+carried — SNAT vs DNAT, i.e. which side of a packet gets rewritten — and
+fold it into `translate`, which already has to name the rewrite target
+regardless): `translate` now recognizes three forms instead of two —
+`masquerade` (or blank, with an interface) for SNAT via that interface's
+address, a literal IPv4 for a fixed SNAT target, and new
+`port-forward:<ipv4>` for DNAT to that address. There's no longer a
+separate field or column for the mode; naming the target *is* choosing
+the mode, the same way `masquerade` already doubled as both a value and
+a mode before this.
+
+One thing this surfaced that wasn't obvious from the userspace engine
+alone: `cmd/gravinet/main.go`'s `kernelNATRules` — which derives the
+*host-kernel* netfilter rules, separate from the userspace overlay NAT
+path — used `direction` too, and specifically skipped installing a
+kernel rule for `overlay2overlay` (traffic assumed to never cross a
+physical interface, so kernel-level conntrack NAT doesn't apply).
+Dropping the concept meant deciding what happens to that skip. Reasoned
+through it rather than guessing: a masquerade/SNAT kernel rule is scoped
+to a specific `OutIface`, so installing one for traffic that in fact
+never egresses that interface is inert — it simply never matches
+anything, not a correctness bug. So every masquerade/SNAT-style rule now
+always gets a kernel-side attempt, and the old skip (along with the
+distinction that motivated it) is gone. Wrote `TestKernelNATRulesModes`
+to lock this reasoning in as an explicit, tested behavior rather than an
+unstated side effect of the refactor — this function had no test
+coverage at all before this change.
+
+Existing configs with the old field aren't silently broken: `Direction`
+stays on `NATRule` (deprecated, `omitempty`) purely so old JSON still
+parses, and `Config.Validate` migrates it on load — an
+`"underlay2overlay"` rule gets `port-forward:` prefixed onto its
+`Translate` value so it keeps meaning DNAT, `"overlay2underlay"`/
+`"overlay2overlay"` just drop the field (both already meant plain SNAT),
+and `Direction` is cleared afterward either way so it's never written
+back out. The one edge case with no clean equivalent — an
+`underlay2overlay` rule left as `masquerade`/blank, meaning "DNAT to
+whatever address the interface itself resolves to" — falls back to
+plain masquerade/SNAT rather than guessing at an address; this
+combination has no evidence of ever being used and no sensible default
+target to invent for it.
+
+**What changed:** `internal/mesh/nat.go` — `NATRuleSpec` lost `Direction`;
+`toRule()` detects a `port-forward:` prefix on `Translate` (new
+`cutPrefixFold` helper, case-insensitive) to pick `dnatAction` instead of
+reading a separate field. `internal/config/config.go` — `NATRule` lost
+`DestNetwork` outright and kept `Direction` only as deprecated/
+`omitempty`; `NATDirection` and its three constants are gone entirely;
+new migration block in `Validate` (next to the existing NAT
+`StateTimeout` migration, same established pattern). `internal/config/
+ops.go` — `buildNATRule`/`NATRuleAdd`/`NATRuleUpdateAt` lost their
+`direction` parameter; `buildNATRule` now parses the `port-forward:`
+prefix itself (new `natPortForwardPrefix` const, `cutNATPortForwardPrefix`
+helper) and requires a valid IPv4 target after it. `internal/webadmin/
+edit.go` — the `/api/nat` handler's request struct lost `Direction`.
+`cmd/gravinet/main.go` — the NAT spec conversion lost `Direction`;
+`kernelNATRules` rewritten per the reasoning above (own copy of the
+prefix constant, since `cmd/gravinet` doesn't import `internal/config`'s
+or `internal/mesh`'s private helpers for one shared keyword).
+`cmd/gravinet/cli_config.go` — `nat add`'s `direction` keyword arg and
+usage string are gone; `nat list`'s direction column is gone.
+`internal/webadmin/ui.go` — the NAT table lost its direction column;
+`natAddRow`/`startNATEdit` lost the direction `<select>`, translate
+inputs widened slightly and gained a title tooltip listing the three
+accepted forms; the global search index's NAT-rule label no longer
+includes direction; hint text rewritten to describe `translate`'s three
+forms instead of two.
+
+**Verified:** `go build ./...`, `go vet ./...`, `gofmt -l` clean.
+`go test ./internal/config/... ./internal/webadmin/... ./cmd/gravinet/...`
+clean, plus the mesh package's `NAT`/`Reload`/`AddNetwork`/`LiveNet`
+groups (16 tests). New/updated coverage: `TestNATRuleDirectionMigration`
+(config) drives `Validate` over five rules spanning all three legacy
+direction values, mixed casing, and the DNAT-to-self fallback case,
+asserting both the resulting `Translate` values and that `Direction` is
+cleared on every one. `TestNATRulePortForwardPrefixCaseInsensitive` and
+an expanded `TestNATRuleAddRejectsBadInput` (missing target, non-IP
+target, IPv6 target all rejected) cover `buildNATRule` directly.
+`TestNATRuleSpecToRuleDetectsMode` (mesh, new, table-driven) is
+`toRule()`'s first direct unit test — SNAT vs DNAT, case-insensitivity,
+whitespace handling, and each rejection case, isolated from the
+end-to-end engine tests that exercised this only indirectly before.
+`TestKernelNATRulesModes` (cmd/gravinet, new — this function had zero
+prior test coverage) covers all three `Translate` forms producing the
+right `netfilter.Rule` `Kind`, a malformed port-forward target being
+skipped rather than failing the whole pass (matching the old code's
+behavior for a malformed DNAT), every disabled/excluded case, and
+explicitly pins the "no more overlay2overlay carve-out" behavior as
+intentional. `nat_rule_handler_test.go`/`nat_update_handler_test.go`
+(webadmin, existing, updated) confirm the HTTP layer end-to-end,
+including editing a rule from masquerade to `port-forward:` through the
+same API path the UI uses. Embedded-script `node --check` and the
+backtick-count sanity check (v433, exactly 2) both clean.
+
+---
+
 ## v445 — 2026-07-15
 
 Shortened the Info \u2192 Upgrade source-upload hint per feedback — v444's

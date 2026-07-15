@@ -46,7 +46,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "445"
+	version = "446"
 	commit  = "none"
 )
 
@@ -2187,7 +2187,6 @@ func fillRuntimeSpec(spec *mesh.NetSpec, n config.Network, exempts []config.Fire
 				continue
 			}
 			spec.NAT = append(spec.NAT, mesh.NATRuleSpec{
-				Direction: string(nr.Direction),
 				Source:    nr.Source,
 				Dest:      nr.Dest,
 				Translate: nr.Translate,
@@ -2198,11 +2197,14 @@ func fillRuntimeSpec(spec *mesh.NetSpec, n config.Network, exempts []config.Fire
 }
 
 // kernelNATRules derives the NAT rules that must be enforced by the host kernel
-// (netfilter), as opposed to the userspace overlay path. overlay->underlay and
-// underlay->overlay translation happens as the kernel forwards traffic out a
-// physical interface, where only conntrack-backed NAT can reverse-translate the
-// replies — so masquerade/SNAT/DNAT for those directions belong here.
-// overlay<->overlay translation stays in the userspace path and is excluded.
+// (netfilter), as opposed to the userspace overlay path. Traffic crossing a
+// physical interface needs kernel-level, conntrack-backed NAT to reverse-
+// translate replies correctly; the userspace overlay path handles everything
+// else (see internal/mesh/nat.go). A masquerade/SNAT rule is scoped to a
+// specific OutIface, so installing one for a rule whose traffic never
+// actually egresses that interface (pure overlay-to-overlay routing, say) is
+// harmless — it simply never matches anything — so every enabled rule gets a
+// kernel-side attempt here regardless of what its traffic turns out to be.
 func kernelNATRules(cfg *config.Config) []netfilter.Rule {
 	var out []netfilter.Rule
 	for i := range cfg.Networks {
@@ -2216,28 +2218,34 @@ func kernelNATRules(cfg *config.Config) []netfilter.Rule {
 			}
 			src := parsePfx(r.Source)
 			dst := parsePfx(r.Dest)
-			switch strings.ToLower(string(r.Direction)) {
-			case "underlay2overlay":
-				to, err := netip.ParseAddr(strings.TrimSpace(r.Translate))
+			t := strings.TrimSpace(r.Translate)
+			// port-forward:<addr> is DNAT — see config.NATRule's doc comment.
+			// Case-insensitive prefix match, same as config.buildNATRule's.
+			if len(t) >= len(natPortForwardPrefix) && strings.EqualFold(t[:len(natPortForwardPrefix)], natPortForwardPrefix) {
+				addr := strings.TrimSpace(t[len(natPortForwardPrefix):])
+				to, err := netip.ParseAddr(addr)
 				if err != nil || !to.IsValid() {
 					continue // DNAT needs a literal IPv4/IPv6 target
 				}
 				out = append(out, netfilter.Rule{Kind: netfilter.DNAT, Dest: dst, InIface: r.Interface, To: to, V6: to.Is6()})
-			case "overlay2overlay":
-				continue // userspace handles overlay<->overlay
-			default: // overlay2underlay
-				t := strings.TrimSpace(r.Translate)
-				if t == "" || strings.EqualFold(t, "masquerade") {
-					// Family comes from the source prefix; default IPv4 when unspecified.
-					out = append(out, netfilter.Rule{Kind: netfilter.Masquerade, Source: src, OutIface: r.Interface, V6: src.IsValid() && src.Addr().Is6()})
-				} else if to, err := netip.ParseAddr(t); err == nil && to.IsValid() {
-					out = append(out, netfilter.Rule{Kind: netfilter.SNAT, Source: src, OutIface: r.Interface, To: to, V6: to.Is6()})
-				}
+				continue
+			}
+			if t == "" || strings.EqualFold(t, "masquerade") {
+				// Family comes from the source prefix; default IPv4 when unspecified.
+				out = append(out, netfilter.Rule{Kind: netfilter.Masquerade, Source: src, OutIface: r.Interface, V6: src.IsValid() && src.Addr().Is6()})
+			} else if to, err := netip.ParseAddr(t); err == nil && to.IsValid() {
+				out = append(out, netfilter.Rule{Kind: netfilter.SNAT, Source: src, OutIface: r.Interface, To: to, V6: to.Is6()})
 			}
 		}
 	}
 	return out
 }
+
+// natPortForwardPrefix marks a NAT rule's Translate value as DNAT — see
+// config.NATRule's doc comment. Kept as its own copy here (matching
+// internal/config's own copy) rather than exported from either package
+// solely for this one shared keyword.
+const natPortForwardPrefix = "port-forward:"
 
 // parsePfx parses a CIDR (or a bare IPv4/IPv6 host as /32 or /128);
 // empty/invalid = zero prefix, which the netfilter generators treat as "any".

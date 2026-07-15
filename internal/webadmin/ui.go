@@ -878,7 +878,7 @@ function buildSearchIndex(){
     }
     ((cf.nat||{}).rules||[]).forEach((r,i) => {
       const tgt = r.interface ? (r.translate||'masquerade')+' ('+r.interface+')' : (r.translate||'masquerade');
-      const label = (r.direction||'')+' '+(r.source||'any')+' \u2192 '+(r.dest||'any')+' \u21d2 '+tgt;
+      const label = (r.source||'any')+' \u2192 '+(r.dest||'any')+' \u21d2 '+tgt;
       add(label, 'NAT rule \u00b7 '+cf.name, 'nat', cf.id, {kind:'nat', idx:i});
     });
     ((cf.qos||{}).rules||[]).forEach(r => {
@@ -4592,23 +4592,22 @@ function svcAddRow(table){
 
 function secNAT(c) {
   if (!state.cfg.length) return emptyCard(c, 'No networks.');
-  secHint(c, 'NAT rewrites IPv4 addresses (IPv4-only). <b>source</b> and <b>dest</b> select which packets a rule matches (blank = any). <b>translate</b> is either <i>masquerade</i> (rewrite to the chosen interface\'s address, many\u21921) or a literal IPv4 target. Use + to add a rule; double-click a field to edit a rule, or the state tag to toggle it; tick rows and \u2212 to remove.');
+  secHint(c, 'NAT rewrites IPv4 addresses (IPv4-only). <b>source</b> and <b>dest</b> select which packets a rule matches (blank = any). <b>translate</b> is where those packets get rewritten to \u2014 and which direction the rewrite runs, all in one value: <i>masquerade</i> (rewrite the source to the chosen interface\u2019s address, many\u21921, for outbound traffic sharing one address), a literal IPv4 (rewrite the source to that fixed address instead), or <code>port-forward:</code> followed by an IPv4 (rewrite the destination to that address instead, for inbound traffic reaching an internal host). Use + to add a rule; double-click a field to edit a rule, or the state tag to toggle it; tick rows and \u2212 to remove.');
   for (const cf of state.cfg) {
     const nat = cf.nat||{}; const en = !!nat.enabled;
     const card = $('<div class="card"></div>');
     card.appendChild(netCardHead(cf, en, '/api/nat'));
 
     const rules = nat.rules||[];
-    let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>direction</th><th>source</th><th>dest</th><th>translate</th><th>state</th></tr>';
-    if (!rules.length) h += '<tr><td colspan="6" class="empty">no NAT rules — click + to add one</td></tr>';
+    let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>source</th><th>dest</th><th>translate</th><th>state</th></tr>';
+    if (!rules.length) h += '<tr><td colspan="5" class="empty">no NAT rules — click + to add one</td></tr>';
     else rules.forEach((r, i) => {
       const tgt = r.interface ? (esc(r.translate||'masquerade')+' ('+esc(r.interface)+')') : esc(r.translate||'');
       const enabled = r.enabled!==false;
       const stTag = '<span class="tag-toggle '+(enabled?'on':'off')+'" data-natstate="1" title="double-click to '+(enabled?'disable':'enable')+'">'+(enabled?'enabled':'disabled')+'</span>';
       h += '<tr class="natrow'+(enabled?'':' fw-disabled')+'" data-idx="'+i+'" data-enabled="'+(enabled?1:0)+'"'
-        + ' data-direction="'+esc(r.direction||'overlay2underlay')+'" data-source="'+esc(r.source||'')+'" data-dest="'+esc(r.dest||'')+'" data-translate="'+esc(r.translate||'')+'" data-iface="'+esc(r.interface||'')+'">'
+        + ' data-source="'+esc(r.source||'')+'" data-dest="'+esc(r.dest||'')+'" data-translate="'+esc(r.translate||'')+'" data-iface="'+esc(r.interface||'')+'">'
         + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
-        + '<td class="nat-field nat-dir-cell">'+esc(r.direction||'')+'</td>'
         + '<td class="nat-field nat-src-cell">'+esc(r.source||'any')+'</td>'
         + '<td class="nat-field nat-dst-cell">'+esc(r.dest||'any')+'</td>'
         + '<td class="nat-field nat-tr-cell">'+tgt+'</td>'
@@ -4644,10 +4643,9 @@ function secNAT(c) {
 function natAddRow(table, net){
   const tr = document.createElement('tr');
   tr.innerHTML = '<td class="selcol"></td>'
-    + '<td><select class="nate-dir"><option value="overlay2underlay">overlay2underlay</option><option value="underlay2overlay">underlay2overlay</option><option value="overlay2overlay">overlay2overlay</option></select></td>'
     + '<td><input class="nate-src" placeholder="any or CIDR" style="width:120px"></td>'
     + '<td><input class="nate-dst" placeholder="any or CIDR" style="width:120px"></td>'
-    + '<td><input class="nate-tr" value="masquerade" style="width:108px"> <select class="nate-iface" style="width:108px"><option value="">iface…</option></select></td>'
+    + '<td><input class="nate-tr" value="masquerade" title="masquerade, a literal IPv4, or port-forward:IPv4" style="width:150px"> <select class="nate-iface" style="width:108px"><option value="">iface…</option></select></td>'
     + '<td class="nat-state"><span class="on">enabled</span> <button class="sm nate-save">save</button> <button class="ghost sm nate-cancel">cancel</button></td>';
   if (!insertNewRow(table, tr)) return;
   const sel = tr.querySelector('.nate-iface');
@@ -4656,7 +4654,6 @@ function natAddRow(table, net){
   tr.querySelector('.nate-save').onclick = () => {
     edit('/api/nat', {
       op:'add', net:net,
-      direction: tr.querySelector('.nate-dir').value,
       source: tr.querySelector('.nate-src').value.trim(),
       dest: tr.querySelector('.nate-dst').value.trim(),
       translate: tr.querySelector('.nate-tr').value.trim(),
@@ -4669,21 +4666,18 @@ function natAddRow(table, net){
 // field layout) prefilled from the row's data attributes. Saving sends the
 // update op, which replaces the rule in place while preserving its enabled
 // state. translate + interface are edited together because they are
-// interdependent (masquerade needs an interface; a literal IPv4 clears it).
+// interdependent (masquerade needs an interface; a literal IPv4 or
+// port-forward:IPv4 clears it).
 function startNATEdit(tr, net){
-  if (tr.querySelector('.nate-dir')) return; // already editing
+  if (tr.querySelector('.nate-src')) return; // already editing
   const idx = parseInt(tr.dataset.idx, 10);
-  const dirCell = tr.querySelector('.nat-dir-cell');
   const srcCell = tr.querySelector('.nat-src-cell');
   const dstCell = tr.querySelector('.nat-dst-cell');
   const trCell  = tr.querySelector('.nat-tr-cell');
   const stCell  = tr.querySelector('.nat-state');
-  const dirs = ['overlay2underlay','underlay2overlay','overlay2overlay'];
-  const curDir = tr.dataset.direction || 'overlay2underlay';
-  dirCell.innerHTML = '<select class="nate-dir">'+dirs.map(d=>'<option value="'+d+'"'+(d===curDir?' selected':'')+'>'+d+'</option>').join('')+'</select>';
   srcCell.innerHTML = '<input class="nate-src" placeholder="any or CIDR" style="width:120px" value="'+esc(tr.dataset.source||'')+'">';
   dstCell.innerHTML = '<input class="nate-dst" placeholder="any or CIDR" style="width:120px" value="'+esc(tr.dataset.dest||'')+'">';
-  trCell.innerHTML  = '<input class="nate-tr" style="width:108px" value="'+esc(tr.dataset.translate||'')+'"> <select class="nate-iface" style="width:108px"><option value="">iface…</option></select>';
+  trCell.innerHTML  = '<input class="nate-tr" title="masquerade, a literal IPv4, or port-forward:IPv4" style="width:150px" value="'+esc(tr.dataset.translate||'')+'"> <select class="nate-iface" style="width:108px"><option value="">iface…</option></select>';
   const sel = trCell.querySelector('.nate-iface');
   const curIface = tr.dataset.iface || '';
   systemInterfaces().then(list => {
@@ -4696,7 +4690,6 @@ function startNATEdit(tr, net){
   tr.querySelector('.nate-save').onclick = async () => {
     const r = await api('/api/nat', { method:'POST', body: JSON.stringify({
       op:'update', net:net, index:idx,
-      direction: dirCell.querySelector('.nate-dir').value,
       source: srcCell.querySelector('.nate-src').value.trim(),
       dest: dstCell.querySelector('.nate-dst').value.trim(),
       translate: trCell.querySelector('.nate-tr').value.trim(),

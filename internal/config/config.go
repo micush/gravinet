@@ -996,25 +996,41 @@ type Route struct {
 	Enabled bool   `json:"enabled"`
 }
 
-// NATDirection enumerates the translation contexts.
-type NATDirection string
-
-const (
-	NATOverlayToUnderlay NATDirection = "overlay2underlay"
-	NATUnderlayToOverlay NATDirection = "underlay2overlay"
-	NATOverlayToOverlay  NATDirection = "overlay2overlay"
-)
-
-// NATRule describes one translation. Source/Dest are CIDRs; Translate is the
-// pool/address applied. DestNetwork is used for overlay-to-overlay.
+// NATRule describes one translation. Source/Dest are CIDRs (blank = any).
+//
+// Translate says both what to rewrite a matching packet to and which
+// direction the rewrite runs — there's no separate mode/direction field:
+//   - "masquerade" (or blank, with Interface set): rewrite the source of
+//     egress packets to Interface's address (SNAT — many local addresses
+//     share one, e.g. giving a whole overlay subnet internet access).
+//   - a literal IPv4: rewrite the source to that fixed address instead of
+//     masquerading through an interface (static SNAT).
+//   - "port-forward:<ipv4>": rewrite the destination of ingress packets to
+//     that internal address instead (DNAT — replies get their source
+//     restored automatically).
 type NATRule struct {
-	Direction   NATDirection `json:"direction"`
-	Source      string       `json:"source"`
-	Dest        string       `json:"dest"`
-	Translate   string       `json:"translate"`
-	DestNetwork string       `json:"dest_network"`        // for overlay2overlay
-	Interface   string       `json:"interface,omitempty"` // egress interface for masquerade
-	Enabled     bool         `json:"enabled"`
+	Source    string `json:"source"`
+	Dest      string `json:"dest"`
+	Translate string `json:"translate"`
+	Interface string `json:"interface,omitempty"` // egress interface for masquerade
+	Enabled   bool   `json:"enabled"`
+
+	// Direction and DestNetwork are deprecated. An earlier version had a
+	// separate 3-value direction selector (overlay2underlay/
+	// underlay2overlay/overlay2overlay) alongside Translate, with
+	// DestNetwork meant to further distinguish overlay2overlay — except
+	// DestNetwork was never actually read anywhere, so overlay2overlay
+	// rules ran identically to overlay2underlay ones in the userspace NAT
+	// engine, and only differed (silently) in whether a redundant
+	// kernel-level rule also got installed. Direction is retained only so
+	// old configs still parse: on load, an "underlay2overlay" rule's
+	// Translate gets "port-forward:" prefixed onto it (see
+	// Config.Validate) so it keeps meaning DNAT under the new
+	// Translate-carries-the-mode scheme; "overlay2underlay" and
+	// "overlay2overlay" both just drop the field, since both already
+	// meant plain SNAT. DestNetwork is dropped outright — there was never
+	// any real data in it to migrate.
+	Direction string `json:"direction,omitempty"`
 }
 
 // NAT is a network's address translation. It is off by default; when disabled no
@@ -1433,6 +1449,30 @@ func (c *Config) Validate() error {
 	}
 	if c.NATStateTimeout < 0 || c.NATStateTimeout > 86400 {
 		return fmt.Errorf("nat_state_timeout must be 0..86400 seconds")
+	}
+	// A NAT rule's Direction field is deprecated (see NATRule's doc comment):
+	// migrate an "underlay2overlay" rule's meaning into its Translate value
+	// via the port-forward: prefix, then clear Direction unconditionally so
+	// it's never written back out. "overlay2underlay" and "overlay2overlay"
+	// both already meant plain SNAT and need no Translate change, just the
+	// field cleared.
+	for i := range c.Networks {
+		for j := range c.Networks[i].NAT.Rules {
+			r := &c.Networks[i].NAT.Rules[j]
+			if strings.EqualFold(r.Direction, "underlay2overlay") {
+				t := strings.TrimSpace(r.Translate)
+				if t != "" && !strings.EqualFold(t, "masquerade") && !strings.HasPrefix(strings.ToLower(t), "port-forward:") {
+					r.Translate = "port-forward:" + t
+				}
+				// else: an underlay2overlay rule with translate left as
+				// masquerade/blank was always a rare DNAT-to-self combination
+				// (only meaningful if the interface's own address was the
+				// intended forward target) with no clean equivalent under the
+				// new scheme; it falls back to plain SNAT/masquerade here
+				// rather than guessing at an address.
+			}
+			r.Direction = ""
+		}
 	}
 	if !c.EnableIPv4 && !c.EnableIPv6 {
 		return fmt.Errorf("at least one of enable_ipv4/enable_ipv6 must be true")

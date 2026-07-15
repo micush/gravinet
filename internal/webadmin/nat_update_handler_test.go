@@ -21,8 +21,8 @@ func TestHandleNATRuleUpdate(t *testing.T) {
 		WebAdmin: config.WebAdmin{Listen: "127.0.0.1:8443"},
 		Networks: []config.Network{{ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24",
 			NAT: config.NAT{Enabled: true, Rules: []config.NATRule{
-				{Direction: config.NATOverlayToUnderlay, Source: "10.0.0.0/24", Translate: "masquerade", Interface: "eth0", Enabled: false},
-				{Direction: config.NATOverlayToUnderlay, Source: "10.0.1.0/24", Translate: "198.51.100.7", Enabled: true},
+				{Source: "10.0.0.0/24", Translate: "masquerade", Interface: "eth0", Enabled: false},
+				{Source: "10.0.1.0/24", Translate: "198.51.100.7", Enabled: true},
 			}},
 		}},
 	}
@@ -60,14 +60,15 @@ func TestHandleNATRuleUpdate(t *testing.T) {
 		return c2.Networks[0].NAT.Rules[0]
 	}
 
-	// edit rule 0: masquerade -> literal IP, new direction/dest. State (disabled)
-	// and position preserved.
+	// edit rule 0: masquerade -> port-forward (DNAT), new dest. State
+	// (disabled) and position preserved. There's no separate "direction" key
+	// to post anymore — port-forward: is part of translate itself.
 	if ok, _ := post(map[string]any{"op": "update", "net": "lan", "index": 0,
-		"direction": "underlay2overlay", "source": "10.0.0.0/24", "dest": "203.0.113.0/24", "translate": "192.0.2.5"})["ok"].(bool); !ok {
+		"source": "10.0.0.0/24", "dest": "203.0.113.0/24", "translate": "port-forward:192.0.2.5"})["ok"].(bool); !ok {
 		t.Fatal("update rejected")
 	}
 	r := rule0()
-	if r.Translate != "192.0.2.5" || r.Interface != "" || string(r.Direction) != "underlay2overlay" || r.Dest != "203.0.113.0/24" {
+	if r.Translate != "port-forward:192.0.2.5" || r.Interface != "" || r.Dest != "203.0.113.0/24" {
 		t.Fatalf("fields not updated correctly: %+v", r)
 	}
 	if r.Enabled {

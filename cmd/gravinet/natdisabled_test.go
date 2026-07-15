@@ -18,8 +18,8 @@ func TestDisabledNATRuleNotInSpec(t *testing.T) {
 		NAT: config.NAT{
 			Enabled: true,
 			Rules: []config.NATRule{
-				{Direction: config.NATOverlayToUnderlay, Source: "10.0.0.0/24", Translate: "198.51.100.7", Enabled: true},
-				{Direction: config.NATOverlayToUnderlay, Source: "10.0.1.0/24", Translate: "198.51.100.8", Enabled: false}, // disabled
+				{Source: "10.0.0.0/24", Translate: "198.51.100.7", Enabled: true},
+				{Source: "10.0.1.0/24", Translate: "198.51.100.8", Enabled: false}, // disabled
 			},
 		},
 	}

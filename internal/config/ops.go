@@ -929,7 +929,6 @@ func (c *Config) NATAdd(netName, iface string) error {
 	}
 	n.NAT.Enabled = true
 	n.NAT.Rules = append(n.NAT.Rules, NATRule{
-		Direction: NATOverlayToUnderlay,
 		Translate: "masquerade",
 		Interface: iface,
 		Enabled:   true,
@@ -980,25 +979,33 @@ func validNATCIDR(field, s string) (string, error) {
 	return "", fmt.Errorf("%s %q: not an IPv4 address or CIDR", field, s)
 }
 
-// NATRuleAdd appends a full NAT rule. direction is one of overlay2underlay,
-// underlay2overlay, overlay2overlay (default overlay2underlay). source/dest are
-// empty ("any") or IPv4 addresses/CIDRs. translate is either "masquerade" (which
-// requires iface, whose primary IPv4 is used) or a literal IPv4 target.
-// buildNATRule validates and normalizes the user-supplied fields of a NAT rule
-// into a NATRule (with Enabled left false for the caller to set). It is shared by
-// NATRuleAdd and NATRuleUpdateAt so adding and editing enforce identical rules:
-// a recognized direction, valid source/dest CIDRs, and a translate target that
-// is either "masquerade" (which requires an egress interface) or a literal IPv4
-// (which clears the interface).
-func buildNATRule(direction, source, dest, translate, iface string) (NATRule, error) {
-	dir := NATDirection(strings.ToLower(strings.TrimSpace(direction)))
-	switch dir {
-	case "":
-		dir = NATOverlayToUnderlay
-	case NATOverlayToUnderlay, NATUnderlayToOverlay, NATOverlayToOverlay:
-	default:
-		return NATRule{}, fmt.Errorf("direction must be overlay2underlay, underlay2overlay, or overlay2overlay")
+// natPortForwardPrefix marks a translate value as DNAT — see NATRule's doc
+// comment. Kept as its own constant (rather than importing mesh's copy) since
+// config intentionally doesn't depend on mesh; the two packages just happen
+// to agree on the same short keyword, the same way they already agree on
+// "masquerade".
+const natPortForwardPrefix = "port-forward:"
+
+// cutNATPortForwardPrefix is strings.CutPrefix's case-insensitive
+// counterpart, scoped to natPortForwardPrefix — matched case-insensitively
+// so a hand-edited config using "Port-Forward:" still parses the same as
+// the lowercase form the admin UI and CLI always write.
+func cutNATPortForwardPrefix(s string) (target string, ok bool) {
+	if len(s) < len(natPortForwardPrefix) || !strings.EqualFold(s[:len(natPortForwardPrefix)], natPortForwardPrefix) {
+		return s, false
 	}
+	return s[len(natPortForwardPrefix):], true
+}
+
+// source/dest are empty ("any") or IPv4 addresses/CIDRs. translate is either
+// "masquerade" (requires iface, whose primary IPv4 is used), a literal IPv4
+// target (static SNAT), or "port-forward:<ipv4>" (DNAT to that address — see
+// NATRule's doc comment for why the mode lives in translate rather than a
+// separate field). buildNATRule validates and normalizes the user-supplied
+// fields of a NAT rule into a NATRule (with Enabled left false for the
+// caller to set). It is shared by NATRuleAdd and NATRuleUpdateAt so adding
+// and editing enforce identical rules.
+func buildNATRule(source, dest, translate, iface string) (NATRule, error) {
 	src, err := validNATCIDR("source", source)
 	if err != nil {
 		return NATRule{}, err
@@ -1009,6 +1016,17 @@ func buildNATRule(direction, source, dest, translate, iface string) (NATRule, er
 	}
 	translate = strings.TrimSpace(translate)
 	iface = strings.TrimSpace(iface)
+	if rest, ok := cutNATPortForwardPrefix(translate); ok {
+		addr := strings.TrimSpace(rest)
+		ip, perr := netip.ParseAddr(addr)
+		if perr != nil || !ip.Is4() {
+			return NATRule{}, fmt.Errorf("port-forward target %q: must be an IPv4 address", addr)
+		}
+		// Port-forwarding is a fixed rewrite target, not a per-interface
+		// masquerade, so it carries no interface — same as any other literal
+		// translate address.
+		return NATRule{Source: src, Dest: dst, Translate: natPortForwardPrefix + addr}, nil
+	}
 	masq := translate == "" || strings.EqualFold(translate, "masquerade")
 	if masq {
 		if iface == "" {
@@ -1018,19 +1036,19 @@ func buildNATRule(direction, source, dest, translate, iface string) (NATRule, er
 	} else {
 		ip, perr := netip.ParseAddr(translate)
 		if perr != nil || !ip.Is4() {
-			return NATRule{}, fmt.Errorf("translate %q: must be an IPv4 address or \"masquerade\"", translate)
+			return NATRule{}, fmt.Errorf("translate %q: must be an IPv4 address, \"masquerade\", or \"port-forward:<ipv4>\"", translate)
 		}
 		iface = ""
 	}
-	return NATRule{Direction: dir, Source: src, Dest: dst, Translate: translate, Interface: iface}, nil
+	return NATRule{Source: src, Dest: dst, Translate: translate, Interface: iface}, nil
 }
 
-func (c *Config) NATRuleAdd(netName, direction, source, dest, translate, iface string) error {
+func (c *Config) NATRuleAdd(netName, source, dest, translate, iface string) error {
 	n, err := c.PickNetwork(netName)
 	if err != nil {
 		return err
 	}
-	rule, err := buildNATRule(direction, source, dest, translate, iface)
+	rule, err := buildNATRule(source, dest, translate, iface)
 	if err != nil {
 		return err
 	}
@@ -1043,7 +1061,7 @@ func (c *Config) NATRuleAdd(netName, direction, source, dest, translate, iface s
 // NATRuleUpdateAt replaces the rule at index idx (as shown by NAT list / the UI)
 // in place, preserving its enabled/disabled state and its position. It backs the
 // click-to-edit rule fields in the UI. Validation matches NATRuleAdd.
-func (c *Config) NATRuleUpdateAt(netName string, idx int, direction, source, dest, translate, iface string) error {
+func (c *Config) NATRuleUpdateAt(netName string, idx int, source, dest, translate, iface string) error {
 	n, err := c.PickNetwork(netName)
 	if err != nil {
 		return err
@@ -1051,7 +1069,7 @@ func (c *Config) NATRuleUpdateAt(netName string, idx int, direction, source, des
 	if idx < 0 || idx >= len(n.NAT.Rules) {
 		return fmt.Errorf("no NAT rule at index %d (have %d)", idx, len(n.NAT.Rules))
 	}
-	rule, err := buildNATRule(direction, source, dest, translate, iface)
+	rule, err := buildNATRule(source, dest, translate, iface)
 	if err != nil {
 		return err
 	}

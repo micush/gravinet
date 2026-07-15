@@ -747,8 +747,8 @@ func cmdNAT(args []string) {
 			if r.Interface != "" {
 				tgt = r.Translate + " (" + r.Interface + ")"
 			}
-			fmt.Printf("  [%d] %-16s src=%-18s dst=%-18s -> %-22s %s\n",
-				i, r.Direction, src, dst, tgt, onOff(r.Enabled))
+			fmt.Printf("  [%d] src=%-18s dst=%-18s -> %-22s %s\n",
+				i, src, dst, tgt, onOff(r.Enabled))
 		}
 		return
 	case "enable", "disable":
@@ -786,19 +786,21 @@ func cmdNAT(args []string) {
 		fmt.Printf("set global NAT state timeout to %ds\n", secs)
 	case "add":
 		// Two forms: a bare interface (masquerade shorthand) or keyword args
-		// direction/source/dest/translate/iface for a full rule.
-		dir := kw(rest, "direction")
+		// source/dest/translate/iface for a full rule. translate itself
+		// carries whether the rule masquerades/statically SNATs (a literal
+		// address, or "masquerade") or port-forwards/DNATs
+		// ("port-forward:<ipv4>") — there's no separate direction keyword.
 		src := kw(rest, "source")
 		dst := kw(rest, "dest")
 		translate := kw(rest, "translate")
 		iface := kw(rest, "iface")
-		if dir == "" && src == "" && dst == "" && translate == "" && iface == "" {
+		if src == "" && dst == "" && translate == "" && iface == "" {
 			if len(rest) == 0 {
-				fatal("usage: gravinet nat add IFACE  |  nat add [direction DIR] [source CIDR] [dest CIDR] (translate ADDR | iface IFACE)")
+				fatal("usage: gravinet nat add IFACE  |  nat add [source CIDR] [dest CIDR] (translate ADDR|masquerade|port-forward:ADDR | iface IFACE)")
 			}
 			iface = rest[0] // bare-interface masquerade shorthand
 		}
-		if err := cfg.NATRuleAdd(netName, dir, src, dst, translate, iface); err != nil {
+		if err := cfg.NATRuleAdd(netName, src, dst, translate, iface); err != nil {
 			fatal("%v", err)
 		}
 		fmt.Printf("added NAT rule on %s\n", n.Name)
