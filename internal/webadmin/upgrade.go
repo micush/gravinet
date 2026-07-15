@@ -257,7 +257,7 @@ func (s *Server) handleUpgradeStage(w http.ResponseWriter, r *http.Request) {
 			man, haveMan = m, true
 		case "artifact":
 			if !haveMan {
-				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "a manifest must be uploaded before the artifact \u2014 use /api/upgrade/stage-source instead if you don't have one (uploads a source .tgz/.tar.gz, no manifest needed)"})
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "a manifest must be uploaded before the artifact \u2014 use /api/upgrade/stage-source instead if you don't have one (uploads a source .tgz/.tar.gz or .zip, no manifest needed)"})
 				return
 			}
 			if err := s.upg.Store.Ingest(man, part); err != nil {
@@ -273,13 +273,21 @@ func (s *Server) handleUpgradeStage(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleUpgradeStageSource takes an uploaded gravinet source tree as a single
-// .tgz (.tar.gz — same format) body, builds it (the same `go build` the platform installers run),
-// and ingests the result exactly like handleUpgradeStage's unsigned binary
-// path does. This exists for the case the raw-binary path doesn't cover: you
-// don't have a built gravinet binary at all, only source — which, for this
-// project, is *every* fresh checkout, since there is no separate prebuilt
-// release artifact anywhere. The installers already do this build step
+// request body — a gzip-compressed tar (.tgz/.tar.gz) or a zip (.zip),
+// whichever extractSourceArchive determines it to be from its content — builds
+// it (the same `go build` the platform installers run), and ingests the
+// result exactly like handleUpgradeStage's unsigned binary path does. This
+// exists for the case the raw-binary path doesn't cover: you don't have a
+// built gravinet binary at all, only source — which, for this project, is
+// *every* fresh checkout, since there is no separate prebuilt release
+// artifact anywhere. The installers already do this build step
 // automatically; this is the same step, offered from the browser.
+//
+// zip, alongside the tgz the installers themselves produce, matters here
+// specifically because it's what GitHub's own "Download ZIP" button hands
+// you — the most likely way to get this project's source onto a box that
+// doesn't already have a git client on it — and before this it simply
+// wasn't accepted as an upgrade source at all.
 //
 // Only available in local-only-unsigned mode (no trusted_keys), and for the
 // same reason handleUpgradeStage's unsigned path is: there is no key to check
@@ -315,4 +323,3 @@ func (s *Server) handleUpgradeStageSource(w http.ResponseWriter, r *http.Request
 	s.log.Infof("upgrade: built and staged %s from uploaded source via the web admin", m.ID())
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "staged": m.ID(), "unsigned": true, "built_from_source": true})
 }
-

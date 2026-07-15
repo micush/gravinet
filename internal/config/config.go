@@ -117,6 +117,33 @@ type Config struct {
 	// (see DefaultFirewallExempts); an explicit empty list disables all exemptions.
 	FirewallExempts []FirewallExempt `json:"firewall_exempt,omitempty"`
 
+	// FirewallObjects / FirewallServices are the node-global reusable address-
+	// object and service catalogs every network's firewall rules resolve their
+	// src/dst/services references against (see FirewallRule.Src/Dst/Services) —
+	// one catalog, shared by every network on this node, not duplicated per
+	// network. A rule always lives on a specific network (it only makes sense
+	// applied to that network's traffic), but the named objects/services it
+	// references are node-wide: the same "google.com" or "HTTPS" definition a
+	// rule on one network names is the same definition a rule on any other
+	// network here would name too, edited in one place.
+	FirewallObjects  []FirewallObject  `json:"firewall_objects,omitempty"`
+	FirewallServices []FirewallService `json:"firewall_services,omitempty"`
+	// ObjectsCatalogSeeded / ServicesCatalogSeeded record that the admin UI's
+	// well-known object/service catalog (FW_COMMON_WILDCARD_OBJECTS /
+	// FW_COMMON_SERVICES in internal/webadmin's embedded JS) has already been
+	// populated into FirewallObjects/FirewallServices once, node-wide. Purely
+	// local bookkeeping the packet-filter engine never reads and the persist
+	// hook never re-derives (unlike FirewallObjects/FirewallServices
+	// themselves, which the engine is the source of truth for) — its only
+	// reader is the admin UI's auto-populate pass, which uses it to populate
+	// exactly once, ever, for this node, and then leave the operator's own
+	// additions/removals alone from then on: without it, a deleted well-known
+	// entry would silently reappear on every visit to a firewall tab, since
+	// there'd be nothing on disk distinguishing "never populated" from
+	// "populated, then deliberately edited."
+	ObjectsCatalogSeeded  bool `json:"objects_catalog_seeded,omitempty"`
+	ServicesCatalogSeeded bool `json:"services_catalog_seeded,omitempty"`
+
 	// UnderlayMTU caps the size of a single UDP datagram we put on the wire.
 	// Overlay packets larger than what fits are fragmented at the application
 	// layer and reassembled by the peer, so the jumbo tunnel MTU (9216) works
@@ -574,14 +601,13 @@ type FirewallRule struct {
 // an empty rulebase the default policy is allow (stateful), so add rules to
 // restrict. When disabled, no filtering happens at all.
 //
-// Objects and Services are reusable catalogs a rule can reference by name (see
-// FirewallRule.Src/Dst and FirewallRule.Services). They apply whether or not the
-// firewall is enabled, and are shared by every rule in this network.
+// Rules reference reusable address-object and service catalogs by name (see
+// FirewallRule.Src/Dst and FirewallRule.Services) — those catalogs are node-
+// global (Config.FirewallObjects/FirewallServices, shared by every network on
+// this node), not part of this per-network struct.
 type Firewall struct {
-	Enabled  bool              `json:"enabled"`
-	Rules    []FirewallRule    `json:"rules"`
-	Objects  []FirewallObject  `json:"objects,omitempty"`
-	Services []FirewallService `json:"services,omitempty"`
+	Enabled bool           `json:"enabled"`
+	Rules   []FirewallRule `json:"rules"`
 }
 
 // FirewallObject is a named, reusable address object referenced by rules. kind
@@ -1519,9 +1545,9 @@ func (c *Config) Validate() error {
 				n.Throttle.UpBytesPerSec = defaultQoSUpBytesPerSec
 			}
 		}
-		if err := validateFirewallCatalog(n.Firewall); err != nil {
-			return fmt.Errorf("network %q firewall: %w", n.Name, err)
-		}
+	}
+	if err := validateFirewallCatalog(c.FirewallObjects, c.FirewallServices); err != nil {
+		return fmt.Errorf("firewall catalog: %w", err)
 	}
 	for j, ex := range c.FirewallExempts {
 		if err := validateExempt(ex); err != nil {
@@ -1549,20 +1575,21 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// validateFirewallCatalog checks the structural sanity of a network's address
-// objects and services: recognised kinds, non-empty names, and (for groups)
-// that every referenced member exists. It deliberately does not reject rules
-// that reference an unknown object — the engine logs and skips those — but it
-// does catch the common typos in the catalog itself at load time.
-func validateFirewallCatalog(fw Firewall) error {
-	names := make(map[string]bool, len(fw.Objects))
-	for _, o := range fw.Objects {
+// validateFirewallCatalog checks the structural sanity of the node-global
+// address objects and services: recognised kinds, non-empty names, and (for
+// groups) that every referenced member exists. It deliberately does not
+// reject rules that reference an unknown object — the engine logs and skips
+// those — but it does catch the common typos in the catalog itself at load
+// time.
+func validateFirewallCatalog(objects []FirewallObject, services []FirewallService) error {
+	names := make(map[string]bool, len(objects))
+	for _, o := range objects {
 		if strings.TrimSpace(o.Name) == "" {
 			return fmt.Errorf("object with empty name")
 		}
 		names[strings.ToLower(strings.TrimSpace(o.Name))] = true
 	}
-	for _, o := range fw.Objects {
+	for _, o := range objects {
 		switch strings.ToLower(strings.TrimSpace(o.Kind)) {
 		case "host", "subnet", "range", "fqdn":
 			if len(o.Addresses) == 0 {
@@ -1581,7 +1608,7 @@ func validateFirewallCatalog(fw Firewall) error {
 			return fmt.Errorf("object %q has unknown kind %q (want host|subnet|range|fqdn|group)", o.Name, o.Kind)
 		}
 	}
-	for _, s := range fw.Services {
+	for _, s := range services {
 		if strings.TrimSpace(s.Name) == "" {
 			return fmt.Errorf("service with empty name")
 		}

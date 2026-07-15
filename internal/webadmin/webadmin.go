@@ -56,11 +56,12 @@ type Backend interface {
 	FirewallAdd(networkID uint64, r mesh.FirewallRule, at int) (mesh.FirewallRule, error)
 	FirewallDelete(networkID uint64, ids []uint64) error
 	FirewallMove(networkID, id uint64, to int) error
-	// Object/service catalog + counters (v392 firewall parity).
-	FirewallObjectsList(networkID uint64) ([]mesh.FirewallObject, error)
-	SetFirewallObjects(networkID uint64, objs []mesh.FirewallObject) error
-	FirewallServicesList(networkID uint64) ([]mesh.FirewallService, error)
-	SetFirewallServices(networkID uint64, svcs []mesh.FirewallService) error
+	// Object/service catalog (node-global, shared by every network — see
+	// Config.FirewallObjects' doc comment) + counters (v392 firewall parity).
+	FirewallObjectsList() ([]mesh.FirewallObject, error)
+	SetFirewallObjects(objs []mesh.FirewallObject) error
+	FirewallServicesList() ([]mesh.FirewallService, error)
+	SetFirewallServices(svcs []mesh.FirewallService) error
 	FirewallResetCounters(networkID uint64, ids []uint64) error
 	FloodKey(networkID uint64, keyB64, label string, expiresNano int64, slot int) error
 	RetractKey(networkID uint64, keyB64 string) error
@@ -822,7 +823,16 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			DNS: n.DNSAdvertise, DNSRej: n.DNSReject, Keys: keys,
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"nets": out, "primary_port": cfg.PrimaryPort, "tcp_fallback_port": cfg.TCPFallbackPortValue(), "tcp_fallback_disabled": !cfg.TCPFallbackEnabled(), "extra_listen_ports": cfg.ExtraListenPorts, "extra_tcp_listen_ports": cfg.ExtraTCPListenPorts, "nat_state_timeout": cfg.NATStateTimeout, "geoip_lookup": s.cfg.GeoIPEnabled(), "allow_remote_shell": s.cfg.AllowRemoteShell, "shell_supported": ptySupported, "log_level": s.be.LogLevel()})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"nets": out, "primary_port": cfg.PrimaryPort, "tcp_fallback_port": cfg.TCPFallbackPortValue(), "tcp_fallback_disabled": !cfg.TCPFallbackEnabled(), "extra_listen_ports": cfg.ExtraListenPorts, "extra_tcp_listen_ports": cfg.ExtraTCPListenPorts, "nat_state_timeout": cfg.NATStateTimeout, "geoip_lookup": s.cfg.GeoIPEnabled(), "allow_remote_shell": s.cfg.AllowRemoteShell, "shell_supported": ptySupported, "log_level": s.be.LogLevel(),
+		// Node-global firewall object/service catalog (see Config.FirewallObjects'
+		// doc comment) — shared by every network above, not nested under any one
+		// of them. The seeded flags let the admin UI populate the well-known
+		// catalog exactly once, ever, for this node (see
+		// Config.ObjectsCatalogSeeded's doc comment).
+		"firewall_objects": cfg.FirewallObjects, "firewall_services": cfg.FirewallServices,
+		"firewall_objects_seeded": cfg.ObjectsCatalogSeeded, "firewall_services_seeded": cfg.ServicesCatalogSeeded,
+	})
 }
 
 func (s *Server) handleBan(w http.ResponseWriter, r *http.Request) {
@@ -989,6 +999,49 @@ func (s *Server) handleFirewall(w http.ResponseWriter, r *http.Request) {
 		s.editResult(w, err, false)
 		return
 	}
+	// objects / services replace the node-global address-object / service
+	// catalog every network's rules resolve their src/dst/services references
+	// against — not scoped to req.Net (there's no per-network catalog left to
+	// scope to), applied live and persisted by the engine's persist hook, like
+	// rule edits.
+	if req.Op == "objects" || req.Op == "services" {
+		var err error
+		if req.Op == "objects" {
+			err = s.be.SetFirewallObjects(req.Objects)
+		} else {
+			err = s.be.SetFirewallServices(req.Services)
+		}
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "restart": false})
+		return
+	}
+	// mark-objects-seeded / mark-services-seeded record that the admin UI's
+	// well-known catalog auto-populate (see ui.go's fwAutoPopulateCatalog) has
+	// already run for this node, so it never runs again — a plain config
+	// mutation like enable/disable above, not an engine op: the flag itself
+	// has no effect on packet filtering, only on whether the UI's next visit
+	// tries to add anything. Node-global, like the catalog itself — not
+	// scoped to req.Net. The client calls this right after an "objects"/
+	// "services" save that filled any gaps (or immediately, if there were
+	// none to fill) — sequenced after that save completes, so the fresh
+	// catalog it just wrote is what's on disk by the time this reads and
+	// re-saves the file, not a stale copy from before the objects/services
+	// write (both this and the engine's persist hook take the same
+	// per-config-path lock; see mutateConfig's comment).
+	if req.Op == "mark-objects-seeded" || req.Op == "mark-services-seeded" {
+		objects := req.Op == "mark-objects-seeded"
+		err := s.mutateConfig(func(cfg *config.Config) error {
+			if objects {
+				return cfg.FirewallMarkObjectsCatalogSeeded()
+			}
+			return cfg.FirewallMarkServicesCatalogSeeded()
+		})
+		s.editResult(w, err, false)
+		return
+	}
 	// rule-enable / rule-disable toggle a single rule's enabled flag by its
 	// engine ID; we find it by matching ID in the live rulebase, then apply to config by index.
 	if req.Op == "rule-enable" || req.Op == "rule-disable" {
@@ -1051,18 +1104,6 @@ func (s *Server) handleFirewall(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err = s.be.FirewallMove(id, req.IDs[0], req.To); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-			return
-		}
-	case "objects":
-		// Replace-all: the UI sends the full object catalog. Applied live and
-		// persisted by the engine's hook, like rule edits.
-		if err = s.be.SetFirewallObjects(id, req.Objects); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-			return
-		}
-	case "services":
-		if err = s.be.SetFirewallServices(id, req.Services); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}

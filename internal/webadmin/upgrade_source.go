@@ -2,6 +2,7 @@ package webadmin
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"compress/gzip"
 	"context"
 	"errors"
@@ -17,11 +18,13 @@ import (
 	"gravinet/internal/upgrade"
 )
 
-// maxSourceUploadSize caps a source archive upload (.tgz/.tar.gz — same
-// format; detected by content, not extension). gravinet's own source tree
-// (no vendor/, no build output, no git history in the tgz the installers
-// consume) is a few MiB; 128 MiB is generous headroom without being large
-// enough to be a meaningful disk-fill vector on a small box.
+// maxSourceUploadSize caps a source archive upload — a gzip-compressed tar
+// (.tgz/.tar.gz) or a zip (.zip), detected by content, not extension (see
+// extractSourceArchive). gravinet's own source tree (no vendor/, no build
+// output, no git history in the archive the installers or GitHub's own
+// "Download ZIP" button produce) is a few MiB; 128 MiB is generous headroom
+// without being large enough to be a meaningful disk-fill vector on a small
+// box.
 const maxSourceUploadSize = 128 << 20
 
 // maxSourceExtractedSize caps the *decompressed* total a tgz may expand to —
@@ -37,11 +40,85 @@ const maxSourceExtractedSize = 512 << 20
 // action, not something on a hot path.
 const buildTimeout = 10 * time.Minute
 
+// extractSourceArchive safely unpacks r — a gzip-compressed tar (.tgz/
+// .tar.gz) or a zip (.zip) — under destDir, auto-detecting which of the two
+// it is by content (the leading bytes: 0x1f 0x8b for gzip, "PK" plus a
+// third byte of 0x03, 0x05, or 0x07 for zip's few defined first-record
+// types), not by filename or extension: this handler's caller posts a raw
+// body with no filename attached at all, and even where one exists,
+// trusting an extension to say what a file actually contains is exactly
+// the kind of check the rest of this file is careful not to rely on.
+//
+// zip support exists because GitHub's own "Download ZIP" button — and
+// most anything else that hands out a repo snapshot without requiring a
+// git client — produces a .zip, not a .tgz; before this, that download
+// couldn't be used as an upgrade source at all despite being the single
+// most likely way an operator without a local clone would actually get
+// this project's source.
+//
+// Every format archive/zip can parse needs io.ReaderAt plus a known
+// length — its central directory lives at the end of the stream and has
+// to be located and read before anything else, which a forward-only
+// io.Reader (what an HTTP request body is) can't support. So r is always
+// spooled to a temp file first, even for the gzip/tar case where that
+// isn't strictly required, both to keep one code path instead of two and
+// to make detecting the format (which likewise needs to look at the
+// stream before committing to either parser) simple: read once, sniff,
+// then hand the same seekable file to whichever extractor applies. Capped
+// at maxSourceUploadSize+1 bytes independent of whatever the caller's own
+// reader may or may not already limit (the one real caller wraps its
+// request body in http.MaxBytesReader, but this stays self-contained
+// rather than trusting that).
+func extractSourceArchive(r io.Reader, destDir string) (moduleRoot string, err error) {
+	tmp, err := os.CreateTemp(filepath.Dir(destDir), ".upload-*")
+	if err != nil {
+		return "", err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	n, copyErr := io.Copy(tmp, io.LimitReader(r, maxSourceUploadSize+1))
+	closeErr := tmp.Close()
+	if copyErr != nil {
+		return "", copyErr
+	}
+	if closeErr != nil {
+		return "", closeErr
+	}
+	if n > maxSourceUploadSize {
+		return "", fmt.Errorf("upload exceeds the %d-byte size ceiling", int64(maxSourceUploadSize))
+	}
+
+	f, err := os.Open(tmpPath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	var sig [4]byte
+	if _, err := io.ReadFull(f, sig[:]); err != nil {
+		return "", errors.New("upload is too small to be a valid .tgz/.tar.gz or .zip source archive")
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+
+	switch {
+	case sig[0] == 0x1f && sig[1] == 0x8b:
+		return extractSourceTarGz(f, destDir)
+	case sig[0] == 'P' && sig[1] == 'K' && (sig[2] == 0x03 || sig[2] == 0x05 || sig[2] == 0x07):
+		return extractSourceZip(f, n, destDir)
+	default:
+		return "", errors.New("not a valid .tgz/.tar.gz or .zip source archive (unrecognized file signature)")
+	}
+}
+
 // extractSourceTarGz safely unpacks r (a gzip-compressed tar stream) under
-// destDir, and returns the directory that actually contains go.mod — the tgz
-// this project ships (and the one this handler expects) wraps everything in
-// a single top-level directory (e.g. "gravinet/go.mod", "gravinet/cmd/..."),
-// so the module root is a subdirectory of destDir, not destDir itself.
+// destDir, and returns the directory that actually contains go.mod — the
+// archive this project's installers ship, and the one this handler
+// expects (whichever of the two formats extractSourceArchive determined
+// r to be), wraps everything in a single top-level directory (e.g.
+// "gravinet/go.mod", "gravinet/cmd/..."), so the module root is a
+// subdirectory of destDir, not destDir itself.
 //
 // "Safely" here means the standard tar-extraction hazards are closed, not
 // that the uploader is assumed hostile — the same care applies to a tarball
@@ -124,6 +201,106 @@ func extractSourceTarGz(r io.Reader, destDir string) (moduleRoot string, err err
 			return "", fmt.Errorf("%q: tar header claimed %d bytes, stream had at least %d", hdr.Name, hdr.Size, n)
 		}
 		total += n
+		if total > maxSourceExtractedSize {
+			return "", fmt.Errorf("upload expands past the %d-byte extraction ceiling", int64(maxSourceExtractedSize))
+		}
+
+		if foundGoMod == "" && filepath.Base(target) == "go.mod" {
+			foundGoMod = filepath.Dir(target)
+		}
+	}
+
+	if foundGoMod == "" {
+		return "", errors.New("no go.mod found anywhere in the upload — this doesn't look like a gravinet source tree")
+	}
+	if _, err := os.Stat(filepath.Join(foundGoMod, "cmd", "gravinet")); err != nil {
+		return "", errors.New("found a go.mod, but no cmd/gravinet under it — this doesn't look like a gravinet source tree")
+	}
+	return foundGoMod, nil
+}
+
+// extractSourceZip is extractSourceTarGz's zip-format counterpart, same
+// contract and the same safety checks (path-escape rejection, symlink
+// rejection, per-entry and cumulative size enforced by counting bytes
+// actually written rather than trusting the header) — see its doc comment
+// for the reasoning behind each; nothing here is that comment's mirror by
+// coincidence, it's the same hazards under a different archive format,
+// notably including GitHub's own "Download ZIP" output (which wraps a repo
+// in a single top-level "<repo>-<branch>/..." directory, the same shape
+// extractSourceTarGz already expects from a .tgz).
+//
+// r must support io.ReaderAt — zip's central directory is read from the end
+// of the stream, so it can't be parsed from a forward-only reader — with
+// size its total byte length; extractSourceArchive is what actually
+// supplies both (a temp file it already spooled r to in order to sniff the
+// format in the first place).
+func extractSourceZip(r io.ReaderAt, size int64, destDir string) (moduleRoot string, err error) {
+	zr, err := zip.NewReader(r, size)
+	if err != nil {
+		return "", fmt.Errorf("not a valid zip archive: %w", err)
+	}
+
+	var total int64
+	var foundGoMod string
+	for _, zf := range zr.File {
+		fi := zf.FileInfo()
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("refusing to extract %q: a source upload may not contain symlinks", zf.Name)
+		}
+		if !fi.Mode().IsRegular() && !fi.IsDir() {
+			// Device nodes, FIFOs, etc. (or anything else a nonstandard zip
+			// writer might encode) have no business in a source tree; skip
+			// rather than fail, the same as extractSourceTarGz does for tar
+			// entry types it doesn't recognize.
+			continue
+		}
+
+		// Same boundary check as extractSourceTarGz, applied to a zip
+		// entry's name instead of a tar header's — see its comment for why
+		// filepath.Clean alone isn't the actual boundary.
+		name := filepath.Clean(zf.Name)
+		if filepath.IsAbs(name) || name == ".." || strings.HasPrefix(name, ".."+string(filepath.Separator)) {
+			return "", fmt.Errorf("refusing to extract %q: escapes the upload directory", zf.Name)
+		}
+		target := filepath.Join(destDir, name)
+		if target != destDir && !strings.HasPrefix(target, destDir+string(filepath.Separator)) {
+			return "", fmt.Errorf("refusing to extract %q: escapes the upload directory", zf.Name)
+		}
+
+		if fi.IsDir() {
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return "", err
+			}
+			continue
+		}
+
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return "", err
+		}
+		mode := fi.Mode().Perm()
+		if mode == 0 {
+			mode = 0o644
+		}
+		rc, err := zf.Open()
+		if err != nil {
+			return "", fmt.Errorf("%q: %w", zf.Name, err)
+		}
+		out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+		if err != nil {
+			rc.Close()
+			return "", err
+		}
+		declared := int64(zf.UncompressedSize64)
+		nCopied, copyErr := io.Copy(out, io.LimitReader(rc, declared+1))
+		out.Close()
+		rc.Close()
+		if copyErr != nil {
+			return "", copyErr
+		}
+		if nCopied != declared {
+			return "", fmt.Errorf("%q: zip entry claimed %d bytes, stream had at least %d", zf.Name, declared, nCopied)
+		}
+		total += nCopied
 		if total > maxSourceExtractedSize {
 			return "", fmt.Errorf("upload expands past the %d-byte extraction ceiling", int64(maxSourceExtractedSize))
 		}
@@ -256,8 +433,10 @@ func buildFromSource(ctx context.Context, moduleRoot, outPath string) (output st
 }
 
 // stageFromSource is the full pipeline handleUpgradeStageSource drives:
-// extract, build, probe, ingest. src is the raw multipart tar.gz stream. Every
-// temp directory it creates is cleaned up before returning, win or lose.
+// extract, build, probe, ingest. src is the raw request-body stream — a
+// gzip-compressed tar (.tgz/.tar.gz) or a zip (.zip), either is fine (see
+// extractSourceArchive, which is what tells them apart). Every temp
+// directory this creates is cleaned up before returning, win or lose.
 func stageFromSource(st *upgrade.Store, src io.Reader) (upgrade.Manifest, error) {
 	workDir, err := os.MkdirTemp(st.Dir(), ".source-build-*")
 	if err != nil {
@@ -269,7 +448,7 @@ func stageFromSource(st *upgrade.Store, src io.Reader) (upgrade.Manifest, error)
 	if err := os.MkdirAll(extractDir, 0o755); err != nil {
 		return upgrade.Manifest{}, err
 	}
-	moduleRoot, err := extractSourceTarGz(src, extractDir)
+	moduleRoot, err := extractSourceArchive(src, extractDir)
 	if err != nil {
 		return upgrade.Manifest{}, err
 	}

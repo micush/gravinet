@@ -156,12 +156,12 @@ type NetSpec struct {
 	// QoS (step 10): prioritises traffic within the egress shaper. nil = none.
 	QoS *classifier
 
-	// Firewall (step 11): initial rulebase (empty = default allow-all).
-	FirewallEnabled  bool
-	FirewallRules    []FirewallRule
-	FirewallExempts  []FirewallExempt
-	FirewallObjects  []FirewallObject  // named address objects (host/subnet/range/fqdn/group)
-	FirewallServices []FirewallService // named service catalog
+	// Firewall (step 11): initial rulebase (empty = default allow-all). The
+	// object/service catalog rules resolve against is node-global, not part
+	// of this per-network spec — see Options.FirewallObjects' doc comment.
+	FirewallEnabled bool
+	FirewallRules   []FirewallRule
+	FirewallExempts []FirewallExempt
 
 	// NAT (step 12): address translation rules (empty = none).
 	NATEnabled      bool
@@ -258,6 +258,16 @@ type Options struct {
 	// same knob rather than one respecting it and the other silently
 	// picking its own count.
 	TunWorkers int
+
+	// FirewallObjects / FirewallServices seed the node-global firewall
+	// object/service catalog (see config.Config.FirewallObjects' doc
+	// comment) before any of Nets' initial network states are built, so
+	// every one of them — not just ones added later via AddNetwork — starts
+	// with the real catalog instead of empty. Shared by every network on
+	// this node; not part of NetSpec, which is otherwise the per-network
+	// counterpart to this node-global Options struct.
+	FirewallObjects  []FirewallObject
+	FirewallServices []FirewallService
 }
 
 // Engine is the running mesh for one node.
@@ -300,6 +310,22 @@ type Engine struct {
 	// the same underlay socket.
 	reflexiveMu sync.Mutex
 	reflexive   map[string]reflexiveObs
+
+	// fwCatalogMu / fwObjects / fwServices hold the node-global firewall
+	// object/service catalog (see config.Config.FirewallObjects' doc
+	// comment) — one shared list, not one copy per network. Every network's
+	// *firewall instance gets the same objs/svcs pushed into it whenever
+	// SetFirewallObjects/SetFirewallServices runs; this pair is the
+	// authoritative copy that (a) FirewallObjectsList/FirewallServicesList
+	// read back, and (b) newNetState reads when bringing up a network — at
+	// boot (Options.FirewallObjects/FirewallServices seeds this before any
+	// initial network is built) or later via AddNetwork — so a network
+	// never starts out with an empty catalog just because it wasn't the one
+	// SetFirewallObjects/Services happened to be called against most
+	// recently.
+	fwCatalogMu sync.Mutex
+	fwObjects   []FirewallObject
+	fwServices  []FirewallService
 
 	// localUnderlay is the source address the kernel currently uses to reach the
 	// underlay. When it changes (e.g. switching Wi-Fi/5G), the path MTU to every
@@ -1074,6 +1100,11 @@ func NewEngine(o Options) *Engine {
 	e.primaryPort.Store(int64(o.PrimaryPort))
 	e.extraTCPPorts.Store(&o.ExtraTCPPorts)
 	e.extraUDPPorts.Store(&o.ExtraUDPPorts)
+	// Seed the node-global firewall catalog before any network state is
+	// built below, so every initial network (not just ones added later via
+	// AddNetwork) starts with the real objects/services instead of empty.
+	e.fwObjects = append([]FirewallObject(nil), o.FirewallObjects...)
+	e.fwServices = append([]FirewallService(nil), o.FirewallServices...)
 	nm := make(map[uint64]*netState, len(o.Nets))
 	for _, spec := range o.Nets {
 		ns := e.newNetState(spec)
@@ -1189,7 +1220,8 @@ func (e *Engine) newNetState(spec NetSpec) *netState {
 	ns.fw = newFirewall(nil)
 	ns.fw.setLogger(e.log)
 	ns.fw.setMgmtPort(e.webPort)
-	ns.fw.setCatalog(spec.FirewallObjects, spec.FirewallServices)
+	objs, svcs := e.firewallCatalogSnapshot()
+	ns.fw.setCatalog(objs, svcs)
 	ns.fw.loadRules(spec.FirewallRules)
 	ns.fw.setExempts(spec.FirewallExempts)
 	ns.fw.setEnabled(spec.FirewallEnabled)
@@ -1197,6 +1229,14 @@ func (e *Engine) newNetState(spec NetSpec) *netState {
 		ns.nat.Store(nt)
 	}
 	return ns
+}
+
+// firewallCatalogSnapshot returns copies of the node-global firewall object/
+// service catalog — see the fwCatalogMu field group's doc comment.
+func (e *Engine) firewallCatalogSnapshot() ([]FirewallObject, []FirewallService) {
+	e.fwCatalogMu.Lock()
+	defer e.fwCatalogMu.Unlock()
+	return append([]FirewallObject(nil), e.fwObjects...), append([]FirewallService(nil), e.fwServices...)
 }
 
 // network returns the netState for an id, or nil. Lock-free (reads a snapshot).

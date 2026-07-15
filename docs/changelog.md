@@ -37,6 +37,395 @@ assuming it didn't happen.
 
 ---
 
+## v445 — 2026-07-15
+
+Shortened the Info \u2192 Upgrade source-upload hint per feedback — v444's
+spelled out both accepted formats and namechecked GitHub inline; that's
+what the file picker's accept list and the error messages are for, not
+the one-line hint above it.
+
+**What changed:** ui.go's source-upload hint text is now "Upload a
+source archive and it\u2019s built and applied automatically." — down from
+naming .tgz/.tar.gz/.zip and GitHub's Download ZIP explicitly. Nothing
+else from v444 changed: the file picker still accepts .tgz/.tar.gz/.zip,
+`extractSourceArchive` still sniffs the format server-side, the
+validation alert still names both extensions.
+
+**Verified:** `go build ./...`; embedded-script `node --check` and the
+backtick-count sanity check (v433, exactly 2) both clean.
+
+---
+
+## v444 — 2026-07-15
+
+GitHub's "Download ZIP" button — the most likely way to get this
+project's source onto a box without a git client already on it —
+produces a .zip, not a .tgz. Before this, Info \u2192 Upgrade's source
+upload only understood gzip-compressed tar, so that download couldn't be
+used as an upgrade source at all: `extractSourceTarGz` would fail on the
+very first `gzip.NewReader` call with a "not a valid gzip-compressed tar
+archive" error that had nothing to do with what was actually wrong.
+
+New `extractSourceArchive` sits in front of extraction and sniffs the
+uploaded body's format from its content — 0x1f 0x8b for gzip, "PK" plus
+a third byte of 0x03/0x05/0x07 for zip's few defined first-record types
+— since this handler's caller posts a raw request body with no filename
+or Content-Type attached at all, so there's nothing else to go on
+(consistent with how tgz-vs-extension was already decided here before
+this change). Both formats need the body spooled to a temp file first:
+zip's central directory lives at the end of the stream and needs
+`io.ReaderAt` plus a known length to parse, which a raw HTTP body
+reader can't offer, and detecting the format in the first place means
+reading it before committing to either parser anyway — so one temp
+file, one read, then whichever extractor applies. New `extractSourceZip`
+is `extractSourceTarGz`'s zip-format counterpart, same contract and the
+same safety checks ported over entry-by-entry: path-escape rejection
+(`../` and absolute-path entries refused, resolved path re-checked
+against the destination boundary), symlink rejection (checked via the
+Unix mode bits zip's external file attributes carry, the same
+S_IFLNK Info-ZIP and every compatible tool round-trip a symlink
+through), and per-entry plus cumulative extracted-size enforcement by
+counting bytes actually written rather than trusting the (attacker-
+controlled, unverified) header value — none of that is new reasoning,
+it's the existing tar-path reasoning applied to zip's equivalent
+hazards.
+
+Also now accepted: the Info \u2192 Upgrade page's file picker
+(`accept=".tgz,.tar.gz,.zip,..."`) and its hint text, and the
+error message pointing at `/api/upgrade/stage-source` from the
+signed-manifest upload path when no manifest was supplied.
+
+**What changed:** `extractSourceArchive` (spools to a temp file, sniffs,
+dispatches) and `extractSourceZip` (upgrade_source.go) are new;
+`stageFromSource` calls `extractSourceArchive` instead of
+`extractSourceTarGz` directly. `maxSourceUploadSize`'s doc comment,
+`handleUpgradeStageSource`'s doc comment, and the "upload a manifest
+first" error message (upgrade.go) all updated to describe both formats
+instead of just tgz. ui.go's source-upload `<input>` accept list, hint
+text, and validation alert now mention .zip; the stale "no format
+choice, no sniffing needed" comment there is gone, since sniffing is
+exactly what happens now, just server-side.
+
+**Verified:** `go build ./...`, `go vet ./...`, `gofmt -l` clean;
+`go test ./internal/webadmin/...` clean (82s). New tests:
+`TestExtractSourceZipRejectsPathTraversal`/`RejectsSymlink`/
+`HappyPath` mirror the existing tar-format tests entry-for-entry against
+`extractSourceZip` directly. `TestExtractSourceArchiveDetectsFormatByContent`
+drives the actual dispatcher — confirms a tgz body routes to the tar
+extractor, a zip body routes to the zip extractor, a body that's neither
+gets a clear rejection instead of a confusing one from whichever parser
+happened to run first, and a body too short to contain either signature
+is rejected before either parser sees it. `TestStageFromSourceAcceptsZip`
+is the end-to-end proof: packages this repository's own actual current
+source as a .zip (new `zipOfDir` helper, mirroring the existing
+`tarGzOfDir`'s file selection) and runs it through the real
+`stageFromSource` pipeline — extract, `go build`, probe, ingest — the
+same path `handleUpgradeStageSource` calls, not a synthetic shortcut;
+passed in 28s alongside the pre-existing tgz equivalent
+(`TestStageFromSourceBuildsWithGoOffPATH`, 27s) run in the same pass.
+
+---
+
+## v443 — 2026-07-15
+
+Three requested changes to the Rules tab, all UI-only (no engine/config
+changes this time):
+
+**Column order.** The rules table now reads state, source, destination,
+services, action, log, hits, notes — action moved from 2nd to 5th
+column, right before log. The `src`/`dst` header labels are spelled out
+as "source"/"destination" now too. Purely a rendering-order change:
+`startFwEdit` finds each cell by class (`.fw-action`, `.fw-src`, etc.),
+not position, so reordering the `<td>`s in the table-building loop was
+enough — nothing downstream needed to change to match.
+
+**Filter dropdown on source/destination/services.** These three fields
+used to autocomplete via a plain HTML `<datalist>`, whose filtering
+behavior is inconsistent across browsers (some only prefix-match, some
+don't filter at all as you type). New `fwCatalogCombobox(input,
+getNames)` replaces that with a real filterable dropdown — reusing the
+`.ss-list`/`.ss-opt` styling `buildListPicker` already established
+elsewhere in this UI rather than inventing new dropdown chrome. Typing
+narrows the list by case-insensitive substring match against this node's
+object/service catalog (`state.fwObjects`/`state.fwServices`, re-read
+fresh on every open so an edit made on the Objects/Services tab shows up
+without needing the row re-rendered); click or Enter picks one; Escape or
+clicking away closes it. Unlike `buildListPicker` this stays a genuine
+free-typing text input the whole time — a literal CIDR or `proto/port`
+isn't in any catalog and is still a perfectly valid value for these
+fields, so there's no separate filter row or button standing in for the
+input the way `buildListPicker`'s trigger-button-plus-list does; the
+input itself is both the value and the filter. Dropped the per-tab
+`<datalist>` element pair (`objNames`/`svcNames` building in
+`secFirewall`) entirely along with the `list=` attributes and
+`table._dlObj`/`_dlSvc` plumbing that wired rows to them — no longer
+needed now that `fwCatalogCombobox` is wired directly off `state`
+instead.
+
+**Wider fields.** `fwe-src`/`fwe-dst` 110px → 150px, `fwe-services` 140px
+→ 180px, `fwe-notes` 100px → 140px, in both `fwAddRow` and `startFwEdit`
+(they'd drifted out of sync before; both are 150/150/180/140 now).
+
+**What changed:** `secFirewall`'s table-header and row-building strings
+reordered; hint text reworded for the new source/destination labels and
+to describe the filter dropdown instead of a "well-known object" note
+that had drifted out of date anyway. New `fwCatalogCombobox`. `fwAddRow`
+rebuilt with the new column order, widths, and combobox wiring in place
+of `list=`; `startFwEdit` likewise, and lost its now-pointless
+`table`/`dlObj`/`dlSvc` lookups (`table` wasn't used for anything else).
+
+**Verified:** `go build ./...` (JS lives in a Go raw string; the package
+still needs to compile), `go vet ./...`, `gofmt -l` clean;
+`go test ./internal/webadmin/...` clean, including the firewall-specific
+tests, which don't touch rendering but confirm the API contracts these
+handlers still exercise are unaffected. Embedded-script `node --check`
+and the backtick-count sanity check (v433, exactly 2) both clean.
+Installed jsdom and drove `fwCatalogCombobox` against a real DOM rather
+than reasoning about it statically: focus opens the list with every
+name; typing "goog" narrows to the two matching entries by substring
+(not just prefix); a query matching nothing hides the list without
+erroring; a literal CIDR typed into the field is left alone (no match,
+no crash) exactly as a raw value should be; clicking a filtered option
+sets the input's value and closes the list. Visually confirmed the
+rendered header string reads `state, source, destination, services,
+action, log, hits, notes` and that each data row's `<td>` sequence
+matches it exactly.
+
+---
+
+## v442 — 2026-07-15
+
+Two fixes per direct feedback on v441, and they turned out to be the same
+underlying problem. First: "why once per network? objects and services
+are shared between networks" — they weren't. `Firewall.Objects`/
+`Services` lived on each `Network` in config, so a node running three
+networks kept three independent copies of what was supposed to be one
+reusable catalog; editing "google.com" on one network never touched the
+other two. Second, a direct consequence of the fix for the first: once
+the catalog is genuinely one node-global list, "populate once" needs a
+real persisted marker, not a per-network guess — v441's auto-populate had
+no seeded flag at all, so it re-added anything missing by name on every
+single render, silently resurrecting a deliberately deleted well-known
+entry the next time anyone opened a firewall tab.
+
+**The catalog is node-global now.** `Config.FirewallObjects`/
+`FirewallServices` replace the old per-`Network` `Firewall.Objects`/
+`Services` fields — one catalog, shared by every network on this node,
+edited once and usable everywhere. In the engine, `Engine.fwObjects`/
+`fwServices` (guarded by `fwCatalogMu`) are the live equivalent:
+`SetFirewallObjects`/`SetFirewallServices` (now `(objs)`/`(svcs)`, no
+`networkID`) push the same list into every currently-running network's
+`*firewall` instance in one call, and `newNetState` seeds a
+newly-built network (at boot via `Options.FirewallObjects`/
+`FirewallServices`, or later via `AddNetwork`) from that same shared
+state — so a network created after the catalog was last edited starts
+with the real thing, not empty. `NetSpec.FirewallObjects`/`Services` are
+gone; a per-network spec has no business carrying node-global data.
+`/api/firewall`'s `objects`/`services` ops (and the new
+`mark-objects-seeded`/`mark-services-seeded`, below) dropped their `net`
+requirement to match — they're handled before net resolution now, the
+same tier as `enable`/`disable`. `/api/config`'s response moved
+`firewall_objects`/`firewall_services` to the top level, sitting next to
+`nets` rather than nested inside any one of them; the client's `state.cfg`
+lost `cf.firewall.objects`/`services` in favor of top-level
+`state.fwObjects`/`state.fwServices`. The Objects/Services tabs
+(`secFwObjects`/`secFwServices`) went from one table per network to one
+table, period — and, since a catalog entry no longer belongs to any
+particular network, they're usable (and, per the point below, get
+auto-populated) even with zero networks configured yet, matching how the
+Allow List tab has always worked.
+
+**Populate-once is now a real once, backed by disk.** New
+`Config.ObjectsCatalogSeeded`/`ServicesCatalogSeeded` (node-global, next
+to `FirewallObjects`/`Services`) record that the well-known catalog has
+already been populated; new config methods
+`FirewallMarkObjectsCatalogSeeded`/`FirewallMarkServicesCatalogSeeded` set
+them, exposed as the `mark-objects-seeded`/`mark-services-seeded`
+ops — plain `mutateConfig` mutations, same tier as `enable`/`disable`,
+sequenced by the client to run right after an `objects`/`services` save
+that filled any gaps (both take the same per-config-path lock as the
+engine's persist hook, so the flag is never written ahead of the catalog
+it's describing). `fwAutoPopulateCatalog` now checks
+`state.fwObjectsSeeded`/`fwServicesSeeded` before doing anything: seeded
+already → it does *nothing at all*, not even the "missing" diff v441 ran
+on every render. Not seeded yet → fill any gaps, then mark seeded, once,
+ever, for this node. A well-known entry deleted after that point simply
+stays deleted — there's no more per-render "missing" check to resurrect
+it, because the whole point of the seeded flag is that nothing runs that
+check again.
+
+**What changed (Go):** `Config.Firewall` lost `Objects`/`Services`;
+`Config` gained `FirewallObjects`/`FirewallServices`/
+`ObjectsCatalogSeeded`/`ServicesCatalogSeeded`. `validateFirewallCatalog`
+takes `(objects, services)` directly instead of a per-network `Firewall`,
+called once in `Config.Validate` instead of once per network.
+`FirewallMarkObjectsCatalogSeeded`/`FirewallMarkServicesCatalogSeeded`
+(ops.go) dropped their `netName` parameter. `mesh.Options` gained
+`FirewallObjects`/`FirewallServices` (seeds the engine's global catalog
+before any initial network is built); `mesh.NetSpec` lost the equivalent
+per-network fields. `Engine.SetFirewallObjects`/`FirewallObjectsList`/
+`SetFirewallServices`/`FirewallServicesList` are global now (no
+`networkID`); new `Engine.firewallCatalogSnapshot()` backs both
+`newNetState` (network construction) and `ReloadRuntime` (runtime
+reload, reload.go). `webadmin.Backend`'s four matching methods updated
+to suit. `handleFirewall` (webadmin.go) handles `objects`/`services`/
+`mark-objects-seeded`/`mark-services-seeded` before net resolution;
+`handleConfig` moved the catalog + seeded flags to the top-level JSON
+response. `cmd/gravinet/main.go`: the persist hook now syncs the global
+catalog once per call (unconditionally, before the per-network loop)
+instead of once per matched network; `fillRuntimeSpec` dropped the
+per-network object/service population it used to do; new
+`toMeshFirewallObjects`/`toMeshFirewallServices` convert config's global
+catalog to the engine's `Options` shape at startup.
+
+**What changed (JS):** `refresh()` (ui.go) reads the new top-level
+`firewall_objects`/`firewall_services`/`firewall_objects_seeded`/
+`firewall_services_seeded` into `state.fwObjects`/`fwServices`/
+`fwObjectsSeeded`/`fwServicesSeeded`. `fwAutoPopulateCatalog` reworked
+around those two seeded flags instead of a per-network "missing" scan.
+`secFwObjects`/`secFwServices` render one table from `state.fwObjects`/
+`fwServices`, no per-network loop, no `net` argument threaded through
+`objSave`/`svcSave`/`objAddRow`/`svcAddRow` anymore. `secFirewall`'s Rules
+tab builds one shared pair of datalists (fixed ids `FW_DL_OBJ`/`FW_DL_SVC`)
+instead of one pair per network.
+
+**Verified:** `go build ./...`, `go vet ./...`, `gofmt -l` clean.
+`go test ./internal/config/... ./internal/webadmin/... ./cmd/gravinet/...`
+clean, including `firewall_catalog_test.go` rewritten for the
+`Config`-level catalog shape and a new `TestFirewallCatalogGlobalOpsNotNetScoped`
+that posts `objects`/`services`/`mark-*-seeded` with no `net` field at
+all against a two-network config, then reloads the config file from disk
+(not just in-memory state) to confirm both seeded flags actually
+persisted and neither network's own `Firewall.Rules` was touched. In
+`internal/mesh`, ran the full `Firewall`/`Reload`/`AddNetwork`/`LiveNet`
+test groups clean, plus two new tests:
+`TestFirewallCatalogSharedAcrossNetworks` (one `SetFirewallObjects`/
+`SetFirewallServices` call, two networks, a rule on each referencing the
+same object and service by name — both compile and both actually deny
+the same traffic, not just one of them) and
+`TestFirewallCatalogSeedsNetworkAddedAfterSet` (a network built via
+`newNetState` *after* `SetFirewallObjects` already ran still resolves
+the shared object, proving the catalog reaches networks that didn't
+exist yet when it was last set, not just ones that did). Embedded-script
+`node --check` and the backtick-count sanity check (v433, exactly 2)
+both clean. Extracted the rewritten `fwAutoPopulateCatalog` into an
+isolated Node harness again: a first pass (unseeded) populates both
+lists and marks both seeded in one batch, plus one `refresh()`; a second
+pass makes zero calls; and — the actual bug — deleting an entry *after*
+seeding and running another pass makes zero calls and the deleted entry
+stays gone.
+
+---
+
+## v441 — 2026-07-15
+
+Dropped v440's "add all" button too, per direct follow-up feedback: a
+button is still a click, and the ask was zero clicks. Every configured
+network's real object and service catalog is now kept fully stocked with
+the entire well-known set automatically, no interaction required at all.
+
+`fwAutoPopulateCatalog` runs at the top of `secFirewall` — so on any visit
+to Rules, Objects, Services, or Allow List — and diffs each network's real
+catalog against `FW_COMMON_WILDCARD_OBJECTS`/`FW_COMMON_SERVICES`. Any
+network missing entries gets them saved in via the same `op:objects`/
+`op:services` calls the removed button used to make, then one `refresh()`
+at the end. A `fwAutoAddBusy` guard stops overlapping runs if the section
+re-renders again before a prior pass finishes (e.g. clicking between tabs
+quickly); once a network is fully stocked, a pass is just the "missing"
+diff against two in-memory arrays with no network calls, so running it on
+every render costs nothing once it's caught up. Removed the buttons from
+`secFwObjects`/`secFwServices` and their hint text along with them —
+Objects/Services now just show real rows, always complete, nothing to
+click.
+
+**Worth knowing, stated once and not re-litigated:** this only fills
+gaps by name — an entry already present (including one edited under its
+original name) is left alone, never overwritten. It does mean that
+deleting a well-known object/service without also excluding it some other
+way won't stick across a fresh page load; the next visit to a firewall
+tab re-adds anything missing by name, same as a first visit would. That
+follows directly from "no action required" — a catalog entry only
+matters once a rule references it, so this trades "deletions of unused
+catalog entries persist" for "nothing to ever set up." The gossip-cost
+reasoning `FW_COMMON_WILDCARD_OBJECTS`/`FW_COMMON_SERVICES`'s doc
+comments describe is why those lists stay curated at a few dozen to a
+hundred-odd entries rather than parapet's much larger Tranco-derived
+one — that's what keeps "every network, always fully populated" affordable
+rather than turning every config sync into a large gossip payload.
+
+**What changed:** new `fwAutoPopulateCatalog` (async, guarded by
+`fwAutoAddBusy`) and its call in `secFirewall`. `secFwObjects`/
+`secFwServices` lost their `missing`-driven button and reverted to a
+plain real-rows-only render (empty-state text back to "click + to add
+one," dropping v440's "or use add all above"). Updated the Rules hint,
+the datalist-building comment, and the `FW_COMMON_WILDCARD_OBJECTS`/
+`FW_COMMON_SERVICES` doc comments to describe automatic, unconditional
+population instead of v434–440's various opt-in mechanisms.
+
+**Verified:** `go build ./...`, `go vet ./...`, `gofmt -l` clean;
+`go test ./internal/webadmin/... ./cmd/gravinet/...` clean. Embedded-script
+`node --check` and the backtick-count sanity check (v433, exactly 2) both
+clean. Extracted `fwAutoPopulateCatalog` and its dependencies into an
+isolated Node harness with a mocked `api`/`refresh`/`state` and confirmed
+by direct execution: a first pass populates every network missing
+entries in one batch of calls plus a single `refresh()`; a second pass
+immediately after makes zero calls (no infinite loop, no thrash); a
+well-known entry present under its own name is never duplicated.
+
+---
+
+## v440 — 2026-07-15
+
+Reverted v439's approach per direct feedback: materializing a well-known
+object/service into the real catalog only when a rule happened to
+reference it was still a lazy, indirect trick — an object wasn't real
+until something else caused it to become real, whichever mechanism did
+that. The ask was blunter than that: they should just already be real.
+
+Deleted the lazy stuff (`fwEnsureRuleCatalog`, `fwMaterializeObjs`,
+`fwMaterializeSvcs`, `fwObjCatalogDef`, `fwSvcCatalogDef`, and their call
+sites in `fwAddRow`/`startFwEdit`) along with v434–439's whole
+suggestion-row apparatus (`fwSuggestRows`, the dimmed/extra
+`data-def-idx` rows, the per-cell `promote()` closures). In its place:
+each network's Objects and Services tables are back to showing only real,
+saved entries — nothing conjured, nothing pretending — plus one plain
+button above each table, "add all N well-known objects/services", that
+does a single `objSave`/`svcSave` call appending every
+`FW_COMMON_WILDCARD_OBJECTS`/`FW_COMMON_SERVICES` entry the network
+doesn't have yet. Click it once and every one of them is a real,
+persisted, editable, deletable row — same as anything typed in by hand —
+and from that point on Rules' src/dst/services autocomplete (back to
+listing only the real catalog, dropping v439's union-with-catalog
+datalist trick too) has all of them because they're actually there.
+Editing one first (renaming it, adjusting its addresses/ports/notes)
+still works the same as always via double-click on its row, for anyone
+who wants to customize before adding rather than after.
+
+The gossip-cost trade-off `FW_COMMON_WILDCARD_OBJECTS`/
+`FW_COMMON_SERVICES`'s doc comments describe (why these aren't baked into
+every fresh network's config automatically) hasn't changed — a network
+that never clicks "add all" still pays nothing extra. What changed is
+that reaching "fully populated, all real" now takes one click instead of
+~190 double-clicks or a scattering of coincidental rule edits.
+
+**What changed:** `secFirewall`'s datalists reverted to real-catalog-only.
+`secFwObjects`/`secFwServices` each gained a `missing` computation (this
+network's real names vs. the full built-in catalog) and, when non-empty,
+a button rendered above the table that appends the missing defs in their
+default (unedited) shape and calls `objSave`/`svcSave` once. Both
+functions' suggestion-row rendering, wiring, and `fwSuggestRows` itself
+are gone.
+
+**Verified:** `go build ./...`, `go vet ./...`, `gofmt -l` clean;
+`go test ./internal/webadmin/... ./cmd/gravinet/...` clean. Embedded-script
+`node --check` and the backtick-count sanity check (v433, exactly 2) both
+clean. Grepped for every removed identifier
+(`fwEnsureRuleCatalog`/`fwMaterializeObjs`/`fwMaterializeSvcs`/
+`fwObjCatalogDef`/`fwSvcCatalogDef`/`fwSuggestRows`/`data-def-idx`/
+`promote(`) to confirm no dangling references survived the cut.
+
+---
+
 ## v439 — 2026-07-15
 
 Fixed the actual complaint underneath v434–438's run at the Objects/

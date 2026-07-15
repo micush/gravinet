@@ -2,6 +2,7 @@ package webadmin
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"io"
@@ -81,6 +82,162 @@ func TestExtractSourceTarGzHappyPath(t *testing.T) {
 	if filepath.Base(root) != "gravinet" {
 		t.Fatalf("expected module root to be the 'gravinet' dir, got %q", root)
 	}
+}
+
+// buildZip is buildTgz's zip counterpart — same entries-map shape, same
+// convention (Name -> content, every entry a plain file).
+func buildZip(t *testing.T, entries map[string]string) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for name, content := range entries {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return &buf
+}
+
+// addZipSymlink writes a zip entry encoding a symlink the way Info-ZIP
+// (and every zip tool that round-trips them, including Go's own
+// archive/zip on read) represents one: a regular entry whose external
+// attributes carry the Unix S_IFLNK mode bit, content is the link target
+// text rather than file data.
+func addZipSymlink(t *testing.T, zw *zip.Writer, name, target string) {
+	t.Helper()
+	fh := &zip.FileHeader{Name: name, Method: zip.Store}
+	fh.SetMode(os.ModeSymlink | 0o777)
+	w, err := zw.CreateHeader(fh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte(target)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExtractSourceZipRejectsPathTraversal(t *testing.T) {
+	dir := t.TempDir()
+	zr := buildZip(t, map[string]string{
+		"gravinet/go.mod":               "module gravinet\n",
+		"gravinet/cmd/gravinet/main.go": "package main\nfunc main(){}\n",
+		"../../etc/evil":                "pwned",
+	})
+	_, err := extractSourceZip(bytes.NewReader(zr.Bytes()), int64(zr.Len()), dir)
+	if err == nil {
+		t.Fatal("expected an error for a path-traversal entry, got nil")
+	}
+	t.Logf("correctly rejected: %v", err)
+	if _, statErr := os.Stat(filepath.Join(dir, "..", "..", "etc", "evil")); statErr == nil {
+		t.Fatal("path traversal entry was actually written outside destDir")
+	}
+}
+
+func TestExtractSourceZipRejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.Create("gravinet/go.mod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte("module gravinet\n")); err != nil {
+		t.Fatal(err)
+	}
+	addZipSymlink(t, zw, "gravinet/evil-link", "/etc/passwd")
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, err = extractSourceZip(bytes.NewReader(buf.Bytes()), int64(buf.Len()), dir)
+	if err == nil {
+		t.Fatal("expected an error for a symlink entry, got nil")
+	}
+	t.Logf("correctly rejected: %v", err)
+}
+
+func TestExtractSourceZipHappyPath(t *testing.T) {
+	dir := t.TempDir()
+	zr := buildZip(t, map[string]string{
+		"gravinet/go.mod":               "module gravinet\n",
+		"gravinet/cmd/gravinet/main.go": "package main\nfunc main(){}\n",
+	})
+	root, err := extractSourceZip(bytes.NewReader(zr.Bytes()), int64(zr.Len()), dir)
+	if err != nil {
+		t.Fatalf("expected success, got %v", err)
+	}
+	if filepath.Base(root) != "gravinet" {
+		t.Fatalf("expected module root to be the 'gravinet' dir, got %q", root)
+	}
+	got, err := os.ReadFile(filepath.Join(root, "cmd", "gravinet", "main.go"))
+	if err != nil {
+		t.Fatalf("extracted file missing: %v", err)
+	}
+	if string(got) != "package main\nfunc main(){}\n" {
+		t.Fatalf("extracted content mismatch: %q", got)
+	}
+}
+
+// TestExtractSourceArchiveDetectsFormatByContent is the point of this whole
+// upgrade: extractSourceArchive (what stageFromSource actually calls, unlike
+// the format-specific tests above which call extractSourceTarGz/
+// extractSourceZip directly) has to work out which of the two formats it was
+// handed from the bytes themselves — neither a filename nor a Content-Type
+// header is available to a raw request-body upload — and route to the right
+// extractor either way, plus reject anything that's neither with a clear
+// error rather than a confusing one from whichever parser happened to be
+// tried.
+func TestExtractSourceArchiveDetectsFormatByContent(t *testing.T) {
+	entries := map[string]string{
+		"gravinet/go.mod":               "module gravinet\n",
+		"gravinet/cmd/gravinet/main.go": "package main\nfunc main(){}\n",
+	}
+
+	t.Run("tgz", func(t *testing.T) {
+		dir := t.TempDir()
+		root, err := extractSourceArchive(buildTgz(t, entries), dir)
+		if err != nil {
+			t.Fatalf("expected a .tgz body to be detected and extracted, got: %v", err)
+		}
+		if filepath.Base(root) != "gravinet" {
+			t.Fatalf("expected module root 'gravinet', got %q", root)
+		}
+	})
+
+	t.Run("zip", func(t *testing.T) {
+		dir := t.TempDir()
+		root, err := extractSourceArchive(buildZip(t, entries), dir)
+		if err != nil {
+			t.Fatalf("expected a .zip body (e.g. GitHub's Download ZIP) to be detected and extracted, got: %v", err)
+		}
+		if filepath.Base(root) != "gravinet" {
+			t.Fatalf("expected module root 'gravinet', got %q", root)
+		}
+	})
+
+	t.Run("neither", func(t *testing.T) {
+		dir := t.TempDir()
+		_, err := extractSourceArchive(bytes.NewReader([]byte("this is not an archive at all, just text")), dir)
+		if err == nil {
+			t.Fatal("expected an error for a body that's neither gzip nor zip, got nil")
+		}
+		t.Logf("correctly rejected: %v", err)
+	})
+
+	t.Run("too small to sniff", func(t *testing.T) {
+		dir := t.TempDir()
+		_, err := extractSourceArchive(bytes.NewReader([]byte("hi")), dir)
+		if err == nil {
+			t.Fatal("expected an error for a body too short to contain a format signature, got nil")
+		}
+		t.Logf("correctly rejected: %v", err)
+	})
 }
 
 // findRepoRoot locates the module root from this test file's own location
@@ -163,6 +320,55 @@ func tarGzOfDir(t *testing.T, srcDir, prefix string) *bytes.Buffer {
 	return &buf
 }
 
+// zipOfDir is tarGzOfDir's zip counterpart: same source selection (go.mod,
+// cmd/, internal/, third_party/), same top-level prefix directory shape —
+// what GitHub's "Download ZIP" produces for this repo, and what
+// extractSourceZip expects.
+func zipOfDir(t *testing.T, srcDir, prefix string) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	include := []string{"go.mod", "cmd", "internal", "third_party"}
+	for _, rel := range include {
+		full := filepath.Join(srcDir, rel)
+		walkErr := filepath.Walk(full, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			relPath, err := filepath.Rel(srcDir, path)
+			if err != nil {
+				return err
+			}
+			name := filepath.ToSlash(filepath.Join(prefix, relPath))
+			if info.IsDir() {
+				_, err := zw.Create(name + "/")
+				return err
+			}
+			if !info.Mode().IsRegular() {
+				return nil // no symlinks etc. expected here, skip defensively
+			}
+			w, err := zw.Create(name)
+			if err != nil {
+				return err
+			}
+			f, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+			_, err = io.Copy(w, f)
+			return err
+		})
+		if walkErr != nil {
+			t.Fatalf("packaging %s into test zip: %v", rel, walkErr)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("closing zip writer: %v", err)
+	}
+	return &buf
+}
+
 // newTestStore is a bare, untrusted (no signing keys configured) upgrade
 // store — exactly what unsigned/local-only mode uses, which is the only
 // mode stageFromSource is ever reached from.
@@ -174,6 +380,7 @@ func newTestStore(t *testing.T) *upgrade.Store {
 	}
 	return st
 }
+
 // with, by asking the OS for wherever "go" would currently be found on
 // PATH — done once, before any test clears PATH, so it reflects the
 // environment's real installation rather than a hardcoded guess.
@@ -289,6 +496,34 @@ func TestStageFromSourceBuildsWithGoOffPATH(t *testing.T) {
 	m, err := stageFromSource(st, tgz)
 	if err != nil {
 		t.Fatalf("stageFromSource failed with Go reachable only via the fallback path: %v", err)
+	}
+	if m.Version == "" {
+		t.Fatal("expected a non-empty version on the resulting manifest")
+	}
+}
+
+// TestStageFromSourceAcceptsZip is TestStageFromSourceBuildsWithGoOffPATH's
+// point, isolated: run the real end-to-end pipeline
+// (handleUpgradeStageSource's actual body, not a synthetic call straight to
+// extractSourceZip) against a .zip of gravinet's own current source — the
+// same shape GitHub's "Download ZIP" button would hand an operator — and
+// confirm it builds and ingests exactly as a .tgz upload already did. Plain
+// PATH here (no fallback-location gymnastics; that's already covered above
+// for the tgz path and the fallback logic itself doesn't care what archive
+// format got it to a module root) to keep this test's cost proportionate to
+// what it's actually proving: that stageFromSource's format detection routes
+// a zip body to extractSourceZip and the rest of the pipeline doesn't care
+// which extractor got it there.
+func TestStageFromSourceAcceptsZip(t *testing.T) {
+	realGoPath(t) // skip if no toolchain, same guard the other build test uses
+	repoRoot := findRepoRoot(t)
+
+	zr := zipOfDir(t, repoRoot, "gravinet")
+	st := newTestStore(t)
+
+	m, err := stageFromSource(st, zr)
+	if err != nil {
+		t.Fatalf("stageFromSource failed on a zip source upload: %v", err)
 	}
 	if m.Version == "" {
 		t.Fatal("expected a non-empty version on the resulting manifest")

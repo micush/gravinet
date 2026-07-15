@@ -109,6 +109,118 @@ func TestFirewallTogglesAreLive(t *testing.T) {
 	}
 }
 
+// TestFirewallCatalogGlobalOpsNotNetScoped covers v441's move of the object/
+// service catalog (and its "seeded" bookkeeping) from per-network to
+// node-global: objects/services/mark-*-seeded apply with no "net" needed at
+// all (unlike add/del/move, which still are net-scoped), and the seeded
+// flags actually persist to the config file rather than just living in
+// memory — a second read of the same config file must see them too.
+func TestFirewallCatalogGlobalOpsNotNetScoped(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := dir + "/config.json"
+	cfg := &config.Config{
+		PrimaryPort: 51820,
+		EnableIPv4:  true,
+		Networks: []config.Network{
+			{ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24"},
+			{ID: "5678", Name: "wan", Enabled: true, Subnet4: "10.1.0.0/24"},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("test config invalid: %v", err)
+	}
+	if err := cfg.SaveTo(cfgPath); err != nil {
+		t.Fatal(err)
+	}
+
+	cred, _ := GenerateCredential("admin", "pw", 10000)
+	wcfg := config.WebAdmin{
+		AuthMode: "local", Users: []config.AdminUser{cred},
+		LoginBan: config.BanPolicy{MaxFailures: 3, WindowSeconds: 60, BanSeconds: 900},
+	}
+	be := &stubBackend{}
+	srv := New(wcfg, be, logx.Default())
+	srv.SetConfigPath(cfgPath)
+	srv.SetReload(func() error { return nil })
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	c := sessionFor(t, ts)
+
+	// No "net" field at all — objects/services aren't scoped to a network.
+	out := fwPost(t, ts, c, map[string]any{
+		"op": "objects",
+		"objects": []map[string]any{
+			{"name": "web", "kind": "host", "addresses": []string{"10.0.0.10"}},
+		},
+	})
+	if out["error"] != nil {
+		t.Fatalf("objects op (no net) errored: %v", out["error"])
+	}
+	if be.fwObjSetCalls != 1 || len(be.fwObjects) != 1 {
+		t.Fatalf("SetFirewallObjects not applied: calls=%d objs=%d", be.fwObjSetCalls, len(be.fwObjects))
+	}
+	if r, _ := out["restart"].(bool); r {
+		t.Fatal("objects op applies live; restart must be false")
+	}
+
+	out = fwPost(t, ts, c, map[string]any{
+		"op":       "services",
+		"services": []map[string]any{{"name": "dns", "ports": []map[string]any{{"proto": "udp", "port_min": 53}}}},
+	})
+	if out["error"] != nil {
+		t.Fatalf("services op (no net) errored: %v", out["error"])
+	}
+	if be.fwSvcSetCalls != 1 || len(be.fwServices) != 1 {
+		t.Fatalf("SetFirewallServices not applied: calls=%d svcs=%d", be.fwSvcSetCalls, len(be.fwServices))
+	}
+
+	// mark-objects-seeded / mark-services-seeded: no net needed, and the flag
+	// must actually land on disk — reload the file fresh rather than trusting
+	// in-memory state, since that's what a second admin-UI session (or this
+	// same node after a restart) would see.
+	reload := func() *config.Config {
+		t.Helper()
+		got, err := config.Load(cfgPath)
+		if err != nil {
+			t.Fatalf("reload config: %v", err)
+		}
+		return got
+	}
+	if got := reload(); got.ObjectsCatalogSeeded || got.ServicesCatalogSeeded {
+		t.Fatalf("seeded flags should start false: %+v", got)
+	}
+
+	out = fwPost(t, ts, c, map[string]any{"op": "mark-objects-seeded"})
+	if out["error"] != nil {
+		t.Fatalf("mark-objects-seeded errored: %v", out["error"])
+	}
+	if r, _ := out["restart"].(bool); r {
+		t.Fatal("mark-objects-seeded applies live; restart must be false")
+	}
+	if got := reload(); !got.ObjectsCatalogSeeded {
+		t.Fatal("mark-objects-seeded should have persisted ObjectsCatalogSeeded=true")
+	} else if got.ServicesCatalogSeeded {
+		t.Fatal("mark-objects-seeded should not also mark services seeded")
+	}
+
+	out = fwPost(t, ts, c, map[string]any{"op": "mark-services-seeded"})
+	if out["error"] != nil {
+		t.Fatalf("mark-services-seeded errored: %v", out["error"])
+	}
+	if got := reload(); !got.ServicesCatalogSeeded {
+		t.Fatal("mark-services-seeded should have persisted ServicesCatalogSeeded=true")
+	} else if !got.ObjectsCatalogSeeded {
+		t.Fatal("mark-services-seeded should not have unset the earlier objects-seeded flag")
+	}
+
+	// Both networks' own Firewall config is untouched by any of the above —
+	// the catalog and its seeded flags never lived there to begin with.
+	final := reload()
+	if len(final.Networks) != 2 {
+		t.Fatalf("expected both networks to survive untouched, got %d", len(final.Networks))
+	}
+}
+
 // TestFirewallObjectsServicesCounters covers the v392 catalog ops wired into the
 // web admin: setting the object catalog, the service catalog, and resetting hit
 // counters all reach the backend and report restart:false (they apply live).

@@ -1594,48 +1594,70 @@ func (a fwAction) string() string {
 
 // ---- object / service catalog & counters (control plane) ----
 
-// FirewallObjectsList returns the network's named address objects.
-func (e *Engine) FirewallObjectsList(networkID uint64) ([]FirewallObject, error) {
-	f, err := e.fwOf(networkID)
-	if err != nil {
-		return nil, err
-	}
-	return f.getObjects(), nil
+// FirewallObjectsList returns the node's named address objects — shared by
+// every network (see the fwCatalogMu field group's doc comment).
+func (e *Engine) FirewallObjectsList() ([]FirewallObject, error) {
+	objs, _ := e.firewallCatalogSnapshot()
+	return objs, nil
 }
 
-// SetFirewallObjects replaces the network's address-object catalog and recompiles
-// the rulebase against it, live. FQDN objects are resolved promptly afterwards.
-func (e *Engine) SetFirewallObjects(networkID uint64, objs []FirewallObject) error {
-	f, err := e.fwOf(networkID)
-	if err != nil {
-		return err
+// SetFirewallObjects replaces the node-global address-object catalog and
+// recompiles every network's rulebase against it, live. FQDN objects are
+// resolved promptly afterwards, network by network.
+func (e *Engine) SetFirewallObjects(objs []FirewallObject) error {
+	e.fwCatalogMu.Lock()
+	e.fwObjects = append([]FirewallObject(nil), objs...)
+	e.fwCatalogMu.Unlock()
+	var notifyID uint64
+	notified := false
+	for id, ns := range e.netSnapshot() {
+		if ns.fw == nil {
+			continue
+		}
+		ns.fw.setObjects(objs)
+		e.refreshFirewallFQDN(id)
+		notifyID, notified = id, true
 	}
-	f.setObjects(objs)
-	e.refreshFirewallFQDN(networkID)
-	e.log.Infof("mesh: firewall objects updated on net %x (%d)", networkID, len(objs))
-	e.notifyChange(networkID)
+	e.log.Infof("mesh: firewall objects updated (%d)", len(objs))
+	// notifyChange needs some networkID to locate the config file's network
+	// entry for the *other* things it persists (rules, name/subnet, keys) —
+	// any currently-running network does, since the persist hook syncs the
+	// node-global catalog unconditionally regardless of which one triggered
+	// it. If no network is up yet, there's nothing to notify (and nothing
+	// waiting on this UI-side; see secFwObjects/secFwServices's "no
+	// networks" early return).
+	if notified {
+		e.notifyChange(notifyID)
+	}
 	return nil
 }
 
-// FirewallServicesList returns the network's named service catalog.
-func (e *Engine) FirewallServicesList(networkID uint64) ([]FirewallService, error) {
-	f, err := e.fwOf(networkID)
-	if err != nil {
-		return nil, err
-	}
-	return f.getServices(), nil
+// FirewallServicesList returns the node's named service catalog — shared by
+// every network (see the fwCatalogMu field group's doc comment).
+func (e *Engine) FirewallServicesList() ([]FirewallService, error) {
+	_, svcs := e.firewallCatalogSnapshot()
+	return svcs, nil
 }
 
-// SetFirewallServices replaces the network's service catalog and recompiles the
-// rulebase against it, live.
-func (e *Engine) SetFirewallServices(networkID uint64, svcs []FirewallService) error {
-	f, err := e.fwOf(networkID)
-	if err != nil {
-		return err
+// SetFirewallServices replaces the node-global service catalog and
+// recompiles every network's rulebase against it, live.
+func (e *Engine) SetFirewallServices(svcs []FirewallService) error {
+	e.fwCatalogMu.Lock()
+	e.fwServices = append([]FirewallService(nil), svcs...)
+	e.fwCatalogMu.Unlock()
+	var notifyID uint64
+	notified := false
+	for id, ns := range e.netSnapshot() {
+		if ns.fw == nil {
+			continue
+		}
+		ns.fw.setServices(svcs)
+		notifyID, notified = id, true
 	}
-	f.setServices(svcs)
-	e.log.Infof("mesh: firewall services updated on net %x (%d)", networkID, len(svcs))
-	e.notifyChange(networkID)
+	e.log.Infof("mesh: firewall services updated (%d)", len(svcs))
+	if notified {
+		e.notifyChange(notifyID)
+	}
 	return nil
 }
 

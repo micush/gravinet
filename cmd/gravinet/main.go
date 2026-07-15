@@ -46,7 +46,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "439"
+	version = "445"
 	commit  = "none"
 )
 
@@ -441,6 +441,8 @@ func cmdRun(args []string) {
 			ExtraTCPPorts:     toUint16Ports(cfg.ExtraTCPListenPorts),
 			ExtraUDPPorts:     toUint16Ports(cfg.ExtraListenPorts),
 			TunWorkers:        workers,
+			FirewallObjects:   toMeshFirewallObjects(cfg.FirewallObjects),
+			FirewallServices:  toMeshFirewallServices(cfg.FirewallServices),
 		})
 		// restartRequested is closed (at most once) when the engine detects a
 		// sleep/resume cycle it can't fully recover from in-process — see
@@ -602,6 +604,32 @@ func cmdRun(args []string) {
 				logx.Warnf("persist: load %s: %v", *cfgPath, err)
 				return
 			}
+			// Persist the node-global address-object and service catalogs the
+			// rules of every network resolve their src/dst/services references
+			// against, so a named object/service survives a restart. Node-global
+			// (see config.Config.FirewallObjects' doc comment), so this happens
+			// once per persist call, unconditionally — not scoped to whichever
+			// networkID triggered this call, unlike the per-network work below.
+			if objs, oerr := engine.FirewallObjectsList(); oerr == nil {
+				co := make([]config.FirewallObject, 0, len(objs))
+				for _, o := range objs {
+					co = append(co, config.FirewallObject{
+						Name: o.Name, Kind: o.Kind, Addresses: o.Addresses, Members: o.Members, Notes: o.Notes,
+					})
+				}
+				cur.FirewallObjects = co
+			}
+			if svcs, serr := engine.FirewallServicesList(); serr == nil {
+				cs := make([]config.FirewallService, 0, len(svcs))
+				for _, s := range svcs {
+					cp := make([]config.FirewallServicePort, 0, len(s.Ports))
+					for _, p := range s.Ports {
+						cp = append(cp, config.FirewallServicePort{Proto: p.Proto, PortMin: p.PortMin, PortMax: p.PortMax})
+					}
+					cs = append(cs, config.FirewallService{Name: s.Name, Ports: cp, Notes: s.Notes})
+				}
+				cur.FirewallServices = cs
+			}
 			// Persist the engine's current rulebase. The engine holds the rules
 			// whether or not the firewall is enabled (enabled only gates enforcement),
 			// so this is safe to write in either state and won't wipe rules while the
@@ -626,28 +654,6 @@ func cmdRun(args []string) {
 						})
 					}
 					cur.Networks[i].Firewall.Rules = out
-				}
-				// Persist the address-object and service catalogs the rules resolve
-				// against, so a named object/service survives a restart.
-				if objs, oerr := engine.FirewallObjectsList(networkID); oerr == nil {
-					co := make([]config.FirewallObject, 0, len(objs))
-					for _, o := range objs {
-						co = append(co, config.FirewallObject{
-							Name: o.Name, Kind: o.Kind, Addresses: o.Addresses, Members: o.Members, Notes: o.Notes,
-						})
-					}
-					cur.Networks[i].Firewall.Objects = co
-				}
-				if svcs, serr := engine.FirewallServicesList(networkID); serr == nil {
-					cs := make([]config.FirewallService, 0, len(svcs))
-					for _, s := range svcs {
-						cp := make([]config.FirewallServicePort, 0, len(s.Ports))
-						for _, p := range s.Ports {
-							cp = append(cp, config.FirewallServicePort{Proto: p.Proto, PortMin: p.PortMin, PortMax: p.PortMax})
-						}
-						cs = append(cs, config.FirewallService{Name: s.Name, Ports: cp, Notes: s.Notes})
-					}
-					cur.Networks[i].Firewall.Services = cs
 				}
 				// Name and subnet a node learned from the network when joining by id.
 				if name, s4, s6, ok := engine.NetworkIdentity(networkID); ok {
@@ -1969,6 +1975,34 @@ func overlaysOf(cfg *config.Config) []netip.Prefix {
 // fillRuntimeSpec populates the hot-reloadable fields of a NetSpec (throttle,
 // QoS, firewall, NAT) from a network's config. Shared by initial setup and by
 // the reload path so both produce identical specs.
+// toMeshFirewallObjects / toMeshFirewallServices convert the node-global
+// firewall catalog from its config shape to its mesh shape — used once at
+// startup to seed mesh.Options.FirewallObjects/FirewallServices (the engine
+// initializes every network's live catalog from there; see
+// mesh.Options.FirewallObjects' doc comment). The reverse conversion (mesh
+// shape back to config shape, for persistence) lives inline in the persist
+// hook above, matching how the rules conversion there has always worked.
+func toMeshFirewallObjects(objs []config.FirewallObject) []mesh.FirewallObject {
+	out := make([]mesh.FirewallObject, 0, len(objs))
+	for _, o := range objs {
+		out = append(out, mesh.FirewallObject{
+			Name: o.Name, Kind: o.Kind, Addresses: o.Addresses, Members: o.Members, Notes: o.Notes,
+		})
+	}
+	return out
+}
+func toMeshFirewallServices(svcs []config.FirewallService) []mesh.FirewallService {
+	out := make([]mesh.FirewallService, 0, len(svcs))
+	for _, s := range svcs {
+		ms := mesh.FirewallService{Name: s.Name, Notes: s.Notes}
+		for _, p := range s.Ports {
+			ms.Ports = append(ms.Ports, mesh.FirewallServicePort{Proto: p.Proto, PortMin: p.PortMin, PortMax: p.PortMax})
+		}
+		out = append(out, ms)
+	}
+	return out
+}
+
 func fillRuntimeSpec(spec *mesh.NetSpec, n config.Network, exempts []config.FirewallExempt, natStateTimeout int) {
 	// Redistributed routes (hot-reloadable; applied live on reload). Disabled
 	// route entries are skipped.
@@ -2053,19 +2087,13 @@ func fillRuntimeSpec(spec *mesh.NetSpec, n config.Network, exempts []config.Fire
 			Notes:          fr.Notes,
 		})
 	}
-	// Reusable address-object and service catalogs the rules resolve against.
-	for _, o := range n.Firewall.Objects {
-		spec.FirewallObjects = append(spec.FirewallObjects, mesh.FirewallObject{
-			Name: o.Name, Kind: o.Kind, Addresses: o.Addresses, Members: o.Members, Notes: o.Notes,
-		})
-	}
-	for _, s := range n.Firewall.Services {
-		ms := mesh.FirewallService{Name: s.Name, Notes: s.Notes}
-		for _, p := range s.Ports {
-			ms.Ports = append(ms.Ports, mesh.FirewallServicePort{Proto: p.Proto, PortMin: p.PortMin, PortMax: p.PortMax})
-		}
-		spec.FirewallServices = append(spec.FirewallServices, ms)
-	}
+	// The reusable address-object/service catalogs rules resolve against are
+	// node-global now (config.Config.FirewallObjects/FirewallServices,
+	// mesh.Options.FirewallObjects/FirewallServices) — not part of this
+	// per-network spec. The engine already has the current catalog live
+	// (seeded at startup, updated via SetFirewallObjects/SetFirewallServices)
+	// and reapplies it to every network on each reload; nothing to fill in
+	// here.
 	// Always-allowed exemptions (control/management/routing). This list is
 	// node-global — the same allowlist applies to every network — and is passed
 	// in by the caller. Populated regardless of the enabled flag so the engine can

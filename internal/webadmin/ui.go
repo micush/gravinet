@@ -766,6 +766,13 @@ async function load() {
   state.allowRemoteShell = !!(c.body && c.body.allow_remote_shell);
   state.shellSupported = c.body ? !!c.body.shell_supported : true;
   state.logLevel = (c.body && c.body.log_level) || 'info';
+  // Node-global firewall object/service catalog — shared by every network
+  // above (see the server's Config.FirewallObjects doc comment), so it lives
+  // at this top level rather than nested under any one entry in state.cfg.
+  state.fwObjects = (c.body && c.body.firewall_objects) || [];
+  state.fwServices = (c.body && c.body.firewall_services) || [];
+  state.fwObjectsSeeded = !!(c.body && c.body.firewall_objects_seeded);
+  state.fwServicesSeeded = !!(c.body && c.body.firewall_services_seeded);
   return true;
 }
 
@@ -3865,10 +3872,72 @@ function fwParseSvc(raw){
   return {proto, port, services};
 }
 
+// fwAutoPopulateCatalog keeps the node-global object and service catalog
+// (shared by every network — see Config.FirewallObjects' doc comment)
+// stocked with the full well-known set from FW_COMMON_WILDCARD_OBJECTS/
+// FW_COMMON_SERVICES — automatically, once, ever, with no button and no
+// click. Runs at most once per catalog: after a successful pass it marks
+// the catalog seeded (op:mark-objects-seeded / op:mark-services-seeded),
+// and every render after that just sees the seeded flag already set and
+// does nothing — so deleting a well-known entry afterward sticks; nothing
+// ever re-adds it. fwAutoAddBusy guards against overlapping runs when
+// secFirewall renders again (e.g. switching tabs) before a prior pass has
+// finished.
+var fwAutoAddBusy = false;
+async function fwAutoPopulateCatalog(){
+  if (fwAutoAddBusy) return;
+  let did = false;
+  fwAutoAddBusy = true;
+  try {
+    if (!state.fwObjectsSeeded){
+      const objs = state.fwObjects || [];
+      const have = {}; objs.forEach(o=>{ have[(o.name||'').toLowerCase()]=true; });
+      const missing = FW_COMMON_WILDCARD_OBJECTS.filter(d=>!have[d.name.toLowerCase()]);
+      let ok = true;
+      if (missing.length){
+        const additions = missing.map(def => ({ name: def.name, kind: 'fqdn', addresses: def.addresses.slice(), members: [], notes: def.notes||'' }));
+        const r = await api('/api/firewall',{method:'POST',body:JSON.stringify({op:'objects', objects:objPayload(objs.concat(additions))})});
+        ok = r.ok;
+      }
+      if (ok){
+        const mr = await api('/api/firewall',{method:'POST',body:JSON.stringify({op:'mark-objects-seeded'})});
+        if (mr.ok) did = true;
+      }
+    }
+    if (!state.fwServicesSeeded){
+      const svcs = state.fwServices || [];
+      const have = {}; svcs.forEach(s=>{ have[(s.name||'').toLowerCase()]=true; });
+      const missing = FW_COMMON_SERVICES.filter(d=>!have[d.name.toLowerCase()]);
+      let ok = true;
+      if (missing.length){
+        const additions = missing.map(def => ({ name: def.name, ports: def.ports.map(p=>({proto:p.proto, port_min:p.port_min, port_max:p.port_max})), notes: def.notes||'' }));
+        const r = await api('/api/firewall',{method:'POST',body:JSON.stringify({op:'services', services:svcPayload(svcs.concat(additions))})});
+        ok = r.ok;
+      }
+      if (ok){
+        const mr = await api('/api/firewall',{method:'POST',body:JSON.stringify({op:'mark-services-seeded'})});
+        if (mr.ok) did = true;
+      }
+    }
+  } finally {
+    fwAutoAddBusy = false;
+  }
+  if (did) await refresh();
+}
+
 function secFirewall(c) {
   state.firewallTab = state.firewallTab || 'rules';
   c.appendChild(buildTabBar([['rules','Rules'],['objects','Objects'],['services','Services'],['allowlist','Allow List']], state.firewallTab,
     (tab) => { state.firewallTab = tab; renderSection(); }));
+
+  // The node-global object/service catalog should already contain the full
+  // well-known set — no button, no double-click — from the first time
+  // anyone looks at a firewall tab, ever, on this node. fwAutoPopulateCatalog
+  // checks the seeded flags and, the first time only, saves any gaps in and
+  // marks itself done; not awaited here since secFirewall itself is a
+  // synchronous render, same pattern as any other background-then-refresh
+  // update in this file.
+  fwAutoPopulateCatalog();
 
   // Allow List is node-global, not per-network — unlike Rules below, it has
   // something to show (and something useful to do) even with zero networks
@@ -3878,7 +3947,8 @@ function secFirewall(c) {
   if (state.firewallTab === 'services') { secFwServices(c); return; }
 
   if (!state.cfg.length) return emptyCard(c, 'No networks.');
-  secHint(c, 'Disabled = all traffic passes. Enabled = rules evaluated top-to-bottom, first match wins; unmatched traffic is allowed (stateful — replies to allowed flows pass automatically). <b>services</b> takes a comma-separated mix of named services and raw <code>proto</code>/<code>proto/port</code> entries (e.g. <code>https, tcp/8443, udp/53</code>) \u2014 at most one raw entry per rule, any number of named services. Each of <b>src</b>, <b>dst</b>, and <b>services</b> has a <b>\u00d8</b> button inside its editor \u2014 click it to match anything <i>except</i> that field (shown as a leading <b>!</b> here). <b>src</b>/<b>dst</b>/<b>services</b> autocomplete against every object/service this network has, including well-known ones (like <code>netflix.com</code> or <code>HTTPS</code>) it hasn\u2019t used yet \u2014 pick or type one and save the rule and that\u2019s it, it\u2019s a real object/service now, reusable from the Objects/Services tabs like any other. Use + to add a rule, drag to reorder, double-click to edit or toggle state, tick rows and use \u2212 to remove.');
+  secHint(c, 'Disabled = all traffic passes. Enabled = rules evaluated top-to-bottom, first match wins; unmatched traffic is allowed (stateful — replies to allowed flows pass automatically). <b>services</b> takes a comma-separated mix of named services and raw <code>proto</code>/<code>proto/port</code> entries (e.g. <code>https, tcp/8443, udp/53</code>) \u2014 at most one raw entry per rule, any number of named services. Each of <b>source</b>, <b>destination</b>, and <b>services</b> has a <b>\u00d8</b> button inside its editor \u2014 click it to match anything <i>except</i> that field (shown as a leading <b>!</b> here) \u2014 and, next to it, a filterable dropdown of this node\u2019s objects/services catalog: start typing to narrow it, or just type a literal CIDR/proto/port instead, since these fields take either. Use + to add a rule, drag to reorder, double-click to edit or toggle state, tick rows and use \u2212 to remove.');
+
   for (const cf of state.cfg) {
     const fw = cf.firewall||{}; const en = !!fw.enabled;
     const live = state.status.find(s => s.id===cf.id) || {};
@@ -3886,26 +3956,7 @@ function secFirewall(c) {
     const card = $('<div class="card"></div>');
     card.appendChild(netCardHead(cf, en, '/api/firewall'));
 
-    // Datalists of this network's object and service names, so the rule editor's
-    // src/dst and services inputs autocomplete against the catalog. This
-    // includes every name in this network's real (saved) catalog PLUS every
-    // well-known FW_COMMON_WILDCARD_OBJECTS/FW_COMMON_SERVICES name it
-    // doesn't have yet — a rule can reference either kind by name, and
-    // fwEnsureRuleCatalog (below) materializes the well-known ones into the
-    // real catalog automatically when the rule referencing them is saved.
-    // There's no separate "add the object first" step: an object or service
-    // is usable the moment a rule names it.
-    const objNames = ((cf.firewall||{}).objects||[]).map(o=>o.name).filter(Boolean);
-    const svcNames = ((cf.firewall||{}).services||[]).map(s=>s.name).filter(Boolean);
-    const objHave = {}; objNames.forEach(n=>{ objHave[n.toLowerCase()]=true; });
-    const svcHave = {}; svcNames.forEach(n=>{ svcHave[n.toLowerCase()]=true; });
-    const objOptions = objNames.concat(FW_COMMON_WILDCARD_OBJECTS.map(d=>d.name).filter(n=>!objHave[n.toLowerCase()]));
-    const svcOptions = svcNames.concat(FW_COMMON_SERVICES.map(d=>d.name).filter(n=>!svcHave[n.toLowerCase()]));
-    const dlObj = 'fwobj-'+cf.id, dlSvc = 'fwsvc-'+cf.id;
-    card.appendChild($('<datalist id="'+dlObj+'">'+objOptions.map(n=>'<option value="'+esc(n)+'">').join('')+'</datalist>'));
-    card.appendChild($('<datalist id="'+dlSvc+'">'+svcOptions.map(n=>'<option value="'+esc(n)+'">').join('')+'</datalist>'));
-
-    let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>action</th><th>src</th><th>dst</th><th>services</th><th>log</th><th>hits</th><th>notes</th></tr>';
+    let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>source</th><th>destination</th><th>services</th><th>action</th><th>log</th><th>hits</th><th>notes</th></tr>';
     if (!rules.length) h += '<tr><td colspan="9" class="empty">no rules — all traffic allowed (click + to add one)</td></tr>';
     else for (let i=0;i<rules.length;i++) { const f=rules[i];
       const enabled = !f.disabled;
@@ -3914,17 +3965,16 @@ function secFirewall(c) {
       h += '<tr draggable="true" class="fwrow'+(enabled?'':' fw-disabled')+'" data-fwid="'+esc(f.id)+'" data-idx="'+i+'" data-enabled="'+(enabled?1:0)+'" data-action="'+esc(f.action)+'" data-services="'+esc(svcTxt)+'" data-src="'+esc(f.src||'')+'" data-dst="'+esc(f.dst||'')+'" data-src-negate="'+(f.src_negate?1:0)+'" data-dst-negate="'+(f.dst_negate?1:0)+'" data-services-negate="'+(f.services_negate?1:0)+'" data-log="'+(f.log?1:0)+'" data-notes="'+esc(f.notes||'')+'">'
         + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
         + '<td class="fw-state">'+stTag+'</td>'
-        + '<td class="fw-action">'+esc(f.action)+'</td>'
         + '<td class="fw-src" title="'+(f.src_negate?'anything EXCEPT this':'')+'">'+(f.src_negate?'<b>!</b>':'')+esc(f.src||'any')+'</td>'
         + '<td class="fw-dst" title="'+(f.dst_negate?'anything EXCEPT this':'')+'">'+(f.dst_negate?'<b>!</b>':'')+esc(f.dst||'any')+'</td>'
         + '<td class="fw-services" title="'+(f.services_negate?'any service EXCEPT this':'')+'">'+(f.services_negate?'<b>!</b>':'')+esc(svcTxt||'any')+'</td>'
+        + '<td class="fw-action">'+esc(f.action)+'</td>'
         + '<td class="fw-log">'+(f.log?'<span class="on" title="matches are logged">log</span>':'')+'</td>'
         + '<td class="fw-hits" title="'+fmtHits(f)+'">'+esc(String(f.packets||0))+'</td>'
         + '<td class="fw-notes">'+esc(f.notes||'')+'</td></tr>';
     }
     const t = $('<div></div>'); t.innerHTML = h+'</table>'; card.appendChild(t);
     const table = t.querySelector('table');
-    table._dlObj = dlObj; table._dlSvc = dlSvc;
     t.querySelectorAll('tr.fwrow').forEach(tr => {
       tr.ondblclick = (e) => {
         if (e.target.closest('.fw-state')) return; // state cell has its own click handler
@@ -4001,100 +4051,87 @@ function fwWireNegToggles(scope){
   });
 }
 
-// fwObjCatalogDef / fwSvcCatalogDef look up a well-known catalog def by name
-// (case-insensitive), or null if the name isn't one of the curated entries
-// in FW_COMMON_WILDCARD_OBJECTS / FW_COMMON_SERVICES.
-function fwObjCatalogDef(name){
-  const key = (name||'').trim().toLowerCase(); if (!key) return null;
-  for (const d of FW_COMMON_WILDCARD_OBJECTS) if (d.name.toLowerCase()===key) return d;
-  return null;
-}
-function fwSvcCatalogDef(name){
-  const key = (name||'').trim().toLowerCase(); if (!key) return null;
-  for (const d of FW_COMMON_SERVICES) if (d.name.toLowerCase()===key) return d;
-  return null;
-}
+// fwCatalogCombobox turns a plain text input (a rule editor's src/dst/
+// services field) into a filterable combobox against this node's real
+// object/service catalog, reusing the .ss-list/.ss-opt styling built for
+// buildListPicker (see its comment) rather than inventing new dropdown
+// styling. Narrows as you type — case-insensitive substring match against
+// whatever getNames() returns at the moment the list opens or the input
+// changes, so an edit made on the Objects/Services tab in the meantime is
+// picked up without needing this row re-rendered. Unlike buildListPicker
+// this stays a genuine free-typing input throughout: a literal CIDR or
+// proto/port is a perfectly valid value and isn't in any catalog, so
+// there's no separate filter row and no button standing in for the input
+// — the input itself is both the value and the filter. Relies on the
+// input already sitting inside a '.fwe-field' (position:relative; see its
+// CSS) so the dropdown positions directly below it with no coordinate math.
+function fwCatalogCombobox(input, getNames){
+  const field = input.closest('.fwe-field') || input.parentElement;
+  const list = $('<div class="ss-list" role="listbox"></div>');
+  field.appendChild(list);
+  let shown = [], selIdx = -1;
 
-// fwMaterializeObjs / fwMaterializeSvcs take the names a rule references and
-// return an updated catalog list (existing entries plus any well-known def
-// the rule needs that isn't saved yet), or null if nothing needs adding.
-// This is the whole mechanism behind "an object/service is usable the
-// moment a rule names it" — no separate add-it-first step in the
-// Objects/Services tabs. A name that isn't in this network's real catalog
-// and isn't a recognized well-known def either (a typo, a literal CIDR, an
-// unrecognized service name) is left alone here; the server still validates
-// it when the rule is compiled and reports the same error it always has.
-function fwMaterializeObjs(cf, names){
-  const objs = ((cf.firewall||{}).objects||[]).map(cloneObj);
-  const have = {}; objs.forEach(o=>{ have[(o.name||'').toLowerCase()]=true; });
-  let added = false;
-  for (const raw of (names||[])){
-    const key = (raw||'').trim().toLowerCase();
-    if (!key || key==='any' || have[key]) continue;
-    const def = fwObjCatalogDef(raw);
-    if (!def) continue;
-    objs.push({ name: def.name, kind: 'fqdn', addresses: def.addresses.slice(), members: [], notes: def.notes||'' });
-    have[key] = true; added = true;
-  }
-  return added ? objs : null;
-}
-function fwMaterializeSvcs(cf, names){
-  const svcs = ((cf.firewall||{}).services||[]).map(cloneSvc);
-  const have = {}; svcs.forEach(s=>{ have[(s.name||'').toLowerCase()]=true; });
-  let added = false;
-  for (const raw of (names||[])){
-    const key = (raw||'').trim().toLowerCase();
-    if (!key || have[key]) continue;
-    const def = fwSvcCatalogDef(raw);
-    if (!def) continue;
-    svcs.push({ name: def.name, ports: def.ports.map(p=>({proto:p.proto, port_min:p.port_min, port_max:p.port_max})), notes: def.notes||'' });
-    have[key] = true; added = true;
-  }
-  return added ? svcs : null;
-}
+  const markSel = () => list.querySelectorAll('.ss-opt').forEach((o,i) => o.classList.toggle('sel', i===selIdx));
+  const render = () => {
+    const q = input.value.trim().toLowerCase();
+    const all = getNames() || [];
+    shown = q ? all.filter(n => n.toLowerCase().indexOf(q) >= 0) : all;
+    list.innerHTML = '';
+    selIdx = -1;
+    if (!shown.length){ list.classList.remove('show'); return; }
+    shown.slice(0, 200).forEach((name, i) => {
+      const o = $('<div class="ss-opt" role="option"></div>');
+      o.textContent = name;
+      o.onmouseenter = () => { selIdx = i; markSel(); };
+      // mousedown, not click: fires before the blur that closes the list
+      // would otherwise swallow it (same reason as the global search box).
+      o.onmousedown = (e) => { e.preventDefault(); pick(name); };
+      list.appendChild(o);
+    });
+    list.classList.add('show');
+  };
+  const pick = (name) => {
+    input.value = name;
+    list.classList.remove('show');
+    input.focus();
+  };
+  const close = () => { list.classList.remove('show'); selIdx = -1; };
 
-// fwEnsureRuleCatalog materializes, into net's real catalog, whatever
-// well-known objects/services a rule's src/dst/services reference before
-// the rule itself is saved. Called from both the add-row and edit-row save
-// handlers so either path works the same way. Returns false (after
-// alerting) if a materializing save fails; true if it's safe to proceed
-// (including the common case where nothing needed materializing at all).
-async function fwEnsureRuleCatalog(net, rule){
-  const cf = state.cfg.find(x=>x.id===net) || {id:net};
-  const newObjs = fwMaterializeObjs(cf, [rule.src, rule.dst]);
-  if (newObjs){
-    const r = await api('/api/firewall',{method:'POST',body:JSON.stringify({net:net, op:'objects', objects:objPayload(newObjs)})});
-    if (!r.ok){ alert((r.body&&r.body.error)||'failed to save referenced object'); return false; }
-    cf.firewall = cf.firewall||{}; cf.firewall.objects = newObjs;
-  }
-  const newSvcs = fwMaterializeSvcs(cf, rule.services);
-  if (newSvcs){
-    const r = await api('/api/firewall',{method:'POST',body:JSON.stringify({net:net, op:'services', services:svcPayload(newSvcs)})});
-    if (!r.ok){ alert((r.body&&r.body.error)||'failed to save referenced service'); return false; }
-    cf.firewall = cf.firewall||{}; cf.firewall.services = newSvcs;
-  }
-  return true;
+  input.addEventListener('input', render);
+  input.addEventListener('focus', render);
+  input.addEventListener('blur', () => setTimeout(close, 150));
+  input.addEventListener('keydown', (e) => {
+    if (!list.classList.contains('show')){
+      if (e.key === 'ArrowDown') render();
+      return;
+    }
+    if (e.key === 'ArrowDown'){ e.preventDefault(); selIdx = Math.min(selIdx+1, shown.length-1); markSel(); list.querySelector('.ss-opt.sel')?.scrollIntoView({block:'nearest'}); }
+    else if (e.key === 'ArrowUp'){ e.preventDefault(); selIdx = Math.max(selIdx-1, 0); markSel(); list.querySelector('.ss-opt.sel')?.scrollIntoView({block:'nearest'}); }
+    else if (e.key === 'Enter'){ if (selIdx>=0 && shown[selIdx]){ e.preventDefault(); pick(shown[selIdx]); } }
+    else if (e.key === 'Escape'){ close(); }
+  });
 }
 
 function fwAddRow(table, net){
-  const dlObj = table._dlObj||'', dlSvc = table._dlSvc||'';
   const tr = document.createElement('tr');
   tr.innerHTML = '<td class="selcol"></td>'
     + '<td class="fw-state"><span class="on">enabled</span></td>'
+    + '<td><span class="fwe-field"><input class="fwe-src" placeholder="cidr / object" style="width:150px">'+fwNegToggle('fwe-src-negate','match anything EXCEPT this')+'</span></td>'
+    + '<td><span class="fwe-field"><input class="fwe-dst" placeholder="cidr / object" style="width:150px">'+fwNegToggle('fwe-dst-negate','match anything EXCEPT this')+'</span></td>'
+    + '<td><span class="fwe-field"><input class="fwe-services" placeholder="tcp/443, https" style="width:180px">'+fwNegToggle('fwe-services-negate','match any service EXCEPT this')+'</span></td>'
     + '<td><select class="fwe-action">'+fwActOpts('allow')+'</select></td>'
-    + '<td><span class="fwe-field"><input class="fwe-src" placeholder="cidr / object" list="'+dlObj+'" style="width:110px">'+fwNegToggle('fwe-src-negate','match anything EXCEPT this')+'</span></td>'
-    + '<td><span class="fwe-field"><input class="fwe-dst" placeholder="cidr / object" list="'+dlObj+'" style="width:110px">'+fwNegToggle('fwe-dst-negate','match anything EXCEPT this')+'</span></td>'
-    + '<td><span class="fwe-field"><input class="fwe-services" placeholder="tcp/443, https" list="'+dlSvc+'" style="width:140px">'+fwNegToggle('fwe-services-negate','match any service EXCEPT this')+'</span></td>'
     + '<td><label class="fwe-log-l" title="log matches"><input type="checkbox" class="fwe-log"> log</label></td>'
     + '<td></td>'
-    + '<td><input class="fwe-notes" placeholder="notes" style="width:100px"> <button class="sm fwe-save">save</button> <button class="ghost sm fwe-cancel">cancel</button></td>';
+    + '<td><input class="fwe-notes" placeholder="notes" style="width:140px"> <button class="sm fwe-save">save</button> <button class="ghost sm fwe-cancel">cancel</button></td>';
   if (!insertNewRow(table, tr)) return;
   fwWireNegToggles(tr);
+  fwCatalogCombobox(tr.querySelector('.fwe-src'), () => (state.fwObjects||[]).map(o=>o.name));
+  fwCatalogCombobox(tr.querySelector('.fwe-dst'), () => (state.fwObjects||[]).map(o=>o.name));
+  fwCatalogCombobox(tr.querySelector('.fwe-services'), () => (state.fwServices||[]).map(s=>s.name));
   tr.querySelector('.fwe-cancel').onclick = () => refresh();
   tr.querySelector('.fwe-save').onclick = async () => {
     const rule = fwCollectRule(tr); if (!rule) return;
     if (!fwValidateNegate(rule)) return;
-    if (!(await fwEnsureRuleCatalog(net, rule))) return;
     const r = await api('/api/firewall',{method:'POST',body:JSON.stringify({net:net,op:'add',at:-1,rule})});
     if (!r.ok){ alert((r.body && r.body.error) || 'failed'); return; }
     await refresh();
@@ -4148,18 +4185,20 @@ function fwValidateNegate(rule){
 function startFwEdit(tr, net){
   if (tr.querySelector('.fwe-action')) return; // already editing
   tr.draggable = false;
-  const table = tr.closest('table'); const dlObj = table._dlObj||'', dlSvc = table._dlSvc||'';
   const oldId = Number(tr.dataset.fwid), oldIdx = Number(tr.dataset.idx);
   const a=tr.querySelector('.fw-action'),
         sv=tr.querySelector('.fw-services'), s=tr.querySelector('.fw-src'), d=tr.querySelector('.fw-dst'),
         lg=tr.querySelector('.fw-log'), no=tr.querySelector('.fw-notes');
   a.innerHTML = '<select class="fwe-action">'+fwActOpts(tr.dataset.action)+'</select>';
-  sv.innerHTML = '<span class="fwe-field"><input class="fwe-services" list="'+dlSvc+'" style="width:140px" value="'+esc(tr.dataset.services||'')+'">'+fwNegToggle('fwe-services-negate','match any service EXCEPT this')+'</span>';
-  s.innerHTML = '<span class="fwe-field"><input class="fwe-src" list="'+dlObj+'" style="width:110px" value="'+esc(tr.dataset.src||'')+'">'+fwNegToggle('fwe-src-negate','match anything EXCEPT this')+'</span>';
-  d.innerHTML = '<span class="fwe-field"><input class="fwe-dst" list="'+dlObj+'" style="width:110px" value="'+esc(tr.dataset.dst||'')+'">'+fwNegToggle('fwe-dst-negate','match anything EXCEPT this')+'</span>';
+  sv.innerHTML = '<span class="fwe-field"><input class="fwe-services" style="width:180px" value="'+esc(tr.dataset.services||'')+'">'+fwNegToggle('fwe-services-negate','match any service EXCEPT this')+'</span>';
+  s.innerHTML = '<span class="fwe-field"><input class="fwe-src" style="width:150px" value="'+esc(tr.dataset.src||'')+'">'+fwNegToggle('fwe-src-negate','match anything EXCEPT this')+'</span>';
+  d.innerHTML = '<span class="fwe-field"><input class="fwe-dst" style="width:150px" value="'+esc(tr.dataset.dst||'')+'">'+fwNegToggle('fwe-dst-negate','match anything EXCEPT this')+'</span>';
   lg.innerHTML = '<label class="fwe-log-l" title="log matches"><input type="checkbox" class="fwe-log"'+(tr.dataset.log==='1'?' checked':'')+'> log</label>';
-  no.innerHTML = '<input class="fwe-notes" style="width:100px" value="'+esc(tr.dataset.notes||'')+'"> <button class="sm fwe-save">save</button>';
+  no.innerHTML = '<input class="fwe-notes" style="width:140px" value="'+esc(tr.dataset.notes||'')+'"> <button class="sm fwe-save">save</button>';
   fwWireNegToggles(tr);
+  fwCatalogCombobox(s.querySelector('.fwe-src'), () => (state.fwObjects||[]).map(o=>o.name));
+  fwCatalogCombobox(d.querySelector('.fwe-dst'), () => (state.fwObjects||[]).map(o=>o.name));
+  fwCatalogCombobox(sv.querySelector('.fwe-services'), () => (state.fwServices||[]).map(x=>x.name));
   if (tr.dataset.srcNegate==='1'){ const b=s.querySelector('.fwe-src-negate'); b.classList.add('active'); b.setAttribute('aria-pressed','true'); }
   if (tr.dataset.dstNegate==='1'){ const b=d.querySelector('.fwe-dst-negate'); b.classList.add('active'); b.setAttribute('aria-pressed','true'); }
   if (tr.dataset.servicesNegate==='1'){ const b=sv.querySelector('.fwe-services-negate'); b.classList.add('active'); b.setAttribute('aria-pressed','true'); }
@@ -4167,7 +4206,6 @@ function startFwEdit(tr, net){
   no.querySelector('.fwe-save').onclick = async () => {
     const rule = fwCollectRule(tr); if (!rule) return;
     if (!fwValidateNegate(rule)) return;
-    if (!(await fwEnsureRuleCatalog(net, rule))) return;
     const dr = await api('/api/firewall',{method:'POST',body:JSON.stringify({net:net,op:'del',ids:[oldId]})});
     if (!dr.ok){ alert((dr.body&&dr.body.error)||'edit failed'); refresh(); return; }
     const ar = await api('/api/firewall',{method:'POST',body:JSON.stringify({net:net,op:'add',at:oldIdx,rule:rule})});
@@ -4176,107 +4214,52 @@ function startFwEdit(tr, net){
   };
 }
 
-// secFwObjects renders the per-network address-object catalog: reusable named
-// address sets a rule references by name in src/dst. Whole-list save, applied
-// live via /api/firewall op:objects (no restart).
+// secFwObjects renders the node-global address-object catalog: reusable
+// named address sets a rule on any network references by name in src/dst
+// (see Config.FirewallObjects' doc comment — one catalog, shared by every
+// network on this node, not one per network, so this is one table, not one
+// per network either). Whole-list save, applied live via /api/firewall
+// op:objects (no restart).
 function secFwObjects(c){
-  if (!state.cfg.length) return emptyCard(c, 'No networks.');
-  secHint(c, 'Reusable address objects a rule can name in its <b>src</b>/<b>dst</b>. <b>kind</b>: host (literal IPs), subnet (CIDRs), range (a\u2011b), fqdn (domain names, re\u2011resolved live \u2014 an entry can be a literal name or a <b>*.domain.tld</b> wildcard covering every subdomain, learned passively from real DNS traffic; see docs), or group (a bundle of other objects, by name). Edit an object once and every rule that names it follows. Double\u2011click a cell to edit; + adds a row, tick rows and \u2212 removes. Extra rows below your own are well-known domains not yet in this network\u2019s catalog \u2014 already usable by name in a firewall rule\u2019s src/dst as-is (saving a rule that names one adds it here automatically), or double\u2011click any cell here first if you want to rename it or adjust its addresses/notes before using it.');
-  for (const cf of state.cfg){
-    const objs = ((cf.firewall||{}).objects || []).map(cloneObj);
-    const card = $('<div class="card"></div>');
-    card.appendChild($('<h3>'+esc(cf.name||('net '+cf.id))+'</h3>'));
-    const t = $('<div></div>');
-    let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>name</th><th>kind</th><th>addresses / members</th><th>notes</th></tr>';
-    objs.forEach((o,i)=>{ h += '<tr data-idx="'+i+'">'
-      + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
-      + '<td class="ob-name">'+esc(o.name||'')+'</td>'
-      + '<td class="ob-kind">'+esc(o.kind||'')+'</td>'
-      + '<td class="ob-val">'+esc(objValStr(o))+'</td>'
-      + '<td class="ob-notes">'+esc(o.notes||'')+'</td></tr>'; });
-    const existing = {}; objs.forEach(o => { existing[(o.name||'').toLowerCase()] = true; });
-    h += fwSuggestRows(FW_COMMON_WILDCARD_OBJECTS, existing, def =>
-      '<td class="ob-name">'+esc(def.name)+'</td><td class="ob-kind">fqdn</td><td class="ob-val">'+esc(def.addresses.join(', '))+'</td><td class="ob-notes">'+esc(def.notes||'')+'</td>');
-    if (!objs.length && FW_COMMON_WILDCARD_OBJECTS.every(d => existing[d.name.toLowerCase()])) h += '<tr><td colspan="5" class="empty">no objects \u2014 click + to add one</td></tr>';
-    t.innerHTML = h+'</table>';
-    const table = t.querySelector('table'); card.appendChild(t);
-    table._objs = objs;
-    if (objs.length) t.querySelectorAll('tr[data-idx]').forEach(tr=>{
-      const i = Number(tr.dataset.idx);
-      const nameTd=tr.querySelector('.ob-name'), kindTd=tr.querySelector('.ob-kind'), valTd=tr.querySelector('.ob-val'), notesTd=tr.querySelector('.ob-notes');
-      nameTd.title=kindTd.title=valTd.title=notesTd.title='double-click to edit';
-      nameTd.ondblclick=()=>inlineCellEdit(nameTd,objs[i].name||'','name',v=>{ v=v.trim(); if(!v){alert('name required');renderSection();return;} objs[i].name=v; objSave(cf.id,objs); });
-      kindTd.ondblclick=()=>inlineCellEdit(kindTd,objs[i].kind||'','host|subnet|range|fqdn|group',v=>{ v=v.trim().toLowerCase(); if(['host','subnet','range','fqdn','group'].indexOf(v)<0){alert('kind must be host, subnet, range, fqdn, or group');renderSection();return;} objs[i].kind=v; objSave(cf.id,objs); });
-      valTd.ondblclick=()=>inlineCellEdit(valTd,objValStr(objs[i]), objs[i].kind==='group'?'member object names, comma-separated':'addresses / CIDRs / ranges / domains, comma-separated', v=>{ setObjVal(objs[i], v); objSave(cf.id,objs); });
-      notesTd.ondblclick=()=>inlineCellEdit(notesTd,objs[i].notes||'','notes',v=>{ objs[i].notes=v.trim(); objSave(cf.id,objs); });
-    });
-    // Suggestion rows: same double-click-to-edit gesture as a real row, just
-    // building a fresh entry from the catalog def (with the one edited field
-    // applied) and appending it to the saved list instead of mutating one
-    // already in it. Editing any field — even committing the same value
-    // back unchanged — adds the row here; naming the def in a saved rule
-    // (fwEnsureRuleCatalog) adds it too, unedited, from wherever the rule is
-    // written — this is just the path for editing one first.
-    t.querySelectorAll('tr[data-def-idx]').forEach(tr=>{
-      const def = FW_COMMON_WILDCARD_OBJECTS[Number(tr.dataset.defIdx)];
-      const draft = () => ({ name: def.name, kind: 'fqdn', addresses: def.addresses.slice(), members: [], notes: def.notes||'' });
-      const promote = apply => { const o = draft(); apply(o); objSave(cf.id, (table._objs||[]).concat([o])); };
-      const nameTd=tr.querySelector('.ob-name'), kindTd=tr.querySelector('.ob-kind'), valTd=tr.querySelector('.ob-val'), notesTd=tr.querySelector('.ob-notes');
-      nameTd.title=kindTd.title=valTd.title=notesTd.title='double-click to edit';
-      nameTd.ondblclick=()=>inlineCellEdit(nameTd,def.name||'','name',v=>{ v=v.trim(); if(!v){alert('name required');renderSection();return;} promote(o=>{ o.name=v; }); });
-      kindTd.ondblclick=()=>inlineCellEdit(kindTd,'fqdn','host|subnet|range|fqdn|group',v=>{ v=v.trim().toLowerCase(); if(['host','subnet','range','fqdn','group'].indexOf(v)<0){alert('kind must be host, subnet, range, fqdn, or group');renderSection();return;} promote(o=>{ o.kind=v; }); });
-      valTd.ondblclick=()=>inlineCellEdit(valTd,def.addresses.join(', '),'addresses / CIDRs / ranges / domains, comma-separated',v=>{ promote(o=>{ setObjVal(o, v); }); });
-      notesTd.ondblclick=()=>inlineCellEdit(notesTd,def.notes||'','notes',v=>{ promote(o=>{ o.notes=v.trim(); }); });
-    });
-    selAllWire(t);
-    table._rowAdd = ()=>objAddRow(table, cf.id);
-    table._rowRemove = ()=>{ const sel=selCheckedRows(table); if(!sel.length){alert('tick one or more rows to remove');return;} const keep=objs.filter((_,i)=>!sel.some(tr=>Number(tr.dataset.idx)===i)); objSave(cf.id, keep); };
-    c.appendChild(card);
-  }
-}
-
-// fwSuggestRows renders the "not yet added" rows appended after a catalog
-// table's real entries: one per FW_COMMON_WILDCARD_OBJECTS/FW_COMMON_SERVICES
-// def not already present (by name, case-insensitive) in 'existing'. These
-// rows are deliberately NOT visually or behaviorally distinct from a real
-// row — same 'selbox' checkbox class (so 'select all' sees it exactly like
-// any other row; ticking one alone does nothing, same as ticking a real
-// row does nothing until '\u2212' is clicked, and clicking '\u2212' on a
-// ticked suggestion row is a harmless no-op since it was never part of the
-// saved list to begin with — see the caller's data-idx-based filter).
-// 'data-def-idx' is the only thing marking a row as a suggestion, used by
-// the caller to find these rows and wire double-click-to-edit exactly like
-// a real row's — editing any field (even re-saving the same value) is one
-// way to add it here, useful when you want to rename it or tweak its
-// addresses/ports/notes before using it. It's not the only way, though:
-// fwEnsureRuleCatalog adds a def the same way the moment a rule names it,
-// so a def is usable in a rule whether or not it's ever been edited here.
-// Nothing here writes to config on its own — a def stays a suggestion, and
-// costs nothing in the gossiped catalog, until it's actually added, either
-// by editing a cell in this table or by being named in a saved rule (see
-// FW_COMMON_SERVICES's doc comment on why these stay opt-in rather than
-// baked into every fresh network's config to begin with — that reasoning
-// is about gossip cost, not about gating a def behind a manual step before
-// it can be used).
-function fwSuggestRows(catalog, existing, renderCells){
-  let h = '', defIdx = -1;
-  for (const def of catalog){
-    defIdx++;
-    if (existing[def.name.toLowerCase()]) continue;
-    h += '<tr data-def-idx="'+defIdx+'"><td class="selcol"><input type="checkbox" class="selbox"></td>' + renderCells(def) + '</tr>';
-  }
-  return h;
+  secHint(c, 'Reusable address objects a rule can name in its <b>src</b>/<b>dst</b> \u2014 shared by every network on this node, edited once and usable everywhere. <b>kind</b>: host (literal IPs), subnet (CIDRs), range (a\u2011b), fqdn (domain names, re\u2011resolved live \u2014 an entry can be a literal name or a <b>*.domain.tld</b> wildcard covering every subdomain, learned passively from real DNS traffic; see docs), or group (a bundle of other objects, by name). Edit an object once and every rule that names it, on any network, follows. Double\u2011click a cell to edit; + adds a row, tick rows and \u2212 removes. Every well\u2011known domain gravinet knows about is already a real row here \u2014 nothing to add, nothing to click.');
+  const objs = (state.fwObjects || []).map(cloneObj);
+  const card = $('<div class="card"></div>');
+  const t = $('<div></div>');
+  let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>name</th><th>kind</th><th>addresses / members</th><th>notes</th></tr>';
+  objs.forEach((o,i)=>{ h += '<tr data-idx="'+i+'">'
+    + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
+    + '<td class="ob-name">'+esc(o.name||'')+'</td>'
+    + '<td class="ob-kind">'+esc(o.kind||'')+'</td>'
+    + '<td class="ob-val">'+esc(objValStr(o))+'</td>'
+    + '<td class="ob-notes">'+esc(o.notes||'')+'</td></tr>'; });
+  if (!objs.length) h += '<tr><td colspan="5" class="empty">no objects \u2014 click + to add one</td></tr>';
+  t.innerHTML = h+'</table>';
+  const table = t.querySelector('table'); card.appendChild(t);
+  table._objs = objs;
+  if (objs.length) t.querySelectorAll('tr[data-idx]').forEach(tr=>{
+    const i = Number(tr.dataset.idx);
+    const nameTd=tr.querySelector('.ob-name'), kindTd=tr.querySelector('.ob-kind'), valTd=tr.querySelector('.ob-val'), notesTd=tr.querySelector('.ob-notes');
+    nameTd.title=kindTd.title=valTd.title=notesTd.title='double-click to edit';
+    nameTd.ondblclick=()=>inlineCellEdit(nameTd,objs[i].name||'','name',v=>{ v=v.trim(); if(!v){alert('name required');renderSection();return;} objs[i].name=v; objSave(objs); });
+    kindTd.ondblclick=()=>inlineCellEdit(kindTd,objs[i].kind||'','host|subnet|range|fqdn|group',v=>{ v=v.trim().toLowerCase(); if(['host','subnet','range','fqdn','group'].indexOf(v)<0){alert('kind must be host, subnet, range, fqdn, or group');renderSection();return;} objs[i].kind=v; objSave(objs); });
+    valTd.ondblclick=()=>inlineCellEdit(valTd,objValStr(objs[i]), objs[i].kind==='group'?'member object names, comma-separated':'addresses / CIDRs / ranges / domains, comma-separated', v=>{ setObjVal(objs[i], v); objSave(objs); });
+    notesTd.ondblclick=()=>inlineCellEdit(notesTd,objs[i].notes||'','notes',v=>{ objs[i].notes=v.trim(); objSave(objs); });
+  });
+  selAllWire(t);
+  table._rowAdd = ()=>objAddRow(table);
+  table._rowRemove = ()=>{ const sel=selCheckedRows(table); if(!sel.length){alert('tick one or more rows to remove');return;} const keep=objs.filter((_,i)=>!sel.some(tr=>Number(tr.dataset.idx)===i)); objSave(keep); };
+  c.appendChild(card);
 }
 function cloneObj(o){ return { name:o.name||'', kind:o.kind||'host', addresses:(o.addresses||[]).slice(), members:(o.members||[]).slice(), notes:o.notes||'' }; }
 function objValStr(o){ return ((o.kind==='group')?(o.members||[]):(o.addresses||[])).join(', '); }
 function setObjVal(o, v){ const parts=v.split(',').map(x=>x.trim()).filter(Boolean); if(o.kind==='group'){ o.members=parts; o.addresses=[]; } else { o.addresses=parts; o.members=[]; } }
 function objPayload(objs){ return objs.map(o=>({ name:o.name, kind:o.kind, addresses:(o.kind==='group'?[]:(o.addresses||[])), members:(o.kind==='group'?(o.members||[]):[]), notes:o.notes||'' })); }
-async function objSave(net, objs){
-  const r = await api('/api/firewall',{method:'POST',body:JSON.stringify({net:net, op:'objects', objects:objPayload(objs)})});
+async function objSave(objs){
+  const r = await api('/api/firewall',{method:'POST',body:JSON.stringify({op:'objects', objects:objPayload(objs)})});
   if(!r.ok){ alert((r.body&&r.body.error)||'save failed'); }
   await refresh();
 }
-function objAddRow(table, net){
+function objAddRow(table){
   const tr=document.createElement('tr');
   tr.innerHTML='<td class="selcol"></td>'
     + '<td><input class="oba-name" placeholder="name" style="width:110px"></td>'
@@ -4292,7 +4275,7 @@ function objAddRow(table, net){
     const o={name:name, kind:kindSel.value, addresses:[], members:[], notes:tr.querySelector('.oba-notes').value.trim()};
     setObjVal(o, valInp.value);
     const list=(table._objs||[]).slice(); list.push(o);
-    objSave(net, list);
+    objSave(list);
   };
 }
 
@@ -4314,6 +4297,16 @@ function objAddRow(table, net){
 // an operator adding their own less-common wildcard fqdn objects by hand
 // the same way any other object is added — this catalog is a convenience
 // for the common case, not a ceiling.
+//
+// fwAutoPopulateCatalog (internal/webadmin's admin UI) saves every entry
+// here into every configured network's real catalog automatically, no
+// action required — so unlike an earlier version of this feature, none of
+// this stays opt-in per network anymore; it's all real, always, as soon
+// as the admin UI is open. The curation above is what keeps that
+// unconditional every-network cost bounded to "a few dozen to a
+// hundred-odd" rather than 1,000+ or 10,000+: this list staying small on
+// purpose is now the only thing standing between "always populated" and
+// "always populated with a genuinely large gossip payload."
 //
 // Each entry seeds a single wildcard address ("*.google.com"), not the
 // bare domain alongside it. fqdnPatternMatch (internal/mesh/
@@ -4438,13 +4431,14 @@ var FW_COMMON_WILDCARD_OBJECTS = [
 
 // bundles a network's service list can be quick-populated from, grouped by
 // category — the same convenience gravinet's sibling project parapet gives
-// its users via a large pre-filled default service list. Rather than baking
-// these into every fresh network's config unasked (parapet's approach, and
-// one that's hard to walk back once a config exists), these stay opt-in:
-// fwSuggestRows renders every entry not yet in a network's real catalog as
-// a dimmed row right in the Services table, one + click away from being
-// added — no config bloat for entries a click never touches, but nothing
-// hidden behind a separate button/modal either.
+// its users via a large pre-filled default service list. Unlike an earlier
+// version of this feature, these aren't opt-in anymore: fwAutoPopulateCatalog
+// saves every entry here into every configured network's real catalog
+// automatically, no button and no per-entry click. Keeping this list
+// curated (a few dozen to a hundred-odd entries, not parapet's much larger
+// default set) is what keeps that unconditional per-network cost bounded —
+// see FW_COMMON_WILDCARD_OBJECTS's doc comment on the gossip-payload
+// reasoning, which applies here the same way.
 //
 // Only protocols gravinet's firewall engine actually matches on are used
 // here (see protoNum in internal/mesh/firewall.go): "tcp"/"udp" by port,
@@ -4538,70 +4532,49 @@ var FW_COMMON_SERVICES = [
   svcDef('ALL-UDP', 'Wildcards', [svcLeg('udp')], 'matches any UDP port'),
 ];
 
-// secFwServices renders the per-network service catalog: reusable protocol/port
-// bundles a rule references by name in its services field.
+// secFwServices renders the node-global service catalog: reusable protocol/
+// port bundles a rule on any network references by name in its services
+// field (see Config.FirewallObjects' doc comment — one catalog, shared by
+// every network on this node, not one per network, so this is one table,
+// not one per network either).
 function secFwServices(c){
-  if (!state.cfg.length) return emptyCard(c, 'No networks.');
-  secHint(c, 'Reusable protocol/port bundles a rule can name in its <b>services</b> field \u2014 e.g. a "DNS" service carrying udp/53 and tcp/53. Write ports as <i>proto/port</i> or <i>proto/lo\u2011hi</i>, comma\u2011separated; a proto alone (like <i>icmp</i>) matches any port. Double\u2011click a cell to edit; + adds a row, tick rows and \u2212 removes. Extra rows below your own are well-known services not yet in this network\u2019s catalog \u2014 already usable by name in a firewall rule\u2019s services field as-is (saving a rule that names one adds it here automatically), or double\u2011click any cell here first if you want to rename it or adjust its ports/notes before using it.');
-  for (const cf of state.cfg){
-    const svcs = ((cf.firewall||{}).services || []).map(cloneSvc);
-    const card = $('<div class="card"></div>');
-    card.appendChild($('<h3>'+esc(cf.name||('net '+cf.id))+'</h3>'));
-    const t=$('<div></div>');
-    let h='<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>name</th><th>ports</th><th>notes</th></tr>';
-    svcs.forEach((s,i)=>{ h+='<tr data-idx="'+i+'">'
-      + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
-      + '<td class="sv-name">'+esc(s.name||'')+'</td>'
-      + '<td class="sv-ports">'+esc(svcPortsFmt(s.ports))+'</td>'
-      + '<td class="sv-notes">'+esc(s.notes||'')+'</td></tr>'; });
-    const existing = {}; svcs.forEach(s => { existing[(s.name||'').toLowerCase()] = true; });
-    h += fwSuggestRows(FW_COMMON_SERVICES, existing, def =>
-      '<td class="sv-name">'+esc(def.name)+'</td><td class="sv-ports">'+esc(svcPortsFmt(def.ports))+'</td><td class="sv-notes">'+esc(def.notes||'')+'</td>');
-    if (!svcs.length && FW_COMMON_SERVICES.every(d => existing[d.name.toLowerCase()])) h += '<tr><td colspan="4" class="empty">no services \u2014 click + to add one</td></tr>';
-    t.innerHTML=h+'</table>';
-    const table=t.querySelector('table'); card.appendChild(t);
-    table._svcs=svcs;
-    if(svcs.length) t.querySelectorAll('tr[data-idx]').forEach(tr=>{
-      const i=Number(tr.dataset.idx);
-      const nameTd=tr.querySelector('.sv-name'), portsTd=tr.querySelector('.sv-ports'), notesTd=tr.querySelector('.sv-notes');
-      nameTd.title=portsTd.title=notesTd.title='double-click to edit';
-      nameTd.ondblclick=()=>inlineCellEdit(nameTd,svcs[i].name||'','name',v=>{v=v.trim(); if(!v){alert('name required');renderSection();return;} svcs[i].name=v; svcSave(cf.id,svcs);});
-      portsTd.ondblclick=()=>inlineCellEdit(portsTd,svcPortsFmt(svcs[i].ports),'e.g. udp/53, tcp/53',v=>{ const p=svcPortsParse(v); if(p===null){alert('bad ports \u2014 use proto/port or proto/lo-hi, comma-separated');renderSection();return;} svcs[i].ports=p; svcSave(cf.id,svcs);});
-      notesTd.ondblclick=()=>inlineCellEdit(notesTd,svcs[i].notes||'','notes',v=>{svcs[i].notes=v.trim(); svcSave(cf.id,svcs);});
-    });
-    // Suggestion rows: same double-click-to-edit gesture as a real row, just
-    // building a fresh entry from the catalog def (with the one edited field
-    // applied) and appending it to the saved list instead of mutating one
-    // already in it. Editing any field — even committing the same value
-    // back unchanged — adds the row here; naming the def in a saved rule
-    // (fwEnsureRuleCatalog) adds it too, unedited, from wherever the rule is
-    // written — this is just the path for editing one first.
-    t.querySelectorAll('tr[data-def-idx]').forEach(tr=>{
-      const def = FW_COMMON_SERVICES[Number(tr.dataset.defIdx)];
-      const draft = () => ({ name: def.name, ports: def.ports.map(p => ({proto:p.proto, port_min:p.port_min, port_max:p.port_max})), notes: def.notes||'' });
-      const promote = apply => { const s = draft(); apply(s); svcSave(cf.id, (table._svcs||[]).concat([s])); };
-      const nameTd=tr.querySelector('.sv-name'), portsTd=tr.querySelector('.sv-ports'), notesTd=tr.querySelector('.sv-notes');
-      nameTd.title=portsTd.title=notesTd.title='double-click to edit';
-      nameTd.ondblclick=()=>inlineCellEdit(nameTd,def.name||'','name',v=>{v=v.trim(); if(!v){alert('name required');renderSection();return;} promote(s=>{ s.name=v; }); });
-      portsTd.ondblclick=()=>inlineCellEdit(portsTd,svcPortsFmt(def.ports),'e.g. udp/53, tcp/53',v=>{ const p=svcPortsParse(v); if(p===null){alert('bad ports \u2014 use proto/port or proto/lo-hi, comma-separated');renderSection();return;} promote(s=>{ s.ports=p; }); });
-      notesTd.ondblclick=()=>inlineCellEdit(notesTd,def.notes||'','notes',v=>{ promote(s=>{ s.notes=v.trim(); }); });
-    });
-    selAllWire(t);
-    table._rowAdd=()=>svcAddRow(table, cf.id);
-    table._rowRemove=()=>{ const sel=selCheckedRows(table); if(!sel.length){alert('tick one or more rows to remove');return;} const keep=svcs.filter((_,i)=>!sel.some(tr=>Number(tr.dataset.idx)===i)); svcSave(cf.id, keep); };
-    c.appendChild(card);
-  }
+  secHint(c, 'Reusable protocol/port bundles a rule can name in its <b>services</b> field \u2014 shared by every network on this node, edited once and usable everywhere. e.g. a "DNS" service carrying udp/53 and tcp/53. Write ports as <i>proto/port</i> or <i>proto/lo\u2011hi</i>, comma\u2011separated; a proto alone (like <i>icmp</i>) matches any port. Double\u2011click a cell to edit; + adds a row, tick rows and \u2212 removes. Every well\u2011known service gravinet knows about is already a real row here \u2014 nothing to add, nothing to click.');
+  const svcs = (state.fwServices || []).map(cloneSvc);
+  const card = $('<div class="card"></div>');
+  const t=$('<div></div>');
+  let h='<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>name</th><th>ports</th><th>notes</th></tr>';
+  svcs.forEach((s,i)=>{ h+='<tr data-idx="'+i+'">'
+    + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
+    + '<td class="sv-name">'+esc(s.name||'')+'</td>'
+    + '<td class="sv-ports">'+esc(svcPortsFmt(s.ports))+'</td>'
+    + '<td class="sv-notes">'+esc(s.notes||'')+'</td></tr>'; });
+  if (!svcs.length) h += '<tr><td colspan="4" class="empty">no services \u2014 click + to add one</td></tr>';
+  t.innerHTML=h+'</table>';
+  const table=t.querySelector('table'); card.appendChild(t);
+  table._svcs=svcs;
+  if(svcs.length) t.querySelectorAll('tr[data-idx]').forEach(tr=>{
+    const i=Number(tr.dataset.idx);
+    const nameTd=tr.querySelector('.sv-name'), portsTd=tr.querySelector('.sv-ports'), notesTd=tr.querySelector('.sv-notes');
+    nameTd.title=portsTd.title=notesTd.title='double-click to edit';
+    nameTd.ondblclick=()=>inlineCellEdit(nameTd,svcs[i].name||'','name',v=>{v=v.trim(); if(!v){alert('name required');renderSection();return;} svcs[i].name=v; svcSave(svcs);});
+    portsTd.ondblclick=()=>inlineCellEdit(portsTd,svcPortsFmt(svcs[i].ports),'e.g. udp/53, tcp/53',v=>{ const p=svcPortsParse(v); if(p===null){alert('bad ports \u2014 use proto/port or proto/lo-hi, comma-separated');renderSection();return;} svcs[i].ports=p; svcSave(svcs);});
+    notesTd.ondblclick=()=>inlineCellEdit(notesTd,svcs[i].notes||'','notes',v=>{svcs[i].notes=v.trim(); svcSave(svcs);});
+  });
+  selAllWire(t);
+  table._rowAdd=()=>svcAddRow(table);
+  table._rowRemove=()=>{ const sel=selCheckedRows(table); if(!sel.length){alert('tick one or more rows to remove');return;} const keep=svcs.filter((_,i)=>!sel.some(tr=>Number(tr.dataset.idx)===i)); svcSave(keep); };
+  c.appendChild(card);
 }
 function cloneSvc(s){ return {name:s.name||'', ports:(s.ports||[]).map(p=>({proto:p.proto||'', port_min:p.port_min||0, port_max:p.port_max||0})), notes:s.notes||''}; }
 function svcPortsFmt(ports){ return (ports||[]).map(p=>{ let s=p.proto||'any'; if(p.port_min){ s+='/'+p.port_min; if(p.port_max && p.port_max!==p.port_min) s+='-'+p.port_max; } return s; }).join(', '); }
 function svcPortsParse(str){ const out=[]; for(let tok of str.split(',')){ tok=tok.trim(); if(!tok) continue; const sl=tok.indexOf('/'); if(sl<0){ out.push({proto:tok.toLowerCase(), port_min:0, port_max:0}); continue; } const proto=tok.slice(0,sl).trim().toLowerCase(); const ps=tok.slice(sl+1).trim(); const dash=ps.indexOf('-'); let lo,hi; if(dash<0){ lo=hi=Number(ps); } else { lo=Number(ps.slice(0,dash)); hi=Number(ps.slice(dash+1)); } if(!proto || Number.isNaN(lo) || Number.isNaN(hi) || lo<0 || hi>65535 || lo>hi) return null; out.push({proto:proto, port_min:lo, port_max:hi}); } return out; }
 function svcPayload(svcs){ return svcs.map(s=>({ name:s.name, ports:(s.ports||[]).map(p=>({proto:p.proto, port_min:p.port_min||0, port_max:p.port_max||0})), notes:s.notes||'' })); }
-async function svcSave(net, svcs){
-  const r=await api('/api/firewall',{method:'POST',body:JSON.stringify({net:net, op:'services', services:svcPayload(svcs)})});
+async function svcSave(svcs){
+  const r=await api('/api/firewall',{method:'POST',body:JSON.stringify({op:'services', services:svcPayload(svcs)})});
   if(!r.ok){ alert((r.body&&r.body.error)||'save failed'); }
   await refresh();
 }
-function svcAddRow(table, net){
+function svcAddRow(table){
   const tr=document.createElement('tr');
   tr.innerHTML='<td class="selcol"></td>'
     + '<td><input class="sva-name" placeholder="name" style="width:110px"></td>'
@@ -4613,7 +4586,7 @@ function svcAddRow(table, net){
     const name=tr.querySelector('.sva-name').value.trim(); if(!name){alert('name required');return;}
     const ports=svcPortsParse(tr.querySelector('.sva-ports').value); if(ports===null){alert('bad ports \u2014 use proto/port or proto/lo-hi, comma-separated');return;}
     const list=(table._svcs||[]).slice(); list.push({name:name, ports:ports, notes:tr.querySelector('.sva-notes').value.trim()});
-    svcSave(net, list);
+    svcSave(list);
   };
 }
 
@@ -4915,7 +4888,7 @@ async function drawUpgrade(host){
   }
   stCard.appendChild($('<div class="hint" style="margin:0 0 10px">' + (u.signing_required
     ? 'Upload a build and its signed manifest (make one with <b>gravinet upgrade sign</b>). The signature is checked before the upload is accepted.'
-    : 'Upload the source tarball and it\u2019s built and applied automatically.'
+    : 'Upload a source archive and it\u2019s built and applied automatically.'
     ) + '</div>'));
 
   const up = $('<div class="tbar"></div>');
@@ -4943,15 +4916,17 @@ async function drawUpgrade(host){
       } finally { stageBtn.disabled = false; stageBtn.textContent = 'Stage'; }
     };
   } else {
-    // Source only -- no binary upload, no format choice, no sniffing needed.
-    // Pick the tarball, click Upgrade: it's built here with go build, staged,
-    // applied, and this node restarts into it, all from one action.
-    const fileIn = $('<input type="file" class="up-file" accept=".tgz,.tar.gz,application/gzip">');
+    // Source only -- no binary upload, no format choice on this side either:
+    // .tgz/.tar.gz and .zip are both accepted, and which one a given upload
+    // is gets sniffed from its content server-side (extractSourceArchive),
+    // not from this accept list or the filename — the accept attribute below
+    // is just what makes the file picker's own dialog filter sensibly.
+    const fileIn = $('<input type="file" class="up-file" accept=".tgz,.tar.gz,.zip,application/gzip,application/zip">');
     const upgradeBtn = $('<button class="sm" style="margin-left:16px">Upgrade</button>');
     up.appendChild(fileIn);
     up.appendChild(upgradeBtn);
     upgradeBtn.onclick = async () => {
-      if (!fileIn.files[0]){ alert('Pick a source .tgz/.tar.gz first.'); return; }
+      if (!fileIn.files[0]){ alert('Pick a source .tgz/.tar.gz or .zip first.'); return; }
       if (!confirm('Upload this, build it, apply it, and restart into it?\n\nNothing is touched until the build succeeds. If the new binary can\u2019t rejoin the mesh, it reverts itself automatically.')) return;
       upgradeBtn.disabled = true; upgradeBtn.textContent = 'Building\u2026';
       try {

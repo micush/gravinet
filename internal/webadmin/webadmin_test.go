@@ -135,18 +135,18 @@ func (s *stubBackend) FirewallAdd(_ uint64, r mesh.FirewallRule, _ int) (mesh.Fi
 }
 func (s *stubBackend) FirewallDelete(uint64, []uint64) error  { s.fwDelCalls++; return nil }
 func (s *stubBackend) FirewallMove(uint64, uint64, int) error { s.fwMoveCalls++; return nil }
-func (s *stubBackend) FirewallObjectsList(uint64) ([]mesh.FirewallObject, error) {
+func (s *stubBackend) FirewallObjectsList() ([]mesh.FirewallObject, error) {
 	return s.fwObjects, nil
 }
-func (s *stubBackend) SetFirewallObjects(_ uint64, o []mesh.FirewallObject) error {
+func (s *stubBackend) SetFirewallObjects(o []mesh.FirewallObject) error {
 	s.fwObjects = o
 	s.fwObjSetCalls++
 	return nil
 }
-func (s *stubBackend) FirewallServicesList(uint64) ([]mesh.FirewallService, error) {
+func (s *stubBackend) FirewallServicesList() ([]mesh.FirewallService, error) {
 	return s.fwServices, nil
 }
-func (s *stubBackend) SetFirewallServices(_ uint64, v []mesh.FirewallService) error {
+func (s *stubBackend) SetFirewallServices(v []mesh.FirewallService) error {
 	s.fwServices = v
 	s.fwSvcSetCalls++
 	return nil

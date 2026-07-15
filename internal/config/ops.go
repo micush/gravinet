@@ -656,6 +656,19 @@ func (c *Config) FirewallSetEnabled(netName string, on bool) error {
 	return nil
 }
 
+// FirewallMarkObjectsCatalogSeeded / FirewallMarkServicesCatalogSeeded record
+// that this node's well-known object/service catalog has been populated
+// once, node-wide (see Config.ObjectsCatalogSeeded's doc comment).
+// Idempotent — safe to call again once already marked.
+func (c *Config) FirewallMarkObjectsCatalogSeeded() error {
+	c.ObjectsCatalogSeeded = true
+	return nil
+}
+func (c *Config) FirewallMarkServicesCatalogSeeded() error {
+	c.ServicesCatalogSeeded = true
+	return nil
+}
+
 // PeerSetEnabled enables or disables a peer locally by node id. Disabling adds
 // the id to the network's local DisabledPeers blocklist (this node refuses to
 // connect to it); enabling removes it. This is local-only and never floods to

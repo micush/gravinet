@@ -87,7 +87,12 @@ func (e *Engine) ReloadRuntime(networkID uint64, spec NetSpec) error {
 		// Catalog first so rules that reference edited objects/services recompile
 		// against the new definitions; setCatalog recompiles the live rulebase,
 		// then ReloadFirewallRules swaps in the (possibly reordered/edited) rules.
-		ns.fw.setCatalog(spec.FirewallObjects, spec.FirewallServices)
+		// The catalog itself is node-global (Options.FirewallObjects' doc
+		// comment) — re-applying the engine's current copy here on every
+		// runtime reload is redundant most of the time but harmless, and
+		// keeps this network in sync if it somehow drifted.
+		objs, svcs := e.firewallCatalogSnapshot()
+		ns.fw.setCatalog(objs, svcs)
 		if err := e.ReloadFirewallRules(networkID, spec.FirewallRules); err != nil {
 			e.log.Debugf("mesh: reload firewall net %016x: %v", networkID, err)
 		}
