@@ -413,7 +413,7 @@ func (s *Server) Start() error {
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 	}
-	s.metrics = newMetricsCollector(s.be)
+	s.metrics = newMetricsCollector(s.be, s.log)
 	go s.metrics.run()
 	go func() {
 		if err := s.httpSrv.ServeTLS(ln, "", ""); err != nil && err != http.ErrServerClosed {

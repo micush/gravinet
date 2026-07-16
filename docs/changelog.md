@@ -37,7 +37,82 @@ assuming it didn't happen.
 
 ---
 
-## v452 — 2026-07-15
+## v453 — 2026-07-15
+
+Second follow-up on the macOS Metrics-tab lag (v452): after that fix, CPU
+now visibly reaches "now" — it's live, moving, right up to the edge — but
+Memory still doesn't, still flat, still stopping short. That's a useful data
+point in itself: v452's fix (running the readers concurrently) helped the
+graph that was slow because *everything* was slow. Memory not improving
+means it isn't "everything is slow" anymore — it's something specific to the
+memory reader.
+
+Tried to get a live `/api/metrics` payload or a DevTools capture to see
+`mem`'s actual timestamps against the real clock and pin this down properly
+rather than guess again; wasn't able to get that this round. Reasoned it out
+from the code instead: CPU and Memory are both written inside the same
+`sample()` call, from the same `now` variable — so on any tick where *both*
+successfully update, they get the exact same timestamp, by construction. The
+only way CPU's newest point can be visibly more recent than Memory's is if
+there have been ticks where CPU's reader (`readCPUTotals`, one subprocess:
+`top`) succeeded while Memory's (`readMemUsedPct`, two subprocesses:
+`sysctl` then `vm_stat`) didn't — which, since a manual `vm_stat; sysctl -n
+hw.memsize` on the actual box runs fine and returns cleanly parseable
+output, points at something about the *daemon's* invocation of these
+specifically that a manual interactive shell doesn't hit — model differences
+in a launchd-managed process (environment, resource limits, concurrent-fork
+timing now that v452 fires 5 subprocess spawns from 5 goroutines at once
+instead of one at a time) are plausible candidates, but this couldn't be
+confirmed without a real Mac or the diagnostic output this round didn't turn
+up.
+
+Rather than guess at which of those and patch that one guess, made the
+collector resilient to the underlying failure mode instead of trying to
+prevent it: if any reader fails on a tick after previously succeeding, the
+affected graph now carries its last known value forward (a new point, at the
+current tick's timestamp, repeating the last good reading) instead of just
+silently skipping that tick. A graph that's briefly flat because its last
+real reading hasn't changed yet is a much smaller problem than one whose
+newest point quietly falls further and further behind "now" with every
+failed tick — which is exactly the shape of what's been reported. This holds
+regardless of what's actually causing the macOS memory reader to fail, so it
+should genuinely help whether or not the reasoning above is exactly right.
+
+Also added logging for this, specifically so the *next* report doesn't have
+to end in "wasn't able to get that this round": every reader now logs (once,
+on the true→false transition — not spammed every 2s) when it starts failing
+after a run of successes, and again when it recovers. That's a plain
+`tail /var/log/gravinet.err.log` away — no browser, no DevTools, no session
+cookie — if this comes back.
+
+**What changed:** `internal/webadmin/metrics.go` — `metricsCollector` tracks
+the last successfully-computed CPU/memory/disk percentage; `sample()` now
+re-appends that value at the current timestamp when the corresponding reader
+fails after previously succeeding, and logs (`Warnf`/`Infof`) on every
+failing/recovered transition. Deliberately not applied to per-interface
+rx/tx throughput — a carried-forward byte rate is a much less honest
+stand-in than a carried-forward percentage, so a `netstat` hiccup still just
+skips that tick there, same as before.
+
+**Verified:** `go build ./...`, `go vet ./...`, and cross-compiles for
+linux/darwin/windows/freebsd/openbsd all clean. Full
+`go test ./internal/webadmin/... -short -race` passes. Added
+`TestSampleCarriesLastValueForwardOnFailure`, which fails a fake memory
+reader after one successful sample and confirms `sample()` keeps appending
+the carried-forward value (with an advancing timestamp) through the failure
+and resumes real readings on recovery — reverting the carry-forward logic
+reproduces the original "stuck at one point forever" shape and fails the
+test (verified by hand). Log-transition messages confirmed present in that
+test's own output.
+
+Have not been able to confirm this actually resolves the report — that
+needs the same real Mac. If the line still doesn't reach "now" after this,
+the `/var/log/gravinet.err.log` tail mentioned above should say why, which
+would move this from reasoning to evidence.
+
+---
+
+
 
 Follow-up report on the Metrics tab, macOS only: at the 1-minute zoom, the
 graph lines visibly stop short of the chart's right edge instead of running

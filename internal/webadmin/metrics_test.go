@@ -14,7 +14,7 @@ import (
 
 func TestMetricsCollectorSample(t *testing.T) {
 	be := &stubBackend{}
-	mc := newMetricsCollector(be)
+	mc := newMetricsCollector(be, logx.Default())
 	// Two samples produce at least one CPU/iface rate point (rates need a delta).
 	mc.sample()
 	mc.sample()
@@ -55,7 +55,7 @@ func TestMetricsCollectorSample(t *testing.T) {
 }
 
 func TestMetricsWindowClamp(t *testing.T) {
-	mc := newMetricsCollector(&stubBackend{})
+	mc := newMetricsCollector(&stubBackend{}, logx.Default())
 	mc.sample()
 	// snapshot() should accept any window; the handler clamps 1..60.
 	if got := mc.snapshot(1); got["sample_interval"].(int) != 2 {
@@ -78,7 +78,7 @@ func TestHandleMetrics(t *testing.T) {
 	srv := New(wcfg, &stubBackend{}, logx.Default())
 	srv.SetConfigPath(cfgPath)
 	// The collector is normally started by Start(); set it up directly for the test.
-	srv.metrics = newMetricsCollector(srv.be)
+	srv.metrics = newMetricsCollector(srv.be, srv.log)
 	srv.metrics.sample()
 	srv.metrics.sample()
 	ts := httptest.NewServer(srv.handler())
@@ -145,12 +145,72 @@ func TestSampleRunsReadersConcurrently(t *testing.T) {
 		return map[string]devCounters{}
 	}
 
-	mc := newMetricsCollector(&stubBackend{})
+	mc := newMetricsCollector(&stubBackend{}, logx.Default())
 	start := time.Now()
 	mc.sample()
 	if elapsed := time.Since(start); elapsed >= 2*delay {
 		t.Fatalf("sample() took %v with two independent %v readers — they must run concurrently, "+
 			"not sequentially, or a slow platform (macOS) falls the same amount behind on every "+
 			"graph at once, not just one", elapsed, delay)
+	}
+}
+
+// A reader that fails after previously succeeding (the shape a flaky macOS
+// subprocess spawn takes — see metrics_darwin.go) used to just skip that
+// tick entirely: no new point, so the graph's newest point fell further and
+// further behind actual wall-clock time with every failed tick, visible at
+// the 1-minute zoom as the line stopping short of "now". sample() now
+// carries the last known value forward instead, so the line keeps reaching
+// "now" through a transient failure — flat while it lasts, but never stale.
+func TestSampleCarriesLastValueForwardOnFailure(t *testing.T) {
+	origMem := readMemUsedPctFn
+	defer func() { readMemUsedPctFn = origMem }()
+
+	memUp := true
+	readMemUsedPctFn = func() (float64, bool) {
+		if memUp {
+			return 55, true
+		}
+		return 0, false
+	}
+
+	mc := newMetricsCollector(&stubBackend{}, logx.Default())
+	mc.sample()
+	if len(mc.mem) != 1 || mc.mem[0].V != 55 {
+		t.Fatalf("expected one 55%% point after the first successful sample, got %v", mc.mem)
+	}
+	firstT := mc.mem[0].T
+
+	// The reader starts failing. Without carry-forward, mem would stay at
+	// length 1 forever; with it, a new point still lands every tick, just
+	// holding the last known value.
+	memUp = false
+	time.Sleep(1100 * time.Millisecond) // force a distinct Unix-second timestamp
+	mc.sample()
+	mc.sample()
+
+	if len(mc.mem) != 3 {
+		t.Fatalf("expected sample() to keep appending (carrying the last value forward) through "+
+			"a reader failure, got %d point(s): %v", len(mc.mem), mc.mem)
+	}
+	for i, p := range mc.mem {
+		if p.V != 55 {
+			t.Fatalf("point %d = %v, want carried-forward value 55", i, p)
+		}
+	}
+	if mc.mem[len(mc.mem)-1].T <= firstT {
+		t.Fatalf("carried-forward point's timestamp %d did not advance past the first point's %d — "+
+			"the line wouldn't actually reach \"now\"", mc.mem[len(mc.mem)-1].T, firstT)
+	}
+
+	// And recovering should resume real readings, not get stuck on the
+	// carried-forward value.
+	memUp = true
+	time.Sleep(1100 * time.Millisecond)
+	mc.sample()
+	if got := mc.mem[len(mc.mem)-1].V; got != 55 {
+		// (55 is also the "real" reading here by construction; this mainly
+		// guards against a future change accidentally freezing lastMemPct.)
+		t.Fatalf("expected a real reading after recovery, got %v", got)
 	}
 }

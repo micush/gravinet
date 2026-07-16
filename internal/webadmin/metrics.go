@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"gravinet/internal/logx"
 )
 
 // Sampling cadence and retention for the Info -> Metrics graphs. 2s sampling
@@ -44,7 +46,8 @@ type ifaceMetrics struct {
 // value, they return ok=false and the collector just reports that series as
 // unavailable rather than erroring.
 type metricsCollector struct {
-	be Backend
+	be  Backend
+	log *logx.Logger // may be nil in tests; always nil-checked before use
 
 	mu     sync.Mutex
 	cpu    []metricPoint
@@ -63,12 +66,48 @@ type metricsCollector struct {
 	lastCPUTotal, lastCPUIdle uint64
 	haveCPU                   bool
 
+	// Last successfully-computed percentage for cpu/mem/disk, carried
+	// forward (re-appended at the current tick's timestamp) when a reader
+	// has a transient failure after previously succeeding — see sample()'s
+	// comment on why a stalled graph is worse than a flat-but-current one.
+	// Deliberately not done for per-interface rx/tx: a "carried forward"
+	// rate is a much less honest stand-in for a byte counter than a
+	// carried-forward percentage is for CPU/mem/disk, so a netstat/readNetDev
+	// hiccup still just skips that tick for interface throughput.
+	lastCPUPct, lastMemPct, lastDiskPct float64
+	haveCPUPct, haveMemPct, haveDiskPct bool
+	cpuFailing, memFailing, diskFailing bool
+	uptimeFailing                       bool
+
 	available bool // whether /proc metrics could be read at all
 	stop      chan struct{}
 }
 
-func newMetricsCollector(be Backend) *metricsCollector {
-	return &metricsCollector{be: be, ifaces: map[string]*ifaceMetrics{}, stop: make(chan struct{})}
+func newMetricsCollector(be Backend, log *logx.Logger) *metricsCollector {
+	return &metricsCollector{be: be, log: log, ifaces: map[string]*ifaceMetrics{}, stop: make(chan struct{})}
+}
+
+// noteReaderHealth logs (Warnf, then Infof on recovery) only on the
+// true/false transition of a reader's ok result, not on every tick — so a
+// reader that's simply unsupported on this platform (always ok=false) never
+// logs at all, matching the existing "report unavailable, don't error"
+// design, while one that starts failing after a run of successes — exactly
+// what carrying a value forward would otherwise mask silently — shows up in
+// the daemon's own log with nothing more than a restart and a tail needed to
+// see it.
+func (m *metricsCollector) noteReaderHealth(name string, ok bool, failing *bool) {
+	if !ok && !*failing {
+		*failing = true
+		if m.log != nil {
+			m.log.Warnf("webadmin: %s metrics reader failed after previously succeeding — "+
+				"that graph will hold its last known value until it recovers", name)
+		}
+	} else if ok && *failing {
+		*failing = false
+		if m.log != nil {
+			m.log.Infof("webadmin: %s metrics reader recovered", name)
+		}
+	}
 }
 
 func (m *metricsCollector) run() {
@@ -152,29 +191,50 @@ func (m *metricsCollector) sample() {
 		if m.haveCPU && cpuTotal > m.lastCPUTotal {
 			dt := cpuTotal - m.lastCPUTotal
 			di := cpuIdle - m.lastCPUIdle
-			busy := float64(dt-di) / float64(dt) * 100
-			m.cpu = appendTrim(m.cpu, metricPoint{T: now, V: clampPct(busy)}, cutoff)
+			busy := clampPct(float64(dt-di) / float64(dt) * 100)
+			m.cpu = appendTrim(m.cpu, metricPoint{T: now, V: busy}, cutoff)
+			m.lastCPUPct, m.haveCPUPct = busy, true
 		}
 		m.lastCPUTotal, m.lastCPUIdle, m.haveCPU = cpuTotal, cpuIdle, true
+	} else if m.haveCPUPct {
+		// The reader failed this tick after previously succeeding: keep the
+		// line moving through "now" on its last known value rather than
+		// stalling — see this function's doc comment for why a graph that
+		// silently stops advancing is worse than one that's briefly flat.
+		m.cpu = appendTrim(m.cpu, metricPoint{T: now, V: m.lastCPUPct}, cutoff)
 	}
+	m.noteReaderHealth("CPU", cpuOK, &m.cpuFailing)
 
 	// Memory: used percentage from MemTotal/MemAvailable.
 	if memOK {
 		m.available = true
-		m.mem = appendTrim(m.mem, metricPoint{T: now, V: clampPct(memPct)}, cutoff)
+		v := clampPct(memPct)
+		m.mem = appendTrim(m.mem, metricPoint{T: now, V: v}, cutoff)
+		m.lastMemPct, m.haveMemPct = v, true
+	} else if m.haveMemPct {
+		m.mem = appendTrim(m.mem, metricPoint{T: now, V: m.lastMemPct}, cutoff)
 	}
+	m.noteReaderHealth("memory", memOK, &m.memFailing)
 
 	// Disk: used percentage of the root filesystem (/ on Unix, C:\ on Windows).
 	if diskOK {
 		m.available = true
-		m.disk = appendTrim(m.disk, metricPoint{T: now, V: clampPct(diskPct)}, cutoff)
+		v := clampPct(diskPct)
+		m.disk = appendTrim(m.disk, metricPoint{T: now, V: v}, cutoff)
+		m.lastDiskPct, m.haveDiskPct = v, true
+	} else if m.haveDiskPct {
+		m.disk = appendTrim(m.disk, metricPoint{T: now, V: m.lastDiskPct}, cutoff)
 	}
+	m.noteReaderHealth("disk", diskOK, &m.diskFailing)
 
 	// System uptime: latest value only, no history (see the struct field doc).
+	// Nothing meaningful to carry forward here — it just stops advancing
+	// until the reader recovers, same as before.
 	if uptimeOK {
 		m.available = true
 		m.uptimeSecs, m.haveUptime = uptimeSecs, true
 	}
+	m.noteReaderHealth("uptime", uptimeOK, &m.uptimeFailing)
 
 	// Per-interface throughput (bytes/sec) for the live overlay interfaces.
 	live := map[string]bool{}
