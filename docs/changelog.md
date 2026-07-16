@@ -37,6 +37,26 @@ assuming it didn't happen.
 
 ---
 
+## v466 — 2026-07-16
+
+Copy edit, no behavior change: removed every em-dash from the web-admin UI
+strings in `internal/webadmin/ui.go`. This started with the **Log level**
+setting description (which also had a rendering bug: that one line encoded the
+dash as `\\u2014`, a double backslash, so it showed the literal text
+`\u2014` in the browser instead of a dash) and then swept the remaining 82
+occurrences across the file.
+
+Prose dashes were reworded rather than deleted, so grammar stays intact:
+parenthetical asides became commas or parentheses, appositives and
+elaborations became colons, and clause breaks became semicolons or full
+stops. Decorative placeholders like the `\u2014 disabled \u2014` endpoint text
+were unwrapped to just the label (`disabled`, `connecting\u2026`). The five
+empty-cell "no value" glyphs (peer notes, gateway, iface, overlay, and the
+generic key/value renderer) were switched from an em-dash to an en-dash
+(`\u2013`), the conventional mark for absent tabular data; the three
+pre-existing en-dashes elsewhere are numeric ranges and were left alone. No
+logic, selectors, or string quoting changed.
+
 ## v465 — 2026-07-16
 
 The actual terminal-stuck bug, finally found — from a goroutine dump of a

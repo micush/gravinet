@@ -149,7 +149,7 @@ const indexHTML = `<!doctype html>
   /* Mesh > Peers only has target/state/overlay left after Monitor > Mesh
      Peers took the rest, so it gets its own wider proportions instead of
      reusing c-target/c-state (still sized for the monitor page's fuller,
-     7-column layout) \u2014 otherwise the operate table would sit cramped on
+     7-column layout); otherwise the operate table would sit cramped on
      the left with one oversized overlay column soaking up all the room the
      removed columns freed up. */
   table.peers-table col.c-target-op { width:38%; }
@@ -393,7 +393,7 @@ function setTheme(t){ document.documentElement.setAttribute('data-theme', t); tr
 // download can be larger than the generic proxy response cap).
 const LOCAL_API = ['/api/proxy','/api/cluster','/api/managed','/api/manager','/api/shell/setting','/api/login','/api/logout','/api/ping',
   // Every /api/upgrade/* endpoint always runs on the node you are logged into
-  // \u2014 never on whichever peer happens to be selected in the header.
+  // never on whichever peer happens to be selected in the header.
   // handleProxy and each handler's own upgradeLocalOnly check enforce this
   // server-side too (that is the actual boundary; this is just the client-side
   // half, so the browser doesn't even try). Upgrades are local-only outright:
@@ -566,7 +566,7 @@ function showLogin(msg) {
 // here — they're pinned in the rail's foot area, same as parapet's settings tab.
 const NAV_GROUPS = [
   { name:'mesh', items: [
-    ['networks', 'define overlay networks \u2014 subnets, addressing, MTU'],
+    ['networks', 'define overlay networks: subnets, addressing, MTU'],
     ['keys', 'cryptographic keys used to authenticate this network\u2019s peers'],
     ['seeds', 'bootstrap addresses used to find and reconnect to peers'],
     ['peers', 'enable, disable, or ban nodes known on this network'],
@@ -595,7 +595,7 @@ const NAV_GROUPS = [
     ['logs', 'the daemon\u2019s recent log output'],
   ]},
   { name:'info', items: [
-    ['upgrade', 'check and apply a new gravinet binary on this node \u2014 local only, no peer can trigger this'],
+    ['upgrade', 'check and apply a new gravinet binary on this node; local only, no peer can trigger this'],
     ['readme', 'project documentation'],
     ['getting-started', 'the full onboarding walkthrough'],
     ['license', 'license information'],
@@ -822,8 +822,8 @@ function buildSearchIndex(){
     ['cluster-manager-row', 'Manager mode', 'Let this node browse and remotely configure other Managed-mode peers in the cluster.'],
     ['shell-allow-row', 'Remote shell', 'Let a Manager peer open a real OS shell on this node through the web admin.'],
     ['routeadv-row', 'Route advertisement interval', 'How often this node re-advertises the routes it originates.'],
-    ['udpport-row', 'UDP port', 'The UDP port(s) this node listens on \u2014 comma-separated for more than one, so a peer behind a restrictive firewall can reach it on a well-known port too.'],
-    ['tcpport-row', 'TCP port', 'The TCP port(s) this node listens on for the TLS fallback \u2014 comma-separated for more than one.'],
+    ['udpport-row', 'UDP port', 'The UDP port(s) this node listens on; comma-separated for more than one, so a peer behind a restrictive firewall can reach it on a well-known port too.'],
+    ['tcpport-row', 'TCP port', 'The TCP port(s) this node listens on for the TLS fallback; comma-separated for more than one.'],
     ['natstate-row', 'NAT state timeout', 'How long an idle translated NAT connection is remembered before its mapping is reclaimed.'],
     ['geoip-row', 'Geo-IP lookups', 'Show an approximate location on a peer or seed\u2019s info panel, looked up from a third-party service (ipapi.co). geoip'],
   ];
@@ -2153,7 +2153,7 @@ function secSettings(c) {
   // saying so rather than a read-only peer value.
   const sh = $('<div class="settings-row" id="shell-allow-row"></div>');
   const shDesc = state.shellSupported
-    ? 'Let a Manager peer open a real OS shell on this node through the web admin. Off by default: unlike the rest of Managed mode\u2019s API surface, this hands out a full shell as this daemon\u2019s own user (normally root). Every session is transcript-logged. Local-only \u2014 never remotely toggleable, even by an authorized Manager peer. This node restarts immediately to apply a change here.'
+    ? 'Let a Manager peer open a real OS shell on this node through the web admin. Off by default: unlike the rest of Managed mode\u2019s API surface, this hands out a full shell as this daemon\u2019s own user (normally root). Every session is transcript-logged. Local-only; never remotely toggleable, even by an authorized Manager peer. This node restarts immediately to apply a change here.'
     : 'Not available on this platform/architecture yet.';
   const shLabel = $('<div><div class="settings-label">Remote shell</div><div class="settings-desc" id="shell-allow-desc">'+esc(shDesc)+'</div></div>');
   const shSw = $('<label class="sw"><input type="checkbox" id="shell-allow-cb"'+(state.shellSupported?'':' disabled')+'><span class="sw-slider"></span></label>');
@@ -2178,7 +2178,7 @@ function secSettings(c) {
   // proxied like any other setting, so a Manager can raise a *peer's* level too,
   // which is the case that actually needs it.
   const lg = $('<div class="settings-row"></div>');
-  const lgLabel = $('<div><div class="settings-label">Log level</div><div class="settings-desc">How much this node logs. <b>debug</b> is the one worth knowing about: most <i>rejection</i> paths in the mesh \\u2014 a replayed handshake, a clock-skew mismatch, a handshake claiming our own node id, a failed TLS dial \\u2014 log only at debug. At <b>info</b>, a node that is receiving handshakes and refusing every one of them looks exactly like a node receiving nothing at all. Applied immediately; no restart, no sessions dropped. Leave it on info in normal operation \\u2014 debug is chatty.</div></div>');
+  const lgLabel = $('<div><div class="settings-label">Log level</div><div class="settings-desc">How much this node logs. <b>debug</b> is the one worth knowing about. Most <i>rejection</i> paths in the mesh log only at debug: a replayed handshake, a clock-skew mismatch, a handshake claiming our own node id, a failed TLS dial. At <b>info</b>, a node that is receiving handshakes and refusing every one of them looks exactly like a node receiving nothing at all. Applied immediately; no restart, no sessions dropped. Leave it on info in normal operation; debug is chatty.</div></div>');
   const lgSel = $('<select class="sel" id="loglevel-sel"><option value="error">error</option><option value="warn">warn</option><option value="info">info</option><option value="debug">debug</option></select>');
   lgSel.value = state.logLevel || 'info';
   lgSel.onchange = async () => {
@@ -2229,7 +2229,7 @@ function secSettings(c) {
   c.appendChild(card); card = $('<div class="card"></div>');
   card.appendChild($('<h3>Liveness</h3>'));
   const ka = $('<div class="settings-row" id="keepalive-row"></div>');
-  const kaLabel = $('<div><div class="settings-label">Keepalive interval</div><div class="settings-desc">How often (seconds) this node pings each connected peer to hold NAT mappings open and measure round-trip time (used for relay selection). Lower values detect a dead link faster \u2014 see peer timeout below \u2014 at the cost of more background traffic. 0 uses the default (10s).</div></div>');
+  const kaLabel = $('<div><div class="settings-label">Keepalive interval</div><div class="settings-desc">How often (seconds) this node pings each connected peer to hold NAT mappings open and measure round-trip time (used for relay selection). Lower values detect a dead link faster (see peer timeout below), at the cost of more background traffic. 0 uses the default (10s).</div></div>');
   const kaBox = $('<div style="display:flex;gap:6px;align-items:center"></div>');
   const kaInput = $('<input type="text" inputmode="numeric" id="keepalive-input" style="width:80px">');
   kaBox.appendChild(kaInput);
@@ -2249,7 +2249,7 @@ function secSettings(c) {
   kaInput.onkeydown = (e) => { if (e.key === 'Enter') { kaInput.blur(); } };
 
   const pt = $('<div class="settings-row" id="peertimeout-row"></div>');
-  const ptLabel = $('<div><div class="settings-label">Peer timeout</div><div class="settings-desc">How long (seconds) a peer may go silent before its session is dropped \u2014 this is what governs how long a peer that\u2019s actually gone still shows as connected in the peers table. 0 uses the default (20s). Clamped up to the keepalive interval above if set lower: timing a session out before a single keepalive round trip could complete would just cause constant reconnection thrashing, not faster detection.</div></div>');
+  const ptLabel = $('<div><div class="settings-label">Peer timeout</div><div class="settings-desc">How long (seconds) a peer may go silent before its session is dropped. This is what governs how long a peer that\u2019s actually gone still shows as connected in the peers table. 0 uses the default (20s). Clamped up to the keepalive interval above if set lower: timing a session out before a single keepalive round trip could complete would just cause constant reconnection thrashing, not faster detection.</div></div>');
   const ptBox = $('<div style="display:flex;gap:6px;align-items:center"></div>');
   const ptInput = $('<input type="text" inputmode="numeric" id="peertimeout-input" style="width:80px">');
   ptBox.appendChild(ptInput);
@@ -2271,13 +2271,13 @@ function secSettings(c) {
   c.appendChild(card); card = $('<div class="card"></div>');
   card.appendChild($('<h3>Underlay</h3>'));
   card.appendChild(buildPortListRow('udpport', 'UDP port',
-    'The UDP port(s) this node listens on \u2014 comma-separated for more than one. The first is the primary: used for outbound and advertised to peers. Changing it applies immediately \u2014 the node rebinds and connected peers migrate automatically; the old port keeps serving inbound for a couple of minutes so nothing drops. Peers that only know this node by a fixed seed address will need that seed updated if the primary changes. Any further ports are extra, inbound-only listeners \u2014 e.g. 65432, 443, 80 \u2014 so a peer behind a restrictive firewall can still reach this node; best-effort, a port that\u2019s privileged or already in use is skipped, not rejected. Enter <b>-</b> to turn UDP off entirely and rely on the TCP fallback below \u2014 refused while that\u2019s also off, since the node needs at least one way to be reached.',
+    'The UDP port(s) this node listens on; comma-separated for more than one. The first is the primary: used for outbound and advertised to peers. Changing it applies immediately: the node rebinds and connected peers migrate automatically; the old port keeps serving inbound for a couple of minutes so nothing drops. Peers that only know this node by a fixed seed address will need that seed updated if the primary changes. Any further ports are extra, inbound-only listeners (e.g. 65432, 443, 80), so a peer behind a restrictive firewall can still reach this node; best-effort, a port that\u2019s privileged or already in use is skipped, not rejected. Enter <b>-</b> to turn UDP off entirely and rely on the TCP fallback below; refused while that\u2019s also off, since the node needs at least one way to be reached.',
     [state.primaryPort, ...(state.extraUDPPorts||[])], '/api/port',
     (ports, disabled) => { state.primaryPort = disabled ? 0 : ports[0]; state.extraUDPPorts = disabled ? [] : ports.slice(1); },
     state.primaryPort === 0));
 
   card.appendChild(buildPortListRow('tcpport', 'TCP port',
-    'The TCP port(s) this node listens on for the TLS fallback, used to reach the mesh when UDP is blocked \u2014 comma-separated for more than one. The first defaults to the same number as the UDP port (65432); set it to anything (e.g. 443) to make the fallback look like ordinary HTTPS. Changing it applies immediately \u2014 the node rebinds the fallback listener and dials peers on it. Keep it the same on every node in a mesh. Any further ports are extra fallback listeners, best-effort the same way as extra UDP ports. Enter <b>-</b> to turn the TCP fallback off entirely \u2014 refused while UDP above is also off.',
+    'The TCP port(s) this node listens on for the TLS fallback, used to reach the mesh when UDP is blocked; comma-separated for more than one. The first defaults to the same number as the UDP port (65432); set it to anything (e.g. 443) to make the fallback look like ordinary HTTPS. Changing it applies immediately: the node rebinds the fallback listener and dials peers on it. Keep it the same on every node in a mesh. Any further ports are extra fallback listeners, best-effort the same way as extra UDP ports. Enter <b>-</b> to turn the TCP fallback off entirely; refused while UDP above is also off.',
     [state.tcpPort, ...(state.extraTCPPorts||[])], '/api/tcpport',
     (ports, disabled) => { state.tcpFallbackDisabled = disabled; if (!disabled) { state.tcpPort = ports[0]; state.extraTCPPorts = ports.slice(1); } },
     state.tcpFallbackDisabled));
@@ -2307,7 +2307,7 @@ function secSettings(c) {
   c.appendChild(card); card = $('<div class="card"></div>');
   card.appendChild($('<h3>Privacy</h3>'));
   const gi = $('<div class="settings-row" id="geoip-row"></div>');
-  const giLabel = $('<div><div class="settings-label">Geo-IP lookups</div><div class="settings-desc">Show an approximate location (city/region/country) and a map on a peer or seed\u2019s info (\ud83d\udec8) panel, looked up from its public endpoint address. On by default, alongside that same panel\u2019s forward/reverse DNS and WHOIS. Unlike those \u2014 which use the internet\u2019s own decentralized lookup protocols \u2014 this sends the address to one specific third-party service (ipapi.co) over HTTPS, so turn it off here if you\u2019d rather this node never contact one. This node restarts immediately to apply a change here.</div></div>');
+  const giLabel = $('<div><div class="settings-label">Geo-IP lookups</div><div class="settings-desc">Show an approximate location (city/region/country) and a map on a peer or seed\u2019s info (\ud83d\udec8) panel, looked up from its public endpoint address. On by default, alongside that same panel\u2019s forward/reverse DNS and WHOIS. Unlike those, which use the internet\u2019s own decentralized lookup protocols, this sends the address to one specific third-party service (ipapi.co) over HTTPS, so turn it off here if you\u2019d rather this node never contact one. This node restarts immediately to apply a change here.</div></div>');
   const giSw = $('<label class="sw"><input type="checkbox" id="geoip-toggle-cb"><span class="sw-slider"></span></label>');
   const giCb = giSw.querySelector('input');
   giCb.checked = state.geoipLookup;
@@ -2401,7 +2401,7 @@ async function exemptReload(table){
   [...table.rows].forEach((row,i) => { if(i>0) row.remove(); });
   if(!list.length){
     const tr = document.createElement('tr');
-    tr.innerHTML = '<td colspan="4" class="empty">no exemptions \u2014 every protocol is subject to the rules</td>';
+    tr.innerHTML = '<td colspan="4" class="empty">no exemptions; every protocol is subject to the rules</td>';
     tb.appendChild(tr); return;
   }
   list.forEach((e,i) => {
@@ -2496,7 +2496,7 @@ function secKeys(c) {
         + '<td class="kstate" data-slot="'+k.slot+'" data-en="'+(k.enabled?1:0)+'" title="double-click to toggle">'+st+'</td>'
         + '<td class="keycell" data-slot="'+k.slot+'" title="double-click to replace"><span class="kval masked" data-slot="'+k.slot+'">••••••••••••••••</span></td>'
         + '<td class="kdist"><input type="checkbox" class="dist-cb" data-slot="'+k.slot+'"'+(k.enabled?'':' disabled')+(k.distributed?' checked':'')
-          + ' title="'+(k.enabled?'tick to push this key to every peer currently connected on this network; untick to stop managing it together (peers keep their own copy, unaffected) \u2014 deleting a distributed key is what removes it from every peer':'enable this key first')+'"></td>'
+          + ' title="'+(k.enabled?'tick to push this key to every peer currently connected on this network; untick to stop managing it together (peers keep their own copy, unaffected). Deleting a distributed key is what removes it from every peer':'enable this key first')+'"></td>'
         + '<td class="kexp" data-slot="'+k.slot+'" data-iso="'+esc(k.expires||'')+'" title="double-click to set an expiry date/time">'+expiryDisp(k.expires)+'</td>'
         + '<td class="knotes" data-slot="'+k.slot+'" title="double-click to edit — local-only, never pushed to peers even when distributed">'+esc(k.notes||'')+'</td></tr>';
     }
@@ -2595,7 +2595,7 @@ function secKeys(c) {
     const deleteFn = async () => { const s=needSet(); if(!s) return;
       const anyDist = s.some(slot => bySlot[slot] && bySlot[slot].distributed);
       const msg = 'Delete '+s.length+' key'+(s.length>1?'s':'')+' on "'+cf.name+'"?'
-        + (anyDist ? ' This includes a distributed key \u2014 it will be retracted from every peer holding a copy, not just removed here.' : '');
+        + (anyDist ? ' This includes a distributed key; it will be retracted from every peer holding a copy, not just removed here.' : '');
       if (!confirm(msg)) return;
       for (const slot of s) await api('/api/key',{method:'POST',body:JSON.stringify({op:'delete',net:cf.name,slot})});
       selection.keys.clear(); refresh(); };
@@ -2787,7 +2787,7 @@ function perNet(c, render) {
   }
 }
 
-// peerRowsForNet computes the peer rows for network n \u2014 connected peers,
+// peerRowsForNet computes the peer rows for network n: connected peers,
 // locally-disabled peers (pulled from n.disabled_peers so they can still be
 // found), and peers just re-enabled but not yet reconnected. Shared by
 // secPeers (mesh > peers, for operating them) and infoMeshPeers (monitor >
@@ -2860,7 +2860,7 @@ function peerRowsForNet(n) {
     const id = d.NodeID||d.node_id||'';
     disabledSet.add(id);
     if (seen.has(id)) continue;
-    rows.push({ id, host:d.Hostname||d.hostname||'', overlay:'', endpoint:'\u2014 disabled \u2014', relayed:false, disabled:true, notes:d.Notes||d.notes||'' });
+    rows.push({ id, host:d.Hostname||d.hostname||'', overlay:'', endpoint:'disabled', relayed:false, disabled:true, notes:d.Notes||d.notes||'' });
   }
   // Peers the user just re-enabled but that haven't reconnected yet: keep them
   // visible as "connecting" rather than vanishing until the session forms. The
@@ -2869,7 +2869,7 @@ function peerRowsForNet(n) {
   const pend = state.pendingEnable[n.id] || {};
   for (const id of Object.keys(pend)) {
     if (seen.has(id) || disabledSet.has(id)) { delete pend[id]; continue; }
-    rows.push({ id, host:pend[id].host||'', overlay:'', endpoint:'\u2014 connecting\u2026 \u2014', relayed:false, disabled:false, pending:true });
+    rows.push({ id, host:pend[id].host||'', overlay:'', endpoint:'connecting\u2026', relayed:false, disabled:false, pending:true });
   }
   state.pendingEnable[n.id] = pend;
   // Sort by what's actually shown (nodeCell puts the hostname first, the id
@@ -2886,17 +2886,17 @@ function peerRowsForNet(n) {
 }
 
 function secPeers(c) {
-  c.appendChild($('<div class="hint" style="margin:0 0 10px">Peers connected to this node, grouped by network. This node is listed too (<b>this node</b>) \u2014 tickable to look up or shell into, but not disabled, edited, or banned. Double-click a peer to disable it; double-click <b>notes</b> for a local, permanent note on its node id (auto-filled from a matching seed\'s note on first connect, unless you\'ve set your own). Tick rows and Ban to block mesh-wide, or tick one and \ud83d\udec8 for DNS/WHOIS. See Monitor \u2192 mesh peers for connection health and transport detail.</div>'));
+  c.appendChild($('<div class="hint" style="margin:0 0 10px">Peers connected to this node, grouped by network. This node is listed too (<b>this node</b>), tickable to look up or shell into, but not disabled, edited, or banned. Double-click a peer to disable it; double-click <b>notes</b> for a local, permanent note on its node id (auto-filled from a matching seed\'s note on first connect, unless you\'ve set your own). Tick rows and Ban to block mesh-wide, or tick one and \ud83d\udec8 for DNS/WHOIS. See Monitor \u2192 mesh peers for connection health and transport detail.</div>'));
   if (state.nat && state.nat.class && state.nat.class !== 'unknown') {
     const m = {
       open: ['directly reachable (no NAT)', 'on'],
-      cone: ['behind NAT \u2014 consistent mapping (hole-punchable)', 'on'],
+      cone: ['behind NAT, consistent mapping (hole-punchable)', 'on'],
       nat: ['behind NAT', 'on'],
-      symmetric: ['behind NAT \u2014 symmetric mapping (a relay may be needed)', 'off']
+      symmetric: ['behind NAT, symmetric mapping (a relay may be needed)', 'off']
     };
     const info = m[state.nat.class] || [state.nat.class, 'on'];
     let txt = 'This node: <span class="'+info[1]+'">'+esc(info[0])+'</span>';
-    if (state.nat.public) txt += ' \u2014 public endpoint <b>'+esc(state.nat.public)+'</b>';
+    if (state.nat.public) txt += ', public endpoint <b>'+esc(state.nat.public)+'</b>';
     c.appendChild($('<div class="card" style="margin:0 0 12px">'+txt+'</div>'));
   }
   perNet(c, (card, n) => {
@@ -2939,7 +2939,7 @@ function secPeers(c) {
         + '<td>'+nodeCell(p.host,p.id,n.id,p.endpoint)+'</td><td>'+st+'</td>'
         + ovCell+'<td title="'+(p.self?'this node\'s own observed public address (same as the NAT summary above)':(p.relayed?'no direct underlay address — reached through the relay named here':'observed underlay address — for a peer behind NAT this is its public mapping as seen from here'))+'">'+esc(p.endpointText)+'</td>'
         + (p.self
-          ? '<td class="hint" title="a local note on your own node\'s id isn\'t meaningful here">\u2014</td>'
+          ? '<td class="hint" title="a local note on your own node\'s id isn\'t meaningful here">\u2013</td>'
           : '<td class="peer-notes" data-peer-notes="'+esc(p.id)+'" title="double-click to edit — local-only, never sent to the peer">'+esc(p.notes||'')+'</td>')
         + '</tr>';
     }
@@ -3000,7 +3000,7 @@ function secPeers(c) {
       const ids = selectedIn('peers', n.id);
       if (!ids.length){ alert('select one or more peers first'); return; }
       const self = rows.find(x => x.self);
-      if (self && ids.includes(self.id)){ alert('can\'t ban this node itself \u2014 untick "this node" first'); return; }
+      if (self && ids.includes(self.id)){ alert('can\'t ban this node itself; untick "this node" first'); return; }
       for (const id of ids) await api('/api/ban',{method:'POST',body:JSON.stringify({net:n.id,node:id,notes:'banned via admin'})});
       selection.peers.clear(); refresh();
     }},
@@ -3051,7 +3051,7 @@ function peerOverlayEdit(td, n, p){
     const v = inp.value.trim();
     if (v === cur){ refresh(); return; }
     const who = p.host || p.id.slice(0,8);
-    if (!confirm('Change '+who+'\'s overlay address for "'+nameOf(n.id)+'"?\n\nThis saves on '+who+'\'s own node now but takes effect on its next restart \u2014 not this node\'s.')){ refresh(); return; }
+    if (!confirm('Change '+who+'\'s overlay address for "'+nameOf(n.id)+'"?\n\nThis saves on '+who+'\'s own node now but takes effect on its next restart, not this node\'s.')){ refresh(); return; }
     // Which family to submit under: a typed address's own notation is
     // unambiguous (contains ':' => v6). "none" (clearing) carries no family
     // of its own, so that targets whichever family the value being cleared
@@ -3065,7 +3065,7 @@ function peerOverlayEdit(td, n, p){
     if (targetsV6) body.address6 = v; else body.address4 = v;
     const r = await api('/api/network', { method:'POST', body: JSON.stringify(body) }, p.id);
     if (!r.ok){ alert((r.body && r.body.error) || 'save failed'); refresh(); return; }
-    alert('Saved \u2014 takes effect next time '+who+' restarts.');
+    alert('Saved; takes effect next time '+who+' restarts.');
     refresh();
   };
   inp.onkeydown = e => {
@@ -3096,8 +3096,8 @@ function infoMeshPeers(c) {
       let xport = '';
       if (!p.disabled && !p.pending && !p.self) {
         const proto = (p.transport==='tcp')
-          ? '<span class="off" title="UDP to this peer is blocked or failing \u2014 running over the TCP/TLS fallback">tcp</span>'
-          : '<span class="on" title="UDP \u2014 the normal transport">udp</span>';
+          ? '<span class="off" title="UDP to this peer is blocked or failing; running over the TCP/TLS fallback">tcp</span>'
+          : '<span class="on" title="UDP, the normal transport">udp</span>';
         const mtu = p.mtu ? (p.mtu+' B') : 'probing';
         const sd = p.fsdrop||0, rd = p.rdrop||0;
         const health = (sd+rd > 0)
@@ -3331,7 +3331,7 @@ function portLabel(min, max){ if(!min && !max) return 'any'; if(min===max) retur
 // effect on the next restart.
 function secSeeds(c, nets){
   const cfgs = state.cfg;
-  c.appendChild($('<div class="hint" style="margin:0 0 10px">Seed addresses (host, host:port, or host:port,port,... for more than one) this node dials to find each network \u2014 persist whether or not a peer is connected. <b>udp</b> bootstraps over UDP with automatic TCP/TLS fallback; <b>tcp</b> goes straight over TCP/TLS, for cold-starting when UDP\u2019s blocked entirely. Double-click <b>address</b>, <b>transport</b>, or <b>notes</b> to edit. + to add (live), tick rows and \u2212 to remove (next restart), or tick one and \ud83d\udec8 for DNS/WHOIS.</div>'));
+  c.appendChild($('<div class="hint" style="margin:0 0 10px">Seed addresses (host, host:port, or host:port,port,... for more than one) this node dials to find each network; persist whether or not a peer is connected. <b>udp</b> bootstraps over UDP with automatic TCP/TLS fallback; <b>tcp</b> goes straight over TCP/TLS, for cold-starting when UDP\u2019s blocked entirely. Double-click <b>address</b>, <b>transport</b>, or <b>notes</b> to edit. + to add (live), tick rows and \u2212 to remove (next restart), or tick one and \ud83d\udec8 for DNS/WHOIS.</div>'));
   if (!cfgs.length){ emptyCard(c, 'no networks — create one under Networks first'); return; }
   for (const cf of cfgs){
     const card = $('<div class="card"></div>');
@@ -3511,7 +3511,7 @@ function geoIPSectionHTML(d){
     const bbox = [lon-box, lat-box, lon+box, lat+box].join(',');
     const marker = lat+','+lon;
     const largeUrl = 'https://www.openstreetmap.org/?mlat='+encodeURIComponent(lat)+'&mlon='+encodeURIComponent(lon)+'#map=10/'+encodeURIComponent(lat)+'/'+encodeURIComponent(lon);
-    out += '<div class="hint" style="margin:4px 0 6px">approximate \u2014 IP geolocation is usually accurate to city level at best, sometimes far less.</div>';
+    out += '<div class="hint" style="margin:4px 0 6px">approximate; IP geolocation is usually accurate to city level at best, sometimes far less.</div>';
     out += '<iframe style="width:100%;height:220px;border:1px solid var(--line);border-radius:6px" loading="lazy" referrerpolicy="no-referrer"'
          + ' src="https://www.openstreetmap.org/export/embed.html?bbox='+encodeURIComponent(bbox)+'&layer=mapnik&marker='+encodeURIComponent(marker)+'"></iframe>';
     out += '<div style="margin-top:4px"><a href="'+esc(largeUrl)+'" target="_blank" rel="noopener">view larger map</a></div>';
@@ -3556,7 +3556,7 @@ function seedAddRow(table, net){
 function secHosts(c, nets){
   const cfgs = state.cfg;
   if (!cfgs.length){ emptyCard(c, 'no networks — create one under Networks first'); return; }
-  secHint(c, 'Custom name \u2192 IP records this node advertises to the whole mesh; every peer adds them to its hosts file, on top of the automatic peer-hostname entries. The IP can be anything \u2014 an overlay address, or a LAN service reachable over an advertised route. Double-click a name or ip to edit it, or the state tag to toggle the record.');
+  secHint(c, 'Custom name \u2192 IP records this node advertises to the whole mesh; every peer adds them to its hosts file, on top of the automatic peer-hostname entries. The IP can be anything: an overlay address, or a LAN service reachable over an advertised route. Double-click a name or ip to edit it, or the state tag to toggle the record.');
   secHint(c, 'Hostnames rejected from the mesh: a record peers advertise for one of these names is never written into this node\'s hosts file. This is a local filter (it doesn\'t affect other nodes), the host analog of rejecting a route. Double-click the state tag to toggle; use + to add, tick rows and \u2212 to remove.');
   for (const cf of cfgs){
     const card = $('<div class="card"></div>');
@@ -3679,9 +3679,9 @@ function hostRejectAddRow(table, net){
 function secDNS(c, nets){
   const cfgs = state.cfg;
   if (!cfgs.length){ emptyCard(c, 'no networks — create one under Networks first'); return; }
-  secHint(c, 'Domains this node forwards to specific DNS servers, advertised mesh-wide. Peers register them with their OS resolver (systemd-resolved on Linux, /etc/resolver on macOS, NRPT on Windows) \u2014 only queries under the domain are affected; the machine\'s default DNS and plain hostnames (still resolved via Hosts first) are untouched. Double-click a domain, servers, or state to edit.');
-  secHint(c, 'Domains never registered with this node\'s resolver, even if a peer advertises a forward for them \u2014 a local-only filter, the DNS analog of rejecting a hosts record. Double-click state to toggle; + to add, tick rows and \u2212 to remove.');
-  secHint(c, 'Each domain above also acts as a search suffix: an unqualified query like "grafana" is retried as "grafana.corp.internal". Linux and Windows only \u2014 Windows uses just the first domain (one suffix per adapter); macOS/FreeBSD have no per-interface equivalent.');
+  secHint(c, 'Domains this node forwards to specific DNS servers, advertised mesh-wide. Peers register them with their OS resolver (systemd-resolved on Linux, /etc/resolver on macOS, NRPT on Windows); only queries under the domain are affected; the machine\'s default DNS and plain hostnames (still resolved via Hosts first) are untouched. Double-click a domain, servers, or state to edit.');
+  secHint(c, 'Domains never registered with this node\'s resolver, even if a peer advertises a forward for them: a local-only filter, the DNS analog of rejecting a hosts record. Double-click state to toggle; + to add, tick rows and \u2212 to remove.');
+  secHint(c, 'Each domain above also acts as a search suffix: an unqualified query like "grafana" is retried as "grafana.corp.internal". Linux and Windows only. Windows uses just the first domain (one suffix per adapter); macOS/FreeBSD have no per-interface equivalent.');
   for (const cf of cfgs){
     const card = $('<div class="card"></div>');
     card.appendChild($('<h3><span class="net-name">'+esc(cf.name)+'</span> <span class="net-id">'+esc(cf.id)+'</span></h3>'));
@@ -3864,7 +3864,7 @@ function fwParseSvc(raw){
       if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) return {error: '"'+t+'": port must be 1-65535'};
     }
     if (p === 'any' && !portNum) continue; // explicit "any" with no port is a no-op — same as omitting it
-    if (sawRaw) return {error: 'only one raw proto/port entry is allowed per rule (e.g. "tcp/443") \u2014 for more than one, add them to a named service instead'};
+    if (sawRaw) return {error: 'only one raw proto/port entry is allowed per rule (e.g. "tcp/443"); for more than one, add them to a named service instead'};
     sawRaw = true;
     proto = (p === 'any') ? '' : p;
     port = portNum;
@@ -3947,7 +3947,7 @@ function secFirewall(c) {
   if (state.firewallTab === 'services') { secFwServices(c); return; }
 
   if (!state.cfg.length) return emptyCard(c, 'No networks.');
-  secHint(c, 'Disabled = all traffic passes. Enabled = rules evaluated top-to-bottom, first match wins; unmatched traffic is allowed (stateful — replies to allowed flows pass automatically). <b>services</b> takes a comma-separated mix of named services and raw <code>proto</code>/<code>proto/port</code> entries (e.g. <code>https, tcp/8443, udp/53</code>) \u2014 at most one raw entry per rule, any number of named services. Each of <b>source</b>, <b>destination</b>, and <b>services</b> has a <b>\u00d8</b> button inside its editor \u2014 click it to match anything <i>except</i> that field (shown as a leading <b>!</b> here) \u2014 and, next to it, a filterable dropdown of this node\u2019s objects/services catalog: start typing to narrow it, or just type a literal CIDR/proto/port instead, since these fields take either. Use + to add a rule, drag to reorder, double-click to edit or toggle state, tick rows and use \u2212 to remove.');
+  secHint(c, 'Disabled = all traffic passes. Enabled = rules evaluated top-to-bottom, first match wins; unmatched traffic is allowed (stateful — replies to allowed flows pass automatically). <b>services</b> takes a comma-separated mix of named services and raw <code>proto</code>/<code>proto/port</code> entries (e.g. <code>https, tcp/8443, udp/53</code>); at most one raw entry per rule, any number of named services. Each of <b>source</b>, <b>destination</b>, and <b>services</b> has a <b>\u00d8</b> button inside its editor; click it to match anything <i>except</i> that field (shown as a leading <b>!</b> here), and next to it, a filterable dropdown of this node\u2019s objects/services catalog: start typing to narrow it, or just type a literal CIDR/proto/port instead, since these fields take either. Use + to add a rule, drag to reorder, double-click to edit or toggle state, tick rows and use \u2212 to remove.');
 
   for (const cf of state.cfg) {
     const fw = cf.firewall||{}; const en = !!fw.enabled;
@@ -4173,10 +4173,10 @@ function fwCollectRule(scope){
 // anyone meant on purpose, so it's caught here before it's saved rather
 // than silently producing a rule that can never match.
 function fwValidateNegate(rule){
-  if (rule.src_negate && !rule.src){ alert('src \u00d8 is on but src is empty (any) \u2014 that would match nothing; set src or turn its \u00d8 off'); return false; }
-  if (rule.dst_negate && !rule.dst){ alert('dst \u00d8 is on but dst is empty (any) \u2014 that would match nothing; set dst or turn its \u00d8 off'); return false; }
+  if (rule.src_negate && !rule.src){ alert('src \u00d8 is on but src is empty (any): that would match nothing; set src or turn its \u00d8 off'); return false; }
+  if (rule.dst_negate && !rule.dst){ alert('dst \u00d8 is on but dst is empty (any): that would match nothing; set dst or turn its \u00d8 off'); return false; }
   const noLeg = !rule.proto && !rule.dport_min && !rule.services.length;
-  if (rule.services_negate && noLeg){ alert('services \u00d8 is on but no proto/port/service is set (any) \u2014 that would match nothing; set one or turn its \u00d8 off'); return false; }
+  if (rule.services_negate && noLeg){ alert('services \u00d8 is on but no proto/port/service is set (any): that would match nothing; set one or turn its \u00d8 off'); return false; }
   return true;
 }
 
@@ -4221,7 +4221,7 @@ function startFwEdit(tr, net){
 // per network either). Whole-list save, applied live via /api/firewall
 // op:objects (no restart).
 function secFwObjects(c){
-  secHint(c, 'Reusable address objects a rule can name in its <b>src</b>/<b>dst</b> \u2014 shared by every network on this node, edited once and usable everywhere. <b>kind</b>: host (literal IPs), subnet (CIDRs), range (a\u2011b), fqdn (domain names, re\u2011resolved live \u2014 an entry can be a literal name or a <b>*.domain.tld</b> wildcard covering every subdomain, learned passively from real DNS traffic; see docs), or group (a bundle of other objects, by name). Edit an object once and every rule that names it, on any network, follows. Double\u2011click a cell to edit; + adds a row, tick rows and \u2212 removes. Every well\u2011known domain gravinet knows about is already a real row here \u2014 nothing to add, nothing to click.');
+  secHint(c, 'Reusable address objects a rule can name in its <b>src</b>/<b>dst</b>; shared by every network on this node, edited once and usable everywhere. <b>kind</b>: host (literal IPs), subnet (CIDRs), range (a\u2011b), fqdn (domain names, re\u2011resolved live; an entry can be a literal name or a <b>*.domain.tld</b> wildcard covering every subdomain, learned passively from real DNS traffic; see docs), or group (a bundle of other objects, by name). Edit an object once and every rule that names it, on any network, follows. Double\u2011click a cell to edit; + adds a row, tick rows and \u2212 removes. Every well\u2011known domain gravinet knows about is already a real row here; nothing to add, nothing to click.');
   const objs = (state.fwObjects || []).map(cloneObj);
   const card = $('<div class="card"></div>');
   const t = $('<div></div>');
@@ -4232,7 +4232,7 @@ function secFwObjects(c){
     + '<td class="ob-kind">'+esc(o.kind||'')+'</td>'
     + '<td class="ob-val">'+esc(objValStr(o))+'</td>'
     + '<td class="ob-notes">'+esc(o.notes||'')+'</td></tr>'; });
-  if (!objs.length) h += '<tr><td colspan="5" class="empty">no objects \u2014 click + to add one</td></tr>';
+  if (!objs.length) h += '<tr><td colspan="5" class="empty">no objects; click + to add one</td></tr>';
   t.innerHTML = h+'</table>';
   const table = t.querySelector('table'); card.appendChild(t);
   table._objs = objs;
@@ -4459,7 +4459,7 @@ var FW_COMMON_SERVICES = [
   svcDef('PROXY', 'Web', [svcLeg('tcp',3128), svcLeg('tcp',8888)], 'common HTTP proxy ports (Squid and similar)'),
   // Remote access
   svcDef('SSH', 'Remote access', [svcLeg('tcp',22)]),
-  svcDef('TELNET', 'Remote access', [svcLeg('tcp',23)], 'unencrypted \u2014 avoid outside trusted management segments'),
+  svcDef('TELNET', 'Remote access', [svcLeg('tcp',23)], 'unencrypted; avoid outside trusted management segments'),
   svcDef('RDP', 'Remote access', [svcLeg('tcp',3389)]),
   svcDef('VNC', 'Remote access', [svcLeg('tcp',5900,5901)], 'displays :0\u2013:1; widen the range for more displays'),
   // Name & directory services
@@ -4480,7 +4480,7 @@ var FW_COMMON_SERVICES = [
   svcDef('IMAP', 'Mail', [svcLeg('tcp',143), svcLeg('tcp',993)]),
   svcDef('POP3', 'Mail', [svcLeg('tcp',110), svcLeg('tcp',995)]),
   // File transfer
-  svcDef('FTP', 'File transfer', [svcLeg('tcp',21)], 'control channel only \u2014 passive/active data ports depend on the server'),
+  svcDef('FTP', 'File transfer', [svcLeg('tcp',21)], 'control channel only; passive/active data ports depend on the server'),
   svcDef('TFTP', 'File transfer', [svcLeg('udp',69)]),
   svcDef('GIT', 'File transfer', [svcLeg('tcp',9418)]),
   // Databases
@@ -4491,7 +4491,7 @@ var FW_COMMON_SERVICES = [
   svcDef('MONGODB', 'Databases', [svcLeg('tcp',27017)]),
   // VPN & tunneling
   svcDef('IPSEC-IKE', 'VPN & tunneling', [svcLeg('udp',500), svcLeg('udp',4500)], 'IKE + NAT-T'),
-  svcDef('IPSEC-ESP', 'VPN & tunneling', [svcLeg('50')], 'raw IP protocol 50 \u2014 needed alongside IKE when NAT-T isn\u2019t used'),
+  svcDef('IPSEC-ESP', 'VPN & tunneling', [svcLeg('50')], 'raw IP protocol 50; needed alongside IKE when NAT-T isn\u2019t used'),
   svcDef('OPENVPN', 'VPN & tunneling', [svcLeg('udp',1194)]),
   svcDef('WIREGUARD', 'VPN & tunneling', [svcLeg('udp',51820)]),
   svcDef('L2TP', 'VPN & tunneling', [svcLeg('udp',1701)]),
@@ -4516,7 +4516,7 @@ var FW_COMMON_SERVICES = [
   svcDef('RABBITMQ', 'DevOps & observability', [svcLeg('tcp',5672), svcLeg('tcp',5671)], '5672 plaintext, 5671 TLS'),
   // Routing protocols
   svcDef('BGP', 'Routing protocols', [svcLeg('tcp',179)]),
-  svcDef('OSPF', 'Routing protocols', [svcLeg('ospf')], 'raw IP protocol 89 \u2014 covers both OSPFv2 and OSPFv3'),
+  svcDef('OSPF', 'Routing protocols', [svcLeg('ospf')], 'raw IP protocol 89; covers both OSPFv2 and OSPFv3'),
   svcDef('RIP', 'Routing protocols', [svcLeg('udp',520)]),
   svcDef('RIPNG', 'Routing protocols', [svcLeg('udp',521)]),
   svcDef('EIGRP', 'Routing protocols', [svcLeg('88')], 'raw IP protocol 88'),
@@ -4538,7 +4538,7 @@ var FW_COMMON_SERVICES = [
 // every network on this node, not one per network, so this is one table,
 // not one per network either).
 function secFwServices(c){
-  secHint(c, 'Reusable protocol/port bundles a rule can name in its <b>services</b> field \u2014 shared by every network on this node, edited once and usable everywhere. e.g. a "DNS" service carrying udp/53 and tcp/53. Write ports as <i>proto/port</i> or <i>proto/lo\u2011hi</i>, comma\u2011separated; a proto alone (like <i>icmp</i>) matches any port. Double\u2011click a cell to edit; + adds a row, tick rows and \u2212 removes. Every well\u2011known service gravinet knows about is already a real row here \u2014 nothing to add, nothing to click.');
+  secHint(c, 'Reusable protocol/port bundles a rule can name in its <b>services</b> field; shared by every network on this node, edited once and usable everywhere. e.g. a "DNS" service carrying udp/53 and tcp/53. Write ports as <i>proto/port</i> or <i>proto/lo\u2011hi</i>, comma\u2011separated; a proto alone (like <i>icmp</i>) matches any port. Double\u2011click a cell to edit; + adds a row, tick rows and \u2212 removes. Every well\u2011known service gravinet knows about is already a real row here; nothing to add, nothing to click.');
   const svcs = (state.fwServices || []).map(cloneSvc);
   const card = $('<div class="card"></div>');
   const t=$('<div></div>');
@@ -4548,7 +4548,7 @@ function secFwServices(c){
     + '<td class="sv-name">'+esc(s.name||'')+'</td>'
     + '<td class="sv-ports">'+esc(svcPortsFmt(s.ports))+'</td>'
     + '<td class="sv-notes">'+esc(s.notes||'')+'</td></tr>'; });
-  if (!svcs.length) h += '<tr><td colspan="4" class="empty">no services \u2014 click + to add one</td></tr>';
+  if (!svcs.length) h += '<tr><td colspan="4" class="empty">no services; click + to add one</td></tr>';
   t.innerHTML=h+'</table>';
   const table=t.querySelector('table'); card.appendChild(t);
   table._svcs=svcs;
@@ -4557,7 +4557,7 @@ function secFwServices(c){
     const nameTd=tr.querySelector('.sv-name'), portsTd=tr.querySelector('.sv-ports'), notesTd=tr.querySelector('.sv-notes');
     nameTd.title=portsTd.title=notesTd.title='double-click to edit';
     nameTd.ondblclick=()=>inlineCellEdit(nameTd,svcs[i].name||'','name',v=>{v=v.trim(); if(!v){alert('name required');renderSection();return;} svcs[i].name=v; svcSave(svcs);});
-    portsTd.ondblclick=()=>inlineCellEdit(portsTd,svcPortsFmt(svcs[i].ports),'e.g. udp/53, tcp/53',v=>{ const p=svcPortsParse(v); if(p===null){alert('bad ports \u2014 use proto/port or proto/lo-hi, comma-separated');renderSection();return;} svcs[i].ports=p; svcSave(svcs);});
+    portsTd.ondblclick=()=>inlineCellEdit(portsTd,svcPortsFmt(svcs[i].ports),'e.g. udp/53, tcp/53',v=>{ const p=svcPortsParse(v); if(p===null){alert('bad ports: use proto/port or proto/lo-hi, comma-separated');renderSection();return;} svcs[i].ports=p; svcSave(svcs);});
     notesTd.ondblclick=()=>inlineCellEdit(notesTd,svcs[i].notes||'','notes',v=>{svcs[i].notes=v.trim(); svcSave(svcs);});
   });
   selAllWire(t);
@@ -4584,7 +4584,7 @@ function svcAddRow(table){
   tr.querySelector('.sva-cancel').onclick=()=>renderSection();
   tr.querySelector('.sva-save').onclick=()=>{
     const name=tr.querySelector('.sva-name').value.trim(); if(!name){alert('name required');return;}
-    const ports=svcPortsParse(tr.querySelector('.sva-ports').value); if(ports===null){alert('bad ports \u2014 use proto/port or proto/lo-hi, comma-separated');return;}
+    const ports=svcPortsParse(tr.querySelector('.sva-ports').value); if(ports===null){alert('bad ports: use proto/port or proto/lo-hi, comma-separated');return;}
     const list=(table._svcs||[]).slice(); list.push({name:name, ports:ports, notes:tr.querySelector('.sva-notes').value.trim()});
     svcSave(list);
   };
@@ -4592,7 +4592,7 @@ function svcAddRow(table){
 
 function secNAT(c) {
   if (!state.cfg.length) return emptyCard(c, 'No networks.');
-  secHint(c, 'NAT rewrites IPv4 addresses (IPv4-only). <b>source</b> and <b>dest</b> select which packets a rule matches (blank = any). <b>translate</b> is where those packets get rewritten to \u2014 and which direction the rewrite runs, all in one value: <i>masquerade</i> (rewrite the source to the chosen interface\u2019s address, many\u21921, for outbound traffic sharing one address), a literal IPv4 (rewrite the source to that fixed address instead), or <code>port-forward:</code> followed by an IPv4 (rewrite the destination to that address instead, for inbound traffic reaching an internal host). Use + to add a rule; double-click a field to edit a rule, or the state tag to toggle it; tick rows and \u2212 to remove.');
+  secHint(c, 'NAT rewrites IPv4 addresses (IPv4-only). <b>source</b> and <b>dest</b> select which packets a rule matches (blank = any). <b>translate</b> is where those packets get rewritten to, and which direction the rewrite runs, all in one value: <i>masquerade</i> (rewrite the source to the chosen interface\u2019s address, many\u21921, for outbound traffic sharing one address), a literal IPv4 (rewrite the source to that fixed address instead), or <code>port-forward:</code> followed by an IPv4 (rewrite the destination to that address instead, for inbound traffic reaching an internal host). Use + to add a rule; double-click a field to edit a rule, or the state tag to toggle it; tick rows and \u2212 to remove.');
   for (const cf of state.cfg) {
     const nat = cf.nat||{}; const en = !!nat.enabled;
     const card = $('<div class="card"></div>');
@@ -4711,7 +4711,7 @@ function qosClassOpts(classes, sel){
 
 function secQoS(c) {
   if (!state.cfg.length) return emptyCard(c, 'No networks.');
-  secHint(c, '5 priority classes (0 = highest, 4 = lowest/bulk). Unmatched traffic uses class 3 (normal). Strict priority — higher classes drain first under contention. <b>match</b> takes a comma-separated mix of named services (the same catalog as Firewall \u203a Services) and raw <code>proto</code>/<code>proto/port</code> entries (e.g. <code>https, tcp/8443, udp/53</code>) \u2014 at most one raw entry per rule, any number of named services; leave it blank to match anything. Use + to add a rule, double-click a rule to edit it, double-click the state tag to toggle it, tick rows and use \u2212 to remove.');
+  secHint(c, '5 priority classes (0 = highest, 4 = lowest/bulk). Unmatched traffic uses class 3 (normal). Strict priority — higher classes drain first under contention. <b>match</b> takes a comma-separated mix of named services (the same catalog as Firewall \u203a Services) and raw <code>proto</code>/<code>proto/port</code> entries (e.g. <code>https, tcp/8443, udp/53</code>); at most one raw entry per rule, any number of named services; leave it blank to match anything. Use + to add a rule, double-click a rule to edit it, double-click the state tag to toggle it, tick rows and use \u2212 to remove.');
   for (const cf of state.cfg) {
     const q = cf.qos||{}; const en = !!q.enabled; const classes = q.classes||5;
     const dflt = (q.default_class!=null)?q.default_class:3;
@@ -4861,7 +4861,7 @@ function secBandwidth(c) {
 // rollout started from this form is the same rollout, with the same canary and
 // the same abort rule, as one started from a terminal.
 function secUpgrade(c){
-  secHint(c, 'Get a new [gravinet] build running on this node \u2014 upload it, and this node applies it and restarts. This only ever happens on the machine you\u2019re logged into \u2014 no peer, not even a Manager, can start or control an upgrade here. See docs/UPGRADES.md.');
+  secHint(c, 'Get a new [gravinet] build running on this node: upload it, and this node applies it and restarts. This only ever happens on the machine you\u2019re logged into; no peer, not even a Manager, can start or control an upgrade here. See docs/UPGRADES.md.');
   const host = $('<div></div>');
   c.appendChild(host);
   drawUpgrade(host);
@@ -4986,7 +4986,7 @@ function infoMetrics(c){
     if (state.section!=='metrics'){ if(metricsTimer){clearInterval(metricsTimer); metricsTimer=null;} return; }
     const r = await api('/api/metrics?minutes='+metricsMinutes);
     if (!r.ok || !r.body){ body.innerHTML = '<div class="hint">could not load metrics.</div>'; return; }
-    if (!r.body.available){ body.innerHTML = '<div class="hint">live metrics aren\u2019t available on this host \u2014 the CPU/memory/disk/network readers here couldn\u2019t read anything usable.</div>'; return; }
+    if (!r.body.available){ body.innerHTML = '<div class="hint">live metrics aren\u2019t available on this host; the CPU/memory/disk/network readers here couldn\u2019t read anything usable.</div>'; return; }
     renderMetricGraphs(body, r.body, metricsMinutes);
   };
   load();
@@ -5559,7 +5559,7 @@ function infoRoutes(c){
     if (!ent.length && r.body.text){ body.innerHTML=''; const pre=$('<pre class="mono-block"></pre>'); pre.textContent=r.body.text; body.appendChild(pre); addLineFilter(body, pre, r.body.text); return; }
     if (!ent.length){ body.innerHTML = '<div class="hint">no routes found'+(r.body.error?(': '+esc(r.body.error)):'')+'.</div>'; return; }
     let h = '<table><tr><th>destination</th><th>gateway</th><th>iface</th><th>metric</th><th>family</th></tr>';
-    for (const e of ent) h += '<tr><td>'+esc(e.dest)+'</td><td>'+esc(e.gateway||'\u2014')+'</td><td>'+esc(e.iface)+'</td><td>'+esc(e.metric)+'</td><td>'+(e.family===6?'IPv6':'IPv4')+'</td></tr>';
+    for (const e of ent) h += '<tr><td>'+esc(e.dest)+'</td><td>'+esc(e.gateway||'\u2013')+'</td><td>'+esc(e.iface)+'</td><td>'+esc(e.metric)+'</td><td>'+(e.family===6?'IPv6':'IPv4')+'</td></tr>';
     body.innerHTML = h+'</table>';
     enhanceTable(body.querySelector('table')); // async render missed renderSection's pass
   })();
@@ -5592,8 +5592,8 @@ function infoHosts(c){
 // answer "is conditional forwarding actually working" without a shell.
 function infoDNS(c){
   const card = $('<div class="card"></div>');
-  card.appendChild($('<h3>Conditional DNS forwarding \u2014 live state</h3>'));
-  card.appendChild($('<div class="hint" style="margin:-4px 0 10px">What\'s actually registered with this host\'s OS resolver right now, per network. Read live from the OS, not from gravinet\'s own records \u2014 if this is empty or missing an entry you expect, the last sync failed or hasn\'t happened yet; check the DNS section\'s advertise/reject lists and this node\'s logs.</div>'));
+  card.appendChild($('<h3>Conditional DNS forwarding: live state</h3>'));
+  card.appendChild($('<div class="hint" style="margin:-4px 0 10px">What\'s actually registered with this host\'s OS resolver right now, per network. Read live from the OS, not from gravinet\'s own records; if this is empty or missing an entry you expect, the last sync failed or hasn\'t happened yet; check the DNS section\'s advertise/reject lists and this node\'s logs.</div>'));
   const body = $('<div></div>'); body.innerHTML = '<div class="hint">loading\u2026</div>'; card.appendChild(body); c.appendChild(card);
   (async () => {
     const r = await api('/api/localdns');
@@ -5603,7 +5603,7 @@ function infoDNS(c){
     body.innerHTML = '';
     for (const n of nets){
       const sub = $('<div class="subcard"></div>');
-      sub.appendChild($('<h4>'+esc(n.name)+' <span class="net-id">'+esc(n.iface||'\u2014')+'</span></h4>'));
+      sub.appendChild($('<h4>'+esc(n.name)+' <span class="net-id">'+esc(n.iface||'\u2013')+'</span></h4>'));
       if (n.error){
         sub.appendChild($('<div class="hint">'+esc(n.error)+'</div>'));
       } else {
@@ -5642,17 +5642,17 @@ const LATENCY_HIST_LEN = Math.round(LATENCY_WINDOW_MS / LATENCY_POLL_MS);
 // latencySparkline renders a short history as a small inline SVG bar chart,
 // scaled to that peer's own min/max in the window (not a fixed ms scale) so
 // small variations are visible even for a peer whose RTT never leaves a
-// narrow band \u2014 an absolute scale would flatten "10.1, 10.4, 10.2ms" to
+// narrow band; an absolute scale would flatten "10.1, 10.4, 10.2ms" to
 // three identical-looking full-height bars. This used to be text block
 // characters (\u2581\u2582...\u2588), but those only have 8 discrete heights tied to
 // font-size, which made "taller" not really an option and made genuine
 // variation hard to read at a glance. A miss renders as a full-height red
 // bar rather than a small glyph mixed in with the others, since a down
-// reading isn't "a low value" \u2014 it's a different kind of thing, and it
+// reading isn't "a low value"; it's a different kind of thing, and it
 // needs to be impossible to miss without reading anything.
 // PX_PER_SLOT sets a fixed per-bar allotment (bar + its gap) rather than a
 // fixed total chart width, so latencySparkline's bars stay a legible,
-// comfortably hoverable width even if LATENCY_HIST_LEN changes later \u2014 a
+// comfortably hoverable width even if LATENCY_HIST_LEN changes later; a
 // fixed-width chart would just squeeze each bar thinner as more of them get
 // packed in (12 bars at a 104px-wide chart is a comfortable ~9px per bar;
 // naively keeping that same 104px for 18 bars would shrink them to ~3px,
@@ -5686,7 +5686,7 @@ function infoLatency(c){
   const card = $('<div class="card"></div>');
   const head = $('<h3>Latency to mesh peers</h3>');
   card.appendChild(head);
-  card.appendChild($('<div class="hint" style="margin:-4px 0 10px">Round-trip time from this host to every other peer on each up network, pinged over the overlay (so it reflects the mesh path, not just the underlay). A couple of probes per peer, run concurrently \u2014 this can take a few seconds. Refreshes automatically every '+(LATENCY_POLL_MS/1000)+'s; <b>trend</b> covers the last '+(LATENCY_WINDOW_MS/1000)+'s \u2014 blue bars scale to that peer\u2019s own range, red is a miss; hover a bar for the exact reading, or the chart for how long it\u2019s held its current state.</div>'));
+  card.appendChild($('<div class="hint" style="margin:-4px 0 10px">Round-trip time from this host to every other peer on each up network, pinged over the overlay (so it reflects the mesh path, not just the underlay). A couple of probes per peer, run concurrently; this can take a few seconds. Refreshes automatically every '+(LATENCY_POLL_MS/1000)+'s; <b>trend</b> covers the last '+(LATENCY_WINDOW_MS/1000)+'s; blue bars scale to that peer\u2019s own range, red is a miss; hover a bar for the exact reading, or the chart for how long it\u2019s held its current state.</div>'));
   const body = $('<div></div>'); body.innerHTML = '<div class="hint">pinging\u2026</div>'; card.appendChild(body); c.appendChild(card);
 
   const load = async () => {
@@ -5729,7 +5729,7 @@ function infoLatency(c){
         const nameLabel = esc(p.hostname||p.node_id.slice(0,8));
         const nameTitle = notesTitleForNetName(n.name, p.node_id);
         const nameCell = nameTitle ? '<span title="'+nameTitle+'">'+nameLabel+'</span>' : nameLabel;
-        h += '<tr'+rowClass+'><td>'+nameCell+'</td><td>'+esc(p.overlay||'\u2014')+'</td><td>'+rtt+'</td><td>'+trend+'</td></tr>';
+        h += '<tr'+rowClass+'><td>'+nameCell+'</td><td>'+esc(p.overlay||'\u2013')+'</td><td>'+rtt+'</td><td>'+trend+'</td></tr>';
       }
       sub.innerHTML += h+'</table>';
       body.appendChild(sub);
@@ -5757,7 +5757,7 @@ function infoAbout(c){
       ['Go runtime', esc(b.go_version||'')],
     ];
     let h = '<div class="info-kv">';
-    for (const [k,v] of rows) h += '<div class="k">'+k+'</div><div class="v">'+(v||'\u2014')+'</div>';
+    for (const [k,v] of rows) h += '<div class="k">'+k+'</div><div class="v">'+(v||'\u2013')+'</div>';
     body.innerHTML = h+'</div>';
   })();
 }
@@ -5799,7 +5799,7 @@ function secLogs(c){
     const r = await api('/api/logs');
     if (!r.ok || !r.body) return;
     if (r.body.enabled === false){
-      const tr=document.createElement('tr'); tr.innerHTML='<td colspan="3" class="empty">File logging is disabled \u2014 set "log_file" in the config to enable it.</td>'; tb.appendChild(tr); return;
+      const tr=document.createElement('tr'); tr.innerHTML='<td colspan="3" class="empty">File logging is disabled; set "log_file" in the config to enable it.</td>'; tb.appendChild(tr); return;
     }
     const lines = (r.body.lines||[]).slice().reverse(); // newest first
     if (!lines.length){ const tr=document.createElement('tr'); tr.innerHTML='<td colspan="3" class="empty">log is empty</td>'; tb.appendChild(tr); return; }
@@ -6002,7 +6002,7 @@ function openShellModal(node, label) {
   const bg = $('<div class="modal-backdrop"></div>');
   const panel = $('<div class="modal-panel term-panel"></div>');
   const head = $('<div class="modal-head"><h3></h3></div>');
-  head.querySelector('h3').textContent = 'Shell \u2014 ' + label;
+  head.querySelector('h3').textContent = 'Shell: ' + label;
   const closeBtn = $('<button class="modal-close" title="close">\u2715</button>');
   head.appendChild(closeBtn);
   const screen = $('<div class="term-screen"></div>');
