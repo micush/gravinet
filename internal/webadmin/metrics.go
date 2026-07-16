@@ -87,45 +87,96 @@ func (m *metricsCollector) run() {
 
 func (m *metricsCollector) close() { close(m.stop) }
 
+// Swappable via package vars (rather than calling the platform readers
+// directly), purely for testability: TestSampleRunsReadersConcurrently
+// (metrics_test.go) substitutes slow fakes for a couple of these to prove
+// sample()'s wall time is bounded by the slowest reader, not their sum —
+// the same shape as the real-world macOS cost (top, vm_stat, sysctl x2,
+// netstat all shelling out per sample) that pushed every graph's newest
+// point behind actual wall-clock time. Never swapped outside tests.
+var (
+	readCPUTotalsFn   = readCPUTotals
+	readMemUsedPctFn  = readMemUsedPct
+	readDiskUsedPctFn = readDiskUsedPct
+	readUptimeFn      = readUptime
+	readNetDevFn      = readNetDev
+)
+
 func (m *metricsCollector) sample() {
 	now := time.Now().Unix()
 	cutoff := now - int64(metricRetention/time.Second)
+
+	// The readers below range from a fast syscall/proc-file read (Linux,
+	// FreeBSD, ...) to several short-lived subprocess spawns apiece (macOS:
+	// top, vm_stat, sysctl x2, netstat — see metrics_darwin.go; top alone
+	// has its own internal ~1s sampling delay by design, see its doc
+	// comment there). Run one at a time, their costs add up — on a Mac
+	// under any load that can comfortably exceed metricSampleInterval. And
+	// since every series is only ever populated from this one function, a
+	// slow run doesn't just delay one graph: it pushes CPU, memory, disk,
+	// and every interface's newest point behind actual wall-clock time by
+	// the same margin, all at once — which at the 1-minute zoom is visible
+	// as every line, not just one, stopping short of the chart's right
+	// edge (the frontend draws that edge from the browser's own clock, not
+	// from whatever the newest point happens to be — see ui.go's
+	// renderMetricGraphs). Running the readers concurrently bounds the
+	// wall time to the slowest single one instead of their sum, and just
+	// as importantly keeps that wall time off m.mu below, so a concurrent
+	// /api/metrics request isn't stuck waiting on it either.
+	var (
+		wg                sync.WaitGroup
+		cpuTotal, cpuIdle uint64
+		cpuOK             bool
+		memPct            float64
+		memOK             bool
+		diskPct           float64
+		diskOK            bool
+		uptimeSecs        uint64
+		uptimeOK          bool
+		dev               map[string]devCounters
+	)
+	wg.Add(5)
+	go func() { defer wg.Done(); cpuTotal, cpuIdle, cpuOK = readCPUTotalsFn() }()
+	go func() { defer wg.Done(); memPct, memOK = readMemUsedPctFn() }()
+	go func() { defer wg.Done(); diskPct, diskOK = readDiskUsedPctFn() }()
+	go func() { defer wg.Done(); uptimeSecs, uptimeOK = readUptimeFn() }()
+	go func() { defer wg.Done(); dev = readNetDevFn() }()
+	wg.Wait()
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	// CPU: utilization from the /proc/stat aggregate-jiffy deltas.
-	if total, idle, ok := readCPUTotals(); ok {
+	if cpuOK {
 		m.available = true
-		if m.haveCPU && total > m.lastCPUTotal {
-			dt := total - m.lastCPUTotal
-			di := idle - m.lastCPUIdle
+		if m.haveCPU && cpuTotal > m.lastCPUTotal {
+			dt := cpuTotal - m.lastCPUTotal
+			di := cpuIdle - m.lastCPUIdle
 			busy := float64(dt-di) / float64(dt) * 100
 			m.cpu = appendTrim(m.cpu, metricPoint{T: now, V: clampPct(busy)}, cutoff)
 		}
-		m.lastCPUTotal, m.lastCPUIdle, m.haveCPU = total, idle, true
+		m.lastCPUTotal, m.lastCPUIdle, m.haveCPU = cpuTotal, cpuIdle, true
 	}
 
 	// Memory: used percentage from MemTotal/MemAvailable.
-	if used, ok := readMemUsedPct(); ok {
+	if memOK {
 		m.available = true
-		m.mem = appendTrim(m.mem, metricPoint{T: now, V: clampPct(used)}, cutoff)
+		m.mem = appendTrim(m.mem, metricPoint{T: now, V: clampPct(memPct)}, cutoff)
 	}
 
 	// Disk: used percentage of the root filesystem (/ on Unix, C:\ on Windows).
-	if used, ok := readDiskUsedPct(); ok {
+	if diskOK {
 		m.available = true
-		m.disk = appendTrim(m.disk, metricPoint{T: now, V: clampPct(used)}, cutoff)
+		m.disk = appendTrim(m.disk, metricPoint{T: now, V: clampPct(diskPct)}, cutoff)
 	}
 
 	// System uptime: latest value only, no history (see the struct field doc).
-	if secs, ok := readUptime(); ok {
+	if uptimeOK {
 		m.available = true
-		m.uptimeSecs, m.haveUptime = secs, true
+		m.uptimeSecs, m.haveUptime = uptimeSecs, true
 	}
 
 	// Per-interface throughput (bytes/sec) for the live overlay interfaces.
-	dev := readNetDev()
 	live := map[string]bool{}
 	for _, ii := range m.be.Interfaces() {
 		if ii.Iface == "" {

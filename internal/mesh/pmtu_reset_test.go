@@ -4,6 +4,8 @@ import (
 	"net/netip"
 	"testing"
 	"time"
+
+	"gravinet/internal/crypto"
 )
 
 // reset() abandons a converged result and re-searches from the floor, dropping
@@ -217,6 +219,45 @@ func TestCheckUnderlayChangeIgnoresReferencePeerSwitch(t *testing.T) {
 	}
 }
 
+// pmtuLoop used to return before its first tick whenever PMTU discovery was
+// disabled (UnderlayMTUMax <= UnderlayMTU), which silently took
+// checkUnderlayChange — and therefore roam detection, resetAllPMTU/
+// reassertOSState recovery, and the restart-on-underlay-change hook — down
+// with it, even though none of those are actually about PMTU discovery.
+// This proves the tick (and checkUnderlayChange with it) still runs with
+// discovery off; only the per-peer PMTU probing itself should be skipped.
+func TestCheckUnderlayChangeRunsWithPMTUDiscoveryDisabled(t *testing.T) {
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	ks, err := crypto.NewKeySet([]string{key})
+	if err != nil {
+		t.Fatalf("new key set: %v", err)
+	}
+	e := NewEngine(Options{NodeID: "self", UnderlayMTU: 1280, UnderlayMTUMax: 1280, Nets: []NetSpec{{
+		ID: 1, Name: "n", Dev: newFakeDev("d"), Keys: ks,
+		Self4: netip.MustParseAddr("10.0.0.1"), Subnet4: netip.MustParsePrefix("10.0.0.0/24"),
+	}}})
+	if e.pmtuCeil > e.pmtuFloor {
+		t.Fatalf("test setup: discovery should be disabled (ceil=%d, floor=%d)", e.pmtuCeil, e.pmtuFloor)
+	}
+	e.Start() // pmtuLoop (like every other per-network loop) only runs once started
+	defer e.Stop()
+
+	ns := e.netSnapshot()[1]
+	ns.mu.Lock()
+	ns.byNode["aaa"] = &peerSession{net: ns, nodeID: "aaa", endpoint: netip.MustParseAddrPort("203.0.113.1:1")}
+	ns.mu.Unlock()
+
+	if !waitUntil(3*time.Second, func() bool {
+		e.underlayMu.Lock()
+		defer e.underlayMu.Unlock()
+		return e.underlayRefNode == "aaa"
+	}) {
+		t.Fatal("checkUnderlayChange never ran with PMTU discovery disabled — pmtuLoop must still tick even when discovery itself is off")
+	}
+}
 
 func TestLocalSourceIP(t *testing.T) {
 	ip, ok := localSourceIP(netip.MustParseAddrPort("127.0.0.1:9"))

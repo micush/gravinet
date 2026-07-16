@@ -3,6 +3,7 @@ package service
 import (
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -171,6 +172,39 @@ func TestWindowsInstallCommands(t *testing.T) {
 		if !strings.Contains(c, want) {
 			t.Errorf("windows commands missing %q\n%s", want, c)
 		}
+	}
+}
+
+// Restart's platform branches (systemctl restart, launchctl kickstart,
+// service(8) restart, rcctl restart, Restart-Service) are all synchronous
+// stop-then-start cycles whose stop half waits for gravinet's own main
+// process to exit. Called from gravinet's own restart-on-underlay-change or
+// restart-on-suspend-resume path, that process is this one — so if Restart
+// ever went back to exec.Command(...).Run() for any of them, the daemon
+// would deadlock waiting on a restart that is itself waiting on the daemon
+// to exit (see Restart's doc comment). detachedRestart is what every branch
+// funnels through to avoid that; this proves it actually launches detached
+// (Start, not Run) rather than waiting on its child.
+func TestDetachedRestartDoesNotBlock(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no /bin/sh on this system")
+	}
+	start := time.Now()
+	if err := detachedRestart("sh", "-c", "sleep 5"); err != nil {
+		t.Fatalf("detachedRestart: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 1*time.Second {
+		t.Fatalf("detachedRestart blocked for %v waiting on a 5s child — it must Start(), not Run(), "+
+			"or every platform branch of Restart() can deadlock a process restarting itself", elapsed)
+	}
+}
+
+// A command that can't even be launched (bad binary, not just a nonzero
+// exit) must still be reported — detachedRestart trades waiting for the
+// result for waiting on the launch, not for silence on total failure.
+func TestDetachedRestartReportsLaunchFailure(t *testing.T) {
+	if err := detachedRestart("gravinet-definitely-not-a-real-binary-xyz"); err == nil {
+		t.Fatal("detachedRestart should return an error when the command can't be launched at all")
 	}
 }
 

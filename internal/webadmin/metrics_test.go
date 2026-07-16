@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"gravinet/internal/config"
 	"gravinet/internal/logx"
@@ -109,5 +110,47 @@ func TestHandleMetrics(t *testing.T) {
 	// round trip, not just the direct map lookup.
 	if up, ok := out["uptime_seconds"].(float64); !ok || up <= 0 {
 		t.Fatalf("expected a positive uptime_seconds over the wire, got %v", out["uptime_seconds"])
+	}
+}
+
+// On macOS, sample() populates every series (CPU, memory, disk, uptime, and
+// every interface) from readers that mostly shell out to separate short-lived
+// processes (top, vm_stat, sysctl x2, netstat — see metrics_darwin.go), each
+// costing real wall time on top of the fork/exec itself; top in particular
+// has its own ~1s internal sampling delay by design. Run one at a time, five
+// of those per sample() call add up to comfortably more than
+// metricSampleInterval (2s) — and because every series is only ever updated
+// from this one function, a slow run doesn't delay just one graph, it pushes
+// every graph's newest point behind actual wall-clock time by the same
+// margin. At the 1-minute zoom (where the frontend draws its right edge from
+// the browser's own clock — see ui.go's renderMetricGraphs — not from
+// whatever the newest point happens to be) that showed up as every line, not
+// just one, visibly stopping short of "now".
+//
+// This proves the fix: sample()'s readers run concurrently, so wall time is
+// bounded by the slowest single one rather than their sum. It substitutes
+// slow fakes for two independent readers (memory and network) and confirms
+// sample() returns in comfortably less than both delays added together —
+// reverting to the old sequential calls makes this fail (verified by hand).
+func TestSampleRunsReadersConcurrently(t *testing.T) {
+	const delay = 200 * time.Millisecond
+	origMem, origNet := readMemUsedPctFn, readNetDevFn
+	defer func() { readMemUsedPctFn, readNetDevFn = origMem, origNet }()
+	readMemUsedPctFn = func() (float64, bool) {
+		time.Sleep(delay)
+		return 42, true
+	}
+	readNetDevFn = func() map[string]devCounters {
+		time.Sleep(delay)
+		return map[string]devCounters{}
+	}
+
+	mc := newMetricsCollector(&stubBackend{})
+	start := time.Now()
+	mc.sample()
+	if elapsed := time.Since(start); elapsed >= 2*delay {
+		t.Fatalf("sample() took %v with two independent %v readers — they must run concurrently, "+
+			"not sequentially, or a slow platform (macOS) falls the same amount behind on every "+
+			"graph at once, not just one", elapsed, delay)
 	}
 }

@@ -37,7 +37,150 @@ assuming it didn't happen.
 
 ---
 
-## v450 — 2026-07-15
+## v452 — 2026-07-15
+
+Follow-up report on the Metrics tab, macOS only: at the 1-minute zoom, the
+graph lines visibly stop short of the chart's right edge instead of running
+up to "now". First reported as a Memory-only issue; turned out to be every
+graph — CPU, memory, disk, and every interface's throughput — once looked at
+more carefully.
+
+That "every graph, all at once" shape is the tell. All of them are populated
+by one shared function, `metricsCollector.sample()`, on a single 2-second
+ticker (`metricSampleInterval`). On Linux/FreeBSD/etc. its readers are cheap
+proc-file or syscall reads — sub-millisecond. On macOS
+(`internal/webadmin/metrics_darwin.go`) most of them shell out instead: `top`
+for CPU, `sysctl` + `vm_stat` for memory, `sysctl` again for uptime, `netstat`
+for interface counters — five subprocess spawns a sample, and `top -l 1`
+alone has its own ~1s internal sampling delay by design (see its doc
+comment). Run one after another, as `sample()` did, that easily adds up to
+more than the 2-second budget on a loaded or throttled Mac. Since every
+series only ever gets a new point from that one function, a slow run doesn't
+delay one graph — it pushes CPU, memory, disk, and every interface's newest
+point behind actual wall-clock time by the same margin, together. The
+frontend (`ui.go`'s `renderMetricGraphs`) draws the chart's right edge from
+the browser's own `Date.now()`, not from whatever the newest point happens to
+be, so that lag is exactly what shows up as every line falling short of
+"now" — worse the finer the zoom, since a few seconds of staleness is a much
+bigger fraction of a 1-minute window than a 60-minute one, which is why 1 min
+was where this was actually visible.
+
+Holding `m.mu` for the full, now-serialized-and-slow reader sequence
+compounded it: a concurrent `/api/metrics` request had to wait out the same
+delay just to read data that was already stale by the time the lock finally
+freed.
+
+**What changed:** `internal/webadmin/metrics.go`'s `sample()` now runs the
+CPU/memory/disk/uptime/interface readers concurrently and only takes `m.mu`
+once they've all returned, so wall time is bounded by the slowest single
+reader (in the worst case, `top`'s ~1s) rather than their sum — and a
+`/api/metrics` request is never stuck behind the collection cycle. No
+behavior change on platforms where these were already fast; this is purely
+about not letting several independently-slow readers serialize on macOS.
+
+**Verified:** `go build ./...`, `go vet ./...`, and cross-compiles for
+linux/darwin/windows/freebsd/openbsd all clean. Full `go test ./... -short
+-race` for `internal/webadmin` passes. Added
+`TestSampleRunsReadersConcurrently` (`internal/webadmin/metrics_test.go`),
+which substitutes two independent 200ms-delayed fake readers (memory and
+network — swappable via the new `readMemUsedPctFn`/`readNetDevFn` package
+vars, same pattern as `internal/mesh/fulltunnel.go`'s `defaultGatewayFn`) and
+asserts `sample()` returns in well under the 400ms two sequential delays
+would take; reverting to sequential calls reproduces the original
+symptom — the test then fails at ~400ms (verified by hand).
+
+---
+
+
+
+Field report: a node roamed (took a new default route after switching Wi-Fi
+SSIDs) and never recovered on its own — mesh sessions stayed dead and the
+web admin's own control port dropped off entirely (`netstat` showed nothing
+on 8443, not even the loopback listener), for as long as the process was
+left alone. `systemctl status` kept reporting the *original* boot's PID and
+start time throughout — the daemon wasn't crashing or exiting, it just sat
+there, deaf, until a manual `systemctl restart gravinet` brought it back.
+Two independent bugs in the roam-recovery path, both found while tracing
+that report through to its actual root cause rather than the mesh-level
+symptom in the logs (`rejecting advertised route 0.0.0.0/0`, repeated
+identically many times) that looked like the obvious suspect at first. That
+turned out to be a separate, pre-existing, and much smaller issue —
+`onRouteAdd` (routes.go) logs a reject on every single re-advertisement of an
+already-rejected route with no dedup, so a peer's routine periodic
+re-gossip of a route this node rejects produces exactly that kind of
+repeated-line noise at DEBUG level. Noisy, but not what caused the outage;
+left alone here rather than folded into this fix.
+
+**Bug 1 — restart-on-underlay-change could deadlock the daemon against
+itself.** `cmd/gravinet`'s roam/suspend-resume recovery path tears the
+process down cleanly and calls `selfRestart` (an in-place `syscall.Exec`).
+If that ever fails, it falls back to asking the platform service manager to
+restart gravinet — `internal/service.Restart()`. On Linux, macOS, FreeBSD,
+and OpenBSD that fallback ran `systemctl restart` / `launchctl kickstart -k`
+/ `service gravinet restart` / `rcctl restart` synchronously
+(`exec.Command(...).Run()`). Every one of those is a stop-then-start cycle
+whose stop half waits for gravinet's own main process to exit — but by the
+time this fallback runs, that process already shut everything down (closing
+the web admin — explaining the missing 8443 listener — and the mesh
+sessions) in the very same goroutine that's about to block waiting for the
+restart command. The stop phase waits on this goroutine; this goroutine
+waits on the stop phase. Neither side can move. The process doesn't exit or
+crash — the OS and service manager keep reporting it "running" — it just
+sits there inert until something external (an operator, or the service
+manager's own stop timeout escalating to SIGKILL) intervenes. The `windows`
+branch had already been written to avoid exactly this (see its doc
+comment — PowerShell's `Restart-Service` has the identical hazard), and the
+FreeBSD rc.d script's bounded `stop_cmd` override (v-whatever added it after
+a similar hang during upgrades) mitigates it for that one path — but
+`service.Restart()` itself, used directly by this recovery path and by the
+web admin's own Restart button, never got the same treatment on the other
+four platforms.
+
+**Bug 2 — checkUnderlayChange (roam detection itself) was silently gated
+behind PMTU discovery being enabled.** `checkUnderlayChange` — which detects
+the roam, resets path MTU, re-asserts OS state, and invokes the
+restart-on-underlay-change hook — only ever ran from inside `pmtuLoop`,
+which returned before its first tick whenever PMTU discovery was disabled
+(`underlay_mtu_max <= underlay_mtu`, or `pmtu_discovery: false`). That
+silently took the entire roam-recovery mechanism down with it, even though
+`restart_on_underlay_change` is documented as its own independent config
+knob — an operator could reasonably leave restart-on-roam on while turning
+probe-based discovery off (e.g. to cut probe traffic on a metered link,
+which is of course exactly the kind of link most likely to roam) and get
+none of the protection they asked for, with nothing anywhere telling them
+so.
+
+Neither bug alone is fully confirmed as what happened on the reporting
+node — its config wasn't available to check — but both are real,
+independently reproducible, and sit squarely in the one code path a Wi-Fi
+roam exercises. Fixed both rather than guess between them.
+
+**What changed:** `internal/mesh/pmtu.go`'s `pmtuLoop` no longer returns
+early when PMTU discovery is disabled; it keeps ticking once a second and
+still calls `checkUnderlayChange` every tick, skipping only the per-peer
+`pmtuTick` calls that discovery itself needs. `internal/service/service.go`
+gets a new `detachedRestart` helper (`Start`, not `Run`) that every platform
+branch of `Restart()` now goes through — including `windows`, which already
+did the equivalent inline; that branch now just calls the shared helper.
+
+**Verified:** `go build ./...` and `go vet ./...` clean. Full test suite
+(`go test ./... -short`) passes. Added
+`TestCheckUnderlayChangeRunsWithPMTUDiscoveryDisabled`
+(`internal/mesh/pmtu_reset_test.go`), which spins up a real engine with
+`UnderlayMTUMax == UnderlayMTU` and a connected peer and confirms
+`checkUnderlayChange` still rebases `underlayRefNode` within a few ticks;
+reverting the `pmtuLoop` fix reproduces the original failure (verified by
+hand — the test hangs at "never ran" instead). Added
+`TestDetachedRestartDoesNotBlock` and `TestDetachedRestartReportsLaunchFailure`
+(`internal/service/service_test.go`): the first launches a 5-second child
+through `detachedRestart` and asserts the call itself returns in well under
+a second (reverting to `.Run()` makes it block for the full 5s and fail —
+verified by hand); the second confirms a command that can't even launch
+still reports an error rather than being silently swallowed.
+
+---
+
+
 
 Fixed sidebar sub-menu indent for real this time. v448's fix (`30px` →
 `34px`) treated the problem as "a few pixels off" when it was actually a

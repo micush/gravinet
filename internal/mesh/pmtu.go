@@ -503,12 +503,26 @@ func (e *Engine) checkUnderlayChange(now time.Time) {
 }
 
 // pmtuLoop drives discovery for every peer on this network on a fast cadence so
-// the path MTU converges within seconds (data flows at the floor meanwhile).
+// the path MTU converges within seconds (data flows at the floor meanwhile),
+// and — regardless of whether discovery itself is enabled — is what drives
+// checkUnderlayChange, since it's the only per-second tick a netState owns.
+//
+// It used to return immediately, before ever ticking, when discovery was
+// disabled (pmtuCeil <= pmtuFloor, e.g. an operator-set pmtu_discovery:false
+// or underlay_mtu_max <= underlay_mtu). That silently took checkUnderlayChange
+// down with it: no roam detection, no resetAllPMTU/reassertOSState recovery,
+// and — because SetUnderlayChangeHook's restart-on-underlay-change callback is
+// only ever invoked from inside checkUnderlayChange — no automatic restart on
+// a Wi-Fi/cellular roam either, even though restart_on_underlay_change is a
+// separate config knob a operator may have deliberately left on while turning
+// discovery off (e.g. to avoid probe traffic on a metered link — precisely
+// the kind of link most likely to roam). None of that coupling was
+// documented anywhere an operator could have discovered it short of reading
+// this function. The tick now always runs; only the per-peer pmtuTick calls
+// below are skipped when discovery is off.
 func (e *Engine) pmtuLoop(ns *netState) {
 	defer ns.wg.Done()
-	if e.pmtuCeil <= e.pmtuFloor {
-		return // discovery disabled
-	}
+	discoveryEnabled := e.pmtuCeil > e.pmtuFloor
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 	for {
@@ -520,6 +534,9 @@ func (e *Engine) pmtuLoop(ns *netState) {
 		case <-t.C:
 		}
 		e.checkUnderlayChange(time.Now())
+		if !discoveryEnabled {
+			continue
+		}
 		ns.mu.RLock()
 		peers := make([]*peerSession, 0, len(ns.byNode))
 		for _, ps := range ns.byNode {

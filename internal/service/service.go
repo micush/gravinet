@@ -402,65 +402,92 @@ func CanRestart() (bool, string) {
 	}
 }
 
+// detachedRestart launches name(args...) as an independent, backgrounded
+// process (Start, not Run) and returns as soon as it has launched — it does
+// NOT wait for that process to finish, or for the restart it performs to
+// land. See Restart's doc comment for why that distinction is the entire
+// point: every caller in this file that asks the platform service manager to
+// restart gravinet is doing so from *inside the very process being
+// restarted*, and Run()ing the restart command blocks this goroutine waiting
+// for a stop-then-start cycle whose stop half is itself waiting for this
+// process to exit — a self-wait neither half can resolve. Start()ing it
+// instead, and giving the old process a couple of seconds' head start to
+// finish exiting on its own, breaks that cycle: the restart runs on its own
+// clock, independent of whether this goroutine (or this whole process) is
+// still around to see it finish.
+func detachedRestart(name string, args ...string) error {
+	return exec.Command(name, args...).Start()
+}
+
 // Restart restarts the installed gravinet service via the platform service
 // manager. Returns (true, "") on success, or (false, hint) describing how to
 // restart by hand. Used by the CLI and the web admin so both behave
 // identically — including on macOS (launchctl kickstart) and Windows
 // (Restart-Service), not just Linux.
+//
+// Every platform branch below launches its restart command via
+// detachedRestart rather than exec.Command(...).Run(). This isn't a style
+// preference: systemctl/launchctl/service(8)/rcctl restart are all, like
+// PowerShell's Restart-Service (see the windows case below for the fullest
+// explanation), synchronous stop-then-start cycles — and the stop half waits
+// for gravinet's own main process to exit. When Restart is called from
+// gravinet's own restart-on-underlay-change or restart-on-suspend-resume
+// path (cmd/gravinet's runBody, after selfRestart's in-place re-exec has
+// already failed), that main process IS this one, already mid-shutdown in
+// the very same goroutine that would go on to Run() the restart command —
+// so a blocking call here waits on a stop phase that is itself waiting on
+// this goroutine to finish waiting, forever, short of the service manager's
+// own stop timeout (if any) eventually forcing the issue with SIGKILL. The
+// process doesn't crash or exit in that window — systemctl/etc. and the OS
+// still show it "running" — it just sits there with its listeners, TUN
+// device, and mesh sessions already torn down by the shutdown that ran
+// before this call, deaf to everything until something external kills it.
+// Exactly the class of bug the FreeBSD rc.d script's bounded stop_cmd
+// override (see RcdScript's doc comment) and the windows branch below were
+// already written to avoid; the other platforms are brought in line with
+// them here.
 func Restart() (bool, string) {
 	if ok, hint := CanRestart(); !ok {
 		return false, hint
 	}
 	switch runtime.GOOS {
 	case "linux":
-		if err := exec.Command("systemctl", "restart", "gravinet").Run(); err != nil {
+		if err := detachedRestart("sh", "-c", "sleep 2; systemctl restart gravinet"); err != nil {
 			return false, "couldn't restart automatically — run: sudo systemctl restart gravinet"
 		}
 		return true, ""
 	case "darwin":
 		label := LaunchdLabel(Defaults())
-		if exec.Command("launchctl", "kickstart", "-k", "system/"+label).Run() != nil {
+		if err := detachedRestart("sh", "-c", "sleep 2; launchctl kickstart -k system/"+label); err != nil {
 			return false, "couldn't restart automatically — run: sudo launchctl kickstart -k system/" + label
 		}
 		return true, ""
 	case "windows":
-		// Unlike systemd/launchctl/rc.d — each purpose-built for exactly this
-		// "a service asks to restart itself" case — PowerShell's Restart-Service
-		// is a generic, synchronous cmdlet with no special handling for it: it
-		// calls Stop-Service, polls the SCM until it observes this process
-		// reporting SERVICE_STOPPED, then calls Start-Service. Run()ing that
-		// here blocks this goroutine waiting for all of that from *inside* the
-		// very process the stop half is waiting to see die — so its outcome
-		// ends up depending on timing (how long this process's own shutdown
-		// takes, whether it releases its listeners/TUN adapter before the SCM's
-		// stop-wait times out, ...) that this process has no way to guarantee
-		// about its own death. Spawning it detached instead (Start, not Run —
-		// so this returns immediately no matter what happens to this process
-		// next) and giving the old process a couple of seconds to fully exit
-		// before the script even calls Restart-Service removes that
-		// self-referential race: the restart now runs on its own clock,
-		// independent of whether this goroutine — or this whole process — is
-		// even still around to see it finish. The tradeoff is that Start()
-		// only confirms the script launched, not that Restart-Service inside
-		// it actually succeeded; the web admin's own poll-for-a-new-boot-id
-		// loop (see quietRestart/quietPollBack in ui.go) is what actually
-		// confirms the restart landed, and is a more honest check than trusting
-		// this exit code ever was — it only fires after a real fresh process
-		// with a fresh boot id answers /api/ping, not just after Restart-Service
-		// claims success.
-		cmd := exec.Command("powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command",
-			"Start-Sleep -Seconds 2; Restart-Service gravinet")
-		if err := cmd.Start(); err != nil {
+		// PowerShell's Restart-Service is the same kind of synchronous
+		// stop-then-start cycle as the other platforms' commands (see this
+		// function's doc comment) — Stop-Service polls the SCM until it
+		// observes this process reporting SERVICE_STOPPED, so a blocking call
+		// here would wait on this process's own death from inside itself.
+		// detachedRestart avoids that the same way it does everywhere else.
+		// One Windows-specific note: Start() only confirms the script
+		// launched, not that Restart-Service inside it actually succeeded —
+		// the web admin's own poll-for-a-new-boot-id loop (see
+		// quietRestart/quietPollBack in ui.go) is what actually confirms the
+		// restart landed, and is a more honest check than trusting this exit
+		// code ever was, since it only fires after a real fresh process with
+		// a fresh boot id answers /api/ping.
+		if err := detachedRestart("powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command",
+			"Start-Sleep -Seconds 2; Restart-Service gravinet"); err != nil {
 			return false, "couldn't restart automatically — run (elevated): Restart-Service gravinet"
 		}
 		return true, ""
 	case "freebsd":
-		if exec.Command("service", "gravinet", "restart").Run() != nil {
+		if err := detachedRestart("sh", "-c", "sleep 2; service gravinet restart"); err != nil {
 			return false, "couldn't restart automatically — run: service gravinet restart"
 		}
 		return true, ""
 	case "openbsd":
-		if exec.Command("rcctl", "restart", "gravinet").Run() != nil {
+		if err := detachedRestart("sh", "-c", "sleep 2; rcctl restart gravinet"); err != nil {
 			return false, "couldn't restart automatically — run: rcctl restart gravinet"
 		}
 		return true, ""
