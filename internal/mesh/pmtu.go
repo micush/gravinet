@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"net"
 	"net/netip"
+	"syscall"
 	"time"
 
 	"gravinet/internal/protocol"
@@ -534,6 +535,36 @@ func (e *Engine) checkUnderlayChange(now time.Time) {
 		}
 	}
 
+	// Signal 1b (peer-independent, source-IP-independent): the physical
+	// default gateway. This is what catches a roam between two networks that
+	// hand out the same local IP — two APs on one 192.168.x.y subnet, or the
+	// same DHCP lease re-issued on rejoin — where signal 1's source address is
+	// unchanged and signal 2's peers are all already dead, so nothing else
+	// fires and the mesh stays partitioned with no further roam able to
+	// re-trigger it (the reported "3-4 rapid roams then stuck until I switch
+	// to a different network" terminal state). The gateway's address or its
+	// egress interface index almost always differs across such a move.
+	// excludeIfIndex 0 = don't exclude any interface; we want the real
+	// physical default route, and a mesh full-tunnel default (if any) lives on
+	// a tun device whose gateway/ifindex differs from a physical one anyway,
+	// so a transient read of it still registers as "changed" and errs toward
+	// recovering rather than missing a roam. Queried for IPv4 (AF_INET), the
+	// common roam case and the family the full-tunnel gateway code already
+	// tracks; an IPv6-only underlay roam still falls back to signals 1/2.
+	gwChanged := false
+	if gw, gerr := defaultGatewayFn(syscall.AF_INET, 0); gerr == nil && gw.Addr.IsValid() {
+		e.underlayMu.Lock()
+		if e.haveDefaultGW && e.defaultGW.IsValid() && (e.defaultGW != gw.Addr || e.defaultGWIf != gw.IfIndex) {
+			gwChanged = true
+		}
+		prevGW, prevIf := e.defaultGW, e.defaultGWIf
+		e.defaultGW, e.defaultGWIf, e.haveDefaultGW = gw.Addr, gw.IfIndex, true
+		e.underlayMu.Unlock()
+		if gwChanged {
+			e.log.Infof("mesh: default gateway changed %s(if%d) -> %s(if%d) (underlay roam, same source IP); recovering", prevGW, prevIf, gw.Addr, gw.IfIndex)
+		}
+	}
+
 	// Signal 2 (peer-anchored): the source used to reach a specific
 	// directly-connected peer. Kept alongside signal 1 because when it does
 	// fire it's more direct evidence that the path to a real peer moved, and
@@ -561,7 +592,7 @@ func (e *Engine) checkUnderlayChange(now time.Time) {
 		}
 	}
 
-	if anchorChanged || peerChanged {
+	if anchorChanged || gwChanged || peerChanged {
 		// Force every peer on every network to redial from a clean slate —
 		// the same in-process reconnect suspend/resume does (reconnectAllPeers
 		// ages sessions so this tick's pruneDead frees their endpoints for

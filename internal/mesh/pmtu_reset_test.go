@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"gravinet/internal/crypto"
+	"gravinet/internal/tun"
 )
 
 // reset() abandons a converged result and re-searches from the floor, dropping
@@ -395,5 +396,54 @@ func TestCheckUnderlayChangeReconnectsAllPeers(t *testing.T) {
 	ns.mu.RUnlock()
 	if still {
 		t.Fatal("peer session was not pruned after the roam aged it — it won't be redialed")
+	}
+}
+
+// TestCheckUnderlayChangeDetectsRoamViaGatewayWhenSourceIPUnchanged is the
+// same-subnet-roam terminal state: roaming between two networks that hand out
+// the SAME local IP (two APs on one 192.168.203.x subnet, or the same DHCP
+// lease re-issued on rejoin) leaves the anchor source address (signal 1)
+// unchanged, and if every peer is already dead the peer-anchored signal
+// (signal 2) contributes nothing either — so the roam goes completely
+// undetected, no recovery runs, and no further roam re-triggers it until you
+// switch to a network that finally gives a different IP. The physical default
+// gateway (signal 1b) almost always differs across such a move, so it catches
+// what the source IP misses. Here the injected default-path source is held
+// constant while the gateway flips; recovery must still fire.
+func TestCheckUnderlayChangeDetectsRoamViaGatewayWhenSourceIPUnchanged(t *testing.T) {
+	origSrc := defaultPathSourceIPFn
+	origGW := defaultGatewayFn
+	defer func() { defaultPathSourceIPFn = origSrc; defaultGatewayFn = origGW }()
+
+	// Source IP is pinned — signal 1 can never fire.
+	defaultPathSourceIPFn = func() (netip.Addr, bool) {
+		return netip.MustParseAddr("192.168.203.10"), true
+	}
+	// Gateway flips between checks — signal 1b must carry the detection.
+	gw := netip.MustParseAddr("192.168.203.1")
+	var gwIf int32 = 3
+	defaultGatewayFn = func(family int, exclude int32) (tun.Gateway, error) {
+		return tun.Gateway{Addr: gw, IfIndex: gwIf, Metric: 100}, nil
+	}
+
+	eng := NewEngine(Options{NodeID: "self"})
+	eng.startedAt = time.Now().Add(-2 * underlayRestartGrace)
+	var hookCalls int
+	eng.SetUnderlayChangeHook(func() { hookCalls++ })
+
+	// Baseline check establishes both the (pinned) source and the gateway.
+	eng.checkUnderlayChange(time.Now())
+	if hookCalls != 0 {
+		t.Fatalf("baseline check should not fire the hook, got %d", hookCalls)
+	}
+
+	// Same source IP, but a roam onto a different AP: same subnet, different
+	// gateway address AND interface. Signal 1 stays silent; 1b must fire.
+	gw = netip.MustParseAddr("192.168.203.254")
+	gwIf = 5
+	eng.checkUnderlayChange(time.Now().Add(2 * time.Second))
+	if hookCalls != 1 {
+		t.Fatalf("a same-source-IP roam (gateway changed) was not detected (hook fired %d times, want 1) — "+
+			"this is the '3-4 rapid roams then stuck until a different network' terminal state", hookCalls)
 	}
 }

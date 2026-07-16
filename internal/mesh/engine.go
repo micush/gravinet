@@ -342,11 +342,25 @@ type Engine struct {
 	// left the mesh fully partitioned (every peer "no reply") and recovery
 	// was needed most. The anchor lookup doesn't depend on any peer's state,
 	// so it still fires then. Guarded by underlayMu.
-	underlayMu        sync.Mutex
-	localUnderlay     netip.Addr
-	underlayRefNode   string
-	defaultPathSrc    netip.Addr
-	haveDefaultPath   bool
+	underlayMu      sync.Mutex
+	localUnderlay   netip.Addr
+	underlayRefNode string
+	defaultPathSrc  netip.Addr
+	haveDefaultPath bool
+	// defaultGW tracks the physical default gateway (address + egress
+	// interface index) as a THIRD roam signal, independent of both the peer-
+	// anchored source and the anchor source-IP above. Roaming between two
+	// networks that hand out the same local IP — e.g. two APs on the same
+	// 192.168.x.y subnet, or the same SSID re-joined with the same DHCP
+	// lease — leaves defaultPathSrc identical, so neither the anchor nor the
+	// peer signal fires, yet the underlay genuinely changed (different
+	// gateway/L2, old peer endpoints now unreachable). The gateway address or
+	// its interface index almost always differs across such a move, so this
+	// catches the same-source-IP roam the other two miss. Guarded by
+	// underlayMu.
+	defaultGW         netip.Addr
+	defaultGWIf       int32
+	haveDefaultGW     bool
 	lastUnderlayCheck time.Time
 
 	// pmtuFloor/pmtuCeil bound per-peer path-MTU discovery (outer datagram bytes).
