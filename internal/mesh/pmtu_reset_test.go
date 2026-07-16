@@ -268,3 +268,72 @@ func TestLocalSourceIP(t *testing.T) {
 		t.Logf("source for loopback dst = %s (non-loopback, environment-dependent)", ip)
 	}
 }
+
+// TestCheckUnderlayChangeDetectsRoamWithNoUsablePeerEndpoint reproduces the
+// intermittent "whole mesh reads 'no reply' after switching networks, but
+// only sometimes" report. The peer-anchored roam signal (localSourceIP
+// against a specific peer's stored underlay endpoint) can only fire when that
+// endpoint is still routable — but a roam onto a network with no route back
+// to the old endpoints (with or without a default route) is exactly when it
+// isn't, and that's also exactly when recovery is most needed (every peer
+// unreachable). Before the peer-independent anchor signal, checkUnderlayChange
+// returned early in that case and the roam went undetected: no PMTU reset, no
+// OS-state reassert, no restart hook — the "sometimes" was whether any peer
+// endpoint happened to still be routable at the instant of the check.
+//
+// This drives that shape directly: no peers at all (so the peer-anchored half
+// contributes nothing, same as all-endpoints-unroutable), while the injected
+// default-path source flips as it would on a real roam. The underlay-change
+// hook must still fire.
+func TestCheckUnderlayChangeDetectsRoamWithNoUsablePeerEndpoint(t *testing.T) {
+	origFn := defaultPathSourceIPFn
+	defer func() { defaultPathSourceIPFn = origFn }()
+
+	src := netip.MustParseAddr("192.168.1.50")
+	defaultPathSourceIPFn = func() (netip.Addr, bool) { return src, true }
+
+	eng := NewEngine(Options{NodeID: "self"})
+	eng.startedAt = time.Now().Add(-2 * underlayRestartGrace) // past startup grace
+	var hookCalls int
+	eng.SetUnderlayChangeHook(func() { hookCalls++ })
+
+	// First check establishes the baseline default-path source. No peers
+	// exist, so the peer-anchored signal never contributes here or below.
+	eng.checkUnderlayChange(time.Now())
+	if hookCalls != 0 {
+		t.Fatalf("baseline check should not fire the hook, got %d", hookCalls)
+	}
+
+	// The default egress source flips — a roam — with still no usable peer
+	// endpoint anywhere. The anchor signal alone must catch it.
+	src = netip.MustParseAddr("10.9.9.20")
+	eng.checkUnderlayChange(time.Now().Add(2 * time.Second)) // past the 1s per-check throttle
+
+	if hookCalls != 1 {
+		t.Fatalf("roam via the peer-independent anchor signal was not detected with no usable peer "+
+			"endpoint (hook fired %d times, want 1) — this is the intermittent whole-mesh 'no reply' case", hookCalls)
+	}
+}
+
+// TestCheckUnderlayChangeAnchorStableDoesNotFire guards the other direction:
+// a steady default-path source (no roam) must not spuriously trigger recovery
+// just because the anchor signal now runs every check.
+func TestCheckUnderlayChangeAnchorStableDoesNotFire(t *testing.T) {
+	origFn := defaultPathSourceIPFn
+	defer func() { defaultPathSourceIPFn = origFn }()
+
+	defaultPathSourceIPFn = func() (netip.Addr, bool) { return netip.MustParseAddr("192.168.1.50"), true }
+
+	eng := NewEngine(Options{NodeID: "self"})
+	eng.startedAt = time.Now().Add(-2 * underlayRestartGrace)
+	var hookCalls int
+	eng.SetUnderlayChangeHook(func() { hookCalls++ })
+
+	base := time.Now()
+	for i := 0; i < 4; i++ {
+		eng.checkUnderlayChange(base.Add(time.Duration(i) * 2 * time.Second))
+	}
+	if hookCalls != 0 {
+		t.Fatalf("stable default-path source spuriously fired the hook %d time(s)", hookCalls)
+	}
+}

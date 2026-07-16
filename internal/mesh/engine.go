@@ -333,9 +333,20 @@ type Engine struct {
 	// underlayRefNode is the node ID of the peer currently used as the fixed
 	// probe destination (see connectedEndpoint) — comparisons only count as a
 	// real change when the reference peer is unchanged; see checkUnderlayChange.
+	//
+	// defaultPathSrc is a SECOND, peer-independent roam signal: the source
+	// address the kernel would use to reach a fixed off-subnet anchor (see
+	// defaultPathSourceIP). The peer-anchored localUnderlay check above can
+	// miss a roam entirely when every peer's stored underlay endpoint has
+	// become unroutable on the new network — precisely the case where a roam
+	// left the mesh fully partitioned (every peer "no reply") and recovery
+	// was needed most. The anchor lookup doesn't depend on any peer's state,
+	// so it still fires then. Guarded by underlayMu.
 	underlayMu        sync.Mutex
 	localUnderlay     netip.Addr
 	underlayRefNode   string
+	defaultPathSrc    netip.Addr
+	haveDefaultPath   bool
 	lastUnderlayCheck time.Time
 
 	// pmtuFloor/pmtuCeil bound per-peer path-MTU discovery (outer datagram bytes).

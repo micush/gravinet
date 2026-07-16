@@ -37,7 +37,73 @@ assuming it didn't happen.
 
 ---
 
-## v455 — 2026-07-15
+## v456 — 2026-07-15
+
+Report: after switching underlay networks (with or without a default route),
+the peer-latency view sometimes shows "no reply" for *every* peer at once,
+and stays that way — the same fully-partitioned-after-roam symptom v451's
+recovery path was meant to catch, but intermittently slipping through it.
+"Sometimes, not always" was the clue to the exact gap.
+
+Root cause: roam detection (`checkUnderlayChange` in
+`internal/mesh/pmtu.go`) had only one signal, and it was anchored to a
+*peer's* reachability. It picks a directly-connected peer, asks the kernel
+"what local source address would I use to reach that peer's underlay
+endpoint?" (`localSourceIP`, a routeless UDP connect), and treats a change in
+that answer as a roam. The flaw: that lookup is against the peer's *stored,
+pre-roam* endpoint. When the roam lands you on a network with no route back
+to those old endpoints — precisely the case that partitions the whole mesh
+and is the entire reason recovery needs to run — the lookup either can't
+resolve a source or the reference peer's endpoint isn't usable, and
+`checkUnderlayChange` returned early without detecting anything. No PMTU
+reset, no OS-state reassert, and critically no restart-hook fire. Whether it
+detected the roam came down to whether, at the instant of the 1-second check,
+*some* peer's old endpoint still happened to be routable on the new
+network — which is exactly the observed "sometimes."
+
+Fix: add a second, **peer-independent** roam signal that doesn't depend on
+any peer's stored endpoint. `defaultPathSourceIP` asks the kernel "what
+source address does my current default route pick for a generic off-subnet
+destination?" — using fixed documentation-reserved anchors (TEST-NET-1
+`192.0.2.1` and `2001:db8::1`, RFC 5737/3849, never real hosts, never
+actually contacted — it's a pure route lookup). That answer changes exactly
+when the host's default egress path changes, i.e. on a roam, regardless of
+whether any peer is currently reachable. `checkUnderlayChange` now runs both
+signals every check and triggers recovery if *either* fires; the original
+peer-anchored signal is kept because when it does fire it's more direct
+evidence a real peer path moved, and can catch same-default-source
+reconfigurations the anchor wouldn't. The peer-independent signal is what
+closes the "everything unroutable" hole.
+
+**What changed:** `internal/mesh/pmtu.go` — new `defaultPathSourceIP` (+
+`defaultPathAnchors`), and `checkUnderlayChange` restructured to run the
+anchor signal and the peer signal independently and recover on either.
+`internal/mesh/engine.go` — new `defaultPathSrc`/`haveDefaultPath` fields
+tracking the anchor source across checks, under the existing `underlayMu`.
+
+**Verified:** `go build ./...`, `go vet ./...`, cross-compiles for
+linux/darwin/windows/freebsd/openbsd all clean. Full `go test
+./internal/mesh/... -short` passes; the underlay-change paths also pass under
+`-race`. Added `TestCheckUnderlayChangeDetectsRoamWithNoUsablePeerEndpoint`
+(injects a flipping default-path source with zero usable peers and asserts
+the restart hook fires — reverting the anchor signal reproduces the missed
+roam and fails it, verified by hand) and
+`TestCheckUnderlayChangeAnchorStableDoesNotFire` (a steady anchor source must
+not spuriously trigger recovery now that the check runs every second). The
+existing peer-anchored tests (`TestCheckUnderlayChangeIgnoresReferencePeer
+Switch`, `TestCheckUnderlayChangeRunsWithPMTUDiscoveryDisabled`, the
+notify-once/grace tests) still pass unchanged.
+
+Note this makes detection far more robust but recovery itself is still the
+same v451 machinery (in-process PMTU/OS-state reassert, plus a grace-gated
+one-shot restart hook). If a roam is now detected but a given host still
+doesn't fully recover without the restart, that restart is what rebuilds it —
+so `restart_on_underlay_change` being enabled matters for the worst cases,
+same as before.
+
+---
+
+
 
 The macOS Metrics gap, actually diagnosed this time — and with a correction
 to v454, which made one part of it worse. The deciding evidence was in the

@@ -373,6 +373,55 @@ func localSourceIP(dst netip.AddrPort) (netip.Addr, bool) {
 	return netip.Addr{}, false
 }
 
+// defaultPathAnchors are fixed, off-subnet destinations used purely for a
+// route lookup — never actually contacted. TEST-NET-1 (192.0.2.0/24,
+// RFC 5737) and the IPv6 documentation prefix (2001:db8::/32, RFC 3849) are
+// reserved for documentation and guaranteed never to be real hosts, so using
+// them can't accidentally probe or leak to anything; all that's wanted is the
+// source address the kernel's current default route would pick to reach an
+// arbitrary public destination.
+var defaultPathAnchors = []string{"192.0.2.1:9", "[2001:db8::1]:9"}
+
+// defaultPathSourceIPFn is swappable in tests (real net.Dial to the anchors
+// otherwise) so a roam can be simulated without actually reconfiguring the
+// test host's routing. Never reassigned outside tests.
+var defaultPathSourceIPFn = defaultPathSourceIP
+
+// defaultPathSourceIP returns the source address the kernel's current default
+// route would use, independent of any peer. Unlike localSourceIP (which is
+// anchored to a specific peer's possibly-now-unroutable stored endpoint),
+// this asks "for a generic off-subnet destination, what's our source?" — a
+// question whose answer changes exactly when the host's default egress path
+// does, which is what a roam is. Returns ok=false only when the host has no
+// usable default route at all for either family (e.g. link fully down
+// mid-switch), in which case the caller simply waits for the next check
+// rather than treating "no route right now" as a roam.
+func defaultPathSourceIP() (netip.Addr, bool) {
+	for _, anchor := range defaultPathAnchors {
+		c, err := net.Dial("udp", anchor)
+		if err != nil {
+			continue
+		}
+		ua, ok := c.LocalAddr().(*net.UDPAddr)
+		c.Close()
+		if !ok {
+			continue
+		}
+		a, ok2 := netip.AddrFromSlice(ua.IP)
+		if !ok2 {
+			continue
+		}
+		a = a.Unmap()
+		// A bound source of :: or 0.0.0.0 means "no route for this family";
+		// skip to the other family rather than reporting the wildcard.
+		if a.IsUnspecified() {
+			continue
+		}
+		return a, true
+	}
+	return netip.Addr{}, false
+}
+
 // connectedEndpoint returns a directly-connected peer's underlay endpoint to
 // probe against, plus the node ID it came from. If preferID names a peer
 // that's still directly connected, it's reused so repeated calls keep probing
@@ -464,30 +513,55 @@ func (e *Engine) checkUnderlayChange(now time.Time) {
 	prevRefNode := e.underlayRefNode
 	e.underlayMu.Unlock()
 
-	dst, refNode := e.connectedEndpoint(prevRefNode)
-	if !dst.IsValid() {
-		return
-	}
-	cur, ok := localSourceIP(dst)
-	if !ok {
-		return
+	// Signal 1 (peer-independent): the source address the current default
+	// route picks for a generic off-subnet destination. This is checked
+	// first and unconditionally because it keeps working when signal 2 below
+	// can't — specifically when a roam has left every peer's stored underlay
+	// endpoint unroutable, which is exactly the "whole mesh went "no reply"
+	// after switching networks" case this needs to catch. See
+	// defaultPathSourceIP.
+	anchorChanged := false
+	if src, ok := defaultPathSourceIPFn(); ok {
+		e.underlayMu.Lock()
+		if e.haveDefaultPath && e.defaultPathSrc.IsValid() && e.defaultPathSrc != src {
+			anchorChanged = true
+		}
+		prevAnchor := e.defaultPathSrc
+		e.defaultPathSrc, e.haveDefaultPath = src, true
+		e.underlayMu.Unlock()
+		if anchorChanged {
+			e.log.Infof("mesh: default-path source address changed %s -> %s (underlay roam); recovering", prevAnchor, src)
+		}
 	}
 
-	e.underlayMu.Lock()
-	prev := e.localUnderlay
-	// Only a same-reference-peer comparison can tell us our own underlay
-	// changed. If the reference peer itself changed (first check, or the
-	// previous one disconnected), rebase silently instead: a different local
-	// source address for a *different* destination is expected on a
-	// multi-homed host and isn't evidence anything here actually moved.
-	sameRef := prevRefNode != "" && refNode == prevRefNode
-	changed := sameRef && prev.IsValid() && prev != cur
-	e.localUnderlay = cur
-	e.underlayRefNode = refNode
-	e.underlayMu.Unlock()
+	// Signal 2 (peer-anchored): the source used to reach a specific
+	// directly-connected peer. Kept alongside signal 1 because when it does
+	// fire it's more direct evidence that the path to a real peer moved, and
+	// it can catch same-default-source reconfigurations that the anchor
+	// lookup wouldn't. When no peer endpoint is available/routable, this half
+	// simply contributes nothing and signal 1 carries the detection.
+	peerChanged := false
+	if dst, refNode := e.connectedEndpoint(prevRefNode); dst.IsValid() {
+		if cur, ok := localSourceIP(dst); ok {
+			e.underlayMu.Lock()
+			prev := e.localUnderlay
+			// Only a same-reference-peer comparison can tell us our own underlay
+			// changed. If the reference peer itself changed (first check, or the
+			// previous one disconnected), rebase silently instead: a different local
+			// source address for a *different* destination is expected on a
+			// multi-homed host and isn't evidence anything here actually moved.
+			sameRef := prevRefNode != "" && refNode == prevRefNode
+			peerChanged = sameRef && prev.IsValid() && prev != cur
+			e.localUnderlay = cur
+			e.underlayRefNode = refNode
+			e.underlayMu.Unlock()
+			if peerChanged {
+				e.log.Infof("mesh: local underlay address changed %s -> %s; re-running path MTU discovery for all peers", prev, cur)
+			}
+		}
+	}
 
-	if changed {
-		e.log.Infof("mesh: local underlay address changed %s -> %s; re-running path MTU discovery for all peers", prev, cur)
+	if anchorChanged || peerChanged {
 		e.resetAllPMTU()
 		for _, ns := range e.netSnapshot() {
 			e.reassertOSState(ns)
