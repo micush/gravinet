@@ -37,7 +37,134 @@ assuming it didn't happen.
 
 ---
 
-## v462 — 2026-07-15
+## v464 — 2026-07-15
+
+Fixes a regression I introduced in v463. v463 added a physical-default-gateway
+roam signal (1b) to catch same-subnet roams — but it made things *worse*, not
+better: where v462 recovered, v463 didn't recover at all. The report was
+direct and correct ("462 recovers, 463 does not"), and the cause was a
+self-inflicted loop that my v463 change created and my v463 tests didn't
+catch.
+
+The bug: signal 1b read the "lowest-metric default route" via
+`defaultGatewayFn(AF_INET, 0)` — excluding nothing. But in full-tunnel mode
+gravinet installs its *own* default route via a tun device and demotes the
+physical route's metric (`demotePhysicalDefaultRoute`). So the lowest-metric
+default route flips between the physical gateway and gravinet's own tunnel
+gateway depending on demotion state. And here's the loop: a detected gateway
+change triggers recovery → recovery reasserts full-tunnel OS state → that
+demotes/reinstalls the default route → the next per-second check reads a
+*different* "best default" → signal 1b fires again → recovery again, roughly
+once a second, forever. Each cycle ages and re-dials every peer, so no
+handshake ever gets the few seconds it needs to complete. Net effect: the
+mesh became *permanently* unrecoverable — strictly worse than not having the
+signal at all. (My v463 changelog comment even said reading gravinet's own
+tunnel route "errs toward recovering rather than missing a roam" — that
+reasoning was wrong; erring toward recovering every second is fatal, not
+safe.)
+
+**Fix:** signal 1b now reads the *physical* default gateway via a new
+`physicalDefaultGateway` helper that excludes every gravinet tun interface and
+rejects any candidate gateway sitting on one of them. With the tun routes
+filtered out, the read returns the stable physical gateway regardless of
+gravinet's own demotion state — the physical route still exists (just at a
+higher metric) and is the only non-tun default — so signal 1b changes only on
+a real underlay move, not on gravinet's own routing churn. The same-subnet
+roam detection that was the *point* of v463 still works; it just no longer
+self-triggers on gravinet's tunnel route.
+
+**What changed:** `internal/mesh/pmtu.go` — new `physicalDefaultGateway`
+(enumerates this engine's tun ifindexes, excludes them from the gateway
+lookup, rejects a gateway that lands on a tun interface); `checkUnderlayChange`
+signal 1b now calls it instead of the naive lowest-metric read. No change to
+signals 1 or 2, to the v462 endpoint re-arming, or to recovery itself.
+
+**Verified:** `go build ./...`, `go vet ./...`, cross-compiles for all five
+platforms, full `go test ./internal/mesh/... -short` (143s) passes, detection
+paths clean under `-race`. Added
+`TestCheckUnderlayChangeIgnoresOwnTunnelDefaultRoute` — the regression guard
+that was missing in v463: it feeds signal 1b a gateway sitting on gravinet's
+own tun ifindex, flipping address each call, and asserts recovery *never*
+fires. Reverting `physicalDefaultGateway` to the naive read reproduces the
+loop (the test sees the "default gateway changed ... recovering" log fire
+repeatedly on the tun ifindex) and fails — verified by hand. The v463
+same-subnet-roam test (`...DetectsRoamViaGatewayWhenSourceIPUnchanged`) and
+all earlier detection tests still pass.
+
+Lesson recorded honestly: v463's gateway signal was the right idea
+(same-source-IP roams are real and were the actual remaining gap), but shipped
+without a test for the interaction between "read the default route" and
+"gravinet changes the default route," which is exactly where it broke. That
+test now exists.
+
+---
+
+
+
+v462 helped — a stuck mesh now recovers when you roam to a *different*
+network, where before it was terminal until a restart — but it still dies
+after 3-4 rapid roams and then won't recover no matter how many more times
+you roam within the same set of networks. The "recovers on a *different*
+network but not by re-roaming the same ones" detail is the exact tell, and it
+points at a hole in roam *detection*, not recovery.
+
+Root cause: roam detection had two signals, and both can be simultaneously
+blind to a same-subnet roam. Signal 1 (v456) compares the local source IP the
+default route picks; signal 2 (the original) compares the source used to reach
+a live peer. Now consider roaming between two networks that hand out the SAME
+local IP — two APs on one 192.168.203.x subnet, or the same SSID rejoined with
+the same DHCP lease (and every host in this deployment is on 192.168.203.x, so
+this is the common case, not a corner one). Signal 1's source address is
+unchanged, so it never fires. And once a prior roam has already killed every
+peer session, signal 2 has no live peer to measure against, so it contributes
+nothing either. The underlay genuinely changed — different gateway, different
+L2, old peer endpoints unreachable — but *neither signal can see it*, so no
+recovery runs. And because detection is what gates recovery, no subsequent
+same-subnet roam re-triggers anything: the mesh stays partitioned until you
+land on a network that finally hands out a different IP (signal 1 fires) or a
+peer happens to re-handshake in. Exactly the reported behavior.
+
+**Fix:** a third detection signal (1b) — the physical default gateway. Even
+when two networks give the same local IP, the gateway's address or its egress
+interface index almost always differs across the move.
+`checkUnderlayChange` now reads the physical default gateway
+(`tun.DefaultGateway`, IPv4, excluding no interface) each check and triggers
+the same full recovery when its address or ifindex changes, independent of the
+source-IP and peer signals. So a same-subnet roam that both existing signals
+miss is now caught by the gateway change. The three signals are complementary:
+1 catches a source-IP change with no reachable peer; 1b catches a same-source-IP
+roam; 2 catches a moved path to a still-live peer and same-gateway
+reconfigurations.
+
+**What changed:** `internal/mesh/engine.go` — new `defaultGW`/`defaultGWIf`/
+`haveDefaultGW` fields under `underlayMu`. `internal/mesh/pmtu.go` —
+`checkUnderlayChange` adds the gateway signal (signal 1b) and recovers on it
+too; imports `syscall` for `AF_INET`. The gateway read is a cheap netlink
+route dump once per second, comparable to the per-second source-IP dial
+signal 1 already does.
+
+**Verified:** `go build ./...`, `go vet ./...`, cross-compiles for all five
+platforms, full `go test ./internal/mesh/... -short` (143s) passes, and the
+detection/reconnect paths pass under `-race`. Added
+`TestCheckUnderlayChangeDetectsRoamViaGatewayWhenSourceIPUnchanged`: pins the
+default-path source constant while flipping the gateway address+ifindex, and
+asserts recovery still fires — reverting the gateway signal reproduces the
+undetected same-subnet roam and fails the test (verified by hand). All prior
+detection tests (`...AnchorStableDoesNotFire`, `...DetectsRoamWithNoUsablePeer
+Endpoint`, `...IgnoresReferencePeerSwitch`, `...ReconnectsAllPeers`) still pass
+unchanged, and `...AnchorStableDoesNotFire` passing confirms the real
+per-second gateway read doesn't spuriously fire on a stable gateway.
+
+Platform note: `tun.DefaultGateway` has a real backend on Linux (netlink) and
+is stubbed elsewhere today, so signal 1b is active on Linux and simply
+contributes nothing on the other platforms (their gateway read errors out and
+the branch is skipped) — no regression there, they keep signals 1 and 2. This
+is the third layer of the roam story: v456 detect-with-no-peer, v462 retain-
+endpoints-for-redial, v463 detect-a-same-IP-roam.
+
+---
+
+
 
 The roam fix from v457 works most of the time now — reported failure rate
 dropped from ~80% to ~20% — but a new, sharper symptom surfaced underneath

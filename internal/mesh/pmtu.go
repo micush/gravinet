@@ -4,9 +4,11 @@ import (
 	"encoding/binary"
 	"net"
 	"net/netip"
+	"syscall"
 	"time"
 
 	"gravinet/internal/protocol"
+	"gravinet/internal/tun"
 )
 
 // Path-MTU discovery, probe-based (PLPMTUD-style, RFC 8899 in spirit).
@@ -503,6 +505,52 @@ func (e *Engine) resetAllPMTU() {
 // before touching anything, so calling it more often than strictly necessary
 // no longer risks the state corruption it used to. Rate-limited to roughly
 // once per second by the caller-side check below.
+// physicalDefaultGateway returns the current physical (non-tun) default
+// gateway for IPv4, excluding every gravinet tun interface. It's the roam
+// signal 1b input (see checkUnderlayChange). Excluding the tun devices is
+// what keeps it stable across gravinet's own full-tunnel route demotion: the
+// mesh installs its own default via a tun device and demotes the physical
+// one's metric, so a lowest-metric-default read would flip between the two on
+// every recovery; filtering the tun ifindexes out leaves only the physical
+// route, whose gateway/ifindex change only on a real underlay move. Returns
+// ok=false when there's no physical default route (e.g. link down mid-switch)
+// or the platform's DefaultGateway is unsupported, in which case the caller
+// just relies on signals 1 and 2.
+func (e *Engine) physicalDefaultGateway() (tun.Gateway, bool) {
+	// Collect this engine's tun interface indexes to exclude. Cheap: a handful
+	// of networks at most, each a single cached IfIndex() call.
+	var tunIdxs []int32
+	for _, ns := range e.netSnapshot() {
+		if d := ns.dev(); d != nil {
+			if idx, err := d.IfIndex(); err == nil && idx != 0 {
+				tunIdxs = append(tunIdxs, idx)
+			}
+		}
+	}
+	// DefaultGateway excludes a single ifindex; call it excluding each tun in
+	// turn and keep a result only if it isn't itself one of our tun devices.
+	// With the common single-tun setup this is one call. The returned gateway
+	// must not sit on any of our tun interfaces — that would be gravinet's own
+	// tunnel default, exactly what we're filtering out.
+	isTun := func(idx int32) bool {
+		for _, t := range tunIdxs {
+			if t == idx {
+				return true
+			}
+		}
+		return false
+	}
+	exclude := int32(0)
+	if len(tunIdxs) > 0 {
+		exclude = tunIdxs[0]
+	}
+	gw, err := defaultGatewayFn(syscall.AF_INET, exclude)
+	if err != nil || !gw.Addr.IsValid() || isTun(gw.IfIndex) {
+		return tun.Gateway{}, false
+	}
+	return gw, true
+}
+
 func (e *Engine) checkUnderlayChange(now time.Time) {
 	e.underlayMu.Lock()
 	if now.Sub(e.lastUnderlayCheck) < time.Second {
@@ -534,6 +582,43 @@ func (e *Engine) checkUnderlayChange(now time.Time) {
 		}
 	}
 
+	// Signal 1b (peer-independent, source-IP-independent): the physical
+	// default gateway. This is what catches a roam between two networks that
+	// hand out the same local IP — two APs on one 192.168.x.y subnet, or the
+	// same DHCP lease re-issued on rejoin — where signal 1's source address is
+	// unchanged and signal 2's peers are all already dead, so nothing else
+	// fires and the mesh stays partitioned with no further roam able to
+	// re-trigger it. The gateway's address or its egress interface index
+	// almost always differs across such a move.
+	//
+	// CRITICAL: this must read the *physical* default route, excluding
+	// gravinet's own tun interfaces. In full-tunnel mode gravinet demotes the
+	// physical default route's metric and installs its own default via the tun
+	// device; a naive "lowest-metric default route" read would then flip
+	// between the physical gateway and gravinet's tunnel gateway every time
+	// recovery reasserts full-tunnel state — and since a detected change
+	// triggers recovery, which reasserts that state, which flips the read,
+	// that is a once-per-second self-sustaining recovery loop that ages and
+	// re-dials every peer every second so no handshake ever completes (it
+	// made the mesh *permanently* unrecoverable — strictly worse than not
+	// having the signal at all). Excluding the tun interfaces makes the read
+	// return the stable physical gateway regardless of gravinet's own
+	// demotion state, since the physical route still exists (just at a higher
+	// metric) and is the only non-tun default.
+	gwChanged := false
+	if gw, ok := e.physicalDefaultGateway(); ok {
+		e.underlayMu.Lock()
+		if e.haveDefaultGW && e.defaultGW.IsValid() && (e.defaultGW != gw.Addr || e.defaultGWIf != gw.IfIndex) {
+			gwChanged = true
+		}
+		prevGW, prevIf := e.defaultGW, e.defaultGWIf
+		e.defaultGW, e.defaultGWIf, e.haveDefaultGW = gw.Addr, gw.IfIndex, true
+		e.underlayMu.Unlock()
+		if gwChanged {
+			e.log.Infof("mesh: default gateway changed %s(if%d) -> %s(if%d) (underlay roam, same source IP); recovering", prevGW, prevIf, gw.Addr, gw.IfIndex)
+		}
+	}
+
 	// Signal 2 (peer-anchored): the source used to reach a specific
 	// directly-connected peer. Kept alongside signal 1 because when it does
 	// fire it's more direct evidence that the path to a real peer moved, and
@@ -561,7 +646,7 @@ func (e *Engine) checkUnderlayChange(now time.Time) {
 		}
 	}
 
-	if anchorChanged || peerChanged {
+	if anchorChanged || gwChanged || peerChanged {
 		// Force every peer on every network to redial from a clean slate —
 		// the same in-process reconnect suspend/resume does (reconnectAllPeers
 		// ages sessions so this tick's pruneDead frees their endpoints for

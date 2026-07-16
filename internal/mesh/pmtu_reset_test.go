@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"gravinet/internal/crypto"
+	"gravinet/internal/tun"
 )
 
 // reset() abandons a converged result and re-searches from the floor, dropping
@@ -395,5 +396,113 @@ func TestCheckUnderlayChangeReconnectsAllPeers(t *testing.T) {
 	ns.mu.RUnlock()
 	if still {
 		t.Fatal("peer session was not pruned after the roam aged it — it won't be redialed")
+	}
+}
+
+// TestCheckUnderlayChangeDetectsRoamViaGatewayWhenSourceIPUnchanged is the
+// same-subnet-roam terminal state: roaming between two networks that hand out
+// the SAME local IP (two APs on one 192.168.203.x subnet, or the same DHCP
+// lease re-issued on rejoin) leaves the anchor source address (signal 1)
+// unchanged, and if every peer is already dead the peer-anchored signal
+// (signal 2) contributes nothing either — so the roam goes completely
+// undetected, no recovery runs, and no further roam re-triggers it until you
+// switch to a network that finally gives a different IP. The physical default
+// gateway (signal 1b) almost always differs across such a move, so it catches
+// what the source IP misses. Here the injected default-path source is held
+// constant while the gateway flips; recovery must still fire.
+func TestCheckUnderlayChangeDetectsRoamViaGatewayWhenSourceIPUnchanged(t *testing.T) {
+	origSrc := defaultPathSourceIPFn
+	origGW := defaultGatewayFn
+	defer func() { defaultPathSourceIPFn = origSrc; defaultGatewayFn = origGW }()
+
+	// Source IP is pinned — signal 1 can never fire.
+	defaultPathSourceIPFn = func() (netip.Addr, bool) {
+		return netip.MustParseAddr("192.168.203.10"), true
+	}
+	// Gateway flips between checks — signal 1b must carry the detection.
+	gw := netip.MustParseAddr("192.168.203.1")
+	var gwIf int32 = 3
+	defaultGatewayFn = func(family int, exclude int32) (tun.Gateway, error) {
+		return tun.Gateway{Addr: gw, IfIndex: gwIf, Metric: 100}, nil
+	}
+
+	eng := NewEngine(Options{NodeID: "self"})
+	eng.startedAt = time.Now().Add(-2 * underlayRestartGrace)
+	var hookCalls int
+	eng.SetUnderlayChangeHook(func() { hookCalls++ })
+
+	// Baseline check establishes both the (pinned) source and the gateway.
+	eng.checkUnderlayChange(time.Now())
+	if hookCalls != 0 {
+		t.Fatalf("baseline check should not fire the hook, got %d", hookCalls)
+	}
+
+	// Same source IP, but a roam onto a different AP: same subnet, different
+	// gateway address AND interface. Signal 1 stays silent; 1b must fire.
+	gw = netip.MustParseAddr("192.168.203.254")
+	gwIf = 5
+	eng.checkUnderlayChange(time.Now().Add(2 * time.Second))
+	if hookCalls != 1 {
+		t.Fatalf("a same-source-IP roam (gateway changed) was not detected (hook fired %d times, want 1) — "+
+			"this is the '3-4 rapid roams then stuck until a different network' terminal state", hookCalls)
+	}
+}
+
+// TestCheckUnderlayChangeIgnoresOwnTunnelDefaultRoute is the regression guard
+// for the v463 self-inflicted loop. In full-tunnel mode gravinet installs its
+// own default route via a tun device and demotes the physical one's metric. A
+// naive "lowest-metric default route" read for signal 1b flips between the
+// physical gateway and gravinet's own tunnel gateway every time recovery
+// reasserts full-tunnel state — and since a detected change triggers recovery
+// which reasserts that state, that's a once-per-second self-sustaining loop
+// that re-dials every peer every second so no handshake ever completes,
+// making the mesh permanently unrecoverable (strictly worse than not having
+// the signal). physicalDefaultGateway must therefore reject a default route
+// that sits on one of gravinet's own tun interfaces. Here defaultGatewayFn
+// returns a gateway ON the fake tun's ifindex; signal 1b must treat it as "no
+// physical gateway" and never fire, no matter how it changes.
+func TestCheckUnderlayChangeIgnoresOwnTunnelDefaultRoute(t *testing.T) {
+	origSrc := defaultPathSourceIPFn
+	origGW := defaultGatewayFn
+	defer func() { defaultPathSourceIPFn = origSrc; defaultGatewayFn = origGW }()
+
+	// Pin the source IP so signal 1 stays silent; isolate signal 1b.
+	defaultPathSourceIPFn = func() (netip.Addr, bool) {
+		return netip.MustParseAddr("10.0.0.1"), true
+	}
+
+	// The only "default gateway" the OS reports sits on gravinet's own tun
+	// device (fakeDev.IfIndex == 0xF4CE), i.e. it's gravinet's tunnel default,
+	// not a physical one — and it flips address each call, as gravinet's
+	// demote/restore would make a naive read appear to.
+	const tunIf = int32(0xF4CE)
+	flip := false
+	defaultGatewayFn = func(family int, exclude int32) (tun.Gateway, error) {
+		flip = !flip
+		addr := "10.255.0.1"
+		if flip {
+			addr = "10.255.0.2"
+		}
+		return tun.Gateway{Addr: netip.MustParseAddr(addr), IfIndex: tunIf, Metric: 50}, nil
+	}
+
+	eng := NewEngine(Options{
+		NodeID: "self",
+		Nets: []NetSpec{{ID: 0xB01, Name: "n", Dev: newFakeDev("d"),
+			Subnet4: netip.MustParsePrefix("10.0.0.0/24")}},
+	})
+	eng.startedAt = time.Now().Add(-2 * underlayRestartGrace)
+	var hookCalls int
+	eng.SetUnderlayChangeHook(func() { hookCalls++ })
+
+	// Several checks, each seeing a different tun-owned "gateway". None may
+	// fire: the gateway sits on our own tun, so it isn't a physical roam.
+	base := time.Now()
+	for i := 0; i < 4; i++ {
+		eng.checkUnderlayChange(base.Add(time.Duration(i) * 2 * time.Second))
+	}
+	if hookCalls != 0 {
+		t.Fatalf("signal 1b fired %d time(s) on a gateway that sits on gravinet's own tun interface — "+
+			"that's the v463 demote loop that made the mesh permanently unrecoverable", hookCalls)
 	}
 }
