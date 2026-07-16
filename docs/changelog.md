@@ -37,7 +37,79 @@ assuming it didn't happen.
 
 ---
 
-## v456 — 2026-07-15
+## v457 — 2026-07-15
+
+The actual roam bug — not detection this time (v456 fixed that), the
+recovery itself. After a roam, every peer reads "no reply" except the odd one
+that happens to re-handshake toward this host on its own (in the report,
+gn-macos, freshly 3.5ms while all 12 others were dead). That one-peer-alive
+detail is the tell: the overlay works, the transport socket works (it's
+wildcard-bound, so it survives the underlay change), and inbound handshakes
+land fine. What's broken is that this host never re-dials its existing peers
+after the roam — so every session stays pointed at an endpoint that was only
+reachable on the old underlay, and black-holes.
+
+Root cause, traced end to end: recovery from a roam and recovery from a
+laptop wake are supposed to be the same thing — tear every session down so
+the maintenance loop re-dials every peer from scratch — but only the wake
+path actually did it. `onResume` (suspend/resume) ages every session past the
+peer timeout so that tick's `pruneDead` reaps them all, freeing each peer's
+endpoint for `initLoop` to re-dial. `checkUnderlayChange` (a live roam) did
+NOT: it only reset path-MTU and re-asserted OS routes, then fired the restart
+hook and hoped. Resetting PMTU does nothing for a session whose endpoint is
+now unreachable, and re-asserting routes doesn't re-dial anyone. So the
+sessions just sat there. And critically, a peer learned via gossip (i.e. not
+a configured seed) has no independent re-dial trigger at all until its
+session is pruned — and nothing was pruning it, because `pruneDead` only
+reaps sessions already silent past the timeout and a roam doesn't age them.
+The only peers that recovered were seeds (re-dialed by `initLoop` once their
+sessions eventually timed out on their own) and peers that re-handshook
+toward us first. Everyone else stayed dead until the peer-timeout elapsed,
+and then only if they were seeds. That's the whole "no reply to everyone but
+one, doesn't self-heal" picture.
+
+This is also why every prior release in this series missed it: v451–v456 were
+all upstream of this point (making the roam get *detected* and the restart
+*fire*), but the in-process recovery that runs on detection never contained
+the one step — re-dial every peer — that a roam actually needs, so unless the
+restart hook fired and fully rebuilt the process, detection led to a
+recovery that didn't recover.
+
+**Fix:** the roam path now performs the same full-peer reconnect the wake
+path does. Extracted `onResume`'s session-aging teardown into a shared
+`reconnectAllPeers` (internal/mesh/control.go) and call it from
+`checkUnderlayChange` on any detected roam, for every network, before the
+existing PMTU-reset and OS-reassert steps. Every peer — seed or gossip-
+learned — is now aged, pruned this same maintenance cycle, and re-dialed
+from a clean slate against whatever endpoint gossip currently has, exactly as
+after a laptop wake. The grace-gated one-shot restart hook stays as a
+belt-and-braces fallback, but is no longer load-bearing: a mesh with
+restart_on_underlay_change disabled now recovers from a roam on its own
+instead of staying partitioned until session timeout.
+
+**What changed:** `internal/mesh/control.go` — `onResume` refactored to call
+the new `reconnectAllPeers` (identical behavior; it's the extracted core
+plus the OS-state reassert it always did). `internal/mesh/pmtu.go` —
+`checkUnderlayChange`'s recovery block calls `reconnectAllPeers` for every
+network first, so a detected roam re-dials all peers rather than only
+resetting PMTU/routes and deferring to the restart hook.
+
+**Verified:** `go build ./...`, `go vet ./...`, cross-compiles for
+linux/darwin/windows/freebsd/openbsd, full `go test ./... -short` (mesh +
+webadmin + everything), and `-race` on the underlay/resume/reconnect paths
+all clean. Added `TestCheckUnderlayChangeReconnectsAllPeers`: a live,
+non-seed peer session pointed at an old-underlay endpoint, a detected roam
+(via the v456 anchor signal, so no live peer endpoint is needed to detect
+it), and an assertion that the session is aged past the timeout and reaped by
+`pruneDead` this cycle — i.e. it will be re-dialed. Reverting the
+`reconnectAllPeers` call reproduces the black-hole (session stays fresh,
+never pruned) and fails the test, verified by hand. Existing
+`TestOnResumeForcesReconnect` still passes, confirming the refactor left the
+wake path's behavior intact.
+
+---
+
+
 
 Report: after switching underlay networks (with or without a default route),
 the peer-latency view sometimes shows "no reply" for *every* peer at once,

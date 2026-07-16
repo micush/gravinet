@@ -562,16 +562,32 @@ func (e *Engine) checkUnderlayChange(now time.Time) {
 	}
 
 	if anchorChanged || peerChanged {
+		// Force every peer on every network to redial from a clean slate —
+		// the same in-process reconnect suspend/resume does (reconnectAllPeers
+		// ages sessions so this tick's pruneDead frees their endpoints for
+		// initLoop). This is the part that was missing: without it the roam
+		// path only reset PMTU and re-asserted OS routes, which does nothing
+		// for a peer whose session is now pointed at an endpoint unreachable
+		// from the new underlay — and a non-seed peer's stale session is
+		// never retried until it's pruned, so the mesh stayed partitioned
+		// (every peer "no reply") until sessions timed out, and even then
+		// only seeds redialed. Now every peer is torn down and redialed
+		// immediately, exactly as after a laptop wake.
+		for _, ns := range e.netSnapshot() {
+			e.reconnectAllPeers(ns)
+		}
 		e.resetAllPMTU()
 		for _, ns := range e.netSnapshot() {
 			e.reassertOSState(ns)
 		}
-		// In-process recovery above (drop every path MTU to the floor, re-assert
-		// each network's OS state) is a best-effort mitigation. A roam can also
-		// leave peers pinned to endpoints on the network we just left and OS
-		// routes pointing at the old gateway — state only a clean restart rebuilds
-		// reliably. If a restart hook is installed, request one; it's grace-gated
-		// and one-shot so a flapping link can't spin the service.
+		// The in-process reconnect above is the primary recovery now, not a
+		// best-effort patch-up. The restart hook remains as a belt-and-braces
+		// fallback for the residue a clean restart rebuilds more reliably
+		// than a live reconnect (OS routes pinned to the old gateway on some
+		// platforms, etc.); it's grace-gated and one-shot so a flapping link
+		// can't spin the service, and it's now genuinely optional — a mesh
+		// with restart_on_underlay_change off still reconnects via the
+		// teardown above rather than staying dead until session timeout.
 		e.notifyUnderlayChange()
 	}
 }

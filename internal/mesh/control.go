@@ -598,7 +598,26 @@ func (ps *peerSession) setLastRx(t time.Time) {
 // that OS state here (see reassertOSState) and invalidate the cached underlay
 // source so the next underlay check re-baselines to the post-wake address.
 func (e *Engine) onResume(ns *netState, now time.Time) {
-	aged := now.Add(-e.peerTimeoutDuration() - time.Second)
+	e.reconnectAllPeers(ns)
+	e.reassertOSState(ns)
+}
+
+// reconnectAllPeers ages every session on the network past the peer timeout so
+// the current maintenance tick's pruneDead tears them all down — freeing each
+// peer's endpoint for initLoop to re-dial from a clean slate — and drops each
+// peer's path-MTU state so it re-discovers on the fresh path. This is the
+// in-process reconnect shared by onResume (suspend/resume) and
+// checkUnderlayChange (a live underlay roam): both leave every existing
+// session pointed at an endpoint that may no longer be reachable from the new
+// underlay, and for a peer that isn't a configured seed a stale session is
+// never retried until it's first pruned — so without this teardown, only
+// seeds (and peers that happen to re-handshake toward us on their own) ever
+// come back, which is the "every peer reads 'no reply' after a roam, only
+// sometimes recovering" symptom. Also invalidates the cached underlay source
+// so the next check re-baselines to the post-roam address rather than
+// re-triggering on it.
+func (e *Engine) reconnectAllPeers(ns *netState) {
+	aged := time.Now().Add(-e.peerTimeoutDuration() - time.Second)
 	var peers []*peerSession
 	e.mu.RLock()
 	for _, ps := range e.sessions {
@@ -615,8 +634,6 @@ func (e *Engine) onResume(ns *netState, now time.Time) {
 	e.underlayMu.Lock()
 	e.localUnderlay = netip.Addr{}
 	e.underlayMu.Unlock()
-
-	e.reassertOSState(ns)
 }
 
 // reassertOSState re-applies the overlay interface address and every installed

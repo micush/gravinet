@@ -337,3 +337,63 @@ func TestCheckUnderlayChangeAnchorStableDoesNotFire(t *testing.T) {
 		t.Fatalf("stable default-path source spuriously fired the hook %d time(s)", hookCalls)
 	}
 }
+
+// TestCheckUnderlayChangeReconnectsAllPeers is the core of the roam fix: a
+// detected underlay roam must tear down and re-dial EVERY peer, not just
+// configured seeds. Before this, checkUnderlayChange only reset PMTU and
+// re-asserted OS routes on a roam and left every session pointed at its
+// old-underlay endpoint; a non-seed peer's stale session is never retried
+// until it's pruned, and it's only pruned by timeout — so the mesh sat
+// partitioned ("no reply" to every peer) until sessions aged out, and even
+// then only seeds redialed. This drives a detected roam (via the injected
+// default-path anchor, so it fires with no live peer endpoint needed) and
+// asserts a live non-seed peer's session was aged past the timeout, i.e. it
+// WILL be pruned and re-dialed this maintenance cycle.
+func TestCheckUnderlayChangeReconnectsAllPeers(t *testing.T) {
+	origFn := defaultPathSourceIPFn
+	defer func() { defaultPathSourceIPFn = origFn }()
+	src := netip.MustParseAddr("192.168.1.50")
+	defaultPathSourceIPFn = func() (netip.Addr, bool) { return src, true }
+
+	const netID = uint64(0xA11)
+	eng := NewEngine(Options{
+		NodeID: "self", UnderlayMTU: 1280, UnderlayMTUMax: 1450,
+		Nets: []NetSpec{{ID: netID, Name: "n", Dev: newFakeDev("d"),
+			Subnet4: netip.MustParsePrefix("10.0.0.0/24")}},
+	})
+	eng.Attach(nopSender{})
+	eng.startedAt = time.Now().Add(-2 * underlayRestartGrace)
+	ns := eng.network(netID)
+
+	// A live, non-seed peer whose endpoint is on the OLD underlay.
+	ps := &peerSession{nodeID: "peer", net: ns, localIdx: 7,
+		endpoint: netip.MustParseAddrPort("203.0.113.1:65432")}
+	ps.initPMTU(eng.pmtuFloor, eng.pmtuCeil)
+	ps.setLastRx(time.Now()) // freshly alive
+	eng.mu.Lock()
+	eng.sessions[7] = ps
+	eng.mu.Unlock()
+	ns.mu.Lock()
+	ns.byNode["peer"] = ps
+	ns.mu.Unlock()
+
+	// Baseline check (establishes the anchor), then the roam.
+	eng.checkUnderlayChange(time.Now())
+	src = netip.MustParseAddr("10.9.9.20")
+	roamAt := time.Now().Add(2 * time.Second)
+	eng.checkUnderlayChange(roamAt)
+
+	if roamAt.Sub(ps.lastRxTime()) <= eng.peerTimeoutDuration() {
+		t.Fatalf("a detected roam did not age the (non-seed) peer session past peerTimeout "+
+			"(gap=%v) — it would black-hole on its stale endpoint until timeout instead of "+
+			"redialing, which is the whole-mesh 'no reply' after roam bug", roamAt.Sub(ps.lastRxTime()))
+	}
+	// pruneDead this same cycle should now reap it, freeing the endpoint for redial.
+	eng.pruneDead(ns, roamAt)
+	ns.mu.RLock()
+	_, still := ns.byNode["peer"]
+	ns.mu.RUnlock()
+	if still {
+		t.Fatal("peer session was not pruned after the roam aged it — it won't be redialed")
+	}
+}
