@@ -5,6 +5,7 @@ import (
 	"runtime"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gravinet/internal/logx"
@@ -79,7 +80,8 @@ type metricsCollector struct {
 	cpuFailing, memFailing, diskFailing bool
 	uptimeFailing                       bool
 
-	available bool // whether /proc metrics could be read at all
+	available bool        // whether /proc metrics could be read at all
+	sampling  atomic.Bool // true while a sample() launched from run() is in flight
 	stop      chan struct{}
 }
 
@@ -119,7 +121,21 @@ func (m *metricsCollector) run() {
 		case <-m.stop:
 			return
 		case <-t.C:
-			m.sample()
+			// sample() can block for ~1s on macOS (top -l 1's startup
+			// delay). Running it inline here would stretch the effective
+			// cadence to interval+readtime (~3s), collecting fewer points
+			// than the window expects and leaving the newest one further
+			// behind "now". Run it in its own goroutine so the ticker keeps
+			// firing on schedule; the sampling atomic guard skips a tick
+			// only in the pathological case where a prior sample is somehow
+			// still running a full interval later (so slow samples drop a
+			// tick rather than queueing up unboundedly).
+			if m.sampling.CompareAndSwap(false, true) {
+				go func() {
+					defer m.sampling.Store(false)
+					m.sample()
+				}()
+			}
 		}
 	}
 }
@@ -142,26 +158,19 @@ var (
 )
 
 func (m *metricsCollector) sample() {
-	now := time.Now().Unix()
-	cutoff := now - int64(metricRetention/time.Second)
-
-	// The readers below range from a fast syscall/proc-file read (Linux,
-	// FreeBSD, ...) to several short-lived subprocess spawns apiece (macOS:
-	// top, vm_stat, sysctl x2, netstat — see metrics_darwin.go; top alone
-	// has its own internal ~1s sampling delay by design, see its doc
-	// comment there). Run one at a time, their costs add up — on a Mac
-	// under any load that can comfortably exceed metricSampleInterval. And
-	// since every series is only ever populated from this one function, a
-	// slow run doesn't just delay one graph: it pushes CPU, memory, disk,
-	// and every interface's newest point behind actual wall-clock time by
-	// the same margin, all at once — which at the 1-minute zoom is visible
-	// as every line, not just one, stopping short of the chart's right
-	// edge (the frontend draws that edge from the browser's own clock, not
-	// from whatever the newest point happens to be — see ui.go's
-	// renderMetricGraphs). Running the readers concurrently bounds the
-	// wall time to the slowest single one instead of their sum, and just
-	// as importantly keeps that wall time off m.mu below, so a concurrent
-	// /api/metrics request isn't stuck waiting on it either.
+	// Timestamp is captured AFTER the readers return (below), not here: on
+	// macOS the CPU reader (top -l 1) blocks ~1s before it emits anything —
+	// top collects an initial reference frame before its first sample — and
+	// the other readers shell out too. Stamping `now` before that wait, as
+	// this used to, meant every point landed with a timestamp from ~1s+
+	// before it was actually collected. snapshot()'s server_now, by
+	// contrast, is read fresh when the HTTP request arrives, i.e. current —
+	// so the newest point sat a fixed ~1s+ behind the chart's right edge on
+	// every series at once (they all share this timestamp). That's the gap
+	// in the macOS screenshots: not a slow or flaky reader, just points
+	// dated earlier than the moment they represent. Capturing the time when
+	// the readers finish closes it. cutoff (retention trim) is likewise
+	// computed from that same post-read `now`.
 	var (
 		wg                sync.WaitGroup
 		cpuTotal, cpuIdle uint64
@@ -181,6 +190,9 @@ func (m *metricsCollector) sample() {
 	go func() { defer wg.Done(); uptimeSecs, uptimeOK = readUptimeFn() }()
 	go func() { defer wg.Done(); dev = readNetDevFn() }()
 	wg.Wait()
+
+	now := time.Now().Unix()
+	cutoff := now - int64(metricRetention/time.Second)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -270,7 +282,8 @@ func (m *metricsCollector) sample() {
 
 // snapshot returns the series within the last `minutes`, deep-copied for JSON.
 func (m *metricsCollector) snapshot(minutes int) map[string]any {
-	cutoff := time.Now().Unix() - int64(minutes)*60
+	nowUnix := time.Now().Unix()
+	cutoff := nowUnix - int64(minutes)*60
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	ifs := make([]ifaceMetrics, 0, len(m.ifaces))
@@ -289,6 +302,7 @@ func (m *metricsCollector) snapshot(minutes int) map[string]any {
 	out := map[string]any{
 		"available":       m.available,
 		"sample_interval": int(metricSampleInterval / time.Second),
+		"server_now":      nowUnix,
 		"cpu":             sinceCutoff(m.cpu, cutoff),
 		"mem":             sinceCutoff(m.mem, cutoff),
 		"disk":            sinceCutoff(m.disk, cutoff),

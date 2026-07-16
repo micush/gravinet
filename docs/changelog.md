@@ -37,7 +37,147 @@ assuming it didn't happen.
 
 ---
 
-## v453 — 2026-07-15
+## v455 — 2026-07-15
+
+The macOS Metrics gap, actually diagnosed this time — and with a correction
+to v454, which made one part of it worse. The deciding evidence was in the
+screenshots: the per-interface **rx** line is jagged, varied, real
+per-sample data, and it stops short of the right edge at *exactly* the same
+x-position as the flat CPU and disk lines. Every series has plenty of
+points; they all just end at the same spot, a fixed distance from the edge.
+That rules out everything the last three releases chased — a slow reader, a
+flaky reader, clock skew — because none of those would land every series'
+newest point at the identical short position. It's not a freshness problem
+and not a per-reader problem. It's that the newest point's *timestamp* is a
+fixed amount older than where the chart draws "now", uniformly, because of
+two concrete mechanical facts:
+
+1. **Points were timestamped before their readers ran, not after.**
+   `sample()` captured `now = time.Now()` at the top, then blocked on the
+   readers. On macOS the CPU reader shells out to `top -l 1`, which by
+   design waits ~1s collecting an initial reference frame before it emits
+   even a single sample — so every point was stamped ~1s+ earlier than the
+   moment it actually represented. On Linux/BSD the readers are effectively
+   instant, so `now`-at-top and `now`-after-read are the same instant and
+   nothing showed. This is the macOS-specific part.
+
+2. **v454's `server_now` edge anchor guaranteed a gap.** v454 (correctly
+   diagnosing that the browser clock was the wrong reference) switched the
+   chart's right edge to the server's clock — but read *fresh* in
+   `snapshot()` at request time, which is strictly newer than any data
+   point, so the freshest possible point still couldn't reach the edge.
+   Combined with (1), the gap was (top's ~1s delay) + (time since last
+   sample). v454 didn't cause the macOS gap, but its anchor made even a
+   correctly-timestamped point unable to close it.
+
+**The fix, in three parts:**
+
+- `internal/webadmin/metrics.go`: `sample()` now captures its timestamp
+  *after* the readers return, so a point is dated when it was actually
+  collected. (This is the direct fix for fact 1.)
+- `internal/webadmin/ui.go`: the chart's right edge is now anchored to the
+  **newest actual sample timestamp across all series**, not to any
+  wall-clock (`renderMetricGraphs`). The line's last point is drawn at its
+  own timestamp's x-position, so anchoring the edge there is what makes the
+  line reach the end — on every platform, regardless of how old that newest
+  point is relative to real time. This is what instant-reader platforms were
+  already effectively getting for free; macOS now gets it explicitly. "now"
+  on the axis means "the most recent reading," which is what a live chart's
+  edge should represent. (This corrects fact 2. `server_now` is kept only as
+  the fresh-boot fallback when there are no points yet, then `Date.now()`.)
+- `internal/webadmin/metrics.go`: `run()` now dispatches each `sample()` in
+  its own goroutine (with an atomic in-flight guard so they can't pile up)
+  instead of calling it inline, so a ~1s macOS sample no longer stretches
+  the 2s ticker cadence out to ~3s and thins the point density. Secondary to
+  the two above, but it's why macOS also had visibly fewer points per
+  window.
+
+**Verified:** `go build ./...`, `go vet ./...`, cross-compiles for
+linux/darwin/windows/freebsd/openbsd, and `node --check` on the extracted
+`<script>` body all clean. Full `go test ./internal/webadmin/... -short
+-race` passes (including the new goroutine-dispatched sampling path under the
+race detector). Added `TestSampleTimestampsPointsAfterReadersFinish`, which
+gives the CPU reader a 1.2s artificial delay and asserts the resulting
+point's timestamp falls after the readers finished, not before — reverting
+the timestamp fix reproduces the pre-read stamp and fails the test (verified
+by hand). Existing `server_now` assertions retained (it's still emitted for
+the fallback path).
+
+Unlike v452–v454, this isn't reasoning from indirect signals: the "jagged
+line stops at the same x as the flat lines" detail in the screenshots is
+only consistent with a uniform timestamp-vs-edge offset, and both
+contributing offsets (pre-read stamp; fresh-`server_now` edge) are now
+removed at the source. If anything still stops short after this, it would
+have to be a point actually carrying a stale timestamp out of `sample()`,
+which the new test rules out for the reader path.
+
+---
+
+
+
+Third round on the macOS Metrics-tab report: back to all four graphs — CPU,
+memory, disk, and network — not just memory. That's the detail that finally
+points at the right layer: v452 (concurrent readers) and v453 (carry-forward
+on failure) each targeted a specific way *one* series' data could lag or
+gap, but neither touches how the chart decides where "now" is in the first
+place — and if every series is behind by the same amount regardless of which
+reader produced it, the bug was never in the readers at all.
+
+Every point plotted, on every graph, carries the server's own timestamp
+(`sample()`'s `now`, `time.Now().Unix()`). But the frontend never uses that
+timestamp to decide where the chart's right edge is — `chartLayers` and the
+hover handler in `ui.go` each independently compute `Math.floor(Date.now()
+/1000)`, i.e. the *browser's* clock, and draw "now" there. Those are only
+the same instant if the browser's machine and the gravinet host's clock
+agree. If they don't — even by a handful of seconds, which is all it takes
+to see at the 1-minute zoom this was reported at — every series falls short
+of the edge by exactly that gap, uniformly, no matter how fresh the
+underlying reader actually was. Unlike v452/v453, this explanation doesn't
+require the macOS readers to be doing anything wrong at all, which fits: two
+rounds of legitimate fixes to those readers changed nothing about the
+report.
+
+Didn't get to confirm the two clocks actually disagree on the reporting
+box — that needs `date +%s` run at the same moment on both ends, which
+wasn't available this round either. But the fix doesn't require confirming
+that first: making the chart's "now" reference the server's own clock
+instead of the browser's is correct regardless of whether these two
+particular clocks are in sync, and removes the dependency entirely rather
+than working around a specific skew.
+
+**What changed:** `internal/webadmin/metrics.go`'s `snapshot()` now includes
+`server_now` (the same `time.Now().Unix()` used as every point's own
+timestamp) in the `/api/metrics` response. `internal/webadmin/ui.go`'s
+`renderMetricGraphs` reads it and threads it through as `nowRef` to
+`graphCard`, `chartLayers`, and `chartSVG` — replacing their own
+`Date.now()` calls — and the hover crosshair (`attachChartHover`) now reads
+the same value back off the card's state (`hs.now`, updated on every redraw)
+instead of taking a fresh, separately-sourced `Date.now()` reading of its
+own, so the crosshair always agrees with wherever the line was actually
+drawn. Falls back to the browser's clock only if a response somehow lacks
+`server_now` (defensive; shouldn't happen going forward).
+
+**Verified:** `go build ./...`, `go vet ./...`, cross-compiles for
+linux/darwin/windows/freebsd/openbsd, and `node --check` against the
+extracted `<script>` body (ui.go embeds it as one Go string; this file has
+no separate `.js` to run through a normal toolchain) all clean. Full
+`go test ./internal/webadmin/... -short -race` passes. Extended
+`TestMetricsCollectorSample` and `TestHandleMetrics` to assert `server_now`
+is present, current, and survives the real JSON wire format (not just the
+in-process map).
+
+Same as v453: haven't been able to confirm this resolves what's actually
+happening on the reporting Mac, since that still needs eyes on that specific
+box. If the graphs still don't reach "now" after this, the next useful thing
+to check is exactly the `date +%s`-on-both-ends comparison this round didn't
+have — at that point either the clocks genuinely disagree (and this fix
+should have closed the gap) or they don't (and the cause is neither clock
+skew nor anything the last three releases addressed, which would mean
+looking somewhere new rather than at metrics.go/ui.go again).
+
+---
+
+
 
 Second follow-up on the macOS Metrics-tab lag (v452): after that fix, CPU
 now visibly reaches "now" — it's live, moving, right up to the edge — but

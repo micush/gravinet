@@ -5021,18 +5021,41 @@ function metricSpecs(data){
 
 function renderMetricGraphs(body, data, minutes){
   const win = minutes*60;
+  // The chart's right edge ("now") is anchored to the newest actual sample
+  // timestamp across all series — NOT to wall-clock (neither the browser's
+  // Date.now() nor the server's server_now). Reasoning: the line's last
+  // point is drawn at the x-position of its own timestamp, so the line
+  // reaches the edge only if the edge sits at that timestamp. On platforms
+  // whose readers are instant, the newest point is ~microseconds old when
+  // served, so wall-clock and newest-point coincide and it looked fine. On
+  // macOS the readers take ~1s (top -l 1's startup delay), so the newest
+  // point is meaningfully older than wall-clock, and anchoring the edge to
+  // wall-clock (as v454's server_now did — worse, server_now is read fresh
+  // at request time, strictly newer than any point) left every line ending
+  // short by that margin. Anchoring to the data itself makes the window end
+  // exactly where the freshest data is, on every platform, so "now" means
+  // "the most recent reading" — which is what the edge should represent.
+  // server_now is still used, but only as the anchor when there are no
+  // points at all yet (fresh boot), and Date.now() as the last resort.
+  let nowRef = 0;
+  const allSeries = [data.cpu, data.mem, data.disk];
+  for (const ifc of (data.ifaces||[])){ allSeries.push(ifc.rx); allSeries.push(ifc.tx); }
+  for (const arr of allSeries){
+    if (arr && arr.length){ const t = arr[arr.length-1].t; if (t > nowRef) nowRef = t; }
+  }
+  if (!nowRef) nowRef = data.server_now || Math.floor(Date.now()/1000);
   const specs = metricSpecs(data);
   const key = specs.map(s=>s.key).join('|');
   // Same set of graphs as last time: update each in place so the hover
   // crosshair/tooltip survive and the lines keep scrolling while inspected.
   if (body._cardsKey === key && body._cards && body._cards.length === specs.length){
-    for (let i=0;i<specs.length;i++){ body._cards[i]._redraw(specs[i].series, specs[i].yMax, win, specs[i].fmtY); }
+    for (let i=0;i<specs.length;i++){ body._cards[i]._redraw(specs[i].series, specs[i].yMax, win, specs[i].fmtY, nowRef); }
     updateUptimeCard(body, data);
     return;
   }
   body.innerHTML = ''; body._cards = []; body._cardsKey = key; body._uptimeEl = null;
   for (const sp of specs){
-    const card = graphCard(sp.title, sp.series, sp.yMax, sp.fmtY, win, sp.single);
+    const card = graphCard(sp.title, sp.series, sp.yMax, sp.fmtY, win, sp.single, nowRef);
     body.appendChild(card); body._cards.push(card);
   }
   if (!(data.ifaces||[]).length){
@@ -5085,7 +5108,7 @@ function fmtUptime(seconds){
 // graphCard builds one metric card: header (with current values) plus an
 // interactive line chart. card._redraw(series,yMax,win,fmtY) updates the data
 // layer in place, leaving the hover overlay (and its listeners) untouched.
-function graphCard(title, series, yMax, fmtY, win, single){
+function graphCard(title, series, yMax, fmtY, win, single, nowRef){
   const card = $('<div class="card metric-card"></div>');
   const head = $('<div class="metric-head"></div>');
   const setHead = (sr) => {
@@ -5099,15 +5122,15 @@ function graphCard(title, series, yMax, fmtY, win, single){
   setHead(series);
   card.appendChild(head);
   const holder = $('<div class="chart-holder"></div>');
-  holder.innerHTML = chartSVG(series, yMax, win, fmtY);
+  holder.innerHTML = chartSVG(series, yMax, win, fmtY, nowRef);
   card.appendChild(holder);
-  const hs = { series:series, yMax:yMax, win:win, fmtY:fmtY };
+  const hs = { series:series, yMax:yMax, win:win, fmtY:fmtY, now:nowRef };
   attachChartHover(holder, hs);
-  card._redraw = (sr, ym, wn, ff) => {
-    hs.series = sr; hs.yMax = ym; hs.win = wn; hs.fmtY = ff;
+  card._redraw = (sr, ym, wn, ff, nr) => {
+    hs.series = sr; hs.yMax = ym; hs.win = wn; hs.fmtY = ff; hs.now = nr;
     const svg = holder.querySelector('svg.chart');
     if (svg){
-      const L = chartLayers(sr, ym, wn, ff);
+      const L = chartLayers(sr, ym, wn, ff, nr);
       const grid = svg.querySelector('.grid'), dataG = svg.querySelector('.data');
       if (grid) grid.innerHTML = L.grid;
       if (dataG) dataG.innerHTML = L.data;
@@ -5141,7 +5164,7 @@ function attachChartHover(holder, hs){
   cap.addEventListener('mouseleave', () => { metricsHover = false; hov.style.display='none'; tip.style.display='none'; });
   cap.addEventListener('mousemove', (ev) => {
     const series = hs.series, yMax = hs.yMax, win = hs.win, fmtY = hs.fmtY;
-    const now=Math.floor(Date.now()/1000), t0=now-win;
+    const now=hs.now, t0=now-win;
     const ys = v => padT + (H-padT-padB)*(1 - Math.min(v,yMax)/yMax);
     const xOf = t => plotL + (plotR-plotL)*Math.max(0,Math.min(1,(t-t0)/win));
     const rect = svg.getBoundingClientRect();
@@ -5181,9 +5204,9 @@ function clockOf(t){ const d=new Date(t*1000); const p=n=>String(n).padStart(2,'
 // chartLayers builds the grid (axes/labels) and data (line paths) layers for a
 // chart, separately so the data can be redrawn in place without disturbing the
 // hover overlay.
-function chartLayers(series, yMax, win, fmtY){
+function chartLayers(series, yMax, win, fmtY, nowRef){
   const W=CH.W, H=CH.H, padL=CH.padL, padR=CH.padR, padT=CH.padT, padB=CH.padB;
-  const now=Math.floor(Date.now()/1000), t0=now-win;
+  const now=nowRef, t0=now-win;
   const xs = t => padL + (W-padL-padR)*Math.max(0,Math.min(1,(t-t0)/win));
   const ys = v => padT + (H-padT-padB)*(1 - Math.min(v,yMax)/yMax);
   let grid='';
@@ -5208,9 +5231,9 @@ function chartLayers(series, yMax, win, fmtY){
 // chartSVG draws a fixed-viewBox line chart (scales to the card width via CSS),
 // with the grid and data in their own groups, plus a hover crosshair and a
 // transparent capture rect on top.
-function chartSVG(series, yMax, win, fmtY){
+function chartSVG(series, yMax, win, fmtY, nowRef){
   const W=CH.W, H=CH.H, padL=CH.padL, padR=CH.padR, padT=CH.padT, padB=CH.padB;
-  const L = chartLayers(series, yMax, win, fmtY);
+  const L = chartLayers(series, yMax, win, fmtY, nowRef);
   let dots='';
   for (const s of series){ dots += '<circle class="hover-dot" r="3.2" fill="'+s.color+'" cx="0" cy="0" style="display:none"/>'; }
   let g = '<g class="grid">'+L.grid+'</g><g class="data">'+L.data+'</g>';

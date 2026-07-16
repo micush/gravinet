@@ -52,6 +52,18 @@ func TestMetricsCollectorSample(t *testing.T) {
 	if up == 0 || up > 10*365*86400 {
 		t.Fatalf("uptime_seconds = %d, want a plausible non-zero uptime", up)
 	}
+	// server_now is what the frontend draws the chart's "now" edge from
+	// (ui.go's renderMetricGraphs) instead of the browser's own clock — see
+	// v454's changelog entry. Confirm it's actually present and current,
+	// not just silently missing (which would fall back to Date.now() and
+	// mask exactly the client/server clock mismatch this exists to avoid).
+	sn, ok := snap["server_now"].(int64)
+	if !ok {
+		t.Fatalf("server_now missing or wrong type: %v (%T)", snap["server_now"], snap["server_now"])
+	}
+	if d := time.Now().Unix() - sn; d < -2 || d > 2 {
+		t.Fatalf("server_now = %d is %ds from time.Now() — want it essentially current", sn, d)
+	}
 }
 
 func TestMetricsWindowClamp(t *testing.T) {
@@ -110,6 +122,9 @@ func TestHandleMetrics(t *testing.T) {
 	// round trip, not just the direct map lookup.
 	if up, ok := out["uptime_seconds"].(float64); !ok || up <= 0 {
 		t.Fatalf("expected a positive uptime_seconds over the wire, got %v", out["uptime_seconds"])
+	}
+	if sn, ok := out["server_now"].(float64); !ok || sn <= 0 {
+		t.Fatalf("expected a positive server_now over the wire, got %v", out["server_now"])
 	}
 }
 
@@ -212,5 +227,55 @@ func TestSampleCarriesLastValueForwardOnFailure(t *testing.T) {
 		// (55 is also the "real" reading here by construction; this mainly
 		// guards against a future change accidentally freezing lastMemPct.)
 		t.Fatalf("expected a real reading after recovery, got %v", got)
+	}
+}
+
+// The macOS gap (all graphs stopping short of the right edge) came down to
+// points being timestamped BEFORE the readers ran, not after: readCPUTotals
+// there shells out to `top -l 1`, which blocks ~1s before emitting anything,
+// so a `now` captured at the top of sample() was ~1s stale by the time the
+// point was actually appended. With snapshot()'s server_now read fresh at
+// request time, that staleness was a fixed gap between every series' newest
+// point and the chart's right edge. This asserts the point carries a
+// timestamp from AFTER its readers finished, not before.
+func TestSampleTimestampsPointsAfterReadersFinish(t *testing.T) {
+	const readDelay = 1200 * time.Millisecond
+	origCPU := readCPUTotalsFn
+	defer func() { readCPUTotalsFn = origCPU }()
+
+	var tick uint64
+	readCPUTotalsFn = func() (uint64, uint64, bool) {
+		time.Sleep(readDelay)
+		tick += 100
+		return tick, tick / 4, true // ever-increasing total so a CPU point is produced
+	}
+
+	mc := newMetricsCollector(&stubBackend{}, logx.Default())
+	mc.sample() // primes CPU delta state (no point yet)
+
+	before := time.Now().Unix()
+	mc.sample() // this one produces a CPU point; its readers block readDelay
+	after := time.Now().Unix()
+
+	if len(mc.cpu) == 0 {
+		t.Fatal("expected a CPU point after the second sample")
+	}
+	ts := mc.cpu[len(mc.cpu)-1].T
+	// The point must be stamped at/after the moment the (slow) readers
+	// returned — i.e. no earlier than `before`+readDelay, and within the
+	// sample's actual wall-clock span. A pre-read timestamp (the bug) would
+	// be < before+1s.
+	if ts < before {
+		t.Fatalf("CPU point timestamp %d predates the sample() call start %d", ts, before)
+	}
+	if ts > after {
+		t.Fatalf("CPU point timestamp %d is after sample() returned %d", ts, after)
+	}
+	// Most telling: the timestamp should reflect that ~1.2s elapsed reading,
+	// i.e. it should be at least ~1s past when we started, not stamped up
+	// front.
+	if ts < before+1 {
+		t.Fatalf("CPU point timestamp %d was stamped before the ~%v reader delay elapsed (start %d) — "+
+			"points must be timestamped after their readers finish, not before", ts, readDelay, before)
 	}
 }
