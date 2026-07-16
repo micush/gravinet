@@ -37,7 +37,192 @@ assuming it didn't happen.
 
 ---
 
-## v457 — 2026-07-15
+## v461 — 2026-07-15
+
+Consistency tweak: `RestartSec` 5s→8s in both the shipped
+`install/gravinet.service` and the runtime-generated unit
+(`internal/service/service.go`), matching `TimeoutStopSec=8`. Only that one
+line changed; `Restart=always`, `TimeoutStopSec=8`, `SendSIGKILL=yes`
+(`[Service]`) and `StartLimitIntervalSec=0` (`[Unit]`) are unchanged, as is
+the daemon's 5s `shutdownGrace`. No logic or ordering impact — `RestartSec` is
+just the delay before systemd starts the replacement after the process exits,
+independent of the stop-phase/watchdog timing.
+
+**Verified:** `go build ./...`, `go vet ./...`, cross-compiles for all five
+platforms, and `TestSystemdUnit` pass. Same `daemon-reload` reminder for the
+unit-file change to take effect on an existing host.
+
+---
+
+
+
+Tuning follow-up to v459: raise the in-daemon `shutdownGrace` watchdog from 4s
+to 5s and the systemd `TimeoutStopSec` from 5s to 8s. Ordering preserved —
+`shutdownGrace` (5s) stays below `TimeoutStopSec` (8s), so on a wedged teardown
+the daemon still force-exits cleanly (with its log line) at 5s and systemd
+restarts it, with the 8s `TimeoutStopSec`/SIGKILL as the outer backstop for the
+case where even os.Exit can't run. The extra headroom gives a legitimately
+slow-but-not-hung teardown (large nftables ruleset, many peers draining under
+load) a bit more room to finish cleanly before either mechanism cuts it off.
+
+**What changed:** `cmd/gravinet/main.go` — `shutdownGrace` 4s→5s.
+`install/gravinet.service` and `internal/service/service.go` —
+`TimeoutStopSec` 5s→8s (both units kept in sync). No logic changes; the
+watchdog and unit-generation mechanics are unchanged from v458/v459.
+
+**Verified:** `go build ./...`, `go vet ./...`, cross-compiles for all five
+platforms, and `go test ./cmd/gravinet/... ./internal/service/...` (incl. the
+`TestShutdownWatchdog*` and `TestSystemdUnit` assertions) all pass. Same
+`daemon-reload` reminder as v458/v459 for the unit-file half to take effect on
+an existing host.
+
+---
+
+
+
+Operator request: add `Restart=always`, `RestartSec=5`,
+`StartLimitIntervalSec=0`, and `TimeoutStopSec=5` to the systemd unit, to make
+the daemon come back aggressively and never wedge a restart. Applied to both
+the shipped `install/gravinet.service` and the unit `gravinet install`
+generates at runtime (`internal/service/service.go`), kept in sync.
+
+Two adjustments to what was literally asked, both called out here:
+
+- **`StartLimitIntervalSec=0` goes in the `[Unit]` section, not
+  `[Service]`.** It's a unit-level directive; systemd ignores it (with a
+  warning) if placed under `[Service]`. Put it in `[Unit]` so it actually
+  takes effect. `TestSystemdUnit` now asserts it appears before the
+  `[Service]` header so this placement can't regress.
+- **Lowered the daemon's own `shutdownGrace` watchdog from 15s to 4s**
+  (`cmd/gravinet/main.go`) to stay under the new `TimeoutStopSec=5`. v458 set
+  the watchdog to 15s and the unit's stop timeout to 30s so the daemon's clean
+  force-exit (with a log line) always beat systemd's SIGKILL. With
+  `TimeoutStopSec=5`, a 15s watchdog would never get to fire — systemd would
+  SIGKILL at 5s first, making the watchdog dead weight on systemd and losing
+  the clean "forcing exit" log line and any last-ditch cleanup. Dropping it to
+  4s restores that ordering: on a wedged teardown the daemon logs and
+  `os.Exit(1)`s at 4s, systemd sees the exit and restarts, and the 5s
+  `TimeoutStopSec`/SIGKILL remains the outer backstop for when even os.Exit
+  can't run. The shutdownGrace doc comment now notes it must track
+  TimeoutStopSec if that's changed.
+
+Effect of the full set: `Restart=always` restarts on any exit, not just
+failures (a `systemctl stop` is still a clean operator stop and does not
+loop-restart). `StartLimitIntervalSec=0` disables the start-rate limiter so a
+crash/restart loop never lands the unit in a permanent failed state — it keeps
+retrying every `RestartSec=5`. `TimeoutStopSec=5` bounds the stop phase
+tightly; combined with the 4s in-daemon watchdog and `SendSIGKILL=yes`
+(retained from v458), a stuck teardown can no longer hang a restart, and the
+process is guaranteed gone within ~5s either way.
+
+Trade-off worth knowing: `TimeoutStopSec=5` (and the 4s watchdog) means a
+teardown that is legitimately slow-but-not-hung — e.g. clearing a large
+nftables ruleset or draining many peers under load — could be cut off before
+it finishes cleaning up OS state. gravinet reconciles most of that state on
+the next startup anyway (stale hosts/DNS entries are cleared on boot, routes
+and nftables rules are rebuilt), so a truncated teardown is recoverable rather
+than corrupting, but if you run very large meshes and would rather trade
+restart latency for guaranteed-complete cleanup, raise both `TimeoutStopSec`
+and `shutdownGrace` together (keeping the latter below the former).
+
+**What changed:** `install/gravinet.service` and
+`internal/service/service.go` — `[Unit]` gains `StartLimitIntervalSec=0`;
+`[Service]` `Restart=on-failure`→`Restart=always` and
+`TimeoutStopSec=30`→`TimeoutStopSec=5` (`RestartSec=5`, `SendSIGKILL=yes`
+unchanged). `cmd/gravinet/main.go` — `shutdownGrace` 15s→4s.
+
+**Verified:** `go build ./...`, `go vet ./...`, cross-compiles for all five
+platforms, and `go test ./... -short` (with `-race` on cmd/gravinet and
+internal/service) all clean. `TestSystemdUnit` extended to assert
+`Restart=always`, `StartLimitIntervalSec=0`, and its `[Unit]`-section
+placement; the watchdog tests (`TestShutdownWatchdog*`) still pass with the
+shorter grace since they pass their own durations.
+
+Reminder from v458, still applies: a unit-file change only takes effect after
+`systemctl daemon-reload` (then `systemctl restart gravinet`); an existing box
+needs the reload to pick up these directives. The `shutdownGrace` change is in
+the binary and applies as soon as the v459 build runs.
+
+---
+
+
+
+Report: `systemctl restart gravinet` sometimes hangs. Wanted a way to
+guarantee the restart actually happens.
+
+Cause: the systemd unit is `Type=notify`, which means systemd treats the
+stop phase as complete only when the daemon process actually exits — and on a
+restart it won't start the replacement until the old process is gone. The
+daemon's graceful shutdown runs a sequence of teardown steps
+(`engine.Stop()` waiting on the TUN read loops, device and transport closes,
+the nftables ruleset `Clear()`, DNS/hosts cleanup) and every one of them can,
+in the wrong circumstances, block indefinitely on the kernel or on a
+shelled-out subprocess. If any step wedges, the process never exits, and
+`systemctl restart` waits on it — with no bound, because the shipped unit set
+no `TimeoutStopSec` (it inherited only whatever distro-global default
+existed, e.g. the `10-timeout-abort.conf` drop-in seen on the reporting Fedora
+box, which may be generous or absent). That's the intermittent hang: it
+depends on whether a given stop happened to hit a teardown step that blocked.
+
+Fixed with two independent guarantees, either of which alone terminates the
+stop:
+
+1. **In-daemon shutdown watchdog** (`cmd/gravinet/main.go`). The moment
+   graceful shutdown begins, a background timer is armed; if teardown hasn't
+   completed within `shutdownGrace` (15s — far longer than a healthy
+   shutdown), the process force-exits (`os.Exit(1)`, non-zero because a
+   forced stop isn't clean). A shutdown that finishes first disarms it, so
+   the hard exit only ever fires on a genuine hang. This makes the daemon
+   responsible for its own bounded exit rather than depending on the service
+   manager's patience, and it covers the self-restart path too: if the
+   post-roam/-resume `selfRestart` re-exec is preceded by a wedged teardown,
+   the watchdog exits with failure and systemd's `Restart=on-failure` brings
+   it back rather than leaving it hung.
+2. **systemd stop timeout + kill escalation** (`install/gravinet.service`
+   and the runtime-generated unit in `internal/service/service.go`).
+   `TimeoutStopSec=30` (above `shutdownGrace`, so the daemon's own clean-ish
+   exit wins the race when it can) bounds the stop from systemd's side, and
+   `SendSIGKILL=yes` ensures the final SIGTERM→SIGKILL escalation is never
+   disabled. This is the outer backstop for the pathological case where even
+   `os.Exit` can't run (e.g. the process stuck in an uninterruptible kernel
+   wait).
+
+Both the shipped unit file and the unit `gravinet install` generates at
+runtime get the timeout directives, so existing and fresh installs are both
+covered. (Note: a unit-file change only takes effect after `systemctl
+daemon-reload` — the changelog / install docs mention this, but a box that
+installed an older unit needs the reload or a reinstall to pick up the
+backstop; the in-daemon watchdog, by contrast, is in the binary and applies
+as soon as the new build is running.)
+
+**What changed:** `cmd/gravinet/main.go` — new `shutdownGrace` const and
+`armShutdownWatchdog` helper (extracted so the arm/disarm race is testable
+without exiting the process), with the daemon's `shutdown()` arming it around
+the whole teardown. `install/gravinet.service` and
+`internal/service/service.go` — `TimeoutStopSec=30` and `SendSIGKILL=yes`
+added to the `[Service]` section, kept in sync between the two.
+
+**Verified:** `go build ./...`, `go vet ./...`, cross-compiles for
+linux/darwin/windows/freebsd/openbsd, and full `go test ./... -short` (plus
+`-race` on cmd/gravinet and internal/service) all clean. Added
+`TestShutdownWatchdogDisarmedBeforeGraceDoesNotFire`,
+`TestShutdownWatchdogFiresWhenNotDisarmed`, and
+`TestShutdownWatchdogDisarmIdempotent` (`cmd/gravinet`), covering the clean
+path (disarm cancels the force-exit), the wedged path (force-exit fires), and
+idempotent disarm. Extended `TestSystemdUnit` (`internal/service`) to assert
+`TimeoutStopSec=` and `SendSIGKILL=yes` are present so the backstop can't
+silently regress.
+
+Caveat on scope: this guarantees the *process exits* so the restart can
+proceed — it does not make a wedged teardown itself clean up gracefully. If a
+step is regularly hitting the 15s watchdog, that underlying hang is still
+worth chasing (it'll show as the "graceful shutdown exceeded 15s — forcing
+exit" warning in the log); the watchdog just ensures it can no longer take the
+restart down with it.
+
+---
+
+
 
 The actual roam bug — not detection this time (v456 fixed that), the
 recovery itself. After a roam, every peer reads "no reply" except the odd one

@@ -46,9 +46,45 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "457"
+	version = "461"
 	commit  = "none"
 )
+
+// shutdownGrace bounds how long graceful teardown may take before the daemon
+// force-exits itself (see the shutdown watchdog in runBody). A clean shutdown
+// is far quicker than this; the budget only exists so a teardown step wedged
+// on the kernel or a subprocess can't hang the process — and, because the
+// systemd unit is Type=notify, hang a `systemctl restart` waiting on this
+// process to exit. Kept below the systemd unit's TimeoutStopSec (8s) so the
+// daemon's own force-exit wins the race in the normal stuck case, producing a
+// clean "forcing exit" log line rather than an abrupt SIGKILL; the unit's
+// TimeoutStopSec + SendSIGKILL is the independent outer backstop for when even
+// os.Exit can't run. If you raise the unit's TimeoutStopSec, raise this too
+// (staying below it) to preserve that ordering.
+const shutdownGrace = 5 * time.Second
+
+// armShutdownWatchdog starts a timer that invokes onTimeout if the returned
+// disarm func hasn't been called within grace. It's how the shutdown path
+// guarantees the process exits even when a teardown step wedges: onTimeout is
+// os.Exit in production (see runBody), so a stuck engine.Stop()/device
+// close/nftables clear can't hang the process — and therefore can't hang a
+// Type=notify `systemctl restart` waiting on this process to exit. disarm is
+// idempotent and safe to defer; calling it after a clean teardown cancels the
+// timer so onTimeout never runs. Extracted from runBody so the arm/disarm
+// race is unit-testable without actually exiting the process.
+func armShutdownWatchdog(grace time.Duration, onTimeout func()) (disarm func()) {
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-done:
+			return // disarmed: graceful teardown completed in time
+		case <-time.After(grace):
+			onTimeout()
+		}
+	}()
+	var once sync.Once
+	return func() { once.Do(func() { close(done) }) }
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -1384,7 +1420,29 @@ func cmdRun(args []string) {
 		}()
 
 		// The daemon body: run until stopped, then tear down in the safe order.
+		//
+		// Every step below can, in principle, block indefinitely on the
+		// kernel or a subprocess: engine.Stop() waits on the TUN read loops,
+		// the device/transport closes touch the OS, the nftables Clear() and
+		// the DNS/hosts cleanup shell out. If any of them wedges, this process
+		// never exits — and because the systemd unit is Type=notify,
+		// `systemctl restart`/`stop` waits for THIS process to exit before it
+		// starts the replacement, so one stuck teardown step hangs the entire
+		// restart (the reported symptom). The watchdog armed here bounds that:
+		// once shutdown begins, a background goroutine force-exits the process
+		// if graceful teardown hasn't completed within shutdownGrace,
+		// guaranteeing the process exits — and therefore the restart
+		// proceeds — no matter which step is stuck. A clean shutdown that
+		// finishes first disarms it (close(shutdownDone) before returning), so
+		// the hard exit only ever fires on a genuine hang. The unit's
+		// TimeoutStopSec is an independent outer backstop for the pathological
+		// case where even this can't run.
 		shutdown := func() {
+			disarm := armShutdownWatchdog(shutdownGrace, func() {
+				logx.Warnf("graceful shutdown exceeded %s — forcing exit so the service can restart", shutdownGrace)
+				os.Exit(1) // non-zero: this was not a clean stop
+			})
+			defer disarm()
 			close(tickStop)
 			if webSrv != nil {
 				webSrv.Close()

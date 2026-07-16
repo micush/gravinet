@@ -30,6 +30,14 @@ func TestSystemdUnit(t *testing.T) {
 		"ExecStart=/usr/local/bin/gravinet run -config /etc/gravinet/config.json",
 		"User=meshd",
 		"WantedBy=multi-user.target",
+		// Restart-guarantee directives: without a bounded stop, a wedged
+		// teardown hangs `systemctl restart` on this Type=notify unit
+		// indefinitely; without an always-restart + disabled start limiter,
+		// the unit can give up. These must stay present. See SystemdUnit.
+		"Restart=always",
+		"TimeoutStopSec=",
+		"SendSIGKILL=yes",
+		"StartLimitIntervalSec=0",
 	} {
 		if !strings.Contains(u, want) {
 			t.Errorf("systemd unit missing %q\n%s", want, u)
@@ -50,6 +58,14 @@ func TestSystemdUnit(t *testing.T) {
 		if strings.Contains(u, banned) {
 			t.Errorf("systemd unit must NOT contain %q (it breaks PAM auth)\n%s", banned, u)
 		}
+	}
+	// StartLimitIntervalSec is a [Unit] directive; systemd ignores it (with a
+	// warning) under [Service]. Assert it appears before the [Service] header.
+	unitIdx := strings.Index(u, "[Unit]")
+	svcIdx := strings.Index(u, "[Service]")
+	sliIdx := strings.Index(u, "StartLimitIntervalSec")
+	if sliIdx < 0 || unitIdx < 0 || svcIdx < 0 || !(sliIdx > unitIdx && sliIdx < svcIdx) {
+		t.Errorf("StartLimitIntervalSec must be in the [Unit] section (before [Service]); got:\n%s", u)
 	}
 }
 

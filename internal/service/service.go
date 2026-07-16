@@ -76,14 +76,33 @@ func SystemdUnit(o Options) string {
 	var b strings.Builder
 	b.WriteString("[Unit]\n")
 	fmt.Fprintf(&b, "Description=%s\n", o.Description)
-	b.WriteString("After=network-online.target\nWants=network-online.target\n\n")
+	b.WriteString("After=network-online.target\nWants=network-online.target\n")
+	// Disable the start-rate limiter so the unit never gives up restarting
+	// under a rapid crash/restart loop. StartLimitIntervalSec is a [Unit]
+	// directive (systemd ignores it under [Service]). Kept in sync with
+	// install/gravinet.service.
+	b.WriteString("StartLimitIntervalSec=0\n\n")
 	b.WriteString("[Service]\n")
 	b.WriteString("Type=notify\n")
 	fmt.Fprintf(&b, "ExecStart=%s run -config %s\n", o.ExecPath, o.ConfigPath)
 	if o.User != "" {
 		fmt.Fprintf(&b, "User=%s\n", o.User)
 	}
-	b.WriteString("Restart=on-failure\nRestartSec=5\n\n")
+	// Restart on any exit (not just failures) so the daemon is always running
+	// unless an operator explicitly stopped it; a `systemctl stop` is still a
+	// clean stop and does not loop-restart.
+	b.WriteString("Restart=always\nRestartSec=8\n")
+	// Guarantee the stop phase terminates. This unit is Type=notify, so
+	// `systemctl restart` waits for the old process to exit before starting
+	// the replacement; without a bounded stop, a teardown step wedged on the
+	// kernel or a subprocess hangs the restart indefinitely. The daemon's own
+	// shutdown watchdog (shutdownGrace) force-exits just under this timeout,
+	// so it exits cleanly (with a log line) first in the normal stuck case;
+	// this is the outer backstop for when even that can't run — systemd
+	// escalates SIGTERM -> SIGKILL after the timeout, and SendSIGKILL=yes
+	// ensures that final kill is never disabled. Kept in sync with
+	// install/gravinet.service.
+	b.WriteString("TimeoutStopSec=8\nSendSIGKILL=yes\n\n")
 	b.WriteString("[Install]\nWantedBy=multi-user.target\n")
 	return b.String()
 }
