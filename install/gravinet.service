@@ -6,8 +6,10 @@ Wants=network-online.target
 [Service]
 Type=notify
 ExecStart=/usr/local/bin/gravinet run -config /etc/gravinet/config.json
-Restart=on-failure
+Restart=always
 RestartSec=5
+StartLimitIntervalSec=0
+TimeoutStopSec=5
 
 [Install]
 WantedBy=multi-user.target
