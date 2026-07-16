@@ -196,3 +196,47 @@ func TestDualNoFallbackWhenTLSNil(t *testing.T) {
 		t.Fatal("expected error dialing fallback with nil TLS")
 	}
 }
+
+// TestTLSIdleConnectionTimesOut is the regression guard for the terminal leak
+// found via a goroutine dump: readFrame blocked in io.ReadFull with no
+// deadline, so a TLS fallback connection that went silent (a post-roam dial to
+// a peer's stale endpoint that completed the TCP/TLS handshake but over which
+// no mesh frame ever arrived) parked its read goroutine forever and stayed
+// registered in t.conns, masking the peer as reachable via a dead pipe so it
+// was never redialed. Across roams these accumulated until a restart. With a
+// rolling idle read deadline, a connection that produces no frame within
+// tlsReadIdle is torn down and unregistered, freeing the peer to be redialed.
+//
+// The test shortens tlsReadIdle, dials, sends nothing, and asserts the
+// connection is dropped (HasConn goes false) rather than lingering forever.
+func TestTLSIdleConnectionTimesOut(t *testing.T) {
+	orig := tlsReadIdle
+	tlsReadIdle = 150 * time.Millisecond
+	defer func() { tlsReadIdle = orig }()
+
+	srv := openTLSLoopback(t, func([]byte, netip.AddrPort, Family) {})
+	defer srv.Close()
+	cli := openTLSLoopback(t, func([]byte, netip.AddrPort, Family) {})
+	defer cli.Close()
+
+	srvAddr := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(srv.Port()))
+	if err := cli.Dial(srvAddr); err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	if !cli.HasConn(srvAddr) {
+		t.Fatal("HasConn false immediately after dial")
+	}
+
+	// No frames are ever sent. Within a few idle windows, the client's read
+	// loop must hit the deadline, return, and unregister the connection.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if !cli.HasConn(srvAddr) {
+			return // connection was torn down as required
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("idle TLS connection was never torn down — its read goroutine is leaking in readFrame " +
+		"with no deadline (the terminal post-roam fallback leak), so the peer stays masked as reachable " +
+		"and is never redialed")
+}

@@ -37,7 +37,76 @@ assuming it didn't happen.
 
 ---
 
-## v464 — 2026-07-15
+## v465 — 2026-07-16
+
+The actual terminal-stuck bug, finally found — from a goroutine dump of a
+wedged daemon, not another guess. Every roam-detection change from v456–v464
+was chasing the wrong layer; the dump made that unambiguous.
+
+What the dump showed: **no deadlock** (zero goroutines blocked on a mutex),
+and all three mesh loops (maintLoop, initLoop, pmtuLoop) alive and idle at
+their tickers. So detection and recovery were never wedged — I'd been
+debugging a lock/detection problem that didn't exist. What the dump *did*
+show: **30 outbound TLS `Dial` read goroutines (plus 6 inbound) all parked in
+`transport.readFrame` for 5+ minutes** — roughly 3x the ~13-peer count, and
+climbing with each roam.
+
+Root cause, in `internal/transport/tcptls.go`: both the outbound (`Dial`) and
+inbound (`readConn`) TLS read loops call `readFrame`, which blocks in
+`io.ReadFull` with **no read deadline** — and both loops explicitly clear the
+deadline (`SetDeadline(time.Time{})`) after the TLS handshake. After a roam,
+the fallback path dials TCP/TLS to peers; a dial to a peer's now-stale
+post-roam endpoint can complete the TCP/TLS handshake (to something still
+listening, or a connection that lingers) yet never carry another mesh frame.
+Its read goroutine then parks in `readFrame` *forever*. Worse, the connection
+stays registered in the transport's conn table, so `HasConn` reports it live
+and the engine believes it still has a working fallback to that peer — so it
+never redials. Across repeated roams these dead-but-registered connections
+accumulate, every affected peer is masked as "reachable" over a pipe that
+will never deliver anything, and the mesh stays partitioned until a restart
+clears the whole table. That is the terminal state — no amount of further
+roaming recovers it, because the stuck connections look healthy to every code
+path that would otherwise trigger a redial. It explains every observation:
+terminal, restart-only, "all peers no reply," and the total absence of
+roam/recovery log activity (the loops were fine; the *transport* was full of
+zombies).
+
+**Fix:** a rolling idle read deadline on both TLS read loops (`readFrameIdle`,
+resetting `tlsReadIdle` = 90s before every frame read). A connection carrying
+a live session sees a keepalive every 10s (defaultKeepaliveInterval) and
+resets the deadline long before it expires, so healthy peers — including
+legitimately relayed/fallback ones — are never affected. A connection that
+produces no frame for 90s is, by the mesh's own liveness contract (10s
+keepalive, 75s peerTimeout), dead: the read returns i/o timeout, the loop
+exits, and its deferred `unregister` closes the socket and removes it from the
+conn table — which frees the peer to be redialed (`ensureFallback` sees
+`HasConn` false and dials again). No more zombie fallback connections, no more
+accumulation, no terminal partition.
+
+**What changed:** `internal/transport/tcptls.go` — new `tlsReadIdle` window
+and `readFrameIdle` helper; both the `Dial` and `readConn` read loops use it
+instead of the deadline-less `readFrame`.
+
+**Verified:** `go build ./...`, `go vet ./...`, cross-compiles for all five
+platforms, full `go test ./internal/mesh/... -short` (143s), transport suite
+under `-race`, all pass. Added `TestTLSIdleConnectionTimesOut` (shortens
+`tlsReadIdle`, dials, sends nothing, asserts the connection is torn down and
+`HasConn` goes false rather than lingering) — reverting to the deadline-less
+`readFrame` reproduces the leak (the test hangs the full window and fails),
+verified by hand.
+
+Process note, recorded because it matters: this took a goroutine dump to
+find, and I burned several releases (v459, v463 especially) guessing at
+layers the evidence later ruled out. The dump distinguished "loops wedged on a
+lock" (what I kept assuming) from "loops fine, transport full of leaked read
+goroutines" (the truth) in one read. A built-in, non-fatal stack-dump trigger
+would have gotten here far sooner; adding one (SIGUSR1 → dump to log) is worth
+doing as a follow-up so the next hard hang doesn't require SIGQUIT-killing a
+production daemon to diagnose.
+
+---
+
+
 
 Fixes a regression I introduced in v463. v463 added a physical-default-gateway
 roam signal (1b) to catch same-subnet roams — but it made things *worse*, not

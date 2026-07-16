@@ -18,6 +18,39 @@ import (
 	"gravinet/internal/logx"
 )
 
+// tlsReadIdle bounds how long a TLS fallback connection may sit with no frame
+// arriving before its read loop gives up and tears the connection down. This
+// is the fix for a terminal leak: readFrame (frame.go) blocks in io.ReadFull
+// with no deadline, so a fallback connection that goes silent — a TCP session
+// that completed to a peer's now-stale post-roam endpoint but over which no
+// mesh frame will ever arrive again — parks its read goroutine *forever*, and
+// because the connection stays registered in t.conns the engine believes it
+// still has a working fallback to that peer and never redials. Across repeated
+// roams these accumulate (observed: 30+ leaked outbound read goroutines, all
+// blocked 5+ minutes, one per stale dial), and the mesh stays partitioned
+// with every peer masked as "reachable via a dead pipe" until a restart clears
+// them — the reported terminal state that no further roaming recovers.
+//
+// The window derives from the mesh's own liveness contract: a 20s keepalive
+// with a 75s peerTimeout (see disableNagle's comment and internal/mesh). A
+// connection carrying a live session sees a keepalive frame every 20s and so
+// resets this deadline long before it expires; one that hasn't produced a
+// single frame in 90s is, by the mesh's own definition, dead — so dropping it
+// is correct and frees the peer to be redialed. A rolling deadline (reset
+// before every readFrame) means an active connection is never affected; only a
+// genuinely idle one hits it. A var, not a const, only so tests can shorten
+// it (see TestTLSIdleConnectionTimesOut); never reassigned in production.
+var tlsReadIdle = 90 * time.Second
+
+// readFrameIdle is readFrame with a rolling idle deadline applied to c first,
+// so a silent connection returns an error (i/o timeout) instead of blocking
+// forever. Any error — timeout, EOF, or a real read error — ends the caller's
+// read loop, which unregisters and closes the connection.
+func readFrameIdle(c net.Conn) ([]byte, error) {
+	_ = c.SetReadDeadline(time.Now().Add(tlsReadIdle))
+	return readFrame(c)
+}
+
 // disableNagle turns off Nagle's algorithm on a raw TCP connection before TLS
 // wraps it. Without this, Go's default net.TCPConn behaves like most stacks'
 // default socket and leaves Nagle on, which delays small, infrequent writes
@@ -226,7 +259,7 @@ func (t *TLSTransport) readConn(c net.Conn) {
 		if t.closed.Load() {
 			return
 		}
-		payload, err := readFrame(c)
+		payload, err := readFrameIdle(c)
 		if err != nil {
 			return
 		}
@@ -341,7 +374,7 @@ func (t *TLSTransport) Dial(to netip.AddrPort) error {
 			if t.closed.Load() {
 				return
 			}
-			payload, err := readFrame(c)
+			payload, err := readFrameIdle(c)
 			if err != nil {
 				return
 			}
