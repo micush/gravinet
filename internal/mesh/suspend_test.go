@@ -139,3 +139,69 @@ func TestNotifyUnderlayChangeGraceMutesThenFires(t *testing.T) {
 		t.Fatalf("hook fired %d times after the grace window, want 1", calls)
 	}
 }
+
+// TestReconnectAllPeersRearmsEndpointsForRedial covers the terminal-partition
+// bug: after a roam, reconnectAllPeers ages every session and pruneDead reaps
+// them outright — node, routes, AND endpoint. A peer only ever learned via
+// gossip (not a configured seed) then has nothing left to dial, so recovery
+// hinges entirely on a configured seed being reachable on the new underlay.
+// When it isn't (a lossy roam), the session table empties and stays empty:
+// every later roam ages an already-empty table and does nothing, so the mesh
+// never recovers until a restart re-reads the seeds. reconnectAllPeers must
+// therefore re-arm each former peer's endpoint as a redial target before
+// aging it, turning every former peer — not just seeds — into a standing dial
+// target the maintenance loop keeps retrying.
+func TestReconnectAllPeersRearmsEndpointsForRedial(t *testing.T) {
+	const netID = uint64(0xA12)
+	eng := NewEngine(Options{
+		NodeID: "self", UnderlayMTU: 1280, UnderlayMTUMax: 1450,
+		Nets: []NetSpec{{ID: netID, Name: "n", Dev: newFakeDev("d"),
+			Subnet4: netip.MustParsePrefix("10.0.0.0/24")}},
+	})
+	eng.Attach(nopSender{})
+	ns := eng.network(netID)
+
+	// A gossip-learned (non-seed) peer with a known underlay endpoint.
+	ep := netip.MustParseAddrPort("203.0.113.1:65432")
+	ps := &peerSession{nodeID: "peer", net: ns, localIdx: 7, endpoint: ep}
+	ps.initPMTU(eng.pmtuFloor, eng.pmtuCeil)
+	ps.setLastRx(time.Now())
+	eng.mu.Lock()
+	eng.sessions[7] = ps
+	eng.mu.Unlock()
+	ns.mu.Lock()
+	ns.byNode["peer"] = ps
+	ns.mu.Unlock()
+
+	// Confirm it isn't already a seed (so the assertion below is meaningful).
+	ns.mu.RLock()
+	seedBefore := false
+	for _, s := range ns.seeds {
+		if s == ep {
+			seedBefore = true
+		}
+	}
+	ns.mu.RUnlock()
+	if seedBefore {
+		t.Fatal("test setup: peer endpoint should not be a seed before the roam")
+	}
+
+	// Roam recovery, then reap the aged session as the maintenance tick would.
+	eng.reconnectAllPeers(ns)
+	eng.pruneDead(ns, time.Now())
+
+	// The reaped peer's endpoint must now be a standing redial target, or it's
+	// gone forever and recovery can't proceed without a reachable seed.
+	ns.mu.RLock()
+	seedAfter := false
+	for _, s := range ns.seeds {
+		if s == ep {
+			seedAfter = true
+		}
+	}
+	ns.mu.RUnlock()
+	if !seedAfter {
+		t.Fatal("reconnectAllPeers did not re-arm the reaped peer's endpoint for redial — " +
+			"after a lossy roam the session table would empty and never recover without a restart")
+	}
+}

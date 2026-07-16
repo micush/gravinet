@@ -37,7 +37,76 @@ assuming it didn't happen.
 
 ---
 
-## v461 — 2026-07-15
+## v462 — 2026-07-15
+
+The roam fix from v457 works most of the time now — reported failure rate
+dropped from ~80% to ~20% — but a new, sharper symptom surfaced underneath
+it: once a roam *does* fail, the mesh never recovers no matter how many more
+times you roam, until the service is restarted. That "terminal, roam-
+independent, restart-only" shape is the tell, and it points at recovery
+having nothing left to act on rather than failing to detect the roam.
+
+Traced it end to end. The roam recovery (`reconnectAllPeers`) ages every
+session so the maintenance tick's `pruneDead` tears them down — but
+`pruneDead` deletes a reaped session *outright*: the node, its routes, and its
+underlay endpoint, all gone. That's fine for a peer that's a configured seed
+(initLoop keeps dialing seeds) or one still reachable via a peer we're
+gossiping with. But a peer only ever learned via gossip, once its session is
+pruned, has **nothing left to dial** — its endpoint was just discarded.
+So after a roam that prunes every session, recovery depends entirely on a
+configured *seed* being reachable on the new underlay. During a clean roam it
+usually is (hence the 80%→20% improvement). During a lossy roam — the ~20%
+where the switch is rough and the seeds are momentarily unreachable — every
+session gets pruned, nothing gets re-dialed, and the session table empties and
+*stays* empty. Every subsequent roam then ages an already-empty table and does
+nothing, which is exactly why no amount of further roaming brings it back: the
+recovery mechanism only operates on existing sessions, and there are none
+left. Only a restart, which re-reads the seed list from config and retries
+from scratch, recovers it.
+
+The existing admin "reset" path (`ResetNetwork`) and the ban/unban `redial`
+path had already solved this same problem for their cases — they tear a
+session down via `localDisconnect`, which explicitly *retains the endpoint*
+and re-arms it as a redial target — but the roam path never adopted that,
+relying on the hard-pruning `pruneDead` instead.
+
+**Fix:** `reconnectAllPeers` (`internal/mesh/control.go`) now captures each
+live peer's last-known underlay endpoint *before* aging the session out, and
+re-arms it as a node-tagged redial target (`AddSeedFor`, clearing any seed
+backoff so it dials on the next tick). Every former peer — not just the
+configured seeds — becomes a standing dial target the maintenance loop keeps
+retrying on whatever network we land on. So a lossy roam that prunes every
+session no longer empties the mesh permanently: initLoop keeps hammering every
+known endpoint until one answers, and recovery no longer hinges on a seed
+happening to be reachable at the exact instant of the roam. The node-tagging
+means `install()` prunes each re-armed entry cleanly once that peer actually
+reconnects, so the seed list doesn't accumulate stale entries, and duplicates
+are deduped by `addSeed`. This applies to the suspend/resume path too (both
+share `reconnectAllPeers`), which had the same latent gap.
+
+**What changed:** `internal/mesh/control.go` — `reconnectAllPeers` re-arms
+reaped peers' endpoints for redial before aging them; expanded doc comment
+explaining the terminal-partition mechanism.
+
+**Verified:** `go build ./...`, `go vet ./...`, cross-compiles for all five
+platforms, full `go test ./internal/mesh/... -short` (143s) passes, and the
+reconnect/roam paths pass under `-race`. Added
+`TestReconnectAllPeersRearmsEndpointsForRedial`: a gossip-learned (non-seed)
+peer, a roam reconnect, a prune, and an assertion that the reaped peer's
+endpoint is now a standing redial target — reverting the re-arm reproduces the
+"endpoint gone forever" state and fails the test (verified by hand). Existing
+`TestOnResumeForcesReconnect`, `TestCheckUnderlayChangeReconnectsAllPeers`, and
+the roam-detection tests still pass unchanged.
+
+Note this is the recovery-durability half; detection (v456's peer-independent
+anchor signal) and the initial reconnect (v457) are unchanged. Together: a
+roam is detected even with no reachable peer, every peer is torn down and
+re-dialed, and — now — every peer's endpoint keeps being retried until it
+answers instead of being discarded after one pruning cycle.
+
+---
+
+
 
 Consistency tweak: `RestartSec` 5s→8s in both the shipped
 `install/gravinet.service` and the runtime-generated unit

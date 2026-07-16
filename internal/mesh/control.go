@@ -616,19 +616,55 @@ func (e *Engine) onResume(ns *netState, now time.Time) {
 // sometimes recovering" symptom. Also invalidates the cached underlay source
 // so the next check re-baselines to the post-roam address rather than
 // re-triggering on it.
+//
+// Critically, each peer's last-known endpoint is re-armed as a redial target
+// (via AddSeedFor, node-tagged so install() can prune it cleanly once the peer
+// reconnects) BEFORE the session is aged out. pruneDead deletes a reaped
+// session outright — node, routes, and endpoint — so without re-arming, a
+// non-seed peer that was only ever learned via gossip has *nothing* left to
+// dial once every session is pruned: recovery then depends entirely on a
+// configured seed being reachable on the new underlay, and if the seeds are
+// momentarily unreachable during a lossy roam, the session table empties and
+// stays empty (every subsequent roam ages an already-empty table and does
+// nothing) until a restart re-reads the seeds from scratch. That is the
+// reported terminal state — "once it fails, no roam brings it back, only a
+// restart." Re-arming the endpoints turns every former peer, not just the
+// configured seeds, into a standing redial target that initLoop keeps
+// retrying on whatever network we land on, so recovery no longer hinges on a
+// seed happening to be reachable at the instant of the roam.
 func (e *Engine) reconnectAllPeers(ns *netState) {
 	aged := time.Now().Add(-e.peerTimeoutDuration() - time.Second)
+	type redialTarget struct {
+		ep     netip.AddrPort
+		nodeID string
+	}
 	var peers []*peerSession
+	var redials []redialTarget
 	e.mu.RLock()
 	for _, ps := range e.sessions {
 		if ps.net == ns {
 			peers = append(peers, ps)
+			if ep := ps.ep(); ep.IsValid() {
+				redials = append(redials, redialTarget{ep: ep, nodeID: ps.nodeID})
+			}
 		}
 	}
 	e.mu.RUnlock()
 	for _, ps := range peers {
 		ps.setLastRx(aged)
 		ps.resetPMTU()
+	}
+
+	// Re-arm each former peer's endpoint as a node-tagged redial target so
+	// initLoop keeps dialing it after pruneDead reaps the session — the
+	// endpoint would otherwise be forgotten entirely. Clear any seed backoff
+	// so the dial happens on the next tick rather than waiting out a cooldown
+	// from earlier failed handshakes on the old underlay.
+	for _, rt := range redials {
+		ns.mu.Lock()
+		delete(ns.seedBackoff, rt.ep)
+		ns.mu.Unlock()
+		e.AddSeedFor(ns.spec.ID, rt.ep, rt.nodeID)
 	}
 
 	e.underlayMu.Lock()
