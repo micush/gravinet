@@ -37,6 +37,40 @@ assuming it didn't happen.
 
 ---
 
+## v470 — 2026-07-16
+
+Monitor > logs entries are now clickable. A network id or network name in a log
+line jumps to Mesh > networks and ticks that network (clearing any other tick);
+a peer id, peer hostname, or seed ip address jumps to Monitor > mesh peers and
+ticks that peer. A seed ip resolves to the peer currently answering on that
+underlay endpoint; if none is connected it still lands on mesh peers with the
+selection cleared.
+
+Rather than parsing the many (and changing) daemon log line formats, the
+linkifier matches log text literally against the known entities in state:
+`logLinkTokens()` collects each network's id/name, each peer's id/hostname, and
+each configured seed address (full `host:port` and bare host) from `state.cfg`
+and `state.status`, and `linkifyLog` scans the raw message left-to-right,
+emitting a link only for a token that sits on non-alphanumeric boundaries
+(so a name isn't matched mid-word and an id isn't matched inside a longer hex
+run) and escaping everything else a character at a time. Longest-token-first
+ordering makes the most specific match win (a full seed `host:port` over its
+bare host, a hostname over a shorter network name it contains). Because it only
+ever links strings that map to a real entity, there's nothing to navigate to
+that doesn't exist.
+
+Networks and mesh peers tick through their existing, different selection
+machinery: mesh peers keeps a persistent `selection.mpeers` set (seeded before
+refresh, restored by `wireSelectable` — same path v469 added), while the
+networks table has no such set and its ticks live only in the rendered
+checkboxes, so `gotoNetwork` ticks the DOM after the refresh instead. Link
+click handlers are wired after the rows land in the DOM, the same deferred
+wiring the latency table uses; the filter box only hides rows, so they survive
+filtering, and a Refresh re-wires from scratch. Verified with `go build`,
+`go vet`, a `node --check` of the extracted client script, the webadmin test
+suite, and a standalone unit test of the match/escape logic (boundary
+rejection, longest-match, HTML escaping).
+
 ## v469 — 2026-07-16
 
 Clicking a peer name in Monitor > latency now also *ticks* that peer in

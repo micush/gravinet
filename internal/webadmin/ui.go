@@ -1039,6 +1039,26 @@ async function gotoMeshPeer(netId, nodeId){
   flashAndScroll(target);
 }
 
+// gotoNetwork switches to Mesh > networks, ticks one network's row (and clears
+// every other tick), and flashes it. Unlike mesh peers, the networks table
+// carries no persistent selection Set — its ticks live only in the rendered
+// selbox checkboxes (see selAllWire / selCheckedRows) — so this ticks the
+// DOM *after* the refresh rather than seeding a set before it. Sole-ticking
+// means a delete/reset/token action taken right after landing acts on exactly
+// this network. Called from the log linkifier's network id/name links.
+// No-op-safe: if the row can't be found (network removed between click and
+// re-render), it lands on the networks card rather than nowhere.
+async function gotoNetwork(netId){
+  if (!netId) return;
+  state.section = 'networks';
+  setActiveRailTab('networks');
+  await refresh();
+  const row = document.querySelector('#content tr.netrow[data-netid="'+CSS.escape(netId)+'"]');
+  document.querySelectorAll('#content tr.netrow .selbox').forEach(cb => { cb.checked = false; });
+  if (row){ const cb = row.querySelector('.selbox'); if (cb) cb.checked = true; }
+  flashAndScroll(row || document.querySelector('#content .card'));
+}
+
 // buildGlobalSearch renders the header's global search box, reusing the
 // existing .search-select/.ss-* component styling already in the
 // stylesheet (unused until now) rather than introducing a second dropdown
@@ -5821,6 +5841,113 @@ function infoAbout(c){
   })();
 }
 
+// logLinkTokens builds the set of clickable tokens for the log view from
+// current state: every network's id and name (-> Mesh > networks), every
+// peer's id and hostname (-> Monitor > mesh peers), and every configured seed
+// address (-> the mesh peer answering on that address, resolved by endpoint
+// host at click time). Returned entries are { text, kind, netId, nodeId,
+// seedHost } and are matched literally against raw log text, so this only ever
+// links strings that correspond to a real entity the UI can navigate to —
+// rather than trying to parse the many, changing log line formats. Tokens are
+// de-duplicated (a name shared by peer and network, say) keeping the first
+// seen, and the caller sorts by length so the most specific match wins.
+function logLinkTokens(){
+  const toks = [];
+  const seen = new Set();
+  const push = (text, ent) => {
+    text = (text||'').trim();
+    // Minimum length guards the degenerate matches: a 1-char network name
+    // would otherwise light up half the prose in every line.
+    if (text.length < 2 || seen.has(text)) return;
+    seen.add(text);
+    toks.push(Object.assign({ text }, ent));
+  };
+  for (const cf of (state.cfg||[])){
+    if (cf.id) push(cf.id, { kind:'net', netId:cf.id });
+    if (cf.name) push(cf.name, { kind:'net', netId:cf.id });
+    for (const s of (cf.seeds||[])){
+      const addr = stripScheme(s.address||s.Address||'');
+      if (!addr) continue;
+      const host = splitHostPort(addr).host || addr;
+      // Link both the full seed token as written (host:port) and the bare
+      // host, since a log line may print either. Both resolve to a peer by
+      // endpoint host at click time (see gotoSeedPeer).
+      push(addr, { kind:'seed', seedHost:host });
+      push(host, { kind:'seed', seedHost:host });
+    }
+  }
+  for (const n of (state.status||[])){
+    for (const p of peerRowsForNet(n)){
+      if (p.self) continue;
+      if (p.id)   push(p.id,   { kind:'peer', netId:n.id, nodeId:p.id });
+      if (p.host) push(p.host, { kind:'peer', netId:n.id, nodeId:p.id });
+    }
+  }
+  return toks;
+}
+
+// gotoSeedPeer resolves a seed address (matched by underlay endpoint host) to
+// the mesh peer currently answering on it and ticks that peer, so clicking a
+// seed ip in the log lands on the peer it belongs to. If no live peer matches
+// (the seed is configured but nobody's connected on it right now) it still
+// honors the "go to mesh peers" intent, landing there with the selection
+// cleared rather than ticking an unrelated row.
+async function gotoSeedPeer(seedHost){
+  const want = (seedHost||'').toLowerCase();
+  for (const n of (state.status||[])){
+    for (const p of peerRowsForNet(n)){
+      if (p.self || !p.endpoint) continue;
+      const h = (splitHostPort(p.endpoint).host||'').toLowerCase();
+      if (h && h === want){ await gotoMeshPeer(n.id, p.id); return; }
+    }
+  }
+  state.section = 'mesh-peers';
+  setActiveRailTab('mesh-peers');
+  selection.mpeers.clear();
+  await refresh();
+}
+
+// linkifyLog turns a raw log message into HTML: known entity tokens become
+// clickable spans, everything else is escaped verbatim. It scans the raw
+// string (not the escaped one) so escaping and token boundaries can't
+// interfere, matching the longest token that starts at each position and sits
+// on non-alphanumeric boundaries (so a hostname isn't matched mid-word, and an
+// id isn't matched inside a longer hex run). Non-matches are escaped a char at
+// a time. The links carry only data-* attributes here; secLogs wires their
+// click handlers after the rows are in the DOM, the same deferred-wiring the
+// latency table uses.
+function linkifyLog(msg, toks){
+  msg = String(msg==null ? '' : msg);
+  if (!toks || !toks.length) return esc(msg);
+  const isWord = ch => ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z';
+  let out = '', i = 0, n = msg.length;
+  outer:
+  while (i < n){
+    const prevOk = i === 0 || !isWord(msg[i-1]);
+    if (prevOk){
+      for (const t of toks){
+        const L = t.text.length;
+        if (i + L > n) continue;
+        if (msg.substr(i, L) !== t.text) continue;
+        const nextOk = i + L === n || !isWord(msg[i+L]);
+        if (!nextOk) continue;
+        const attrs = t.kind === 'net'
+          ? 'data-log-kind="net" data-net="'+esc(t.netId)+'"'
+          : (t.kind === 'peer'
+              ? 'data-log-kind="peer" data-net="'+esc(t.netId)+'" data-node="'+esc(t.nodeId)+'"'
+              : 'data-log-kind="seed" data-seedhost="'+esc(t.seedHost)+'"');
+        const title = t.kind === 'net' ? 'show this network in Mesh \u2192 networks' : 'show this peer in Monitor \u2192 mesh peers';
+        out += '<span class="peer-link" '+attrs+' title="'+title+'">'+esc(t.text)+'</span>';
+        i += L;
+        continue outer;
+      }
+    }
+    out += esc(msg[i]);
+    i++;
+  }
+  return out;
+}
+
 // secLogs shows the daemon log (everything written to the log file), newest
 // first, in a filterable/sortable table — the filter box comes from enhanceTable
 // like every other list. Setting _rowButtons makes the toolbar (filter +
@@ -5862,6 +5989,11 @@ function secLogs(c){
     }
     const lines = (r.body.lines||[]).slice().reverse(); // newest first
     if (!lines.length){ const tr=document.createElement('tr'); tr.innerHTML='<td colspan="3" class="empty">log is empty</td>'; tb.appendChild(tr); return; }
+    // Build the token set once for the whole tail, and sort longest-first so
+    // the most specific token wins where several could match at one position
+    // (a full host:port seed over its bare host, a hostname over a shorter
+    // network name it contains).
+    const toks = logLinkTokens().sort((a,b) => b.text.length - a.text.length);
     const frag = document.createDocumentFragment();
     for (const line of lines){
       const m = line.match(/^(\d{4}\/\d\d\/\d\d \d\d:\d\d:\d\d) \[(\w+)\] ([\s\S]*)$/);
@@ -5872,10 +6004,23 @@ function secLogs(c){
       const tr=document.createElement('tr');
       tr.innerHTML = '<td style="white-space:nowrap;color:var(--mut);font-size:12.5px">'+esc(time)+'</td>'
         + '<td style="font-weight:600;font-size:12.5px;color:'+col+'">'+esc(lvl)+'</td>'
-        + '<td style="word-break:break-word;font-size:12.5px">'+esc(msg)+'</td>';
+        + '<td style="word-break:break-word;font-size:12.5px">'+linkifyLog(msg, toks)+'</td>';
       frag.appendChild(tr);
     }
     tb.appendChild(frag);
+    // Wire the entity links after the rows are in the DOM (deferred like the
+    // latency table's peer links). enhanceTable's filter only hides/shows
+    // rows, so these handlers survive filtering; a full Refresh rebuilds the
+    // table and re-wires from scratch.
+    tb.querySelectorAll('.peer-link[data-log-kind]').forEach(el => {
+      el.onclick = (e) => {
+        e.stopPropagation();
+        const k = el.dataset.logKind;
+        if (k === 'net') gotoNetwork(el.dataset.net);
+        else if (k === 'peer') gotoMeshPeer(el.dataset.net, el.dataset.node);
+        else if (k === 'seed') gotoSeedPeer(el.dataset.seedhost);
+      };
+    });
   })();
 }
 
