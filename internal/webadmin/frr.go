@@ -360,28 +360,59 @@ func vtyshApplyBoot() bool {
 	return exec.Command(bin, "-b").Run() == nil
 }
 
+// runVtysh runs `vtysh -c <cmd>` and returns its stdout, with a hard wall-clock
+// bound that holds even if vtysh — or a grandchild that inherited its stdout
+// pipe — ignores the context kill. os/exec's Output() waits for the stdout
+// copier to finish, which a lingering grandchild can stall indefinitely past
+// the context deadline; that exact stall is what could wedge the BGP page. So
+// the command runs on its own goroutine and the caller stops waiting at the
+// deadline no matter what. A truly wedged vtysh leaks at most one goroutine and
+// one (already SIGKILL-targeted) process; it can never block the HTTP handler.
+// ok is false when vtysh is absent, errored, or exceeded the bound.
+func runVtysh(cmd string) (out []byte, ok bool) {
+	bin, present := vtyshPath()
+	if !present {
+		return nil, false
+	}
+	type result struct {
+		out []byte
+		err error
+	}
+	ch := make(chan result, 1) // buffered so the goroutine never blocks on send
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), bgpQueryTimeout)
+		defer cancel()
+		o, err := exec.CommandContext(ctx, bin, "-c", cmd).Output()
+		ch <- result{o, err}
+	}()
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			return nil, false
+		}
+		return r.out, true
+	case <-time.After(bgpQueryTimeout + 2*time.Second):
+		// vtysh (or a child) is wedged; abandon it rather than block the caller.
+		return nil, false
+	}
+}
+
 // importBGPFromFRR reads the BGP configuration FRR is *actually running* and
 // reshapes it into a config.BGPConfig, so gravinet can reflect a pre-existing
 // setup (one configured outside gravinet — a hand-edited frr.conf, another
 // tool, or a prior install) instead of showing an empty editor while live peers
 // are established. It asks vtysh for the running-config and parses the
-// `router bgp` stanza. Returns ok=false when vtysh is absent, the query fails,
-// or there's no BGP stanza. Passwords are deliberately not imported (FRR may
-// hold them encrypted, and re-emitting them verbatim on a later save would
-// corrupt the session) — hasPasswords reports whether any neighbor had one so
-// the UI can warn.
+// `router bgp` stanza. Returns ok=false when vtysh is absent, the query fails
+// or wedges, or there's no BGP stanza. Passwords are deliberately not imported
+// (FRR may hold them encrypted, and re-emitting them verbatim on a later save
+// would corrupt the session) — hasPasswords reports whether any neighbor had
+// one so the UI can warn.
 //
 // This is read-only: importing never writes frr.conf or config.json. gravinet
 // only takes ownership when the operator explicitly saves (adopts) the config.
 func importBGPFromFRR() (cfg config.BGPConfig, hasPasswords bool, ok bool) {
-	bin, present := vtyshPath()
-	if !present {
-		return config.BGPConfig{}, false, false
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), bgpQueryTimeout)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, bin, "-c", "show running-config").Output()
-	if err != nil {
+	out, ran := runVtysh("show running-config")
+	if !ran {
 		return config.BGPConfig{}, false, false
 	}
 	return parseRunningConfigBGP(string(out))

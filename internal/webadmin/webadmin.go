@@ -339,6 +339,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/bandwidth", s.authed(s.handleBandwidth))
 	mux.HandleFunc("/api/bgp", s.authed(s.handleBGP))              // read-only BGP peer status via FRR/vtysh
 	mux.HandleFunc("/api/bgp/config", s.authed(s.handleBGPConfig)) // read/write BGP+BFD config; drives the FRR daemon
+	mux.HandleFunc("/api/bgp/import", s.authed(s.handleBGPImport)) // read live FRR config to reflect a pre-existing setup
 	mux.HandleFunc("/api/restart", s.authed(s.handleRestart))
 	mux.HandleFunc("/api/cluster", s.authed(s.handleCluster))
 	mux.HandleFunc("/api/loglevel", s.authed(s.handleLogLevel))

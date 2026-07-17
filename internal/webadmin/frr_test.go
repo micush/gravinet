@@ -1,8 +1,11 @@
 package webadmin
 
 import (
+	"io/fs"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"gravinet/internal/config"
 )
@@ -288,6 +291,29 @@ func TestParseRunningConfigBGPStanzaBoundary(t *testing.T) {
 		if n == "10.9.9.0/24 area 0" || n == "10.9.9.0/24" {
 			t.Error("OSPF network leaked into BGP import")
 		}
+	}
+}
+
+func TestRunVtyshAbsent(t *testing.T) {
+	// With no vtysh present, runVtysh must return promptly with ok=false and
+	// never spawn a process or block — this is what keeps the BGP endpoints
+	// fast on hosts without FRR.
+	withStatFile(t, func(string) (fs.FileInfo, error) { return nil, os.ErrNotExist })
+	done := make(chan struct{})
+	go func() {
+		if out, ok := runVtysh("show running-config"); ok || out != nil {
+			t.Errorf("runVtysh with no vtysh = (%v,%v), want (nil,false)", out, ok)
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runVtysh did not return promptly when vtysh is absent")
+	}
+	// importBGPFromFRR builds on it and must also report nothing to import.
+	if _, _, ok := importBGPFromFRR(); ok {
+		t.Error("importBGPFromFRR should report ok=false when vtysh is absent")
 	}
 }
 

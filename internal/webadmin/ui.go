@@ -5702,13 +5702,26 @@ function infoRoutes(c){
 // reachable when state.bgpSupported is true (vtysh present); see
 // sectionVisible().
 function secBgp(c){
-  secHint(c, 'gravinet owns this host\u2019s BGP and BFD configuration and drives the FRR daemon from it \u2014 edit below and save to render FRR\u2019s config, enable the daemons it needs, and reload FRR. BFD (Bidirectional Forwarding Detection) gives sub-second neighbor-failure detection; turn it on globally or per neighbor. The live peer table beneath reflects what FRR actually has.');
+  secHint(c, 'BGP configuration for dynamic routing.');
   const editWrap = $('<div></div>'); c.appendChild(editWrap);
   editWrap.innerHTML = '<div class="card"><div class="hint">loading configuration\u2026</div></div>';
   (async () => {
     const r = await api('/api/bgp/config');
     if (!r.ok || !r.body){ editWrap.innerHTML = '<div class="card"><div class="hint">could not load BGP configuration.</div></div>'; return; }
-    renderBgpEditor(editWrap, r.body.bgp || {}, !!r.body.installed, !!r.body.imported, !!r.body.imported_has_passwords);
+    // Render the editor immediately from the stored config — this never waits
+    // on FRR, so the page is always usable at once.
+    renderBgpEditor(editWrap, r.body.bgp || {}, !!r.body.installed, false, false);
+    // If gravinet isn't managing BGP yet but FRR is installed, reflect the live
+    // FRR config by importing it in the background. This runs after the editor
+    // is already on screen; if it's slow or FRR is wedged it simply never swaps
+    // in, leaving the (empty) editor fully usable rather than stuck loading.
+    if (!r.body.active && r.body.installed){
+      const im = await api('/api/bgp/import');
+      // Only swap in if we're still on the BGP section and got a real import.
+      if (state.section === 'bgp' && im.ok && im.body && im.body.imported && im.body.bgp){
+        renderBgpEditor(editWrap, im.body.bgp, true, true, !!im.body.imported_has_passwords);
+      }
+    }
   })();
   // Live status, read from FRR — same reader as the read-only view.
   const liveCard = $('<div class="card"></div>');
@@ -5796,7 +5809,13 @@ function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
   const enableCb = rowTog('Enable BGP', 'Render and run a <code>router bgp</code> speaker on this host. Off leaves no BGP block in FRR\u2019s config and switches bgpd off.', !!b.enabled);
   const asnInp = rowInput('Local AS number', 'This node\u2019s autonomous-system number, e.g. 65001. Required to enable BGP.', b.asn||'', 'e.g. 65001', 160);
   const ridInp = rowInput('Router-id', 'BGP router-id (an IPv4-style id), e.g. 10.0.0.1. Optional \u2014 FRR picks one if left blank.', b.router_id||'', 'e.g. 10.0.0.1', 180);
-  const bfdCb = rowTog('BFD on all neighbors', 'Enable Bidirectional Forwarding Detection for every neighbor (sub-second failure detection). A neighbor can also enable BFD on its own below.', !!b.bfd);
+  // BFD defaults on for a brand-new configuration ("always enable BFD by
+  // default"): sub-second neighbor-failure detection is the better baseline. An
+  // existing config — one gravinet already stored, or one imported live from
+  // FRR — keeps whatever it actually has, so we never silently flip a peer's
+  // real setting.
+  const isNewCfg = !imported && !b.enabled && !b.asn && !(b.neighbors && b.neighbors.length);
+  const bfdCb = rowTog('BFD on all neighbors', 'Enable Bidirectional Forwarding Detection for every neighbor (sub-second failure detection). A neighbor can also enable BFD on its own below.', isNewCfg ? true : !!b.bfd);
   const rcCb = rowTog('Redistribute connected', 'Advertise directly-connected routes into BGP.', !!b.redistribute_connected);
   const rsCb = rowTog('Redistribute static', 'Advertise static routes into BGP.', !!b.redistribute_static);
 

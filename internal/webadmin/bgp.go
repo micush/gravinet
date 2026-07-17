@@ -15,12 +15,10 @@ package webadmin
 // ever say "not installed".
 
 import (
-	"context"
 	"encoding/json"
 	"io/fs"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"time"
@@ -69,8 +67,7 @@ const bgpQueryTimeout = 8 * time.Second
 // human reason and an empty peer list, so the UI degrades to an explanatory
 // line rather than an error.
 func (s *Server) handleBGP(w http.ResponseWriter, r *http.Request) {
-	vtysh, ok := vtyshPath()
-	if !ok {
+	if !bgpSupported() {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"available": false,
 			"reason":    "FRR/vtysh is not installed",
@@ -78,15 +75,12 @@ func (s *Server) handleBGP(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), bgpQueryTimeout)
-	defer cancel()
-	// FRR emits JSON when the command ends in "json". This is the same query
-	// parapet issues for its BGP summary.
-	out, err := exec.CommandContext(ctx, vtysh, "-c", "show ip bgp summary json").Output()
-	if err != nil {
-		// vtysh exists but couldn't answer: FRR/bgpd isn't running, or the
-		// call timed out before its sockets came up.
+	// FRR emits JSON when the command ends in "json". runVtysh bounds this hard,
+	// so a wedged FRR socket can never hang the request.
+	out, ran := runVtysh("show ip bgp summary json")
+	if !ran {
+		// vtysh exists but couldn't answer in time: FRR/bgpd isn't running, or
+		// the call timed out (e.g. sockets not up yet just after boot).
 		writeJSON(w, http.StatusOK, map[string]any{
 			"available": false,
 			"reason":    "FRR is not running (no routing daemons active)",
@@ -106,35 +100,20 @@ func (s *Server) handleBGP(w http.ResponseWriter, r *http.Request) {
 
 // handleBGPConfig is the read/write side: gravinet owns the BGP/BFD
 // configuration and drives the FRR daemon from it. GET returns the stored BGP
-// config plus whether FRR is installed (so the editor can warn that a saved
-// config won't be applied on a host without FRR). PUT/POST persists a new BGP
-// config to gravinet's own config.json and then reconciles FRR with it —
-// rendering frr.conf, syncing the daemon set, and reloading FRR (see frr.go).
-// The config is saved even when FRR isn't installed; it just isn't pushed to a
-// daemon that isn't there, exactly as parapet behaves.
+// config plus whether FRR is installed. It deliberately does NOT touch vtysh —
+// so the editor always loads instantly and can never hang on a slow or wedged
+// FRR. Reflecting a pre-existing FRR config (when gravinet isn't managing BGP
+// yet) is done separately by handleBGPImport, which the UI calls only after the
+// editor is already on screen. PUT/POST persists a new BGP config to gravinet's
+// own config.json and then reconciles FRR with it — rendering frr.conf, syncing
+// the daemon set, and reloading FRR (see frr.go). The config is saved even when
+// FRR isn't installed; it just isn't pushed to a daemon that isn't there.
 func (s *Server) handleBGPConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		var bgp config.BGPConfig
 		if s.configPath != "" {
 			if cfg, err := config.Load(s.configPath); err == nil {
 				bgp = cfg.BGP
-			}
-		}
-		// Source precedence: if gravinet is actively managing BGP (its stored
-		// config is enabled with an AS), that's the truth and we show it. If
-		// it isn't — a fresh install on a host that already runs FRR/BGP — the
-		// stored config is empty, so instead of showing an empty editor while
-		// live peers are established, reflect what FRR is actually running by
-		// importing its config. This read-only import is what makes the page
-		// match reality; the operator adopts it into gravinet's management by
-		// saving. imported=true tells the UI to say so (and warn about
-		// passwords, which aren't imported).
-		imported, importedHasPasswords := false, false
-		if !(bgp.Enabled && bgp.ASN != 0) {
-			if live, hasPw, ok := importBGPFromFRR(); ok {
-				bgp = live
-				imported = true
-				importedHasPasswords = hasPw
 			}
 		}
 		if bgp.Neighbors == nil {
@@ -144,11 +123,13 @@ func (s *Server) handleBGPConfig(w http.ResponseWriter, r *http.Request) {
 			bgp.Networks = []string{}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"bgp":                    bgp,
-			"installed":              frrInstalled(),
-			"supported":              bgpSupported(),
-			"imported":               imported,
-			"imported_has_passwords": importedHasPasswords,
+			"bgp":       bgp,
+			"installed": frrInstalled(),
+			"supported": bgpSupported(),
+			// Whether gravinet is actively managing BGP. When false and FRR is
+			// installed, the UI follows up with /api/bgp/import to reflect the
+			// live config.
+			"active": bgp.Enabled && bgp.ASN != 0,
 		})
 		return
 	}
@@ -158,9 +139,7 @@ func (s *Server) handleBGPConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Persist first (mutateConfig validates + saves + fires the daemon's reload
-	// hook), so the durable record is updated before we touch FRR. Neighbor/
-	// network hygiene the renderer would silently drop is normalized here too,
-	// so what's stored is what gets applied.
+	// hook), so the durable record is updated before we touch FRR.
 	if err := s.mutateConfig(func(cfg *config.Config) error {
 		cfg.BGP = req
 		return nil
@@ -172,12 +151,38 @@ func (s *Server) handleBGPConfig(w http.ResponseWriter, r *http.Request) {
 	// when FRR isn't installed — never fatal to the save.
 	note, err := applyBGP(req, s.log)
 	if err != nil {
-		// Config is already saved; report the apply problem without pretending
-		// the save failed.
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "applied": false, "note": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "applied": frrInstalled(), "note": note})
+}
+
+// handleBGPImport reads the BGP configuration FRR is currently running and
+// returns it, so the editor can reflect a setup configured outside gravinet
+// (the fix for "the page shows zero config but there are live peers"). This is
+// its own endpoint, separate from the config GET, precisely so the editor is
+// never blocked on it: the UI renders the stored config immediately, then calls
+// this in the background and swaps in the imported values if any come back.
+// runVtysh (via importBGPFromFRR) bounds the vtysh call hard, so even a wedged
+// FRR can only make this return "nothing to import," never hang. Read-only:
+// importing never writes anything; the operator adopts by saving.
+func (s *Server) handleBGPImport(w http.ResponseWriter, r *http.Request) {
+	bgp, hasPw, ok := importBGPFromFRR()
+	if !ok {
+		writeJSON(w, http.StatusOK, map[string]any{"imported": false})
+		return
+	}
+	if bgp.Neighbors == nil {
+		bgp.Neighbors = []config.BGPNeighbor{}
+	}
+	if bgp.Networks == nil {
+		bgp.Networks = []string{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"imported":               true,
+		"imported_has_passwords": hasPw,
+		"bgp":                    bgp,
+	})
 }
 
 // derivation match parapet's bgp_peer_row so the two projects report BGP the

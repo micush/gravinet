@@ -37,6 +37,41 @@ assuming it didn't happen.
 
 ---
 
+## v479 — 2026-07-16
+
+**BGP page: simplified intro and BFD on by default for new configs.** The
+Traffic › BGP section header text is now just "BGP configuration for dynamic
+routing." in place of the previous multi-sentence explanation. And a brand-new
+BGP configuration now starts with "BFD on all neighbors" enabled by default —
+sub-second neighbor-failure detection is the better baseline. This applies only
+to a fresh config; an existing one (already stored by gravinet, or imported live
+from FRR) keeps whatever BFD setting it actually has, so no peer's real setting
+is ever silently changed.
+
+## v478 — 2026-07-16
+
+**Fix: BGP page could hang on "loading configuration…".** The v476 FRR import
+ran `vtysh` synchronously inside the `/api/bgp/config` GET that the editor waits
+on, so anything that made `vtysh` slow or wedged blocked the whole page from
+rendering — and `os/exec`'s `Output()` can stall past its context deadline if
+`vtysh` (or a child that inherited its stdout pipe) doesn't exit on the kill, so
+the load could hang indefinitely rather than time out.
+
+Two changes fix it. First, the editor no longer blocks on FRR at all: the config
+GET now returns only gravinet's stored config (a fast file read, no subprocess),
+so the editor renders immediately. Reflecting a pre-existing FRR configuration
+moved to a separate `/api/bgp/import` endpoint the UI calls *after* the editor is
+on screen; if it's slow or never answers, the editor is already usable and the
+imported values simply don't swap in (instead of a stuck page). Second, every
+`vtysh` call now goes through a bounded runner that enforces a hard wall-clock
+limit even when the process ignores the context kill — a wedged `vtysh` can leak
+at most one goroutine/process but can never block an HTTP handler. The live-peer
+status endpoint uses the same runner, so it's protected too. Behavior is
+otherwise unchanged: an existing FRR config still populates the editor with a
+"read from FRR" banner, still adopt-on-save, still no passwords imported. Added a
+test that the bounded runner returns promptly (never spawns or blocks) when
+vtysh is absent.
+
 ## v477 — 2026-07-16
 
 **Faster reconnection after the host wakes from sleep: TLS-fallback idle timeout
