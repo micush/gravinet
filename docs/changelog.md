@@ -37,6 +37,39 @@ assuming it didn't happen.
 
 ---
 
+## v471 — 2026-07-16
+
+Settings has a new **Logging** card directly beneath Cluster. **Log level** moved
+into it (out of Cluster, where it had been sitting), and a new **Log size**
+setting sits alongside it: a text box that caps the log file at a size you type
+as `200M`, `1G`, `99K`, or a bare byte count (default 200M). Once the file
+reaches the cap it runs FIFO — the oldest lines are dropped from the front to
+make room for new ones — so it's a rolling window of the most recent activity
+rather than an ever-growing file or a periodic hard wipe.
+
+Backend: `RotatingFile` gained a single-file FIFO mode (`NewFIFOFile`) beside the
+existing numbered-backup rotation. When full it rewrites the file keeping only
+the newest content, trimmed to whole lines and amortized (it keeps ~half the cap
+per trim, so writing past a full file stays cheap rather than rewriting on every
+line). Config gained `log_max_size` with a `ParseSize`/`FormatSize` pair
+(binary K/M/G/T, optional `B`/`iB` suffix, fractional values); `LogMaxBytes`
+now prefers it, defaults to 200 MiB, and floors at 64 KiB, with the legacy
+`log_max_mb`/`log_keep` numbered-rotation path kept for older configs.
+`Config.Validate` rejects an unparseable size at save time.
+
+Both logging settings apply live, no restart: the daemon's reload path already
+updated the running log level, and now also calls the rotating file's new
+`SetMaxBytes`, which trims the on-disk file immediately on a shrink (so lowering
+the cap takes hold at once instead of only after the file is next written past
+the old size). A new `/api/logsize` endpoint reads/writes the cap through the
+same `mutateConfig` plumbing as `/api/loglevel`, is proxied the same way (a
+Manager can set a peer's cap), and `/api/config` now reports `log_max_size` so
+the box populates on load. Both rows are also registered in the Settings search
+index. Verified with `go build`, `go vet`, a `node --check` of the extracted
+client script, the config/logx/webadmin test suites, and new tests covering the
+FIFO rolling window, live shrink, oversized-on-open trim, and size
+parse/format/precedence/validation.
+
 ## v470 — 2026-07-16
 
 Monitor > logs entries are now clickable. A network id or network name in a log

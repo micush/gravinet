@@ -768,6 +768,7 @@ async function load() {
   state.allowRemoteShell = !!(c.body && c.body.allow_remote_shell);
   state.shellSupported = c.body ? !!c.body.shell_supported : true;
   state.logLevel = (c.body && c.body.log_level) || 'info';
+  state.logMaxSize = (c.body && c.body.log_max_size) || '200M';
   // Node-global firewall object/service catalog — shared by every network
   // above (see the server's Config.FirewallObjects doc comment), so it lives
   // at this top level rather than nested under any one entry in state.cfg.
@@ -823,6 +824,8 @@ function buildSearchIndex(){
     ['cluster-managed-row', 'Managed mode', 'Let Manager-mode peers in the cluster remotely configure this node.'],
     ['cluster-manager-row', 'Manager mode', 'Let this node browse and remotely configure other Managed-mode peers in the cluster.'],
     ['shell-allow-row', 'Remote shell', 'Let a Manager peer open a real OS shell on this node through the web admin.'],
+    ['loglevel-row', 'Log level', 'How much this node logs (error, warn, info, debug). Applied immediately, no restart.'],
+    ['logsize-row', 'Log size', 'Maximum size of the log file; once full the oldest lines are dropped (FIFO). e.g. 200M, 1G, 99K.'],
     ['routeadv-row', 'Route advertisement interval', 'How often this node re-advertises the routes it originates.'],
     ['udpport-row', 'UDP port', 'The UDP port(s) this node listens on; comma-separated for more than one, so a peer behind a restrictive firewall can reach it on a well-known port too.'],
     ['tcpport-row', 'TCP port', 'The TCP port(s) this node listens on for the TLS fallback; comma-separated for more than one.'],
@@ -2219,16 +2222,28 @@ function secSettings(c) {
   sh.appendChild(shLabel); sh.appendChild(shSw);
   card.appendChild(sh);
 
-  // Log level. Applied live on save — no restart. That matters more than it
-  // sounds: raising the level to debug is exactly what you want when
-  // investigating a fault, and until now doing so meant editing config.json and
-  // restarting, which resets every session, backoff timer and learned endpoint
-  // — destroying the state you were trying to observe. Anything that only shows
-  // up on a live network event (a roam, a peer flapping, a fallback that won't
-  // establish) could not survive the act of preparing to watch it. This row is
-  // proxied like any other setting, so a Manager can raise a *peer's* level too,
-  // which is the case that actually needs it.
-  const lg = $('<div class="settings-row"></div>');
+  // Cluster card ends here. syncClusterModeRows looks its rows up via
+  // document.getElementById, which can't find them while card is still a
+  // detached DOM subtree, so append first and sync after. (Calling it before
+  // the append silently no-ops: checked/disabled never get corrected to match
+  // the selected peer, and the rows stay enabled with stale local values until
+  // some later unrelated syncClusterModeRows call happens to fix it up — the
+  // real bug behind being able to flip these for a "remote" node right after
+  // navigating here.)
+  c.appendChild(card);
+  syncClusterModeRows();
+
+  // Logging card — sits directly beneath Cluster. Holds Log level (moved here
+  // from Cluster) and Log size. Both apply live on save: the daemon's reload
+  // path updates the running logger's level and the rotating log file's size
+  // cap without a restart (a restart would reset every session, backoff timer
+  // and learned endpoint — the very state you raise the level to observe).
+  // Both are proxied like any other setting, so a Manager can change a peer's.
+  card = $('<div class="card"></div>');
+  card.appendChild($('<h3>Logging</h3>'));
+
+  // Log level.
+  const lg = $('<div class="settings-row" id="loglevel-row"></div>');
   const lgLabel = $('<div><div class="settings-label">Log level</div><div class="settings-desc">How much this node logs. <b>debug</b> is the one worth knowing about. Most <i>rejection</i> paths in the mesh log only at debug: a replayed handshake, a clock-skew mismatch, a handshake claiming our own node id, a failed TLS dial. At <b>info</b>, a node that is receiving handshakes and refusing every one of them looks exactly like a node receiving nothing at all. Applied immediately; no restart, no sessions dropped. Leave it on info in normal operation; debug is chatty.</div></div>');
   const lgSel = $('<select class="sel" id="loglevel-sel"><option value="error">error</option><option value="warn">warn</option><option value="info">info</option><option value="debug">debug</option></select>');
   lgSel.value = state.logLevel || 'info';
@@ -2241,19 +2256,36 @@ function secSettings(c) {
   };
   lg.appendChild(lgLabel); lg.appendChild(lgSel);
   card.appendChild(lg);
-  // Attach *before* syncing: syncClusterModeRows looks these rows up via
-  // document.getElementById, which can't find them while card is still a
-  // detached DOM subtree. Calling it before this append (the previous
-  // ordering here) silently no-ops every single time — checked/disabled
-  // never get corrected to match the selected peer, and the row stays
-  // enabled with stale local values until some *later* unrelated
-  // syncClusterModeRows call (the 6s refreshCluster tick, if one fires while
-  // this section happens to still be open) happens to fix it up. That's the
-  // real bug behind being able to flip these for a "remote" node right after
-  // navigating here: it was never actually being disabled on arrival at all,
-  // regardless of how the peer switch itself was raced.
+
+  // Log size. The log file is a single rolling file capped at this size; once
+  // full, the oldest lines are dropped from the front (FIFO) to make room for
+  // new ones, so it never grows without bound and always holds the most recent
+  // output. Accepts a human size with a unit suffix — 200M, 1G, 99K — or a bare
+  // byte count. Committed on Enter or blur (not per keystroke); the box snaps to
+  // the canonical form the server echoes back, and reverts on a rejected value.
+  const lz = $('<div class="settings-row" id="logsize-row"></div>');
+  const lzLabel = $('<div><div class="settings-label">Log size</div><div class="settings-desc">Maximum size of the log file. Once it fills, the oldest lines are dropped to make room for new ones (FIFO), so the file stays a rolling window of the most recent activity rather than growing without bound. Enter a size like <b>200M</b>, <b>1G</b>, or <b>99K</b>. Default is 200M.</div></div>');
+  const lzInput = $('<input type="text" class="sel" id="logsize-input" style="width:90px" placeholder="200M">');
+  lzInput.value = state.logMaxSize || '200M';
+  let lzLast = lzInput.value;
+  const saveLZ = async () => {
+    const want = (lzInput.value || '').trim();
+    if (!want || want === lzLast) { lzInput.value = lzLast; return; }
+    const r = await api('/api/logsize', { method:'POST', body: JSON.stringify({ size: want }) });
+    if (r.ok && r.body && r.body.size) {
+      state.logMaxSize = r.body.size;
+      lzLast = r.body.size;
+      lzInput.value = r.body.size; // canonical form from the server
+    } else {
+      alert((r.body && r.body.error) || 'could not set log size');
+      lzInput.value = lzLast; // revert
+    }
+  };
+  lzInput.onkeydown = (e) => { if (e.key === 'Enter'){ e.preventDefault(); lzInput.blur(); } };
+  lzInput.onblur = saveLZ;
+  lz.appendChild(lzLabel); lz.appendChild(lzInput);
+  card.appendChild(lz);
   c.appendChild(card);
-  syncClusterModeRows();
 
   card = $('<div class="card"></div>');
   card.appendChild($('<h3>Routing</h3>'));

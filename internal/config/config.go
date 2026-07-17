@@ -186,10 +186,23 @@ type Config struct {
 	// file. Set an explicit path to override, or "-"/"none" to disable the file.
 	LogFile string `json:"log_file,omitempty"`
 
+	// LogMaxSize caps the log file: once a write would push it past this size,
+	// the oldest lines are dropped from the front to make room (FIFO), so the
+	// file is a rolling window of the most recent output rather than growing
+	// without bound. Accepts a human size with an optional unit suffix — "200M",
+	// "99K", "1G", or a bare byte count — and is what the web admin's Logging >
+	// Log Size box writes. Empty means the default (200M). This is the modern
+	// replacement for the LogMaxMB/LogKeep numbered-rotation pair below; when
+	// LogMaxSize is set it takes precedence and the file runs in FIFO mode with
+	// no numbered backups.
+	LogMaxSize string `json:"log_max_size,omitempty"`
+
 	// LogMaxMB is the size (in MB) the log file may reach before it rotates; 0
-	// means the default (10). LogKeep is how many rotated files to retain
+	// means the default. LogKeep is how many rotated files to retain
 	// (<path>.1 … <path>.N); 0 means the default (5). Set LogKeep to a negative
-	// value via the helper to keep none (rotate by truncation).
+	// value via the helper to keep none (rotate by truncation). Superseded by
+	// LogMaxSize above for setting the cap; retained for back-compat with
+	// existing configs and the numbered-backup rotation mode.
 	LogMaxMB int `json:"log_max_mb,omitempty"`
 	LogKeep  int `json:"log_keep,omitempty"`
 
@@ -791,18 +804,133 @@ func (c *Config) RestartOnUnderlayChangeEnabled() bool {
 	return c.RestartOnUnderlayChange == nil || *c.RestartOnUnderlayChange
 }
 
-// LogMaxBytes is the resolved rotation threshold in bytes (default 10 MiB,
-// floored at 64 KiB so a tiny misconfiguration can't thrash).
-func (c *Config) LogMaxBytes() int64 {
-	if c.LogMaxMB <= 0 {
-		return 10 << 20
+// DefaultLogMaxBytes is the log-file cap used when nothing is configured: a
+// 200 MiB rolling window. Exported so the web admin can show the effective
+// default in the Log Size box before anything is set.
+const DefaultLogMaxBytes int64 = 200 << 20
+
+// minLogMaxBytes floors the configured cap so a tiny misconfiguration ("1K")
+// can't make the file thrash on every line.
+const minLogMaxBytes int64 = 64 << 10
+
+// ParseSize parses a human byte size with an optional unit suffix into bytes.
+// Accepts a bare integer ("1048576"), or a number followed by one of B, K/KB,
+// M/MB, G/GB, T/TB (case-insensitive, binary multiples of 1024). A trailing
+// "iB" ("MiB") is accepted as a synonym. Whitespace and a single trailing "b"
+// after the unit letter are tolerated, so "200M", "200 MB", and "200MiB" all
+// mean the same thing. Returns an error on anything it can't make sense of,
+// including zero or negative sizes, so callers can reject bad input rather than
+// silently falling back to a default.
+func ParseSize(s string) (int64, error) {
+	t := strings.TrimSpace(s)
+	if t == "" {
+		return 0, fmt.Errorf("empty size")
 	}
-	b := int64(c.LogMaxMB) << 20
-	if b < 64<<10 {
-		b = 64 << 10
+	// Split the trailing unit letters from the leading number.
+	i := 0
+	for i < len(t) && (t[i] == '.' || t[i] == '-' || t[i] == '+' || (t[i] >= '0' && t[i] <= '9')) {
+		i++
 	}
-	return b
+	numPart := strings.TrimSpace(t[:i])
+	unit := strings.TrimSpace(strings.ToLower(t[i:]))
+	if numPart == "" {
+		return 0, fmt.Errorf("size %q has no number", s)
+	}
+	// Normalize unit: strip a trailing "b"/"ib" so "kb", "kib", and "k" all
+	// collapse to "k".
+	unit = strings.TrimSuffix(unit, "b")
+	unit = strings.TrimSuffix(unit, "i")
+	var mult int64 = 1
+	switch unit {
+	case "":
+		mult = 1
+	case "k":
+		mult = 1 << 10
+	case "m":
+		mult = 1 << 20
+	case "g":
+		mult = 1 << 30
+	case "t":
+		mult = 1 << 40
+	default:
+		return 0, fmt.Errorf("unknown size unit %q in %q", unit, s)
+	}
+	// Allow a fractional number ("1.5M") by parsing as float when a dot is
+	// present, integer otherwise, then multiplying.
+	var bytes int64
+	if strings.Contains(numPart, ".") {
+		f, err := strconv.ParseFloat(numPart, 64)
+		if err != nil {
+			return 0, fmt.Errorf("bad size %q: %v", s, err)
+		}
+		bytes = int64(f * float64(mult))
+	} else {
+		n, err := strconv.ParseInt(numPart, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("bad size %q: %v", s, err)
+		}
+		bytes = n * mult
+	}
+	if bytes <= 0 {
+		return 0, fmt.Errorf("size %q must be positive", s)
+	}
+	return bytes, nil
 }
+
+// FormatSize renders a byte count as a compact human size using the largest
+// unit that divides it evenly (so 200<<20 -> "200M", not "204800K"), falling
+// back to the next unit down when it doesn't divide cleanly. Used to show the
+// effective cap in the web admin.
+func FormatSize(b int64) string {
+	if b <= 0 {
+		return "0"
+	}
+	type u struct {
+		suf string
+		val int64
+	}
+	for _, x := range []u{{"T", 1 << 40}, {"G", 1 << 30}, {"M", 1 << 20}, {"K", 1 << 10}} {
+		if b%x.val == 0 {
+			return strconv.FormatInt(b/x.val, 10) + x.suf
+		}
+	}
+	return strconv.FormatInt(b, 10)
+}
+
+// LogMaxBytes is the resolved log-file cap in bytes. Precedence: an explicit
+// LogMaxSize ("200M", "1G", …) wins; otherwise the legacy LogMaxMB; otherwise
+// the 200 MiB default. Floored at 64 KiB so a tiny value can't thrash. A
+// LogMaxSize that fails to parse is ignored here (Validate rejects it up front,
+// so a saved config never reaches this with a bad value).
+func (c *Config) LogMaxBytes() int64 {
+	if strings.TrimSpace(c.LogMaxSize) != "" {
+		if b, err := ParseSize(c.LogMaxSize); err == nil {
+			if b < minLogMaxBytes {
+				b = minLogMaxBytes
+			}
+			return b
+		}
+	}
+	if c.LogMaxMB > 0 {
+		b := int64(c.LogMaxMB) << 20
+		if b < minLogMaxBytes {
+			b = minLogMaxBytes
+		}
+		return b
+	}
+	return DefaultLogMaxBytes
+}
+
+// LogMaxSizeString reports the effective cap as a human string for display,
+// resolving the same precedence LogMaxBytes uses.
+func (c *Config) LogMaxSizeString() string { return FormatSize(c.LogMaxBytes()) }
+
+// LogFIFO reports whether the log file should run in single-file FIFO mode
+// (oldest lines dropped from the front when full) rather than the legacy
+// numbered-backup rotation. FIFO is the mode whenever a LogMaxSize is set —
+// which the web admin always does — so numbered rotation only survives for a
+// config that predates LogMaxSize and set LogMaxMB/LogKeep directly.
+func (c *Config) LogFIFO() bool { return strings.TrimSpace(c.LogMaxSize) != "" }
 
 // LogBackups is the resolved number of rotated files to keep (default 5). A
 // negative LogKeep means keep none.
@@ -1442,6 +1570,13 @@ func (c *Config) Validate() error {
 	for _, p := range c.ExtraTCPListenPorts {
 		if p <= 0 || p > 65535 {
 			return fmt.Errorf("extra_tcp_listen_ports: %d out of range", p)
+		}
+	}
+	// A configured log cap must parse; reject bad input at save time so the
+	// running daemon never has to fall back silently (see LogMaxBytes).
+	if strings.TrimSpace(c.LogMaxSize) != "" {
+		if _, err := ParseSize(c.LogMaxSize); err != nil {
+			return fmt.Errorf("log_max_size: %v", err)
 		}
 	}
 	// NAT state timeout is a single global setting. Migrate any legacy per-network

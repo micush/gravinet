@@ -46,7 +46,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "470"
+	version = "471"
 	commit  = "none"
 )
 
@@ -338,14 +338,31 @@ func cmdRun(args []string) {
 		// the file can't be opened we keep logging to the console and carry on.
 		logPath := cfg.LogFilePath(*cfgPath)
 		var logClear func() error
+		var logResize func(int64) // set the file's size cap live (nil if file logging is off)
 		if logPath != "" {
-			if lf, lerr := logx.NewRotatingFile(logPath, cfg.LogMaxBytes(), cfg.LogBackups()); lerr != nil {
+			// FIFO mode (single rolling file, oldest lines dropped when full) is
+			// what the web admin's Log Size setting drives; a config that predates
+			// that setting and configured LogMaxMB/LogKeep still gets the classic
+			// numbered-backup rotation. LogFIFO() decides which.
+			var lf *logx.RotatingFile
+			var lerr error
+			if cfg.LogFIFO() {
+				lf, lerr = logx.NewFIFOFile(logPath, cfg.LogMaxBytes())
+			} else {
+				lf, lerr = logx.NewRotatingFile(logPath, cfg.LogMaxBytes(), cfg.LogBackups())
+			}
+			if lerr != nil {
 				logx.Warnf("could not open log file %s: %v (logging to console only)", logPath, lerr)
 				logPath = ""
 			} else {
 				logx.SetOutput(io.MultiWriter(logx.BestEffort(os.Stderr), lf))
 				logClear = lf.Truncate
-				logx.Infof("logging to %s (rotate at %d MiB, keep %d)", logPath, cfg.LogMaxBytes()>>20, cfg.LogBackups())
+				logResize = lf.SetMaxBytes
+				if cfg.LogFIFO() {
+					logx.Infof("logging to %s (FIFO, cap %s)", logPath, config.FormatSize(cfg.LogMaxBytes()))
+				} else {
+					logx.Infof("logging to %s (rotate at %d MiB, keep %d)", logPath, cfg.LogMaxBytes()>>20, cfg.LogBackups())
+				}
 			}
 		}
 		store := config.NewStore(cfg)
@@ -1231,6 +1248,14 @@ func cmdRun(args []string) {
 				prev := logx.LevelName()
 				logx.SetLevel(want)
 				logx.Infof("log level: %s -> %s", prev, logx.LevelName())
+			}
+			// Log size cap, live. Like the level above, this was previously read
+			// only at startup, so changing it in the web admin did nothing until a
+			// restart. The rotating file exposes SetMaxBytes; a shrink is applied
+			// to the on-disk file immediately (FIFO trims to fit now). logResize is
+			// nil when file logging is disabled, so the guard is required.
+			if logResize != nil {
+				logResize(newCfg.LogMaxBytes())
 			}
 			applyKernelNAT(newCfg) // re-program host NAT for any rule changes
 			logx.Infof("config reloaded from %s (networks add/remove, firewall/NAT/QoS/bandwidth/keys, and the underlay port applied live)", *cfgPath)

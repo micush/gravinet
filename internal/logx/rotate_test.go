@@ -124,3 +124,85 @@ func TestRotatingFileTruncate(t *testing.T) {
 		t.Fatalf("after truncate+write, file = %q, want %q", got, "fresh\n")
 	}
 }
+
+func TestFIFOFileRollingWindow(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app.log")
+	r, err := NewFIFOFile(path, 1000) // 1000-byte single-file cap
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Write far more than the cap; the file must stay a rolling window of the
+	// newest lines, never exceeding the cap and never producing a backup.
+	for i := 0; i < 500; i++ {
+		if _, err := r.Write([]byte(fmt.Sprintf("line %04d padding padding padding\n", i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.Close()
+
+	if _, err := os.Stat(path + ".1"); err == nil {
+		t.Error("FIFO mode must not create a .1 backup")
+	}
+	fi, _ := os.Stat(path)
+	if fi.Size() > 1000 {
+		t.Errorf("file = %d bytes, must not exceed the 1000-byte cap", fi.Size())
+	}
+	b, _ := os.ReadFile(path)
+	s := string(b)
+	if !strings.Contains(s, "line 0499") {
+		t.Errorf("newest line must survive; file was:\n%s", s)
+	}
+	if strings.Contains(s, "line 0000") {
+		t.Errorf("oldest line must have been dropped; file was:\n%s", s)
+	}
+	// The first surviving line must be whole, never a mid-line fragment.
+	if first := strings.SplitN(s, "\n", 2)[0]; first != "" && !strings.HasPrefix(first, "line ") {
+		t.Errorf("first surviving line is a fragment: %q", first)
+	}
+}
+
+func TestFIFOFileShrinkLive(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app.log")
+	r, err := NewFIFOFile(path, 100<<10) // start with a big cap
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	for i := 0; i < 1000; i++ {
+		r.Write([]byte(fmt.Sprintf("line %04d xxxxxxxxxxxxxxxxxxxx\n", i)))
+	}
+	// Lowering the cap must trim the on-disk file immediately, not only on the
+	// next overflowing write (this is what the web admin's live Log Size change
+	// relies on).
+	r.SetMaxBytes(500)
+	if fi, _ := os.Stat(path); fi.Size() > 500 {
+		t.Errorf("after live shrink file = %d bytes, want <= 500", fi.Size())
+	}
+	if got := r.MaxBytes(); got != 500 {
+		t.Errorf("MaxBytes() = %d, want 500", got)
+	}
+}
+
+func TestFIFOFileTrimsOversizedOnOpen(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app.log")
+	// Pre-seed a file larger than the cap we'll open it with.
+	var big []byte
+	for i := 0; i < 400; i++ {
+		big = append(big, []byte(fmt.Sprintf("old line %04d padding padding\n", i))...)
+	}
+	if err := os.WriteFile(path, big, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	r, err := NewFIFOFile(path, 800)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	// Opening in FIFO mode with a smaller cap should have trimmed it already.
+	if fi, _ := os.Stat(path); fi.Size() > 800 {
+		t.Errorf("oversized file not trimmed on open: %d bytes", fi.Size())
+	}
+}
