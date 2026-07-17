@@ -358,9 +358,12 @@ func TestRunVtyshAbsent(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("runVtysh did not return promptly when vtysh is absent")
 	}
-	// importBGPFromFRR builds on it and must also report nothing to import.
-	if _, _, ok := importBGPFromFRR(); ok {
+	// importBGPFromFRR builds on it and must also report nothing to import,
+	// with a non-empty diagnostic reason.
+	if _, _, ok, reason := importBGPFromFRR(nil); ok {
 		t.Error("importBGPFromFRR should report ok=false when vtysh is absent")
+	} else if reason == "" {
+		t.Error("importBGPFromFRR should explain why nothing was imported")
 	}
 }
 
@@ -397,7 +400,7 @@ func TestImportBGPFromFRRFile(t *testing.T) {
 	// file path with no daemon — exactly the failing scenario.
 	withStatFile(t, func(string) (fs.FileInfo, error) { return nil, os.ErrNotExist })
 
-	cfg, hasPw, ok := importBGPFromFRR()
+	cfg, hasPw, ok, _ := importBGPFromFRR(nil)
 	if !ok {
 		t.Fatal("expected import to succeed from the config file alone")
 	}
@@ -413,6 +416,32 @@ func TestImportBGPFromFRRFile(t *testing.T) {
 	}
 	if !hasPw {
 		t.Error("expected password presence to be flagged")
+	}
+}
+
+// A config that arrived with Windows (CRLF) line endings must still parse: the
+// trailing \r on the ASN token used to break stanza detection and silently
+// import nothing.
+func TestParseRunningConfigBGPCRLF(t *testing.T) {
+	rc := "router bgp 65001\r\n" +
+		" bgp router-id 10.0.0.1\r\n" +
+		" neighbor 10.0.0.2 remote-as 65002\r\n" +
+		" address-family ipv4 unicast\r\n" +
+		"  network 10.0.0.0/24\r\n" +
+		"  neighbor 10.0.0.2 activate\r\n" +
+		" exit-address-family\r\n"
+	cfg, _, ok := parseRunningConfigBGP(rc)
+	if !ok {
+		t.Fatal("CRLF config should still parse (trailing \\r must not break the ASN)")
+	}
+	if cfg.ASN != 65001 || cfg.RouterID != "10.0.0.1" {
+		t.Errorf("asn/router-id wrong from CRLF input: %+v", cfg)
+	}
+	if len(cfg.Neighbors) != 1 || cfg.Neighbors[0].Peer != "10.0.0.2" || cfg.Neighbors[0].RemoteAS != 65002 {
+		t.Errorf("neighbor wrong from CRLF input: %+v", cfg.Neighbors)
+	}
+	if len(cfg.Networks) != 1 || cfg.Networks[0] != "10.0.0.0/24" {
+		t.Errorf("networks wrong from CRLF input: %+v", cfg.Networks)
 	}
 }
 

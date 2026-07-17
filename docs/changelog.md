@@ -37,6 +37,40 @@ assuming it didn't happen.
 
 ---
 
+## v485 — 2026-07-17
+
+**BGP editor is now fully autosave (no Save button), and the initial FRR config
+import says why it found nothing.**
+
+- **Autosave.** v484 only renamed the BGP form's button to "Save"; this removes
+  it entirely. The Traffic › BGP editor now persists — and applies to FRR —
+  automatically, the same as every other form in the app. Toggles and
+  neighbor/network add-or-remove save immediately; the text fields (AS number,
+  router-id, timers, per-neighbor fields, network prefixes) debounce so we're
+  not POSTing on every keystroke. An intermediate invalid state (BGP enabled
+  with no AS number, or a hold timer at or below the keepalive) is held back with
+  an inline hint instead of being POSTed as a guaranteed error — the next valid
+  edit saves it — so autosave never pushes a config FRR would reject. Concurrent
+  saves are sequence-guarded so a slower earlier save can't clobber the status of
+  a newer one.
+
+- **Import diagnostics.** When gravinet isn't managing BGP yet and tries to
+  reflect FRR's existing config, a failure used to leave the editor silently
+  empty — indistinguishable from a broken import, which is what made this hard to
+  chase across versions. `importBGPFromFRR` now returns a diagnostic reason
+  describing which source it read from, or, when nothing worked, why each source
+  came up empty: file missing vs present-but-unreadable (the classic
+  permissions-on-`/etc/frr` case is now called out specifically), no `router bgp`
+  stanza, or vtysh absent/not answering (bgpd down). That reason is logged by the
+  daemon (`bgp import: …`) and shown in the editor, so an empty form now explains
+  itself instead of looking broken.
+
+- **CRLF hardening.** `parseRunningConfigBGP` now normalizes CRLF/CR line
+  endings before parsing. A config that had ever passed through a Windows editor
+  left a trailing `\r` on the ASN token (`65001\r`), which failed to parse and
+  silently yielded "no stanza" — a real import failure that was invisible in the
+  UI. Covered by a new regression test, alongside the import-reason assertions.
+
 ## v484 — 2026-07-17
 
 **BGP form now saves-and-applies like every other form; FRR's bgpd/bfdd are

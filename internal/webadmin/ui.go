@@ -5725,9 +5725,19 @@ function secBgp(c){
     // it's slow or FRR is wedged it simply never swaps in.
     if (!r.body.active && (r.body.supported || r.body.installed)){
       const im = await api('/api/bgp/import');
-      // Only swap in if we're still on the BGP section and got a real import.
-      if (state.section === 'bgp' && im.ok && im.body && im.body.imported && im.body.bgp){
+      if (state.section !== 'bgp') return; // navigated away while it ran
+      if (im.ok && im.body && im.body.imported && im.body.bgp){
         renderBgpEditor(editWrap, im.body.bgp, true, true, !!im.body.imported_has_passwords);
+      } else if (im.ok && im.body && !im.body.imported){
+        // FRR is present but no existing BGP config could be read. Say why, so an
+        // empty editor isn't indistinguishable from a broken import — the reason
+        // (permissions, no stanza, bgpd not answering, …) is what to act on.
+        const card = editWrap.querySelector('.card');
+        const h3 = card && card.querySelector('h3');
+        if (h3){
+          const why = im.body.reason ? (': ' + esc(im.body.reason)) : '.';
+          card.insertBefore($('<div class="empty" style="margin-bottom:10px;border-left:3px solid var(--acc)">No existing FRR BGP configuration was imported'+why+'</div>'), h3.nextSibling);
+        }
       }
     }
   })();
@@ -5858,12 +5868,12 @@ function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
     neighbors.forEach((n, i) => {
       const tr = $('<tr></tr>');
       const mk = (val, ph, w) => { const inp=$('<input type="text" style="width:'+w+'px">'); inp.value=val==null?'':String(val); inp.placeholder=ph||''; return inp; };
-      const peer = mk(n.peer, '10.0.0.2', 130); peer.oninput = () => n.peer = peer.value.trim();
-      const as = mk(n.remote_as||'', '65002', 80); as.oninput = () => n.remote_as = parseInt(as.value,10)||0;
-      const desc = mk(n.description, 'optional', 150); desc.oninput = () => n.description = desc.value;
-      const pw = $('<input type="password" style="width:120px" placeholder="optional">'); pw.value = n.password||''; pw.oninput = () => n.password = pw.value;
-      const bfd = $('<input type="checkbox">'); bfd.checked = !!n.bfd; bfd.onchange = () => n.bfd = bfd.checked;
-      const del = $('<button class="sm danger">\u2212</button>'); del.onclick = () => { neighbors.splice(i,1); renderNbrs(); };
+      const peer = mk(n.peer, '10.0.0.2', 130); peer.oninput = () => { n.peer = peer.value.trim(); scheduleSave(false); };
+      const as = mk(n.remote_as||'', '65002', 80); as.oninput = () => { n.remote_as = parseInt(as.value,10)||0; scheduleSave(false); };
+      const desc = mk(n.description, 'optional', 150); desc.oninput = () => { n.description = desc.value; scheduleSave(false); };
+      const pw = $('<input type="password" style="width:120px" placeholder="optional">'); pw.value = n.password||''; pw.oninput = () => { n.password = pw.value; scheduleSave(false); };
+      const bfd = $('<input type="checkbox">'); bfd.checked = !!n.bfd; bfd.onchange = () => { n.bfd = bfd.checked; scheduleSave(true); };
+      const del = $('<button class="sm danger">\u2212</button>'); del.onclick = () => { neighbors.splice(i,1); renderNbrs(); scheduleSave(true); };
       const cells = [peer, as, desc, pw, bfd, del];
       cells.forEach(el => { const td=$('<td></td>'); td.appendChild(el); tr.appendChild(td); });
       tbl.appendChild(tr);
@@ -5888,27 +5898,43 @@ function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
     networks.forEach((net, i) => {
       const rowEl = $('<div style="display:flex;gap:8px;margin-bottom:6px;align-items:center"></div>');
       const inp = $('<input type="text" style="width:220px" placeholder="e.g. 10.0.0.0/24">'); inp.value = net||'';
-      inp.oninput = () => networks[i] = inp.value.trim();
-      const del = $('<button class="sm danger">\u2212</button>'); del.onclick = () => { networks.splice(i,1); renderNets(); };
+      inp.oninput = () => { networks[i] = inp.value.trim(); scheduleSave(false); };
+      const del = $('<button class="sm danger">\u2212</button>'); del.onclick = () => { networks.splice(i,1); renderNets(); scheduleSave(true); };
       rowEl.appendChild(inp); rowEl.appendChild(del); netBody.appendChild(rowEl);
     });
   }
   addNet.onclick = () => { networks.push(''); renderNets(); };
   renderNets();
 
-  // ---- save ----
-  const footer = $('<div style="margin-top:16px;border-top:1px solid var(--line);padding-top:12px;display:flex;gap:12px;align-items:center"></div>');
-  const saveBtn = $('<button class="ok">Save</button>');
-  const status = $('<span class="hint"></span>');
-  footer.appendChild(saveBtn); footer.appendChild(status); card.appendChild(footer);
-  card.appendChild($('<div class="hint" style="margin-top:10px">Live peer status is under Monitor \u203a BGP Peers.</div>'));
+  // ---- autosave ----
+  // No Save button: like every other form in the app, edits persist — and apply
+  // to FRR — automatically. Text fields debounce so we don't POST on every
+  // keystroke; toggles and neighbor/network add-or-remove save at once. An
+  // intermediate invalid state (BGP enabled with no AS, or hold <= keepalive) is
+  // held back with an inline hint instead of POSTed, and the next valid edit
+  // saves it — so autosave never pushes a config FRR would reject.
+  const status = $('<div class="hint" style="margin-top:16px;border-top:1px solid var(--line);padding-top:12px">Changes save and apply automatically.</div>');
+  card.appendChild(status);
+  card.appendChild($('<div class="hint" style="margin-top:6px">Live peer status is under Monitor \u203a BGP Peers.</div>'));
 
-  saveBtn.onclick = async () => {
+  let saveTimer = null, saveSeq = 0;
+  function scheduleSave(immediate){
+    if (saveTimer){ clearTimeout(saveTimer); saveTimer = null; }
+    if (immediate){ doSave(); return; }
+    saveTimer = setTimeout(doSave, 700);
+  }
+  async function doSave(){
+    saveTimer = null;
     const asn = parseInt(asnInp.value, 10) || 0;
-    if (enableCb.checked && asn <= 0){ alert('A local AS number is required to enable BGP.'); asnInp.focus(); return; }
     const ka = parseInt(kaInp.value, 10) || 0;
     const hold = parseInt(holdInp.value, 10) || 0;
-    if (enableCb.checked && hold > 0 && hold <= ka){ alert('Hold timer must be greater than the keepalive timer (3\u00d7 is conventional, e.g. 4 and 12).'); holdInp.focus(); return; }
+    // Hold back invalid intermediate states rather than POSTing a guaranteed error.
+    if (enableCb.checked && asn <= 0){
+      status.style.color = ''; status.textContent = 'Enter a local AS number to enable BGP.'; return;
+    }
+    if (enableCb.checked && hold > 0 && hold <= ka){
+      status.style.color = ''; status.textContent = 'Hold timer must be greater than the keepalive timer (e.g. 4 and 12).'; return;
+    }
     const payload = {
       enabled: enableCb.checked,
       asn: asn,
@@ -5923,18 +5949,24 @@ function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
         .map(n => ({ peer:n.peer, remote_as:n.remote_as, description:n.description||'', password:n.password||'', bfd:!!n.bfd })),
       networks: networks.map(s => (s||'').trim()).filter(s => s.length),
     };
-    saveBtn.disabled = true; status.textContent = 'saving\u2026';
+    const seq = ++saveSeq;
+    status.style.color = ''; status.textContent = 'saving\u2026';
     const r = await api('/api/bgp/config', { method:'POST', body: JSON.stringify(payload) });
-    saveBtn.disabled = false;
-    if (!r.ok){ status.textContent=''; alert((r.body && r.body.error) || 'Save failed.'); return; }
+    if (seq !== saveSeq) return; // a newer edit already superseded this save
+    if (!r.ok){ status.style.color = 'var(--danger)'; status.textContent = (r.body && r.body.error) || 'Save failed.'; return; }
     status.style.color = 'var(--ok)';
     // Saving applies the config the same as every other form here — there is no
     // separate "apply" step. The server note just describes what reaching FRR
     // did (reloading in the background, or that FRR is absent so nothing to push).
     status.textContent = 'Saved' + (r.body.note ? (' \u2014 ' + r.body.note) : '.');
-  };
+  }
 
-  host.innerHTML = ''; host.appendChild(card);
+  // Toggles and structural changes apply at once; the four text fields debounce.
+  enableCb.onchange = () => scheduleSave(true);
+  bfdCb.onchange = () => scheduleSave(true);
+  rcCb.onchange = () => scheduleSave(true);
+  rsCb.onchange = () => scheduleSave(true);
+  [asnInp, ridInp, kaInp, holdInp].forEach(inp => { inp.oninput = () => scheduleSave(false); });
 }
 
 // infoHosts shows the local hosts file contents, read live from disk.

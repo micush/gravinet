@@ -528,25 +528,44 @@ var frrConfigPaths = []string{frrConf, "/etc/frr/bgpd.conf"}
 //
 // Read-only: importing never writes anything. gravinet takes ownership only
 // when the operator explicitly saves (adopts) the config.
-func importBGPFromFRR() (cfg config.BGPConfig, hasPasswords bool, ok bool) {
+//
+// reason is a short human diagnostic — which source the config came from, or,
+// when ok is false, why every source came up empty (file missing, unreadable,
+// no stanza; vtysh absent or not answering). It's logged and surfaced to the UI
+// so an empty editor isn't indistinguishable from a broken import, which is what
+// made this hard to diagnose across earlier attempts. log may be nil.
+func importBGPFromFRR(log *logx.Logger) (cfg config.BGPConfig, hasPasswords bool, ok bool, reason string) {
+	var tried []string // per-source notes, joined into reason only if nothing works
 	// 1) The config file — authoritative and daemon-independent.
 	for _, path := range frrConfigPaths {
 		raw, err := os.ReadFile(path)
 		if err != nil {
+			// A missing file is unremarkable; a present-but-unreadable one
+			// (permissions — the classic "daemon can't read /etc/frr") is the
+			// kind of thing the operator needs told, so record that case.
+			if !os.IsNotExist(err) {
+				tried = append(tried, fmt.Sprintf("%s: %v", path, err))
+			}
 			continue
 		}
 		if fc, pw, fok := parseRunningConfigBGP(string(raw)); fok {
-			cfg, hasPasswords, ok = fc, pw, true
+			cfg, hasPasswords, ok, reason = fc, pw, true, "read from "+path
 			break
 		}
+		tried = append(tried, path+": no 'router bgp' stanza")
 	}
 	// 2) Fallback: the live running-config via vtysh (config held only in the
-	//    daemon, or a config path we don't know about).
+	//    daemon — e.g. configured live and never `write memory`'d — or a config
+	//    path we don't know about).
 	if !ok {
 		if rc, ran := runVtysh("show running-config"); ran {
 			if rcCfg, pw, rok := parseRunningConfigBGP(string(rc)); rok {
-				cfg, hasPasswords, ok = rcCfg, pw, true
+				cfg, hasPasswords, ok, reason = rcCfg, pw, true, "read from vtysh running-config"
+			} else {
+				tried = append(tried, "vtysh running-config: no 'router bgp' stanza")
 			}
+		} else {
+			tried = append(tried, "vtysh: not installed or not answering (is bgpd running?)")
 		}
 	}
 	// 3) Enrich from the live summary: fill router-id / local AS when the config
@@ -556,7 +575,7 @@ func importBGPFromFRR() (cfg config.BGPConfig, hasPasswords bool, ok bool) {
 	if sum, ran := runVtysh("show ip bgp summary json"); ran {
 		if scfg, _, sok := summaryToBGPConfig(sum); sok {
 			if !ok {
-				cfg, ok = scfg, true
+				cfg, ok, reason = scfg, true, "read from live BGP summary"
 			} else {
 				if cfg.RouterID == "" {
 					cfg.RouterID = scfg.RouterID
@@ -567,7 +586,21 @@ func importBGPFromFRR() (cfg config.BGPConfig, hasPasswords bool, ok bool) {
 			}
 		}
 	}
-	return cfg, hasPasswords, ok
+	if !ok {
+		if len(tried) > 0 {
+			reason = "no existing BGP config found — " + strings.Join(tried, "; ")
+		} else {
+			reason = "no existing BGP config found on this host"
+		}
+	}
+	if log != nil {
+		if ok {
+			log.Infof("bgp import: %s (asn=%d, %d neighbor(s))", reason, cfg.ASN, len(cfg.Neighbors))
+		} else {
+			log.Infof("bgp import: nothing imported — %s", reason)
+		}
+	}
+	return cfg, hasPasswords, ok, reason
 }
 
 // summaryToBGPConfig builds a config.BGPConfig from `show ip bgp summary json`
@@ -606,6 +639,12 @@ func summaryToBGPConfig(sum []byte) (cfg config.BGPConfig, at map[string]int, ok
 // is set if any neighbor carried a `password` line, though the secret itself is
 // not captured.
 func parseRunningConfigBGP(text string) (cfg config.BGPConfig, hasPasswords bool, ok bool) {
+	// Normalize line endings first: a config that ever passed through a CRLF
+	// editor would otherwise leave a trailing \r on the ASN token (`65001\r`),
+	// which fails to parse and silently yields "no stanza" — an import that
+	// looks broken for a reason that's invisible in the UI.
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
 	lines := strings.Split(text, "\n")
 	inStanza := false
 	// Preserve neighbor first-seen order while allowing lookup by peer.

@@ -167,9 +167,15 @@ func (s *Server) handleBGPConfig(w http.ResponseWriter, r *http.Request) {
 // FRR can only make this return "nothing to import," never hang. Read-only:
 // importing never writes anything; the operator adopts by saving.
 func (s *Server) handleBGPImport(w http.ResponseWriter, r *http.Request) {
-	bgp, hasPw, ok := importBGPFromFRR()
+	bgp, hasPw, ok, reason := importBGPFromFRR(s.log)
 	if !ok {
-		writeJSON(w, http.StatusOK, map[string]any{"imported": false})
+		// Report why nothing came back (and whether FRR is even here), so the UI
+		// can explain an empty editor instead of leaving it a silent mystery.
+		writeJSON(w, http.StatusOK, map[string]any{
+			"imported":  false,
+			"reason":    reason,
+			"installed": frrInstalled(),
+		})
 		return
 	}
 	if bgp.Neighbors == nil {
@@ -181,6 +187,7 @@ func (s *Server) handleBGPImport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"imported":               true,
 		"imported_has_passwords": hasPw,
+		"reason":                 reason,
 		"bgp":                    bgp,
 	})
 }
