@@ -415,6 +415,19 @@ async function api(path, opts={}, target) {
   const body = await r.json().catch(()=>({}));
   return { ok:r.ok, status:r.status, body };
 }
+// withTimeout races a promise against a timer so a caller can never be stuck
+// waiting forever on it — a plain fetch()/api() call has no timeout of its
+// own, and a wedged server-side handler (or a request that never reaches the
+// server at all — a dropped connection, a proxy hop to an unreachable peer)
+// would otherwise hang the UI on "loading…"/"checking…" with no way to tell
+// a slow-but-working request from a genuinely stuck one. Rejects with a
+// clear "timed out after Ns" Error when the timer wins, so callers can show
+// that instead of spinning indefinitely.
+function withTimeout(p, ms){
+  return Promise.race([
+    p, new Promise((_, rej) => setTimeout(() => rej(new Error('timed out after ' + (ms/1000) + 's')), ms)),
+  ]);
+}
 function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 // nodeCell renders a node as "hostname UID" with the id in blue (the same
 // net-id styling used for network ids), falling back to just the id when the
@@ -5733,12 +5746,6 @@ function secBgp(c){
   secHint(c, 'BGP configuration for dynamic routing.');
   const editWrap = $('<div></div>'); c.appendChild(editWrap);
 
-  // A bounded request: the config GET reads local disk and never touches FRR, so
-  // it should be near-instant — if it hasn't answered in 12s something is wrong
-  // and we must say so rather than spin on "loading…" forever.
-  const withTimeout = (p, ms) => Promise.race([
-    p, new Promise((_, rej) => setTimeout(() => rej(new Error('timed out after ' + (ms/1000) + 's')), ms)),
-  ]);
   const fail = (msg) => {
     editWrap.innerHTML = '';
     const card = $('<div class="card"></div>');
@@ -5753,6 +5760,10 @@ function secBgp(c){
     editWrap.innerHTML = '<div class="card"><div class="hint">loading configuration\u2026</div></div>';
     let r;
     try {
+      // A bounded request: the config GET reads local disk and never touches
+      // FRR, so it should be near-instant — if it hasn't answered in 12s
+      // something is wrong and we must say so rather than spin on
+      // "loading…" forever.
       r = await withTimeout(api('/api/bgp/config'), 12000);
     } catch (e){
       // Request rejected or timed out — surface the reason instead of hanging.
@@ -5883,7 +5894,15 @@ function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
       checkMsg.style.color = ''; checkMsg.textContent = 'checking\u2026';
       let im;
       try {
-        im = await api('/api/bgp/import');
+        // Unlike the config GET above, this genuinely touches FRR — up to two
+        // sequential vtysh calls, each internally bounded to ~10s (see
+        // runVtysh's own hard timeout) — so 25s comfortably covers the
+        // legitimate slow-but-working case with margin. Bounding it here too
+        // is what actually fixes "stuck on Checking… forever": without this,
+        // a request that never resolves (dropped connection, a proxied hop to
+        // an unreachable peer, or a server-side path that isn't as bounded in
+        // practice as intended) had nothing client-side to time it out either.
+        im = await withTimeout(api('/api/bgp/import'), 25000);
       } catch (e){
         checkMsg.style.color = 'var(--danger)';
         checkMsg.textContent = 'Request failed \u2014 ' + ((e && e.message) || e);

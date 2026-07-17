@@ -16,6 +16,7 @@ package webadmin
 
 import (
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"os"
@@ -24,6 +25,7 @@ import (
 	"time"
 
 	"gravinet/internal/config"
+	"gravinet/internal/logx"
 )
 
 // bgpVtyshPaths are the locations vtysh is installed to, in priority order.
@@ -157,6 +159,52 @@ func (s *Server) handleBGPConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "applied": frrInstalled(), "note": note})
 }
 
+// bgpImportTimeout bounds handleBGPImport's total work end to end. Each
+// individual runVtysh call inside importBGPFromFRR already bounds itself
+// (bgpQueryTimeout + 2s), and the worst case is two sequential calls (the
+// running-config fallback, then the summary enrichment) plus a fast local
+// file read — call it ~20s. This wraps the whole thing with margin on top of
+// that, as a second, independent backstop: even if some future change adds a
+// third call, or vtysh behaves in a way an individual call's own timeout
+// doesn't fully contain, the HTTP response is still guaranteed within this
+// bound rather than trusting every path inside importBGPFromFRR to compose
+// correctly. Mirrors the same "abandon a wedged call rather than block the
+// caller" shape runVtysh uses for the same reason. A var (not const) so a
+// test can shrink it rather than actually waiting out a real deadline.
+var bgpImportTimeout = 25 * time.Second
+
+// boundedBGPImport races fn (importBGPFromFRR in production) against timeout,
+// returning whichever finishes first. Pulled out of handleBGPImport as its
+// own function so the timeout/abandon mechanism can be exercised directly in
+// a test with a deliberately slow fn, without needing a real, wedged FRR
+// install to prove it actually bounds the wait.
+func boundedBGPImport(timeout time.Duration, log *logx.Logger, fn func(*logx.Logger) (config.BGPConfig, bool, bool, string)) (bgp config.BGPConfig, hasPw, ok bool, reason string) {
+	type result struct {
+		bgp    config.BGPConfig
+		hasPw  bool
+		ok     bool
+		reason string
+	}
+	ch := make(chan result, 1) // buffered so the goroutine never blocks on send
+	go func() {
+		b, pw, k, rsn := fn(log)
+		ch <- result{b, pw, k, rsn}
+	}()
+	select {
+	case res := <-ch:
+		return res.bgp, res.hasPw, res.ok, res.reason
+	case <-time.After(timeout):
+		// Whatever's inside is taking longer than every individual step should
+		// allow for — abandon it (the goroutine is left to finish or leak, same
+		// tradeoff runVtysh itself makes) rather than hold the HTTP response
+		// open indefinitely.
+		if log != nil {
+			log.Infof("bgp import: timed out after %s waiting for FRR", timeout)
+		}
+		return config.BGPConfig{}, false, false, fmt.Sprintf("timed out after %s waiting for FRR", timeout)
+	}
+}
+
 // handleBGPImport reads the BGP configuration FRR is currently running and
 // returns it, so the editor can reflect a setup configured outside gravinet
 // (the fix for "the page shows zero config but there are live peers"). This is
@@ -167,7 +215,7 @@ func (s *Server) handleBGPConfig(w http.ResponseWriter, r *http.Request) {
 // FRR can only make this return "nothing to import," never hang. Read-only:
 // importing never writes anything; the operator adopts by saving.
 func (s *Server) handleBGPImport(w http.ResponseWriter, r *http.Request) {
-	bgp, hasPw, ok, reason := importBGPFromFRR(s.log)
+	bgp, hasPw, ok, reason := boundedBGPImport(bgpImportTimeout, s.log, importBGPFromFRR)
 	if !ok {
 		// Report why nothing came back (and whether FRR is even here), so the UI
 		// can explain an empty editor instead of leaving it a silent mystery.

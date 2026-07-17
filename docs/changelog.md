@@ -37,6 +37,39 @@ assuming it didn't happen.
 
 ---
 
+## v489 — 2026-07-17
+
+**Fix: the v488 "Check FRR's live configuration" button could hang on
+"Checking…" forever.**
+
+Reported symptom: clicking the new button never resolved — no error, no
+result, just a permanent "Checking…". Root cause was two missing bounds:
+
+- **Client side:** the button's request used the plain `api()` helper
+  directly, which wraps a bare `fetch()` with no timeout at all. Every other
+  call in this handler either goes through a bounded helper or hits a
+  same-host endpoint that answers fast; this one was the one place calling
+  out to `/api/bgp/import` — which genuinely can take several seconds since it
+  touches FRR — without any client-side bound. `withTimeout()` (previously a
+  helper local to the config-load function) is now a shared top-level
+  function, and the button's request is wrapped in it at 25s. A stuck request
+  now surfaces "Request failed — timed out after 25s" instead of sitting on
+  "Checking…" with no way to tell a slow-but-working call from a truly wedged
+  one.
+
+- **Server side:** `handleBGPImport` relied entirely on `runVtysh`'s own
+  internal timeout to keep each of its (up to two, sequential) vtysh calls
+  bounded — there was no bound on the handler's *total* work. The
+  goroutine/select "abandon a wedged call" pattern `runVtysh` already uses for
+  a single call is now pulled out into `boundedBGPImport` and applied around
+  the whole import, independent of whatever's happening inside it. New tests
+  (`TestBoundedBGPImportTimesOut`, `TestBoundedBGPImportReturnsPromptly`)
+  cover both the timeout path and the plain fast path.
+
+Together these guarantee the request the button makes returns within 25s no
+matter what — either with real data, a concrete "nothing found" reason, or a
+"timed out" message — never an indefinite hang.
+
 ## v488 — 2026-07-17
 
 **BGP editor: add a manual "Check FRR's live configuration" button.**
