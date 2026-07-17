@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"gravinet/internal/config"
@@ -32,6 +33,11 @@ const (
 	frrConf    = "/etc/frr/frr.conf"
 	frrDaemons = "/etc/frr/daemons"
 )
+
+// vtyshMu serializes all vtysh invocations (see runVtysh). Concurrent vtysh
+// calls against the same FRR daemon can fail with a transient I/O error; a
+// single package-wide lock keeps every reader/importer strictly sequential.
+var vtyshMu sync.Mutex
 
 // frrManagedDaemons is the set of FRR daemons this module owns the on/off state
 // of in /etc/frr/daemons. Any daemon here that a config doesn't need is forced
@@ -109,6 +115,11 @@ func renderFRR(b config.BGPConfig) string {
 	if safeToken(b.RouterID) {
 		fmt.Fprintf(&out, " bgp router-id %s\n", b.RouterID)
 	}
+	// Session timers: always emitted from the effective (default-resolved)
+	// values, so a fresh config gets gravinet's 4s/12s fast-failover baseline
+	// even when the operator never touched the fields. Validate has already
+	// guaranteed the pair is one FRR will accept (hold >= 3, keepalive <= hold).
+	fmt.Fprintf(&out, " timers bgp %d %d\n", b.EffectiveKeepAlive(), b.EffectiveHoldTime())
 	for _, n := range b.Neighbors {
 		if !safeToken(n.Peer) || n.RemoteAS == 0 {
 			continue
@@ -374,6 +385,18 @@ func runVtysh(cmd string) (out []byte, ok bool) {
 	if !present {
 		return nil, false
 	}
+	// Serialize vtysh across the process. FRR's vty can return an I/O error
+	// ("closing connection to bgpd because of an I/O error") when a second
+	// vtysh hits a daemon that's already servicing one — which is exactly what
+	// the BGP page used to do, firing the live-peers query (/api/bgp) and the
+	// editor import (/api/bgp/import, itself two vtysh calls) at the same moment
+	// on load. When the import's call lost that race it returned nothing, so the
+	// live table populated while the editor stayed empty. Running vtysh one at a
+	// time removes the race entirely. The lock is still bounded by the same hard
+	// wall-clock below, so a genuinely wedged vtysh can delay the next caller by
+	// at most that window, never indefinitely.
+	vtyshMu.Lock()
+	defer vtyshMu.Unlock()
 	type result struct {
 		out []byte
 		err error
@@ -438,6 +461,14 @@ func importBGPFromFRR() (cfg config.BGPConfig, hasPasswords bool, ok bool) {
 			cfg.Networks = rcCfg.Networks
 			cfg.RedistributeConnected = rcCfg.RedistributeConnected
 			cfg.RedistributeStatic = rcCfg.RedistributeStatic
+			// Reflect the running timers when they were explicitly set; leaving
+			// them 0 lets the editor show gravinet's defaults instead.
+			if rcCfg.KeepAlive > 0 {
+				cfg.KeepAlive = rcCfg.KeepAlive
+			}
+			if rcCfg.HoldTime > 0 {
+				cfg.HoldTime = rcCfg.HoldTime
+			}
 			hasPasswords = rcHasPw
 			if cfg.RouterID == "" {
 				cfg.RouterID = rcCfg.RouterID
@@ -540,6 +571,18 @@ func parseRunningConfigBGP(text string) (cfg config.BGPConfig, hasPasswords bool
 		switch {
 		case strings.HasPrefix(line, "bgp router-id "):
 			cfg.RouterID = strings.TrimSpace(strings.TrimPrefix(line, "bgp router-id "))
+		case strings.HasPrefix(line, "timers bgp "):
+			// `timers bgp <keepalive> <holdtime>` — capture both so an existing
+			// FRR config's timers survive the round-trip into the editor.
+			tf := strings.Fields(strings.TrimPrefix(line, "timers bgp "))
+			if len(tf) >= 2 {
+				if ka, err := strconv.Atoi(tf[0]); err == nil && ka >= 0 {
+					cfg.KeepAlive = ka
+				}
+				if hold, err := strconv.Atoi(tf[1]); err == nil && hold >= 0 {
+					cfg.HoldTime = hold
+				}
+			}
 		case strings.HasPrefix(line, "neighbor "):
 			rest := strings.TrimSpace(strings.TrimPrefix(line, "neighbor "))
 			f := strings.Fields(rest)

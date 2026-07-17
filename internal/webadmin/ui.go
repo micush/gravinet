@@ -594,6 +594,9 @@ const NAV_GROUPS = [
   { name:'monitor', items: [
     ['metrics', 'live CPU, memory, disk, and per-overlay-interface throughput'],
     ['mesh-peers', 'live connection health, transport, and session detail for every peer'],
+    // Live BGP session state read from FRR. Like Traffic \u203a BGP, shown only
+    // when this host has vtysh; sectionVisible() filters it everywhere.
+    ['bgp-peers', 'live BGP session state (peers, remote AS, uptime, prefixes) as reported by FRR (shown only when vtysh is present on this host)'],
     ['capture', 'live packet capture on an overlay interface'],
     ['speedtest', 'measure throughput between this node and a managed peer'],
     ['latency', 'round-trip time from this host to every other mesh peer'],
@@ -618,6 +621,7 @@ function label(s){
   if (s==='hosts-file') return 'Hosts File';
   if (s==='dns-state') return 'DNS State';
   if (s==='mesh-peers') return 'Mesh Peers';
+  if (s==='bgp-peers') return 'BGP Peers';
   if (s==='routes') return 'Mesh Routes';
   if (s==='getting-started') return 'Getting Started';
   return s==='nat'||s==='qos'||s==='dns'||s==='bgp' ? s.toUpperCase() : s.charAt(0).toUpperCase()+s.slice(1);
@@ -631,7 +635,9 @@ function label(s){
 // by clicking or by searching, and renderSection guards the dispatch as a
 // belt-and-suspenders backstop.
 function sectionVisible(sec){
-  if (sec === 'bgp') return !!state.bgpSupported;
+  // Both the Traffic \u203a BGP editor and the Monitor \u203a BGP Peers live view
+  // depend on FRR/vtysh being present on the managed host.
+  if (sec === 'bgp' || sec === 'bgp-peers') return !!state.bgpSupported;
   return true;
 }
 
@@ -2060,7 +2066,7 @@ function renderSection() {
     ({ networks:secNetworks, keys:secKeys, peers:secPeers, bans:secBans, routes:secRoutes,
        firewall:secFirewall, nat:secNAT, qos:secQoS, bandwidth:secBandwidth, bgp:secBgp, seeds:secSeeds, hosts:secHosts, dns:secDNS,
        upgrade:secUpgrade,
-       metrics:infoMetrics, 'mesh-peers':infoMeshPeers, capture:infoCapture, speedtest:infoSpeedtest, latency:infoLatency,
+       metrics:infoMetrics, 'mesh-peers':infoMeshPeers, 'bgp-peers':infoBgpPeers, capture:infoCapture, speedtest:infoSpeedtest, latency:infoLatency,
        'route-table':infoRoutes, 'hosts-file':infoHosts, 'dns-state':infoDNS,
        logs:secLogs, readme:secReadme, 'getting-started':secGettingStarted, license:secLicense, about:infoAbout }[state.section])(c, nets);
   }
@@ -5726,14 +5732,23 @@ function secBgp(c){
       }
     }
   })();
-  // Live status, read from FRR — same reader as the read-only view.
-  const liveCard = $('<div class="card"></div>');
-  liveCard.appendChild($('<h3>Live peers</h3>'));
-  liveCard.appendChild($('<div class="hint" style="margin:-4px 0 10px">What FRR reports right now for the sessions configured above. A newly-added neighbor takes a moment to appear as FRR brings the session up.</div>'));
-  const liveMeta = $('<div class="hint" style="margin:-4px 0 10px" id="bgp-live-meta"></div>'); liveCard.appendChild(liveMeta);
-  const liveBody = $('<div id="bgp-live-body"></div>'); liveBody.innerHTML = '<div class="hint">loading\u2026</div>'; liveCard.appendChild(liveBody);
-  c.appendChild(liveCard);
-  bgpLiveStatus(liveMeta, liveBody);
+}
+
+// infoBgpPeers is Monitor \u2192 BGP Peers: the live, read-only view of the BGP
+// sessions FRR is running right now (local AS, router id, and per-peer state),
+// the routing-protocol analogue of Monitor \u2192 Mesh Peers. It lives under
+// Monitor, not alongside the Traffic \u203a BGP editor, so configuration and live
+// state are cleanly separated \u2014 and so the editor page no longer fires a vtysh
+// query (this one) concurrently with its own FRR import. Gated on
+// state.bgpSupported exactly like the editor.
+function infoBgpPeers(c){
+  secHint(c, 'What FRR reports right now for this node\u2019s BGP sessions. Configure them under Traffic \u203a BGP; a newly-added neighbor takes a moment to appear here as FRR brings the session up.');
+  const card = $('<div class="card"></div>');
+  card.appendChild($('<h3>Live peers</h3>'));
+  const meta = $('<div class="hint" style="margin:-4px 0 10px" id="bgp-live-meta"></div>'); card.appendChild(meta);
+  const body = $('<div id="bgp-live-body"></div>'); body.innerHTML = '<div class="hint">loading\u2026</div>'; card.appendChild(body);
+  c.appendChild(card);
+  bgpLiveStatus(meta, body);
 }
 
 // bgpLiveStatus fills a meta line and body with FRR's live BGP peer table
@@ -5812,6 +5827,11 @@ function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
   const enableCb = rowTog('Enable BGP', 'Render and run a <code>router bgp</code> speaker on this host. Off leaves no BGP block in FRR\u2019s config and switches bgpd off.', !!b.enabled);
   const asnInp = rowInput('Local AS number', 'This node\u2019s autonomous-system number, e.g. 65001. Required to enable BGP.', b.asn||'', 'e.g. 65001', 160);
   const ridInp = rowInput('Router-id', 'BGP router-id (an IPv4-style id), e.g. 10.0.0.1. Optional \u2014 FRR picks one if left blank.', b.router_id||'', 'e.g. 10.0.0.1', 180);
+  // Session timers. Blank/0 falls back to gravinet\u2019s default (4s/12s) \u2014 a
+  // fast-failover baseline, much tighter than FRR\u2019s traditional 60/180 \u2014 so
+  // we pre-fill the defaults rather than leaving the fields empty.
+  const kaInp = rowInput('Keepalive timer', 'How often (seconds) this node sends a BGP keepalive to each neighbor. Lower detects a dead peer faster. Default 4s.', b.keepalive||4, 'e.g. 4', 100);
+  const holdInp = rowInput('Hold time', 'How long (seconds) a neighbor may go silent before the session is torn down; conventionally three times the keepalive, and it must be at least 3s and no less than the keepalive. Default 12s.', b.hold_time||12, 'e.g. 12', 100);
   // BFD defaults on for a brand-new configuration ("always enable BFD by
   // default"): sub-second neighbor-failure detection is the better baseline. An
   // existing config — one gravinet already stored, or one imported live from
@@ -5885,10 +5905,21 @@ function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
   saveBtn.onclick = async () => {
     const asn = parseInt(asnInp.value, 10) || 0;
     if (enableCb.checked && asn <= 0){ alert('A local AS number is required to enable BGP.'); asnInp.focus(); return; }
+    const keepalive = parseInt(kaInp.value, 10) || 0;
+    const holdTime = parseInt(holdInp.value, 10) || 0;
+    // Mirror the server-side rule so the operator gets an immediate, specific
+    // message instead of a round-trip rejection. 0 means "use the default", so
+    // resolve to the effective pair (4/12) before checking the relationship.
+    const effKa = keepalive > 0 ? keepalive : 4, effHold = holdTime > 0 ? holdTime : 12;
+    if (keepalive < 0 || keepalive > 65535 || holdTime < 0 || holdTime > 65535){ alert('BGP timers must be between 0 and 65535 seconds.'); return; }
+    if (effHold < 3){ alert('BGP hold time must be at least 3 seconds.'); holdInp.focus(); return; }
+    if (effKa > effHold){ alert('BGP keepalive ('+effKa+'s) must not exceed the hold time ('+effHold+'s).'); kaInp.focus(); return; }
     const payload = {
       enabled: enableCb.checked,
       asn: asn,
       router_id: ridInp.value.trim(),
+      keepalive: keepalive,
+      hold_time: holdTime,
       bfd: bfdCb.checked,
       redistribute_connected: rcCb.checked,
       redistribute_static: rsCb.checked,
@@ -5902,9 +5933,10 @@ function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
     saveBtn.disabled = false;
     if (!r.ok){ status.textContent=''; alert((r.body && r.body.error) || 'Save failed.'); return; }
     status.style.color = 'var(--ok)';
-    status.textContent = r.body.applied ? ('Saved \u2014 ' + (r.body.note || 'applied to FRR.')) : ('Saved \u2014 ' + (r.body.note || 'not applied (FRR absent).'));
-    // Refresh live status shortly after, once FRR has had a moment to converge.
-    setTimeout(() => { const m=document.getElementById('bgp-live-meta'), bd=document.getElementById('bgp-live-body'); if (m&&bd) bgpLiveStatus(m, bd); }, 1500);
+    const base = r.body.applied ? ('Saved \u2014 ' + (r.body.note || 'applied to FRR.')) : ('Saved \u2014 ' + (r.body.note || 'not applied (FRR absent).'));
+    // The live session table lives under Monitor \u203a BGP Peers now; point there
+    // rather than refreshing an inline panel this page no longer renders.
+    status.textContent = r.body.applied ? (base + ' See Monitor \u203a BGP Peers for live sessions.') : base;
   };
 
   host.innerHTML = ''; host.appendChild(card);

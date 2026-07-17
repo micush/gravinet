@@ -153,6 +153,43 @@ func TestFRRNetworksAndRedistribute(t *testing.T) {
 	frrHas(t, c, " exit-address-family\n")
 }
 
+// Session timers: an enabled speaker always renders a `timers bgp` line, using
+// gravinet's 4/12 default when the fields are unset and the explicit pair when
+// they're set. A disabled speaker emits no BGP block at all (hence no timers).
+func TestFRRRendersTimers(t *testing.T) {
+	// Default (unset) → 4/12.
+	def := renderFRR(config.BGPConfig{Enabled: true, ASN: 65001})
+	frrHas(t, def, " timers bgp 4 12\n")
+	// Explicit values are used verbatim.
+	set := renderFRR(config.BGPConfig{Enabled: true, ASN: 65001, KeepAlive: 10, HoldTime: 30})
+	frrHas(t, set, " timers bgp 10 30\n")
+	frrLacks(t, set, " timers bgp 4 12\n")
+	// Only one field set → the other falls back to its default (60 keepalive,
+	// default 12 hold would be invalid, but rendering itself doesn't validate;
+	// use a valid partial here: hold set, keepalive defaulted to 4).
+	partial := renderFRR(config.BGPConfig{Enabled: true, ASN: 65001, HoldTime: 90})
+	frrHas(t, partial, " timers bgp 4 90\n")
+	// Disabled → no block, no timers.
+	frrLacks(t, renderFRR(config.BGPConfig{Enabled: false, ASN: 65001}), "timers bgp")
+}
+
+// A `timers bgp` line in an existing FRR running-config is imported so the
+// editor reflects the live timers instead of blanking them.
+func TestParseRunningConfigBGPTimers(t *testing.T) {
+	rc := "router bgp 65001\n" +
+		" bgp router-id 10.0.0.1\n" +
+		" timers bgp 5 15\n" +
+		" neighbor 10.0.0.2 remote-as 65002\n" +
+		"exit\n"
+	cfg, _, ok := parseRunningConfigBGP(rc)
+	if !ok {
+		t.Fatal("expected a BGP stanza")
+	}
+	if cfg.KeepAlive != 5 || cfg.HoldTime != 15 {
+		t.Errorf("timers not imported: keepalive=%d hold=%d", cfg.KeepAlive, cfg.HoldTime)
+	}
+}
+
 // syncDaemonsContent flips the managed daemons to match the wanted set and
 // leaves unmanaged lines untouched. Ported from parapet's sync_daemons logic.
 func TestSyncDaemonsContent(t *testing.T) {

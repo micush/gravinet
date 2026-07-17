@@ -21,10 +21,39 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"gravinet/internal/config"
 )
+
+// flexUint64 unmarshals a JSON value that is a number *or* a quoted numeric
+// string into a uint64, and never fails its containing struct on a malformed
+// value (it yields 0 instead). FRR's summary JSON is mostly numeric, but some
+// builds emit 4-byte ASNs — and the odd counter — as quoted strings. Without
+// this, a single quoted `as` or `remoteAs` makes the whole object unmarshal
+// fail, which blanks the local AS, router id, and peer list together: the
+// "live peers established but the editor imports nothing" class of failure for
+// exactly the large ASNs where the quoting shows up. Tolerating both forms (and
+// degrading a junk value to 0 rather than erroring) keeps one bad field from
+// taking down the rest of the parse.
+type flexUint64 uint64
+
+func (f *flexUint64) UnmarshalJSON(b []byte) error {
+	s := strings.Trim(string(b), `"`)
+	if s == "" || s == "null" {
+		*f = 0
+		return nil
+	}
+	n, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		*f = 0
+		return nil
+	}
+	*f = flexUint64(n)
+	return nil
+}
 
 // bgpVtyshPaths are the locations vtysh is installed to, in priority order.
 // Ported verbatim from parapet's FRR integration (frr.rs / status.rs), which
@@ -214,7 +243,7 @@ func parseBGPSummary(raw []byte) (peers []bgpPeer, routerID string, localAS uint
 		}
 		var afiObj struct {
 			RouterID string                     `json:"routerId"`
-			AS       uint64                     `json:"as"`
+			AS       flexUint64                 `json:"as"`
 			Peers    map[string]json.RawMessage `json:"peers"`
 		}
 		if err := json.Unmarshal(blob, &afiObj); err != nil {
@@ -224,7 +253,7 @@ func parseBGPSummary(raw []byte) (peers []bgpPeer, routerID string, localAS uint
 			routerID = afiObj.RouterID
 		}
 		if localAS == 0 {
-			localAS = afiObj.AS
+			localAS = uint64(afiObj.AS)
 		}
 		for ip, pinfo := range afiObj.Peers {
 			peers = append(peers, bgpPeerRow(ip, afi, pinfo))
@@ -247,11 +276,11 @@ func parseBGPSummary(raw []byte) (peers []bgpPeer, routerID string, localAS uint
 // positive peerUptimeMsec, the same fallback parapet uses.
 func bgpPeerRow(ip, afi string, raw json.RawMessage) bgpPeer {
 	var info struct {
-		RemoteAS       uint64 `json:"remoteAs"`
-		State          string `json:"state"`
-		PeerUptime     string `json:"peerUptime"`
-		PeerUptimeMsec uint64 `json:"peerUptimeMsec"`
-		PfxRcd         uint64 `json:"pfxRcd"`
+		RemoteAS       flexUint64 `json:"remoteAs"`
+		State          string     `json:"state"`
+		PeerUptime     string     `json:"peerUptime"`
+		PeerUptimeMsec flexUint64 `json:"peerUptimeMsec"`
+		PfxRcd         flexUint64 `json:"pfxRcd"`
 	}
 	_ = json.Unmarshal(raw, &info)
 	state := info.State
@@ -262,10 +291,10 @@ func bgpPeerRow(ip, afi string, raw json.RawMessage) bgpPeer {
 	}
 	return bgpPeer{
 		Peer:     ip,
-		RemoteAS: info.RemoteAS,
+		RemoteAS: uint64(info.RemoteAS),
 		State:    state,
 		Uptime:   info.PeerUptime,
-		Prefixes: info.PfxRcd,
+		Prefixes: uint64(info.PfxRcd),
 		AFI:      afi,
 	}
 }
