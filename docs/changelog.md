@@ -37,6 +37,29 @@ assuming it didn't happen.
 
 ---
 
+## v480 — 2026-07-16
+
+**Fix: importing an existing FRR BGP config now actually populates the editor.**
+On a host already running BGP, the config editor stayed empty even though the
+Live Peers table showed the session (local AS, router id, and an established
+neighbor). Two problems: the import parsed `show running-config`, which can fail
+or be restricted on some hosts (producing exactly the "peers live, editor empty"
+mismatch), and the import was gated on `/etc/frr` existing rather than on FRR
+being reachable.
+
+The import now builds primarily from `show ip bgp summary json` — the very query
+the Live Peers panel uses, so wherever peers appear, the editor now reflects
+them: local AS, router id, and the neighbor list (peer + remote AS), including
+32-bit ASNs (which are preserved, not truncated) and dual-stack peers (deduped
+to one entry). `show running-config` is still consulted, but only as best-effort
+enrichment for what the summary doesn't carry (advertised networks,
+redistribute, per-neighbor description/BFD); if it's unavailable the core config
+still imports. The background import is also now gated on vtysh being present
+(the same thing that makes the peers panel work) rather than on the `/etc/frr`
+directory, so it's no longer skipped on hosts where FRR runs but that directory
+isn't where we looked. New tests cover the summary-to-config mapping with the
+reported 32-bit-ASN data, dual-stack dedup, and the no-BGP case.
+
 ## v479 — 2026-07-16
 
 **BGP page: simplified intro and BFD on by default for new configs.** The

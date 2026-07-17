@@ -317,6 +317,70 @@ func TestRunVtyshAbsent(t *testing.T) {
 	}
 }
 
+// The reported mismatch: FRR has a live BGP session (32-bit ASNs) but the
+// editor showed empty. summaryToBGPConfig must rebuild the config from the same
+// summary JSON the live-peers panel uses, so the editor matches. Values here
+// mirror the screenshot: local AS 4216805503, router id 192.168.55.3, peer
+// 192.168.55.1 / remote AS 4216825503.
+func TestSummaryToBGPConfig(t *testing.T) {
+	sum := []byte(`{
+	  "ipv4Unicast": {
+	    "routerId": "192.168.55.3",
+	    "as": 4216805503,
+	    "peers": {
+	      "192.168.55.1": {"remoteAs": 4216825503, "state": "Established", "peerUptimeMsec": 85911000, "pfxRcd": 17}
+	    }
+	  }
+	}`)
+	cfg, at, ok := summaryToBGPConfig(sum)
+	if !ok {
+		t.Fatal("expected ok for a running BGP speaker")
+	}
+	if !cfg.Enabled {
+		t.Error("imported config should be enabled")
+	}
+	if cfg.ASN != 4216805503 {
+		t.Errorf("ASN = %d, want 4216805503 (32-bit ASN must not truncate)", cfg.ASN)
+	}
+	if cfg.RouterID != "192.168.55.3" {
+		t.Errorf("router-id = %q, want 192.168.55.3", cfg.RouterID)
+	}
+	if len(cfg.Neighbors) != 1 {
+		t.Fatalf("got %d neighbors, want 1: %+v", len(cfg.Neighbors), cfg.Neighbors)
+	}
+	if cfg.Neighbors[0].Peer != "192.168.55.1" || cfg.Neighbors[0].RemoteAS != 4216825503 {
+		t.Errorf("neighbor = %+v, want 192.168.55.1/4216825503", cfg.Neighbors[0])
+	}
+	if at["192.168.55.1"] != 0 {
+		t.Errorf("index map wrong: %+v", at)
+	}
+}
+
+// A dual-stack peer present in both address families must appear once, and a
+// speaker with no peers yet (just a local AS) still imports.
+func TestSummaryToBGPConfigDedupAndEmpty(t *testing.T) {
+	dual := []byte(`{
+	  "ipv4Unicast": {"as": 65001, "routerId": "10.0.0.1", "peers": {"fd00::2": {"remoteAs": 65002, "state": "Established", "peerUptimeMsec": 1000}}},
+	  "ipv6Unicast": {"as": 65001, "routerId": "10.0.0.1", "peers": {"fd00::2": {"remoteAs": 65002, "state": "Established", "peerUptimeMsec": 1000}}}
+	}`)
+	cfg, _, ok := summaryToBGPConfig(dual)
+	if !ok || len(cfg.Neighbors) != 1 {
+		t.Errorf("dual-stack peer should dedup to 1 neighbor, got %d (ok=%v)", len(cfg.Neighbors), ok)
+	}
+
+	// Local AS, no peers → still a valid import (an enabled speaker).
+	solo := []byte(`{"ipv4Unicast": {"as": 65001, "routerId": "10.0.0.1", "peers": {}}}`)
+	cfg2, _, ok2 := summaryToBGPConfig(solo)
+	if !ok2 || cfg2.ASN != 65001 {
+		t.Errorf("speaker with no peers should still import: ok=%v asn=%d", ok2, cfg2.ASN)
+	}
+
+	// Nothing at all → not ok.
+	if _, _, ok3 := summaryToBGPConfig([]byte(`{}`)); ok3 {
+		t.Error("empty summary should not import")
+	}
+}
+
 func TestSafeToken(t *testing.T) {
 	good := []string{"10.0.0.1", "fd00::2", "10.0.0.0/24", "eth0", "peer-1_a"}
 	bad := []string{"", "has space", "semi;colon", "back`tick", "pipe|x", strings.Repeat("x", 65)}

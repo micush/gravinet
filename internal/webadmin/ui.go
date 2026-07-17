@@ -5711,11 +5711,14 @@ function secBgp(c){
     // Render the editor immediately from the stored config — this never waits
     // on FRR, so the page is always usable at once.
     renderBgpEditor(editWrap, r.body.bgp || {}, !!r.body.installed, false, false);
-    // If gravinet isn't managing BGP yet but FRR is installed, reflect the live
-    // FRR config by importing it in the background. This runs after the editor
-    // is already on screen; if it's slow or FRR is wedged it simply never swaps
-    // in, leaving the (empty) editor fully usable rather than stuck loading.
-    if (!r.body.active && r.body.installed){
+    // If gravinet isn't managing BGP yet but FRR is reachable (vtysh present —
+    // the same thing that makes the live-peers panel work), reflect the live
+    // FRR config by importing it in the background. Gating on vtysh support
+    // rather than on /etc/frr existing matters: a host can run FRR with live
+    // peers while /etc/frr isn't where we'd look, and the import reads via
+    // vtysh regardless. This runs after the editor is already on screen; if
+    // it's slow or FRR is wedged it simply never swaps in.
+    if (!r.body.active && (r.body.supported || r.body.installed)){
       const im = await api('/api/bgp/import');
       // Only swap in if we're still on the BGP section and got a real import.
       if (state.section === 'bgp' && im.ok && im.body && im.body.imported && im.body.bgp){

@@ -401,21 +401,90 @@ func runVtysh(cmd string) (out []byte, ok bool) {
 // reshapes it into a config.BGPConfig, so gravinet can reflect a pre-existing
 // setup (one configured outside gravinet — a hand-edited frr.conf, another
 // tool, or a prior install) instead of showing an empty editor while live peers
-// are established. It asks vtysh for the running-config and parses the
-// `router bgp` stanza. Returns ok=false when vtysh is absent, the query fails
-// or wedges, or there's no BGP stanza. Passwords are deliberately not imported
-// (FRR may hold them encrypted, and re-emitting them verbatim on a later save
-// would corrupt the session) — hasPasswords reports whether any neighbor had
-// one so the UI can warn.
+// are established.
 //
-// This is read-only: importing never writes frr.conf or config.json. gravinet
-// only takes ownership when the operator explicitly saves (adopts) the config.
+// The primary source is the BGP summary JSON — the exact query the live-peers
+// view uses, which is proven to work wherever peers actually appear. It yields
+// the local AS, the router id, and the configured neighbor list (peer address +
+// remote AS, including neighbors that are configured but down). That's what the
+// editor most needs, and building from it means the editor matches the live
+// table on any host where the peers panel works. Parsing `show running-config`
+// was the old primary source, but it can fail or be restricted on some hosts
+// (and produced exactly the "peers live, editor empty" mismatch) — so it's now
+// only a best-effort enrichment for the fields the summary doesn't carry
+// (advertised networks, redistribute, per-neighbor description/BFD). If it
+// fails, the core config from JSON still stands.
+//
+// Returns ok=false only when vtysh is absent/wedged or no BGP is running.
+// Passwords are deliberately not imported (FRR may hold them encrypted, and
+// re-emitting them verbatim on a later save would corrupt the session);
+// hasPasswords reports whether any neighbor had one so the UI can warn.
+//
+// Read-only: importing never writes frr.conf or config.json. gravinet takes
+// ownership only when the operator explicitly saves (adopts) the config.
 func importBGPFromFRR() (cfg config.BGPConfig, hasPasswords bool, ok bool) {
-	out, ran := runVtysh("show running-config")
+	sum, ran := runVtysh("show ip bgp summary json")
 	if !ran {
 		return config.BGPConfig{}, false, false
 	}
-	return parseRunningConfigBGP(string(out))
+	cfg, at, ok := summaryToBGPConfig(sum)
+	if !ok {
+		return config.BGPConfig{}, false, false
+	}
+
+	// Best-effort enrichment from running-config for what the summary omits.
+	if rc, ranRC := runVtysh("show running-config"); ranRC {
+		if rcCfg, rcHasPw, rcOk := parseRunningConfigBGP(string(rc)); rcOk {
+			cfg.Networks = rcCfg.Networks
+			cfg.RedistributeConnected = rcCfg.RedistributeConnected
+			cfg.RedistributeStatic = rcCfg.RedistributeStatic
+			hasPasswords = rcHasPw
+			if cfg.RouterID == "" {
+				cfg.RouterID = rcCfg.RouterID
+			}
+			for _, rn := range rcCfg.Neighbors {
+				if i, exists := at[rn.Peer]; exists {
+					if rn.Description != "" {
+						cfg.Neighbors[i].Description = rn.Description
+					}
+					if rn.BFD {
+						cfg.Neighbors[i].BFD = true
+					}
+				} else if rn.Peer != "" && rn.RemoteAS != 0 {
+					at[rn.Peer] = len(cfg.Neighbors)
+					cfg.Neighbors = append(cfg.Neighbors, rn)
+				}
+			}
+		}
+	}
+	return cfg, hasPasswords, ok
+}
+
+// summaryToBGPConfig builds a config.BGPConfig from `show ip bgp summary json`
+// output: local AS, router id, and the neighbor list (peer + remote AS),
+// deduped by address across families. Pure and unit-tested. ok is false when
+// there's no BGP speaker (no AS and no peers). The returned index maps peer
+// address → position in cfg.Neighbors, for later enrichment.
+func summaryToBGPConfig(sum []byte) (cfg config.BGPConfig, at map[string]int, ok bool) {
+	peers, routerID, localAS := parseBGPSummary(sum)
+	if localAS == 0 && len(peers) == 0 {
+		return config.BGPConfig{}, nil, false
+	}
+	cfg.Enabled = true
+	cfg.ASN = uint32(localAS) // BGP ASNs are 32-bit; fits uint32
+	cfg.RouterID = routerID
+	at = map[string]int{}
+	for _, p := range peers {
+		if p.Peer == "" || p.RemoteAS == 0 {
+			continue
+		}
+		if _, dup := at[p.Peer]; dup {
+			continue // a dual-stack peer appears once per address family
+		}
+		at[p.Peer] = len(cfg.Neighbors)
+		cfg.Neighbors = append(cfg.Neighbors, config.BGPNeighbor{Peer: p.Peer, RemoteAS: uint32(p.RemoteAS)})
+	}
+	return cfg, at, true
 }
 
 // parseRunningConfigBGP extracts the BGP config from FRR `show running-config`
