@@ -31,16 +31,28 @@ import (
 // with every peer masked as "reachable via a dead pipe" until a restart clears
 // them — the reported terminal state that no further roaming recovers.
 //
-// The window derives from the mesh's own liveness contract: a 20s keepalive
-// with a 75s peerTimeout (see disableNagle's comment and internal/mesh). A
-// connection carrying a live session sees a keepalive frame every 20s and so
-// resets this deadline long before it expires; one that hasn't produced a
-// single frame in 90s is, by the mesh's own definition, dead — so dropping it
-// is correct and frees the peer to be redialed. A rolling deadline (reset
-// before every readFrame) means an active connection is never affected; only a
-// genuinely idle one hits it. A var, not a const, only so tests can shorten
-// it (see TestTLSIdleConnectionTimesOut); never reassigned in production.
-var tlsReadIdle = 90 * time.Second
+// The window derives from the mesh's own liveness contract: a 10s keepalive
+// with a 20s peerTimeout (see disableNagle's comment and internal/mesh —
+// defaultKeepaliveInterval and defaultPeerTimeout). A connection carrying a
+// live session sees a keepalive frame every 10s and so resets this deadline
+// long before it expires; one that hasn't produced a single frame in 45s is,
+// by the mesh's own definition, long dead — the mesh already declared the peer
+// gone at 20s — so dropping it is correct and frees the peer to be redialed.
+// The invariant is that this stays comfortably above peerTimeout: the transport
+// must never tear down a connection the mesh still considers live, only clean
+// up one the mesh has already given up on. 45s is ~2x the default peerTimeout
+// and ~4x the keepalive, so a live-but-quiet session (even across several lost
+// keepalives) is never affected, while an idle one — the stale post-suspend
+// fallback that would otherwise keep a peer masked as "reachable via a dead
+// pipe" and block a redial — is reclaimed in 45s rather than 90s, halving the
+// worst-case reconnection time after the host wakes from sleep. (An operator
+// who raises PeerTimeout above this via mesh.Options.PeerTimeout trades that
+// margin away knowingly, the same tradeoff as lowering it below a few
+// keepalives.) A rolling deadline (reset before every readFrame) means an
+// active connection is never affected; only a genuinely idle one hits it. A
+// var, not a const, only so tests can shorten it (see
+// TestTLSIdleConnectionTimesOut); never reassigned in production.
+var tlsReadIdle = 45 * time.Second
 
 // readFrameIdle is readFrame with a rolling idle deadline applied to c first,
 // so a silent connection returns an error (i/o timeout) instead of blocking
@@ -55,8 +67,8 @@ func readFrameIdle(c net.Conn) ([]byte, error) {
 // wraps it. Without this, Go's default net.TCPConn behaves like most stacks'
 // default socket and leaves Nagle on, which delays small, infrequent writes
 // waiting to either coalesce with more outgoing data or piggyback on a
-// pending ACK. A steady mesh keepalive every 20s (see keepaliveInterval in
-// internal/mesh) never notices — nothing about a 75s peerTimeout cares about
+// pending ACK. A steady mesh keepalive every 10s (see keepaliveInterval in
+// internal/mesh) never notices — nothing about a 20s peerTimeout cares about
 // an extra 40-200ms. But every frame on this fallback carries exactly that
 // profile: small, sporadic mesh datagrams (a handshake message, a keepalive,
 // a redistributed route, an overlay ping) rather than a continuous bulk

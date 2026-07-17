@@ -37,6 +37,29 @@ assuming it didn't happen.
 
 ---
 
+## v477 — 2026-07-16
+
+**Faster reconnection after the host wakes from sleep: TLS-fallback idle timeout
+lowered from 90s to 45s.** When a machine suspends, its connections go silent;
+on resume, a peer reached over the TCP/TLS fallback path can be masked as
+"reachable via a dead pipe" — the stale connection stays registered, so the
+engine believes it still has a working fallback and won't redial — until the
+transport's read-idle deadline tears it down. That deadline was 90s, which set
+the worst-case reconnection ceiling for such peers. It's now 45s, roughly
+halving that ceiling.
+
+The value is still comfortably above the mesh's own liveness contract, which is
+what keeps it safe: the mesh declares a peer dead after 20s of silence
+(`defaultPeerTimeout`) and a live session emits a keepalive every 10s
+(`defaultKeepaliveInterval`), resetting this rolling deadline each time. At 45s
+— ~2x peerTimeout, ~4x the keepalive — a live-but-quiet connection (even across
+several lost keepalives) is never dropped by the transport; only a genuinely
+idle one, which the mesh has already given up on, is reclaimed. The invariant
+(idle timeout fires after the mesh's own peer-timeout, never before) is
+preserved. Also corrected stale figures in the surrounding comments, which still
+referenced an older 20s-keepalive/75s-peer-timeout contract; the code now
+documents the actual 10s/20s values. No config or API change.
+
 ## v476 — 2026-07-16
 
 **BGP page now reflects an existing FRR configuration instead of showing empty.**
