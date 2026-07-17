@@ -15,6 +15,7 @@ package webadmin
 // own config.json, it just isn't pushed to a daemon that isn't there.
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -357,4 +358,121 @@ func vtyshApplyBoot() bool {
 		bin = "vtysh"
 	}
 	return exec.Command(bin, "-b").Run() == nil
+}
+
+// importBGPFromFRR reads the BGP configuration FRR is *actually running* and
+// reshapes it into a config.BGPConfig, so gravinet can reflect a pre-existing
+// setup (one configured outside gravinet — a hand-edited frr.conf, another
+// tool, or a prior install) instead of showing an empty editor while live peers
+// are established. It asks vtysh for the running-config and parses the
+// `router bgp` stanza. Returns ok=false when vtysh is absent, the query fails,
+// or there's no BGP stanza. Passwords are deliberately not imported (FRR may
+// hold them encrypted, and re-emitting them verbatim on a later save would
+// corrupt the session) — hasPasswords reports whether any neighbor had one so
+// the UI can warn.
+//
+// This is read-only: importing never writes frr.conf or config.json. gravinet
+// only takes ownership when the operator explicitly saves (adopts) the config.
+func importBGPFromFRR() (cfg config.BGPConfig, hasPasswords bool, ok bool) {
+	bin, present := vtyshPath()
+	if !present {
+		return config.BGPConfig{}, false, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), bgpQueryTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, bin, "-c", "show running-config").Output()
+	if err != nil {
+		return config.BGPConfig{}, false, false
+	}
+	return parseRunningConfigBGP(string(out))
+}
+
+// parseRunningConfigBGP extracts the BGP config from FRR `show running-config`
+// text. Pure function (no I/O) so it's fully unit-testable. It reads the single
+// `router bgp <asn>` stanza — router-id, per-neighbor remote-as/description/bfd,
+// and the address-family's networks and redistribute directives — mirroring
+// exactly the surface renderFRR emits, so what's imported round-trips through
+// the same fields. Neighbor order is preserved (first appearance). hasPasswords
+// is set if any neighbor carried a `password` line, though the secret itself is
+// not captured.
+func parseRunningConfigBGP(text string) (cfg config.BGPConfig, hasPasswords bool, ok bool) {
+	lines := strings.Split(text, "\n")
+	inStanza := false
+	// Preserve neighbor first-seen order while allowing lookup by peer.
+	idx := map[string]int{}
+	getN := func(peer string) *config.BGPNeighbor {
+		if i, seen := idx[peer]; seen {
+			return &cfg.Neighbors[i]
+		}
+		cfg.Neighbors = append(cfg.Neighbors, config.BGPNeighbor{Peer: peer})
+		idx[peer] = len(cfg.Neighbors) - 1
+		return &cfg.Neighbors[len(cfg.Neighbors)-1]
+	}
+
+	for _, raw := range lines {
+		if !inStanza {
+			// Stanza opens at a column-0 `router bgp <asn>` line. FRR may append
+			// `vrf <name>`; only the default VRF is imported (fields after the
+			// ASN are ignored).
+			f := strings.Fields(raw)
+			if len(f) >= 3 && f[0] == "router" && f[1] == "bgp" {
+				if asn, err := strconv.ParseUint(f[2], 10, 32); err == nil {
+					cfg.Enabled = true
+					cfg.ASN = uint32(asn)
+					ok = true
+					inStanza = true
+				}
+			}
+			continue
+		}
+		// Inside the stanza: a non-indented, non-empty line ends it (the next
+		// top-level stanza, or a column-0 `exit`).
+		if raw != "" && !strings.HasPrefix(raw, " ") && !strings.HasPrefix(raw, "\t") {
+			break
+		}
+		line := strings.TrimSpace(raw)
+		if line == "" || line == "!" || line == "exit" || line == "exit-address-family" {
+			continue
+		}
+		if strings.HasPrefix(line, "no ") { // negations — skip
+			continue
+		}
+		switch {
+		case strings.HasPrefix(line, "bgp router-id "):
+			cfg.RouterID = strings.TrimSpace(strings.TrimPrefix(line, "bgp router-id "))
+		case strings.HasPrefix(line, "neighbor "):
+			rest := strings.TrimSpace(strings.TrimPrefix(line, "neighbor "))
+			f := strings.Fields(rest)
+			if len(f) < 2 {
+				continue
+			}
+			peer, verb := f[0], f[1]
+			switch verb {
+			case "remote-as":
+				if len(f) >= 3 {
+					if as, err := strconv.ParseUint(f[2], 10, 32); err == nil {
+						getN(peer).RemoteAS = uint32(as)
+					}
+				}
+			case "description":
+				getN(peer).Description = strings.TrimSpace(strings.TrimPrefix(rest, f[0]+" description "))
+			case "password":
+				// Presence noted; secret not captured (see importBGPFromFRR).
+				_ = getN(peer)
+				hasPasswords = true
+			case "bfd":
+				getN(peer).BFD = true
+			case "activate":
+				// address-family activation — neighbor already captured.
+				_ = getN(peer)
+			}
+		case strings.HasPrefix(line, "network "):
+			cfg.Networks = append(cfg.Networks, strings.TrimSpace(strings.TrimPrefix(line, "network ")))
+		case line == "redistribute connected":
+			cfg.RedistributeConnected = true
+		case line == "redistribute static":
+			cfg.RedistributeStatic = true
+		}
+	}
+	return cfg, hasPasswords, ok
 }

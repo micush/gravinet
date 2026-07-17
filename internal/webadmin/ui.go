@@ -575,16 +575,17 @@ const NAV_GROUPS = [
     ['bans', 'nodes blocked from joining or reconnecting'],
   ]},
   { name:'traffic', items: [
-    ['routes', 'additional subnets redistributed across the mesh'],
     ['firewall', 'rules controlling which traffic is allowed through the tunnel'],
     ['nat', 'port forwarding and address translation for tunnel traffic'],
     ['qos', 'traffic prioritization and queuing order'],
     ['bandwidth', 'rate limiting per peer or network'],
-    // Dynamic-routing (BGP) peer status, read live from FRR via vtysh. Present
-    // in the model unconditionally but shown only when this host has vtysh —
-    // sectionVisible() filters it out of the rail and search everywhere else,
-    // so on a box without FRR the entry simply doesn't appear.
-    ['bgp', 'live BGP peer status from FRR (shown only when vtysh is present on this host)'],
+    ['routes', 'additional subnets redistributed across the mesh'],
+    // BGP/BFD configuration — gravinet owns the config and drives the FRR
+    // daemon. Present in the model unconditionally but shown only when this
+    // host has vtysh (i.e. FRR is installed); sectionVisible() filters it out
+    // of the rail and search everywhere else, so on a box without FRR the
+    // entry simply doesn't appear.
+    ['bgp', 'BGP and BFD configuration, applied to FRR (shown only when vtysh is present on this host)'],
   ]},
   { name:'naming', items: [
     ['dns', 'conditional forwarding of specific domains to mesh DNS servers'],
@@ -617,6 +618,7 @@ function label(s){
   if (s==='hosts-file') return 'Hosts File';
   if (s==='dns-state') return 'DNS State';
   if (s==='mesh-peers') return 'Mesh Peers';
+  if (s==='routes') return 'Mesh Routes';
   if (s==='getting-started') return 'Getting Started';
   return s==='nat'||s==='qos'||s==='dns'||s==='bgp' ? s.toUpperCase() : s.charAt(0).toUpperCase()+s.slice(1);
 }
@@ -5706,7 +5708,7 @@ function secBgp(c){
   (async () => {
     const r = await api('/api/bgp/config');
     if (!r.ok || !r.body){ editWrap.innerHTML = '<div class="card"><div class="hint">could not load BGP configuration.</div></div>'; return; }
-    renderBgpEditor(editWrap, r.body.bgp || {}, !!r.body.installed);
+    renderBgpEditor(editWrap, r.body.bgp || {}, !!r.body.installed, !!r.body.imported, !!r.body.imported_has_passwords);
   })();
   // Live status, read from FRR — same reader as the read-only view.
   const liveCard = $('<div class="card"></div>');
@@ -5750,8 +5752,11 @@ async function bgpLiveStatus(meta, body){
 // config b. Neighbors and networks are held in local arrays kept in sync with
 // their input fields, so Save gathers a clean object to POST. installed=false
 // (FRR absent) still lets the operator author config — it just warns it won't
-// be applied until FRR is present.
-function renderBgpEditor(host, b, installed){
+// be applied until FRR is present. imported=true means b was read from FRR's
+// running config (gravinet isn't managing BGP yet); the editor shows that and,
+// if importedHasPasswords, warns that neighbor passwords weren't imported and
+// must be re-entered before saving or those sessions may drop.
+function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
   const neighbors = (b.neighbors || []).map(n => ({
     peer: n.peer||'', remote_as: n.remote_as||0, description: n.description||'',
     password: n.password||'', bfd: !!n.bfd,
@@ -5760,6 +5765,13 @@ function renderBgpEditor(host, b, installed){
 
   const card = $('<div class="card"></div>');
   card.appendChild($('<h3>BGP configuration</h3>'));
+  if (imported){
+    let msg = 'These settings were read from FRR\u2019s running configuration \u2014 gravinet is not managing BGP on this host yet. Save to adopt them into gravinet\u2019s management.';
+    if (importedHasPasswords){
+      msg += ' Neighbor MD5 passwords are not shown for security and were not imported; re-enter any before saving, or those sessions may drop when the config is re-applied.';
+    }
+    card.appendChild($('<div class="empty" style="margin-bottom:10px;border-left:3px solid var(--acc)">'+msg+'</div>'));
+  }
   if (!installed){
     card.appendChild($('<div class="empty" style="margin-bottom:10px">FRR is not installed on this host, so a saved configuration is stored but not applied to a running daemon. Install FRR to have gravinet bring these sessions up.</div>'));
   }

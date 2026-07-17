@@ -37,6 +37,48 @@ assuming it didn't happen.
 
 ---
 
+## v476 — 2026-07-16
+
+**BGP page now reflects an existing FRR configuration instead of showing empty.**
+Fixes a bug where, on a host that already ran BGP (configured outside gravinet —
+a hand-edited `frr.conf`, another tool, or a prior install), the Traffic › BGP
+editor showed zero configuration even though live peers were established, because
+it only ever read gravinet's own `config.json`. Now, when gravinet isn't yet
+managing BGP (its stored config is empty/disabled), the page reads what FRR is
+*actually running* — via `vtysh -c "show running-config"` — and populates the
+editor from it: local AS, router-id, neighbors (peer, remote AS, description,
+per-neighbor BFD), advertised networks, and redistribute settings. The editor
+shows a banner noting the settings were read from FRR and that saving adopts them
+into gravinet's management.
+
+The import is strictly read-only — it never writes `frr.conf` or `config.json`;
+gravinet takes ownership only when the operator explicitly saves. This
+deliberately avoids seeding gravinet's config (or rewriting a hand-tuned
+`frr.conf`) behind the operator's back at daemon startup, which could disrupt a
+working session; reflecting the live config on load fixes the visible problem
+without that risk. Precedence is explicit: a BGP config gravinet is actively
+managing always wins; the FRR import is only a fallback when it isn't.
+
+Neighbor MD5 passwords are intentionally not imported — FRR may hold them
+encrypted, and re-emitting them verbatim on a later save would corrupt the
+session — so the page reports whether any neighbor had a password and warns to
+re-enter it before saving. New unit tests cover the running-config parser: a full
+stanza with router-id/neighbors/BFD/networks/redistribute (asserting `activate`
+lines don't create phantom neighbors and passwords aren't captured), the
+no-stanza case, and the stanza boundary (a following `router ospf` block must not
+leak into the BGP import).
+
+## v475 — 2026-07-16
+
+**Traffic menu reordered and Routes renamed to "Mesh Routes."** The Traffic
+group now reads firewall → nat → qos → shaping → mesh routes → bgp, grouping the
+enforcement/shaping items ahead of the routing items (mesh routes and BGP). The
+Routes section is now labelled **Mesh Routes** everywhere the label is used —
+the left rail, global search, and the section heading — to distinguish
+mesh-distributed subnets from the read-only system Route Table under Monitor.
+No behavior change: the section id (`routes`), its API, and its contents are
+unchanged; only ordering and the display label moved.
+
 ## v474 — 2026-07-16
 
 **Traffic › BGP is now a full BGP + BFD control panel — gravinet owns the

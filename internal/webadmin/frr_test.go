@@ -195,6 +195,102 @@ func TestSyncDaemonsContent(t *testing.T) {
 	frrHas(t, body3, "staticd=yes\n") // staticd always wanted
 }
 
+// The exact bug: FRR has an existing BGP config with established peers, gravinet
+// has none. parseRunningConfigBGP must reconstruct that config from FRR's
+// `show running-config` output so the page reflects reality instead of empty.
+func TestParseRunningConfigBGP(t *testing.T) {
+	// Representative FRR running-config: a router bgp stanza with router-id, two
+	// neighbors (one with description + password + bfd), an address-family with
+	// networks/redistribute/activate, wrapped in surrounding unrelated config.
+	rc := "frr version 8.4\n" +
+		"!\n" +
+		"router bgp 65001\n" +
+		" bgp router-id 10.0.0.1\n" +
+		" neighbor 10.0.0.2 remote-as 65002\n" +
+		" neighbor 10.0.0.2 description core uplink\n" +
+		" neighbor 10.0.0.2 password s3cr3t\n" +
+		" neighbor 10.0.0.2 bfd\n" +
+		" neighbor 10.0.0.3 remote-as 65003\n" +
+		" !\n" +
+		" address-family ipv4 unicast\n" +
+		"  network 10.0.0.0/24\n" +
+		"  network 192.168.5.0/24\n" +
+		"  redistribute connected\n" +
+		"  neighbor 10.0.0.2 activate\n" +
+		"  neighbor 10.0.0.3 activate\n" +
+		" exit-address-family\n" +
+		"exit\n" +
+		"!\n" +
+		"line vty\n" +
+		"!\n"
+
+	cfg, hasPw, ok := parseRunningConfigBGP(rc)
+	if !ok {
+		t.Fatal("expected to find a BGP stanza")
+	}
+	if !cfg.Enabled || cfg.ASN != 65001 {
+		t.Errorf("asn/enabled wrong: %+v", cfg)
+	}
+	if cfg.RouterID != "10.0.0.1" {
+		t.Errorf("router-id = %q, want 10.0.0.1", cfg.RouterID)
+	}
+	if !cfg.RedistributeConnected || cfg.RedistributeStatic {
+		t.Errorf("redistribute flags wrong: conn=%v static=%v", cfg.RedistributeConnected, cfg.RedistributeStatic)
+	}
+	if len(cfg.Networks) != 2 || cfg.Networks[0] != "10.0.0.0/24" || cfg.Networks[1] != "192.168.5.0/24" {
+		t.Errorf("networks wrong: %+v", cfg.Networks)
+	}
+	if len(cfg.Neighbors) != 2 {
+		t.Fatalf("got %d neighbors, want 2 (activate lines must not create extras): %+v", len(cfg.Neighbors), cfg.Neighbors)
+	}
+	n0 := cfg.Neighbors[0]
+	if n0.Peer != "10.0.0.2" || n0.RemoteAS != 65002 || n0.Description != "core uplink" || !n0.BFD {
+		t.Errorf("neighbor[0] wrong: %+v", n0)
+	}
+	if n0.Password != "" {
+		t.Errorf("password must not be imported, got %q", n0.Password)
+	}
+	if !hasPw {
+		t.Error("hasPasswords should be true (one neighbor had a password line)")
+	}
+	if cfg.Neighbors[1].Peer != "10.0.0.3" || cfg.Neighbors[1].RemoteAS != 65003 {
+		t.Errorf("neighbor[1] wrong: %+v", cfg.Neighbors[1])
+	}
+}
+
+// No BGP stanza → ok=false, so the handler shows an empty editor rather than a
+// bogus enabled config.
+func TestParseRunningConfigBGPNone(t *testing.T) {
+	for _, rc := range []string{"", "frr version 8.4\n!\nline vty\n!\n", "interface eth0\n ip address 10.0.0.1/24\n!\n"} {
+		if _, _, ok := parseRunningConfigBGP(rc); ok {
+			t.Errorf("expected no BGP stanza for %q", rc)
+		}
+	}
+}
+
+// The stanza must not bleed into following top-level config: a neighbor-like
+// line after the stanza ends is ignored.
+func TestParseRunningConfigBGPStanzaBoundary(t *testing.T) {
+	rc := "router bgp 65001\n" +
+		" neighbor 10.0.0.2 remote-as 65002\n" +
+		"exit\n" +
+		"router ospf\n" +
+		" network 10.9.9.0/24 area 0\n" +
+		"!\n"
+	cfg, _, ok := parseRunningConfigBGP(rc)
+	if !ok || cfg.ASN != 65001 {
+		t.Fatalf("bgp parse failed: %+v", cfg)
+	}
+	if len(cfg.Neighbors) != 1 {
+		t.Errorf("stanza boundary leaked: got %d neighbors, want 1", len(cfg.Neighbors))
+	}
+	for _, n := range cfg.Networks {
+		if n == "10.9.9.0/24 area 0" || n == "10.9.9.0/24" {
+			t.Error("OSPF network leaked into BGP import")
+		}
+	}
+}
+
 func TestSafeToken(t *testing.T) {
 	good := []string{"10.0.0.1", "fd00::2", "10.0.0.0/24", "eth0", "peer-1_a"}
 	bad := []string{"", "has space", "semi;colon", "back`tick", "pipe|x", strings.Repeat("x", 65)}

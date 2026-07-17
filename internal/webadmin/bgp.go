@@ -120,6 +120,23 @@ func (s *Server) handleBGPConfig(w http.ResponseWriter, r *http.Request) {
 				bgp = cfg.BGP
 			}
 		}
+		// Source precedence: if gravinet is actively managing BGP (its stored
+		// config is enabled with an AS), that's the truth and we show it. If
+		// it isn't — a fresh install on a host that already runs FRR/BGP — the
+		// stored config is empty, so instead of showing an empty editor while
+		// live peers are established, reflect what FRR is actually running by
+		// importing its config. This read-only import is what makes the page
+		// match reality; the operator adopts it into gravinet's management by
+		// saving. imported=true tells the UI to say so (and warn about
+		// passwords, which aren't imported).
+		imported, importedHasPasswords := false, false
+		if !(bgp.Enabled && bgp.ASN != 0) {
+			if live, hasPw, ok := importBGPFromFRR(); ok {
+				bgp = live
+				imported = true
+				importedHasPasswords = hasPw
+			}
+		}
 		if bgp.Neighbors == nil {
 			bgp.Neighbors = []config.BGPNeighbor{}
 		}
@@ -127,9 +144,11 @@ func (s *Server) handleBGPConfig(w http.ResponseWriter, r *http.Request) {
 			bgp.Networks = []string{}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"bgp":       bgp,
-			"installed": frrInstalled(),
-			"supported": bgpSupported(),
+			"bgp":                    bgp,
+			"installed":              frrInstalled(),
+			"supported":              bgpSupported(),
+			"imported":               imported,
+			"imported_has_passwords": importedHasPasswords,
 		})
 		return
 	}
