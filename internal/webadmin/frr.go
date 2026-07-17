@@ -236,6 +236,81 @@ func syncDaemons(b config.BGPConfig) (bool, error) {
 	return changed, nil
 }
 
+// frrBGPBFDDaemons are the daemons that must be running for gravinet's BGP and
+// BFD features to work when FRR is present: the BGP speaker and the BFD session
+// daemon. These are exactly the two values ensureFRRDaemonsEnabled makes sure
+// read `=yes` in /etc/frr/daemons whenever FRR is detected.
+var frrBGPBFDDaemons = []string{"bgpd", "bfdd"}
+
+// enableDaemonsContent turns each named daemon on in the body of
+// /etc/frr/daemons: any `<name>=no` line becomes `<name>=yes`. It only ever
+// enables — never disables — and leaves every other line untouched (including
+// managed daemons not named here, and unrelated settings/comments). Pure string
+// transform returning the new body and whether anything actually changed, so the
+// logic is unit-testable without touching disk.
+//
+// This is deliberately separate from syncDaemonsContent, which reconciles the
+// whole managed set to a specific BGP config and will turn unused daemons off.
+// enableDaemonsContent backs the "make sure FRR can run BGP/BFD the moment it's
+// detected" step, which must neither depend on nor disturb the stored config.
+func enableDaemonsContent(existing string, names []string) (string, bool) {
+	changed := false
+	lines := strings.Split(existing, "\n")
+	for i, line := range lines {
+		for _, d := range names {
+			if strings.HasPrefix(line, d+"=no") {
+				if line != d+"=yes" {
+					changed = true
+				}
+				lines[i] = d + "=yes"
+				break
+			}
+		}
+	}
+	return strings.Join(lines, "\n"), changed
+}
+
+// ensureFRRDaemonsEnabled makes sure bgpd and bfdd are enabled in
+// /etc/frr/daemons whenever FRR is detected on this host, restarting FRR if it
+// had to change anything. Run once in the background at daemon startup (see
+// Server.Start): a stock FRR install ships with every optional daemon set to
+// =no, so BGP/BFD would never come up until something turned them on — this is
+// that something.
+//
+// It only ever flips =no to =yes for those two daemons; it never disables
+// anything and never touches other lines, so it can't fight the config-driven
+// reconciliation in applyBGP (which owns turning daemons back off when a saved
+// BGP config doesn't need them). No-op when FRR isn't installed, and idempotent:
+// on every later boot the values already read =yes, nothing changes, and FRR is
+// not restarted.
+func ensureFRRDaemonsEnabled(log *logx.Logger) {
+	if !frrInstalled() {
+		return // no FRR here — nothing to enable.
+	}
+	raw, err := os.ReadFile(frrDaemons)
+	if err != nil || len(raw) == 0 {
+		// FRR's config directory exists but the daemons file doesn't (or is
+		// empty): not the layout we manage. Leave it alone rather than guess.
+		return
+	}
+	body, changed := enableDaemonsContent(string(raw), frrBGPBFDDaemons)
+	if !changed {
+		return // bgpd and bfdd already enabled — nothing to do.
+	}
+	if !strings.HasSuffix(body, "\n") {
+		body += "\n"
+	}
+	if err := writeAtomicFile(frrDaemons, body); err != nil {
+		log.Warnf("bgp: could not enable bgpd/bfdd in %s: %v", frrDaemons, err)
+		return
+	}
+	if runSystemctl("restart") {
+		log.Infof("bgp: enabled bgpd and bfdd in %s and restarted FRR", frrDaemons)
+	} else {
+		log.Warnf("bgp: enabled bgpd and bfdd in %s but could not restart FRR", frrDaemons)
+	}
+}
+
 // writeAtomicFile writes body to path via a temp file + rename, so a reader
 // never sees a half-written config. Ported from parapet's write_atomic.
 func writeAtomicFile(path, body string) error {
@@ -427,39 +502,67 @@ func runVtysh(cmd string) (out []byte, ok bool) {
 //
 // Read-only: importing never writes frr.conf or config.json. gravinet takes
 // ownership only when the operator explicitly saves (adopts) the config.
-func importBGPFromFRR() (cfg config.BGPConfig, hasPasswords bool, ok bool) {
-	sum, ran := runVtysh("show ip bgp summary json")
-	if !ran {
-		return config.BGPConfig{}, false, false
-	}
-	cfg, at, ok := summaryToBGPConfig(sum)
-	if !ok {
-		return config.BGPConfig{}, false, false
-	}
+// frrConfigPaths are the on-disk FRR configs to read the BGP stanza from, in
+// priority order: the integrated config first, then a per-daemon bgpd.conf. A
+// var (not a const list) so tests can point it at a fixture.
+var frrConfigPaths = []string{frrConf, "/etc/frr/bgpd.conf"}
 
-	// Best-effort enrichment from running-config for what the summary omits.
-	if rc, ranRC := runVtysh("show running-config"); ranRC {
-		if rcCfg, rcHasPw, rcOk := parseRunningConfigBGP(string(rc)); rcOk {
-			cfg.Networks = rcCfg.Networks
-			cfg.RedistributeConnected = rcCfg.RedistributeConnected
-			cfg.RedistributeStatic = rcCfg.RedistributeStatic
-			cfg.KeepaliveTime = rcCfg.KeepaliveTime
-			cfg.HoldTime = rcCfg.HoldTime
-			hasPasswords = rcHasPw
-			if cfg.RouterID == "" {
-				cfg.RouterID = rcCfg.RouterID
+// importBGPFromFRR reads the BGP configuration FRR is set up with and reshapes
+// it into a config.BGPConfig, so gravinet reflects a pre-existing setup rather
+// than showing an empty editor.
+//
+// The authoritative source is FRR's own config file (/etc/frr/frr.conf) — read
+// directly off disk. This is deliberate and is the fix for this having failed
+// repeatedly: earlier versions read the config through vtysh
+// (`show ip bgp summary json` / `show running-config`), which only works when
+// bgpd is up and answering — so a host whose peer session wasn't established,
+// or whose daemon wasn't fully responsive, imported nothing even though the
+// config was sitting in the file the whole time. The file doesn't depend on the
+// daemon at all, and its format is exactly what parseRunningConfigBGP handles.
+//
+// vtysh is now only a fallback (config held solely in a running daemon, or a
+// nonstandard file path) and a source for the live router-id/AS when the file
+// omits them. Returns ok=false only when no source yields a BGP stanza.
+// Passwords are not imported (they'd round-trip badly and needn't be surfaced);
+// hasPasswords reports whether any neighbor had one so the UI can warn.
+//
+// Read-only: importing never writes anything. gravinet takes ownership only
+// when the operator explicitly saves (adopts) the config.
+func importBGPFromFRR() (cfg config.BGPConfig, hasPasswords bool, ok bool) {
+	// 1) The config file — authoritative and daemon-independent.
+	for _, path := range frrConfigPaths {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		if fc, pw, fok := parseRunningConfigBGP(string(raw)); fok {
+			cfg, hasPasswords, ok = fc, pw, true
+			break
+		}
+	}
+	// 2) Fallback: the live running-config via vtysh (config held only in the
+	//    daemon, or a config path we don't know about).
+	if !ok {
+		if rc, ran := runVtysh("show running-config"); ran {
+			if rcCfg, pw, rok := parseRunningConfigBGP(string(rc)); rok {
+				cfg, hasPasswords, ok = rcCfg, pw, true
 			}
-			for _, rn := range rcCfg.Neighbors {
-				if i, exists := at[rn.Peer]; exists {
-					if rn.Description != "" {
-						cfg.Neighbors[i].Description = rn.Description
-					}
-					if rn.BFD {
-						cfg.Neighbors[i].BFD = true
-					}
-				} else if rn.Peer != "" && rn.RemoteAS != 0 {
-					at[rn.Peer] = len(cfg.Neighbors)
-					cfg.Neighbors = append(cfg.Neighbors, rn)
+		}
+	}
+	// 3) Enrich from the live summary: fill router-id / local AS when the config
+	//    didn't carry them explicitly, and — if we still have nothing — use the
+	//    summary as a last-resort source (a running speaker with no readable
+	//    config file).
+	if sum, ran := runVtysh("show ip bgp summary json"); ran {
+		if scfg, _, sok := summaryToBGPConfig(sum); sok {
+			if !ok {
+				cfg, ok = scfg, true
+			} else {
+				if cfg.RouterID == "" {
+					cfg.RouterID = scfg.RouterID
+				}
+				if cfg.ASN == 0 {
+					cfg.ASN = scfg.ASN
 				}
 			}
 		}

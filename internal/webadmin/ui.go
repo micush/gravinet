@@ -5898,7 +5898,7 @@ function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
 
   // ---- save ----
   const footer = $('<div style="margin-top:16px;border-top:1px solid var(--line);padding-top:12px;display:flex;gap:12px;align-items:center"></div>');
-  const saveBtn = $('<button class="ok">Save &amp; apply</button>');
+  const saveBtn = $('<button class="ok">Save</button>');
   const status = $('<span class="hint"></span>');
   footer.appendChild(saveBtn); footer.appendChild(status); card.appendChild(footer);
   card.appendChild($('<div class="hint" style="margin-top:10px">Live peer status is under Monitor \u203a BGP Peers.</div>'));
@@ -5928,7 +5928,10 @@ function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
     saveBtn.disabled = false;
     if (!r.ok){ status.textContent=''; alert((r.body && r.body.error) || 'Save failed.'); return; }
     status.style.color = 'var(--ok)';
-    status.textContent = r.body.applied ? ('Saved \u2014 ' + (r.body.note || 'applied to FRR.')) : ('Saved \u2014 ' + (r.body.note || 'not applied (FRR absent).'));
+    // Saving applies the config the same as every other form here — there is no
+    // separate "apply" step. The server note just describes what reaching FRR
+    // did (reloading in the background, or that FRR is absent so nothing to push).
+    status.textContent = 'Saved' + (r.body.note ? (' \u2014 ' + r.body.note) : '.');
   };
 
   host.innerHTML = ''; host.appendChild(card);

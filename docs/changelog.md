@@ -37,6 +37,58 @@ assuming it didn't happen.
 
 ---
 
+## v484 — 2026-07-17
+
+**BGP form now saves-and-applies like every other form; FRR's bgpd/bfdd are
+auto-enabled on detection.**
+
+Two changes to how gravinet drives FRR:
+
+- The Traffic › BGP editor's **Save & apply** button is gone, replaced by a
+  plain **Save**. Nothing about the behaviour changed — saving already
+  persisted the config and reconciled FRR in one step — but the old label
+  implied "apply" was a separate action the operator had to opt into, out of
+  step with every other form in the app, where saving *is* applying. The
+  success line no longer frames applying as a distinct ceremony either; it just
+  reports what reaching FRR did (reloading in the background, or that FRR is
+  absent so there was nothing to push).
+
+- On startup, if FRR is detected on the host, gravinet now checks
+  `/etc/frr/daemons` for `bgpd=yes` and `bfdd=yes`. If either is disabled
+  (`=no`), it enables it and restarts the FRR service so the change takes
+  effect. A stock FRR install ships with every optional daemon off, so BGP and
+  BFD would otherwise never come up until something turned them on; this is that
+  something. It only ever flips `=no` to `=yes` for those two daemons — it never
+  disables anything and never touches other lines — so it doesn't interfere with
+  the config-driven daemon reconciliation that already happens when a BGP config
+  is saved (that path still owns turning unused daemons back off). It's a no-op
+  when FRR isn't installed, and idempotent: once the two daemons read `=yes`,
+  later boots change nothing and FRR is not restarted. Runs in the background so
+  a slow `systemctl restart frr` can't hold up the admin server coming up. New
+  `enableDaemonsContent` unit test covers the enable-only, idempotent, and
+  mixed (one already on) cases.
+
+## v483 — 2026-07-16
+
+**Fix (for real this time): an existing FRR BGP config now imports from the
+config file, not the live daemon.** Prior attempts read the pre-existing BGP
+config through vtysh (`show ip bgp summary json`, then `show running-config`).
+Both depend on bgpd being up and answering — so on a host whose peer session
+wasn't established, or whose daemon wasn't fully responsive, the import returned
+nothing and the editor stayed empty even though `/etc/frr/frr.conf` held the
+whole configuration. That was the wrong source.
+
+The import now reads FRR's config file directly (`/etc/frr/frr.conf`, then
+`/etc/frr/bgpd.conf`) and parses the `router bgp` stanza — local AS, neighbors
+(with remote-AS and BFD), advertised networks, redistribute, and timers — with
+no dependency on the daemon running at all. vtysh is now only a fallback (config
+held solely in a running daemon, or a nonstandard path) and a source for the
+live router-id/AS when the file omits them. A new end-to-end test imports a
+real parapet-managed `frr.conf` — an unestablished neighbor, trailing
+whitespace, password line and all — from the file alone with vtysh absent, and
+asserts the AS, neighbor, BFD, and both networks come through. Passwords are
+still flagged-but-not-imported (re-enter before saving).
+
 ## v482 — 2026-07-16
 
 **Windows: the service no longer stops-and-stays-down on a settings change, and

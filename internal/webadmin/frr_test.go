@@ -198,6 +198,53 @@ func TestSyncDaemonsContent(t *testing.T) {
 	frrHas(t, body3, "staticd=yes\n") // staticd always wanted
 }
 
+// enableDaemonsContent flips bgpd/bfdd from =no to =yes on FRR detection while
+// leaving every other line — including other managed daemons and unrelated
+// settings — exactly as found, and never disables anything.
+func TestEnableDaemonsContent(t *testing.T) {
+	// A stock /etc/frr/daemons: everything off, plus a comment, an already-on
+	// unrelated daemon, and an unmanaged setting line that must survive verbatim.
+	existing := "# frr daemons\n" +
+		"bgpd=no\n" +
+		"ospfd=no\n" +
+		"bfdd=no\n" +
+		"staticd=yes\n" +
+		"vtysh_enable=yes\n"
+
+	body, changed := enableDaemonsContent(existing, frrBGPBFDDaemons)
+	if !changed {
+		t.Fatal("expected a change (bgpd/bfdd flipped on)")
+	}
+	frrHas(t, body, "bgpd=yes\n")
+	frrHas(t, body, "bfdd=yes\n")
+	// Only bgpd/bfdd are touched: ospfd stays off, and nothing else moves.
+	frrHas(t, body, "ospfd=no\n")
+	frrHas(t, body, "staticd=yes\n")
+	frrHas(t, body, "# frr daemons\n")
+	frrHas(t, body, "vtysh_enable=yes\n")
+
+	// Idempotent: a second pass with them already on reports no change.
+	body2, changed2 := enableDaemonsContent(body, frrBGPBFDDaemons)
+	if changed2 {
+		t.Error("second pass with bgpd/bfdd already on must be a no-op")
+	}
+	if body2 != body {
+		t.Error("idempotent enable changed the body")
+	}
+
+	// One already on, one off: still a change, and it only enables (never the
+	// reverse).
+	mixed := "bgpd=yes\nbfdd=no\n"
+	out, changed3 := enableDaemonsContent(mixed, frrBGPBFDDaemons)
+	if !changed3 {
+		t.Error("bfdd=no should flip to yes")
+	}
+	frrHas(t, out, "bgpd=yes\n")
+	frrHas(t, out, "bfdd=yes\n")
+	frrLacks(t, out, "bgpd=no")
+	frrLacks(t, out, "bfdd=no")
+}
+
 // The exact bug: FRR has an existing BGP config with established peers, gravinet
 // has none. parseRunningConfigBGP must reconstruct that config from FRR's
 // `show running-config` output so the page reflects reality instead of empty.
@@ -322,6 +369,53 @@ func TestRunVtyshAbsent(t *testing.T) {
 // summary JSON the live-peers panel uses, so the editor matches. Values here
 // mirror the screenshot: local AS 4216805503, router id 192.168.55.3, peer
 // 192.168.55.1 / remote AS 4216825503.
+// End-to-end regression for the reported bug: an existing /etc/frr/frr.conf
+// (parapet-managed, with a neighbor whose session may be down) must import from
+// the file alone — no dependency on vtysh/bgpd. Content is the operator's exact
+// config, trailing spaces and all.
+func TestImportBGPFromFRRFile(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/frr.conf"
+	body := "! parapet-managed FRR configuration. Do not edit by hand. \n" +
+		"frr defaults traditional \n! \n" +
+		"router bgp 65001 \n" +
+		" neighbor 10.1.1.1 remote-as 65003 \n" +
+		" neighbor 10.1.1.1 password pass \n" +
+		" neighbor 10.1.1.1 bfd \n" +
+		" address-family ipv4 unicast \n" +
+		"  network 10.1.1.0/24 \n" +
+		"  network 10.1.2.0/24 \n" +
+		"  neighbor 10.1.1.1 activate \n" +
+		" exit-address-family \n!\n \n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	orig := frrConfigPaths
+	frrConfigPaths = []string{path}
+	t.Cleanup(func() { frrConfigPaths = orig })
+	// vtysh is absent in the test env (statFile seam), so this exercises the
+	// file path with no daemon — exactly the failing scenario.
+	withStatFile(t, func(string) (fs.FileInfo, error) { return nil, os.ErrNotExist })
+
+	cfg, hasPw, ok := importBGPFromFRR()
+	if !ok {
+		t.Fatal("expected import to succeed from the config file alone")
+	}
+	if !cfg.Enabled || cfg.ASN != 65001 {
+		t.Errorf("asn/enabled wrong: %+v", cfg)
+	}
+	if len(cfg.Neighbors) != 1 || cfg.Neighbors[0].Peer != "10.1.1.1" ||
+		cfg.Neighbors[0].RemoteAS != 65003 || !cfg.Neighbors[0].BFD {
+		t.Errorf("neighbor wrong: %+v", cfg.Neighbors)
+	}
+	if len(cfg.Networks) != 2 || cfg.Networks[0] != "10.1.1.0/24" || cfg.Networks[1] != "10.1.2.0/24" {
+		t.Errorf("networks wrong: %+v", cfg.Networks)
+	}
+	if !hasPw {
+		t.Error("expected password presence to be flagged")
+	}
+}
+
 func TestSummaryToBGPConfig(t *testing.T) {
 	sum := []byte(`{
 	  "ipv4Unicast": {
