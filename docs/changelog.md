@@ -37,6 +37,38 @@ assuming it didn't happen.
 
 ---
 
+## v488 — 2026-07-17
+
+**BGP editor: add a manual "Check FRR's live configuration" button.**
+
+Reported symptom: a real host with a real, independently-configured FRR BGP
+setup opened the Traffic › BGP page and got a blank form — AS number,
+router-id, neighbor, and network fields all empty, no error shown.
+
+The parsing itself checks out: fed the exact reported config lines
+(`router bgp <asn>`, `bgp router-id`, `neighbor ... remote-as`, `network`)
+through both the bare parser and the full `importBGPFromFRR` pipeline in an
+isolated test, it correctly produces enabled/ASN/router-id/neighbor/network —
+so the mapping logic wasn't the bug. The likely gap is upstream of it: the
+page's background import (in `secBgp`'s `load()`) only ever runs once per
+page load, and only when gravinet doesn't yet consider itself the active BGP
+manager (`!active`, i.e. it has no BGP already enabled+saved locally). Once
+BGP has ever been enabled and saved through gravinet — even from an old or
+abandoned attempt — the page stops looking at FRR's live config on its own,
+silently, with nothing on screen to explain why the fields are empty. A
+failed import (permission denied reading the config file, vtysh present but
+not answering, no `router bgp` stanza at the expected path, …) fails the same
+way: quietly, into a blank form.
+
+The BGP configuration card now always shows a "Check FRR's live
+configuration" button (whenever FRR is installed on the host, regardless of
+`active`). Clicking it calls `/api/bgp/import` directly and either re-renders
+the form with what it found, or shows the concrete reason nothing came back —
+turning an unexplained blank page into a diagnosable one. Nothing is written
+until the operator actually edits a field afterward (same autosave-on-touch
+behavior as the rest of the form), so pulling in FRR's live state this way is
+always safe to look at even when gravinet already has its own saved config.
+
 ## v487 — 2026-07-17
 
 **Fix: stale BGP nav items survive a managed-peer switch on a host without FRR.**

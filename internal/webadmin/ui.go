@@ -5858,6 +5858,53 @@ function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
 
   const card = $('<div class="card"></div>');
   card.appendChild($('<h3>BGP configuration</h3>'));
+  // Manual re-check, independent of the automatic background import in
+  // secBgp's load(). That auto-import only ever fires once, and only when
+  // gravinet doesn't yet consider itself the active BGP manager (!active) —
+  // deliberately, so re-opening this page never silently overwrites settings
+  // the operator has already saved here with whatever FRR happens to be
+  // running. That gate means: once BGP has ever been enabled and saved
+  // through gravinet (even from an old/abandoned attempt), the page will
+  // never look at FRR's live config again on its own — and a failed
+  // background import fails silently into a blank form with no visible
+  // reason. This button removes both gaps: it always attempts an import when
+  // clicked, and always reports why, so "the fields are blank" becomes a
+  // concrete reason (permission denied reading the config file, vtysh not
+  // answering, no 'router bgp' stanza, …) instead of an unexplained empty
+  // page.
+  if (installed){
+    const checkRow = $('<div style="margin:-4px 0 12px;display:flex;align-items:center;gap:10px"></div>');
+    const checkBtn = $('<button class="sm">Check FRR\u2019s live configuration</button>');
+    const checkMsg = $('<span class="hint"></span>');
+    checkRow.appendChild(checkBtn); checkRow.appendChild(checkMsg);
+    card.appendChild(checkRow);
+    checkBtn.onclick = async () => {
+      checkBtn.disabled = true;
+      checkMsg.style.color = ''; checkMsg.textContent = 'checking\u2026';
+      let im;
+      try {
+        im = await api('/api/bgp/import');
+      } catch (e){
+        checkMsg.style.color = 'var(--danger)';
+        checkMsg.textContent = 'Request failed \u2014 ' + ((e && e.message) || e);
+        checkBtn.disabled = false;
+        return;
+      }
+      if (im.ok && im.body && im.body.imported && im.body.bgp){
+        // Replaces this whole card with a fresh render of the imported
+        // values; nothing is saved until the operator edits a field (see
+        // the autosave block below), so pulling in FRR's live state here is
+        // always safe to look at even when gravinet already has its own
+        // saved config.
+        renderBgpEditor(host, im.body.bgp, installed, true, !!im.body.imported_has_passwords);
+        return;
+      }
+      checkBtn.disabled = false;
+      const reason = (im.body && (im.body.reason || im.body.error)) || 'no response from the server';
+      checkMsg.style.color = 'var(--danger)';
+      checkMsg.textContent = 'No BGP configuration found \u2014 ' + reason;
+    };
+  }
   if (imported){
     let msg = 'These settings were read from FRR\u2019s running configuration \u2014 gravinet is not managing BGP on this host yet. Save to adopt them into gravinet\u2019s management.';
     if (importedHasPasswords){
