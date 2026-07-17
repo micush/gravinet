@@ -37,6 +37,40 @@ assuming it didn't happen.
 
 ---
 
+## v487 — 2026-07-17
+
+**Fix: stale BGP nav items survive a managed-peer switch on a host without FRR.**
+
+Picking a peer from the managed-node list (the header's node picker) refreshes
+`state.bgpSupported` from that peer's own `/api/config` on every switch, but the
+left-rail nav itself (`buildRail()`) only ran once, at page load. Switching from
+a peer that has FRR to one that doesn't left that peer's Traffic › BGP and
+Monitor › BGP Peers tabs sitting in the rail — still visible, still clickable —
+on a target that can't serve either. Clicking one didn't error; it just fell
+through `renderSection()`'s existing `sectionVisible` backstop straight to
+Networks, which read as a broken link rather than a hidden one.
+
+The rail now always creates every nav button (previously a gated section with
+no capability was skipped entirely, so a target that *gained* the capability
+later had no button to ever show), sets its initial visibility from
+`sectionVisible()` at build time, and a new `syncRailGating()` re-applies that
+check to the buttons already on screen after every `load()` — so switching
+targets shows and hides the BGP tabs live, matching whichever node was just
+selected.
+
+**BGP editor: drop two lines of static boilerplate.**
+
+Removed the "Changes save and apply automatically." and "Live peer status is
+under Monitor › BGP Peers." hints from the bottom of the Traffic › BGP editor.
+The status line itself stays — it's reused to surface save-in-progress, saved,
+and error text — just without the static first line.
+
+(No change to FRR-config import: `router bgp <asn>` → Enable BGP + Local AS,
+`bgp router-id <ip>` → Router-id, `neighbor <peer> remote-as <as>` → the
+neighbor table, and `network <prefix>` → advertised networks was already
+exactly `parseRunningConfigBGP`'s behavior; confirmed against its tests rather
+than re-implemented.)
+
 ## v486 — 2026-07-17
 
 **Fix: BGP section stuck on "loading configuration…" (regression from v485).**

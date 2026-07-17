@@ -697,8 +697,14 @@ function buildRail(){
     };
     const items = $('<div class="rail-group-items"></div>');
     for (const [s, tip] of g.items) {
-      if (!sectionVisible(s)) continue; // capability-gated section this node can't serve
-      const b = $('<button class="rail-tab'+(s===state.section?' active':'')+'" title="'+esc(tip)+'"></button>');
+      // Always create the button, even when this target can't currently serve
+      // it — sectionVisible() only sets its *initial* display here; syncRailGating()
+      // re-applies it on every subsequent load() so a section that's gated on a
+      // per-target capability (BGP/vtysh) appears or disappears as the managed
+      // target switches, instead of a stale button surviving from the previous
+      // target. Skipping creation entirely (as before) meant a target that
+      // *gains* the capability had no button to ever show.
+      const b = $('<button class="rail-tab'+(s===state.section?' active':'')+'" title="'+esc(tip)+'" style="'+(sectionVisible(s)?'':'display:none')+'"></button>');
       b.textContent = label(s); b.dataset.sec = s;
       b.onclick = () => { state.section=s; setActiveRailTab(s); refresh(); };
       items.appendChild(b);
@@ -1594,7 +1600,24 @@ function startPolling(){
   }, 4000);
 }
 
-async function refresh(){ await load(); renderSection(); }
+// syncRailGating re-applies sectionVisible() to every rail button already in
+// the DOM. buildRail() only runs once, at dashboard() startup, but a
+// capability-gated section's visibility (currently just BGP/BGP Peers, gated
+// on state.bgpSupported) is per-*target* and load() re-reads it fresh on
+// every switch. Without this, picking a peer from the managed-node list left
+// the previous target's BGP tabs on screen — still visible, still clickable —
+// on a target that doesn't have FRR; clicking one didn't error, it just fell
+// through renderSection()'s sectionVisible backstop straight to Networks,
+// which looked like a broken link rather than a hidden one. Called after
+// every load() (see refresh()) so the rail always matches whichever node
+// load() just fetched capabilities for.
+function syncRailGating(){
+  document.querySelectorAll('.rail-tab[data-sec]').forEach(b => {
+    b.style.display = sectionVisible(b.dataset.sec) ? '' : 'none';
+  });
+}
+
+async function refresh(){ await load(); syncRailGating(); renderSection(); }
 
 // edit POSTs a config change, surfaces errors, flags a needed restart, refreshes.
 // If autoRestart is true and the server signals a restart is needed, it restarts immediately.
@@ -5944,9 +5967,8 @@ function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
   // intermediate invalid state (BGP enabled with no AS, or hold <= keepalive) is
   // held back with an inline hint instead of POSTed, and the next valid edit
   // saves it — so autosave never pushes a config FRR would reject.
-  const status = $('<div class="hint" style="margin-top:16px;border-top:1px solid var(--line);padding-top:12px">Changes save and apply automatically.</div>');
+  const status = $('<div class="hint" style="margin-top:16px;border-top:1px solid var(--line);padding-top:12px"></div>');
   card.appendChild(status);
-  card.appendChild($('<div class="hint" style="margin-top:6px">Live peer status is under Monitor \u203a BGP Peers.</div>'));
 
   let saveTimer = null, saveSeq = 0;
   function scheduleSave(immediate){
