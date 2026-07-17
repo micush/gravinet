@@ -1010,17 +1010,25 @@ function flashAndScroll(target){
   setTimeout(() => target.classList.remove('search-hit'), 2000);
 }
 
-// gotoMeshPeer switches to Monitor > mesh peers and flashes one peer's row,
-// reusing the same card-scoped flashAndScroll the global search uses. Called
-// from the latency table's peer names; those rows are keyed by network *name*
-// (the /api/latency response carries no network id), so the caller resolves
-// the id first and passes it here. Landing is no-op-safe: if the row can't be
-// found (say the peer dropped between the click and the re-render), it still
-// lands on the right network card rather than nowhere.
+// gotoMeshPeer switches to Monitor > mesh peers, ticks one peer's row (and
+// clears every other tick), and flashes it, reusing the same card-scoped
+// flashAndScroll the global search uses. Called from the latency table's peer
+// names; those rows are keyed by network *name* (the /api/latency response
+// carries no network id), so the caller resolves the id first and passes it
+// here. The selection is set *before* refresh() so the render's own
+// wireSelectable restores the tick from selection.mpeers rather than us
+// poking checkboxes after the fact — same single source of truth every other
+// selection path uses. Sole-selecting means a shell/info opened right after
+// landing acts on this peer and nothing stale. Landing is no-op-safe: if the
+// row can't be found (say the peer dropped between the click and the
+// re-render), it still lands on the right network card rather than nowhere;
+// the tick is keyed by id, so it's harmless if that row never renders.
 async function gotoMeshPeer(netId, nodeId){
   if (!netId) return;
   state.section = 'mesh-peers';
   setActiveRailTab('mesh-peers');
+  selection.mpeers.clear();
+  selection.mpeers.add(selKey(netId, nodeId));
   await refresh();
   let card = null;
   for (const c of document.querySelectorAll('#content .card')){

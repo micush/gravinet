@@ -37,6 +37,23 @@ assuming it didn't happen.
 
 ---
 
+## v469 — 2026-07-16
+
+Clicking a peer name in Monitor > latency now also *ticks* that peer in
+Monitor > mesh peers and clears every other tick, so you land with exactly the
+clicked peer selected. Previously the jump only scrolled and flashed the row;
+the selection was left untouched, so the shell/info buttons added in v467
+would act on whatever happened to be ticked before (or nothing).
+
+The selection is set in `gotoMeshPeer` *before* the `refresh()`, by clearing
+`selection.mpeers` and adding `selKey(netId, nodeId)` — the render's own
+`wireSelectable` then restores the tick from the set, so this reuses the one
+selection source of truth every other path already uses rather than poking
+checkboxes after render. Keying the tick by id means it's harmless if the row
+never renders (peer dropped between click and re-render): the landing still
+falls back to the network card, as before. Verified with `go build`, `go vet`,
+a `node --check` of the extracted client script, and the webadmin test suite.
+
 ## v468 — 2026-07-16
 
 Peer names in Monitor > latency are now clickable: clicking one jumps to that
