@@ -37,6 +37,23 @@ assuming it didn't happen.
 
 ---
 
+## v472 — 2026-07-16
+
+The build-from-source installers now delete the build scratch directory
+(`BUILD_TMP`) immediately after the binary is installed, instead of holding it
+until the end of the run. `BUILD_TMP` holds the Go build and module caches
+(hundreds of MB) that `build_from_source` redirects there via GOCACHE/GOPATH;
+previously it was only removed by the EXIT trap at the very end, so it sat on
+disk through the whole service/firewall/DNS setup, and any run that accumulated
+these across repeated installs/upgrades could fill a small partition — the
+"no space left on device" build failure seen on OpenBSD, whose `/tmp` is
+typically small. Freeing it right after `install`ing the binary keeps the
+footprint transient. The EXIT trap stays as the catch-all for exit paths that
+never reach the install step; the explicit cleanup is guarded and clears
+`BUILD_TMP` so the trap's later pass is a harmless no-op. Applied identically to
+all four build-from-source installers (OpenBSD, FreeBSD, Linux, macOS). No code
+changes; `sh -n`/`dash -n` clean.
+
 ## v471 — 2026-07-16
 
 Settings has a new **Logging** card directly beneath Cluster. **Log level** moved

@@ -238,6 +238,16 @@ echo "==> installing $SRC -> $BIN"
 install -d -m 0755 "$PREFIX/sbin"
 install -m 0755 "$SRC" "$BIN"
 
+# The binary now lives at $BIN, so the build scratch (BUILD_TMP holds the Go
+# build+module caches — hundreds of MB) has served its purpose. Remove it now
+# rather than holding it through the rest of the run (service, pf, unbound
+# setup); the EXIT trap still covers every path that exits before reaching
+# here. Guarded + cleared so the trap's later pass is a harmless no-op.
+if [ -n "$BUILD_TMP" ]; then
+  rm -rf "$BUILD_TMP"
+  BUILD_TMP=""
+fi
+
 SCRIPTDIR="$(dirname "$0")"
 echo "==> installing pkgman -> $PKGMAN"
 if [ -f "$SCRIPTDIR/pkgman" ]; then

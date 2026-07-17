@@ -603,6 +603,15 @@ fi
 echo "==> installing $SRC -> $BIN"
 install -D -m 0755 "$SRC" "$BIN"
 
+# Build scratch (BUILD_TMP: Go build+module caches) is done once the binary is
+# in place — remove it now instead of holding it through the rest of the run;
+# the EXIT trap still covers earlier exit paths. Guarded + cleared so the
+# trap's later pass no-ops.
+if [ -n "$BUILD_TMP" ]; then
+  rm -rf "$BUILD_TMP"
+  BUILD_TMP=""
+fi
+
 SCRIPTDIR="$(dirname "$0")"
 echo "==> installing pkgman -> $PKGMAN"
 if [ -f "$SCRIPTDIR/pkgman" ]; then

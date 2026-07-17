@@ -312,6 +312,15 @@ install -m 0755 "$SRC" "$BIN"
 # Clear the quarantine flag so Gatekeeper doesn't block a locally-built binary.
 xattr -dr com.apple.quarantine "$BIN" 2>/dev/null || true
 
+# Build scratch (BUILD_TMP: Go build+module caches) is done once the binary is
+# in place — remove it now instead of holding it through the rest of the run;
+# the EXIT trap still covers earlier exit paths. Guarded + cleared so the
+# trap's later pass no-ops.
+if [ -n "$BUILD_TMP" ]; then
+  rm -rf "$BUILD_TMP"
+  BUILD_TMP=""
+fi
+
 SCRIPTDIR_PKGMAN="$(dirname "$0")"
 echo "==> installing pkgman -> $PKGMAN"
 if [ -f "$SCRIPTDIR_PKGMAN/pkgman" ]; then
