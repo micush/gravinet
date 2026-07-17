@@ -5709,38 +5709,69 @@ function infoRoutes(c){
 function secBgp(c){
   secHint(c, 'BGP configuration for dynamic routing.');
   const editWrap = $('<div></div>'); c.appendChild(editWrap);
-  editWrap.innerHTML = '<div class="card"><div class="hint">loading configuration\u2026</div></div>';
-  (async () => {
-    const r = await api('/api/bgp/config');
-    if (!r.ok || !r.body){ editWrap.innerHTML = '<div class="card"><div class="hint">could not load BGP configuration.</div></div>'; return; }
-    // Render the editor immediately from the stored config — this never waits
-    // on FRR, so the page is always usable at once.
-    renderBgpEditor(editWrap, r.body.bgp || {}, !!r.body.installed, false, false);
-    // If gravinet isn't managing BGP yet but FRR is reachable (vtysh present —
-    // the same thing that makes the live-peers panel work), reflect the live
-    // FRR config by importing it in the background. Gating on vtysh support
-    // rather than on /etc/frr existing matters: a host can run FRR with live
-    // peers while /etc/frr isn't where we'd look, and the import reads via
-    // vtysh regardless. This runs after the editor is already on screen; if
-    // it's slow or FRR is wedged it simply never swaps in.
-    if (!r.body.active && (r.body.supported || r.body.installed)){
-      const im = await api('/api/bgp/import');
-      if (state.section !== 'bgp') return; // navigated away while it ran
-      if (im.ok && im.body && im.body.imported && im.body.bgp){
-        renderBgpEditor(editWrap, im.body.bgp, true, true, !!im.body.imported_has_passwords);
-      } else if (im.ok && im.body && !im.body.imported){
-        // FRR is present but no existing BGP config could be read. Say why, so an
-        // empty editor isn't indistinguishable from a broken import — the reason
-        // (permissions, no stanza, bgpd not answering, …) is what to act on.
-        const card = editWrap.querySelector('.card');
-        const h3 = card && card.querySelector('h3');
-        if (h3){
-          const why = im.body.reason ? (': ' + esc(im.body.reason)) : '.';
-          card.insertBefore($('<div class="empty" style="margin-bottom:10px;border-left:3px solid var(--acc)">No existing FRR BGP configuration was imported'+why+'</div>'), h3.nextSibling);
+
+  // A bounded request: the config GET reads local disk and never touches FRR, so
+  // it should be near-instant — if it hasn't answered in 12s something is wrong
+  // and we must say so rather than spin on "loading…" forever.
+  const withTimeout = (p, ms) => Promise.race([
+    p, new Promise((_, rej) => setTimeout(() => rej(new Error('timed out after ' + (ms/1000) + 's')), ms)),
+  ]);
+  const fail = (msg) => {
+    editWrap.innerHTML = '';
+    const card = $('<div class="card"></div>');
+    card.appendChild($('<div class="hint">Could not load BGP configuration: '+esc(msg)+'</div>'));
+    const retry = $('<button class="sm" style="margin-top:10px">Retry</button>');
+    retry.onclick = load;
+    card.appendChild(retry);
+    editWrap.appendChild(card);
+  };
+
+  async function load(){
+    editWrap.innerHTML = '<div class="card"><div class="hint">loading configuration\u2026</div></div>';
+    let r;
+    try {
+      r = await withTimeout(api('/api/bgp/config'), 12000);
+    } catch (e){
+      // Request rejected or timed out — surface the reason instead of hanging.
+      fail((e && e.message) || 'request failed'); return;
+    }
+    if (state.section !== 'bgp') return; // navigated away while it ran
+    if (!r || !r.ok || !r.body){
+      fail((r && r.body && r.body.error) || ('server returned ' + ((r && r.status) || 'no response'))); return;
+    }
+    // Render the editor from the stored config — this never waits on FRR, so the
+    // page is usable at once. Guard the render: a bug in here used to throw and
+    // leave the "loading…" placeholder up with no hint why, which looked exactly
+    // like a hung request. Now the actual error is shown.
+    try {
+      renderBgpEditor(editWrap, r.body.bgp || {}, !!r.body.installed, false, false);
+    } catch (e){
+      fail('editor error \u2014 ' + ((e && e.message) || e)); return;
+    }
+    // If gravinet isn't managing BGP yet but FRR is reachable, reflect the live
+    // FRR config by importing it in the background. Best-effort: the editor is
+    // already on screen, so any failure here must never take it back down.
+    try {
+      if (!r.body.active && (r.body.supported || r.body.installed)){
+        const im = await api('/api/bgp/import');
+        if (state.section !== 'bgp') return; // navigated away while it ran
+        if (im.ok && im.body && im.body.imported && im.body.bgp){
+          renderBgpEditor(editWrap, im.body.bgp, true, true, !!im.body.imported_has_passwords);
+        } else if (im.ok && im.body && !im.body.imported){
+          // FRR is present but no existing BGP config could be read. Say why, so an
+          // empty editor isn't indistinguishable from a broken import — the reason
+          // (permissions, no stanza, bgpd not answering, …) is what to act on.
+          const card = editWrap.querySelector('.card');
+          const h3 = card && card.querySelector('h3');
+          if (h3){
+            const why = im.body.reason ? (': ' + esc(im.body.reason)) : '.';
+            card.insertBefore($('<div class="empty" style="margin-bottom:10px;border-left:3px solid var(--acc)">No existing FRR BGP configuration was imported'+why+'</div>'), h3.nextSibling);
+          }
         }
       }
-    }
-  })();
+    } catch (e){ /* editor already rendered; import reflection is best-effort */ }
+  }
+  load();
 }
 
 // secBgpPeers is the Monitor › BGP Peers view: the live BGP session table FRR
@@ -5967,6 +5998,11 @@ function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
   rcCb.onchange = () => scheduleSave(true);
   rsCb.onchange = () => scheduleSave(true);
   [asnInp, ridInp, kaInp, holdInp].forEach(inp => { inp.oninput = () => scheduleSave(false); });
+
+  // Attach the finished editor, replacing the "loading…" placeholder. This is
+  // the line whose loss in v485 left the BGP section stuck on "loading
+  // configuration…" — the whole form was built but never inserted.
+  host.innerHTML = ''; host.appendChild(card);
 }
 
 // infoHosts shows the local hosts file contents, read live from disk.

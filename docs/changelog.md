@@ -37,6 +37,27 @@ assuming it didn't happen.
 
 ---
 
+## v486 — 2026-07-17
+
+**Fix: BGP section stuck on "loading configuration…" (regression from v485).**
+
+The v485 autosave rewrite dropped the one line at the end of `renderBgpEditor`
+that actually attaches the built form to the page and clears the loading
+placeholder (`host.innerHTML=''; host.appendChild(card)`). The result: the whole
+editor was constructed correctly but never inserted, so the BGP section sat on
+"loading configuration…" forever. The line is restored. This slipped through
+because the editor lives in embedded UI JavaScript inside a Go string, which
+`go build`/`vet`/`test` don't parse; the extracted script now passes a Node
+syntax check as part of verifying this build.
+
+The BGP section is also hardened so a failure like this can't present as a silent
+infinite spinner again: the config load is wrapped with a 12s timeout and
+try/catch, the render call is guarded, and any failure now shows the actual
+reason (request error, timeout, non-OK response, or an editor exception) with a
+**Retry** button instead of an unbounded "loading…". (The specific v485 bug
+wasn't an exception or a hang, so only restoring the attach line fixes it — but
+the guardrails turn any future load failure into a visible, recoverable message.)
+
 ## v485 — 2026-07-17
 
 **BGP editor is now fully autosave (no Save button), and the initial FRR config
