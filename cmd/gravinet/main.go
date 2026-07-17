@@ -46,7 +46,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "481"
+	version = "482"
 	commit  = "none"
 )
 
@@ -1516,6 +1516,16 @@ func cmdRun(args []string) {
 		case <-restartRequested:
 			logx.Infof("shutting down for a clean restart to fully rebuild the underlay socket, TUN device, and OS routes")
 			shutdown()
+			// On Windows under the SCM, restart by reporting a failure exit and
+			// letting the configured recovery action bring us back — NOT by
+			// calling Restart-Service on ourselves, which deadlocks against our
+			// own SCM stop and leaves the service stopped (the reported bug).
+			// RestartViaServiceManagerExit arms the non-zero exit; returning
+			// here lets RunService report it so the SCM restarts us.
+			if service.RestartViaServiceManagerExit() {
+				logx.Infof("exiting for Windows service-manager recovery restart")
+				return
+			}
 			if err := selfRestart(); err != nil {
 				// selfRestart is an in-place re-exec (Unix). Where it isn't
 				// available — notably an interactive-less Windows service, whose

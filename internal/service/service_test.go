@@ -184,10 +184,20 @@ func TestOpenBSDRcScript(t *testing.T) {
 
 func TestWindowsInstallCommands(t *testing.T) {
 	c := WindowsInstallCommands(testOpts())
-	for _, want := range []string{"sc.exe create gravinet", "start= auto", "sc.exe description gravinet"} {
+	for _, want := range []string{
+		"sc.exe create gravinet", "start= auto", "sc.exe description gravinet",
+		// Recovery: three restart actions (first/second/subsequent) and the
+		// failure-actions flag so a non-zero-exit stop also triggers recovery.
+		"sc.exe failure gravinet", "actions= restart/5000/restart/10000/restart/30000",
+		"reset= 86400", "sc.exe failureflag gravinet 1",
+	} {
 		if !strings.Contains(c, want) {
 			t.Errorf("windows commands missing %q\n%s", want, c)
 		}
+	}
+	// The service must be created (and recovery configured) before it's started.
+	if strings.Index(c, "sc.exe failure gravinet") > strings.Index(c, "sc.exe start gravinet") {
+		t.Error("recovery must be configured before the service is started")
 	}
 }
 

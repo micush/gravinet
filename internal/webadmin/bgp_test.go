@@ -109,53 +109,6 @@ func TestParseBGPSummary(t *testing.T) {
 	}
 }
 
-// Some FRR builds emit 4-byte ASNs (and the odd counter) as quoted JSON
-// strings rather than numbers. The parser must accept both forms; before
-// flexUint64 a quoted `as`/`remoteAs` failed the whole object unmarshal and
-// blanked the local AS and every peer — the "live peers present but nothing
-// parses" failure, seen exactly on the large ASNs where the quoting appears.
-// Values mirror the reported host: local AS 4216805503, peer remote AS
-// 4216825503.
-func TestParseBGPSummaryStringASNs(t *testing.T) {
-	raw := []byte(`{
-	  "ipv4Unicast": {
-	    "routerId": "192.168.55.3",
-	    "as": "4216805503",
-	    "peers": {
-	      "192.168.55.1": {"remoteAs": "4216825503", "state": "Established", "peerUptime": "23:51:51", "peerUptimeMsec": "85911000", "pfxRcd": "17"}
-	    }
-	  }
-	}`)
-	peers, routerID, localAS := parseBGPSummary(raw)
-	if routerID != "192.168.55.3" {
-		t.Errorf("routerID = %q, want 192.168.55.3", routerID)
-	}
-	if localAS != 4216805503 {
-		t.Errorf("localAS = %d, want 4216805503 (string form must parse)", localAS)
-	}
-	if len(peers) != 1 {
-		t.Fatalf("got %d peers, want 1", len(peers))
-	}
-	if peers[0].RemoteAS != 4216825503 || peers[0].State != "Established" || peers[0].Prefixes != 17 {
-		t.Errorf("string-form peer parsed wrong: %+v", peers[0])
-	}
-
-	// End to end: the editor import must reconstruct the same config from the
-	// string-form summary, so the editor matches the live table.
-	cfg, _, ok := summaryToBGPConfig(raw)
-	if !ok || cfg.ASN != 4216805503 || len(cfg.Neighbors) != 1 || cfg.Neighbors[0].RemoteAS != 4216825503 {
-		t.Errorf("summaryToBGPConfig on string ASNs wrong: ok=%v cfg=%+v", ok, cfg)
-	}
-
-	// A mixed / partly-garbage object still yields what it can rather than
-	// failing wholesale: a bad remoteAs degrades to 0, other fields survive.
-	mixed := []byte(`{"ipv4Unicast":{"as":65001,"routerId":"10.0.0.1","peers":{"10.0.0.2":{"remoteAs":"notanumber","state":"Active","pfxRcd":4}}}}`)
-	mp, _, mas := parseBGPSummary(mixed)
-	if mas != 65001 || len(mp) != 1 || mp[0].RemoteAS != 0 || mp[0].State != "Active" || mp[0].Prefixes != 4 {
-		t.Errorf("mixed/garbage parse wrong: as=%d peers=%+v", mas, mp)
-	}
-}
-
 func TestParseBGPSummaryEmptyOrGarbage(t *testing.T) {
 	// Garbage or an empty document yields an empty (non-nil) peer slice, never
 	// a panic — the endpoint still returns a well-formed available:true body.

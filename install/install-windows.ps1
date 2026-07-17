@@ -597,6 +597,17 @@ Write-Host "==> creating service $ServiceName"
 New-Service -Name $ServiceName -BinaryPathName $binPath -DisplayName $DisplayName `
             -Description $Description -StartupType Automatic | Out-Null
 
+# Recovery: restart the service on the first, second, and subsequent failures,
+# with a short escalating backoff, and reset the failure count after a day of
+# stability. The failure-actions flag makes these fire on a non-zero-exit stop
+# too, which is how gravinet comes back automatically after a settings change
+# that needs a restart (it reports a failure exit rather than deadlocking on a
+# self-restart). The daemon also re-applies this at startup, so it's set even
+# on an upgrade that didn't rerun this installer.
+Write-Host "==> configuring service recovery (restart on failure)"
+sc.exe failure $ServiceName reset= 86400 actions= restart/5000/restart/10000/restart/30000 | Out-Null
+sc.exe failureflag $ServiceName 1 | Out-Null
+
 if (-not $NoStart) {
   Start-Service $ServiceName
   if ($wasRunning) { Write-Host "==> restarted $ServiceName" } else { Write-Host "==> started $ServiceName" }

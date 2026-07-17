@@ -4,29 +4,19 @@ package main
 
 import "fmt"
 
-// selfRestart is not yet implemented on Windows. Two things make the Unix
-// approach (syscall.Exec, a true in-place process-image replacement) not
-// translate directly:
+// selfRestart is not implemented on Windows: there is no in-place
+// process-image replacement like Unix's syscall.Exec, and a detached child
+// process wouldn't inherit the SCM registration (services.msc would show the
+// service Stopped while an orphan kept the mesh running underneath — worse than
+// nothing).
 //
-//   - Windows has no equivalent primitive; the alternative is spawning a
-//     detached child process and exiting, but internal/service's SCM
-//     integration (run_windows.go) always reports SERVICE_STOPPED with exit
-//     code 0 when the service function returns, regardless of why — the
-//     Service Control Manager sees a clean, intentional stop either way, not
-//     a failure, so even a service configured with a "restart on failure"
-//     recovery action wouldn't trigger from that report.
-//   - A spawned child process also wouldn't inherit the original's
-//     registration with the SCM, so `services.msc`/`sc query` would show
-//     the service as Stopped while an orphaned process kept the mesh running
-//     unmanaged underneath it — worse than doing nothing, since the two
-//     would disagree about whether gravinet is running at all.
-//
-// Fixing this properly needs run_windows.go to support reporting a
-// service-specific non-zero exit code so a configured recovery action can
-// take over, which is more than this one file. Until then, the caller falls
-// back to the existing in-process best-effort recovery (onResume) alone on
-// Windows, same as before this change, and logs that a manual restart is
-// the reliable path after a sleep/resume-related connectivity problem.
+// The service case no longer relies on this at all: when a config change needs
+// a full restart, the daemon takes the SCM-recovery path first (see
+// service.RestartViaServiceManagerExit and run_windows.go) — it reports a
+// failure exit and the SCM's configured recovery action restarts it cleanly.
+// selfRestart is only reached on an interactive (non-service) Windows run,
+// where there's no SCM to recover us; there it returns an error and the caller
+// falls back to the platform service manager or, failing that, the operator.
 func selfRestart() error {
-	return fmt.Errorf("automatic restart after sleep/resume is not yet supported on Windows; restart the gravinet service manually if connectivity looks stuck")
+	return fmt.Errorf("in-place restart is not supported on an interactive Windows run; restart the gravinet service to fully recover")
 }

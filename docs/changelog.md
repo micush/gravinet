@@ -9,7 +9,7 @@ available to this tool. That method has real limits worth stating plainly:
 - **Search returns snippets, not full transcripts.** Even for a conversation
   this found, it may only surface part of what was discussed or changed.
 - **Coverage is uneven.** The version counter (the `version` string in
-  `cmd/gravinet/main.go`) is currently at **481**, and jumps by exactly one
+  `cmd/gravinet/main.go`) is currently at **353**, and jumps by exactly one
   on every recorded change — but only a fraction of those ~270-odd increments
   turned up specific, citable detail. Entries below with a version number
   are ones a past conversation explicitly named; the gaps between them are
@@ -28,7 +28,7 @@ available to this tool. That method has real limits worth stating plainly:
 
 Versions **263–272** are from a single long conversation and are complete
 and precise — every change in that range was made directly in that session,
-not reconstructed from a search snippet. **v274** and **v306–481** are each
+not reconstructed from a search snippet. **v274** and **v306–353** are each
 their own session, also direct and precise. Everything else is a
 best-effort reconstruction. If a
 specific version or feature isn't listed here and you
@@ -37,56 +37,56 @@ assuming it didn't happen.
 
 ---
 
-## v481 — 2026-07-17
+## v482 — 2026-07-16
 
-**BGP: configurable keepalive / hold-time timers, defaulting to 4s / 12s.** The
-Traffic › BGP editor gains two timer fields that render as FRR's
-`timers bgp <keepalive> <holdtime>`. Left blank they resolve to gravinet's own
-default — a 4-second keepalive and 12-second hold — a deliberately aggressive,
-fast-failover baseline that matches the BFD-on-by-default posture and is far
-tighter than FRR's traditional 60/180. The pair is validated against FRR's own
-rule (hold is at least 3s and the keepalive never exceeds it, checked on the
-effective values so a large keepalive left against the default hold is caught),
-both client-side for an immediate message and in `config.Validate` at save time.
-An existing FRR config's timers are imported through `show running-config` so the
-editor reflects live values instead of blanking them, and the pair round-trips
-through gravinet's own config.
+**Windows: the service no longer stops-and-stays-down on a settings change, and
+now auto-restarts on failure.** Two related fixes.
 
-**Live peers moved from Traffic › BGP to a new Monitor › BGP Peers section.**
-The read-only live-session table (local AS, router id, per-peer state/uptime/
-prefixes) now sits under Monitor, next to Mesh Peers, so the Traffic › BGP page
-is purely configuration and Monitor holds the live diagnostics — the same split
-the rest of the UI already follows. Like the editor, the new section is shown
-only when the host has FRR/vtysh. This also removes the concurrent vtysh query
-the editor page used to fire (see below).
+Root cause of the stuck service: a settings change that needs a full restart ran
+the same path as every other OS — shut down, then ask the service manager to
+restart us. On Windows that meant the service calling `Restart-Service` on
+*itself*, which deadlocks: `Restart-Service` waits for the service to report
+STOPPED, but the service can't report STOPPED because it's blocked inside that
+very call. It timed out stopped and never came back. Now, when a restart is
+needed and we're running under the SCM, the service instead reports a non-zero
+*failure* exit and returns, letting the SCM's recovery action restart it
+cleanly — the supported pattern, no self-deadlock.
 
-**Fix: BGP editor stayed empty while Live Peers showed an established session —
-"still happening" even after the v476/v477 summary-based import.** Two causes,
-both addressed:
+Service recovery is now configured: **restart on the first, second, and
+subsequent failures**, with a short escalating backoff (5s / 10s / 30s) and the
+failure count reset after a day of stability. Crucially the failure-actions flag
+is set too, so recovery fires not only on a hard crash but also on the non-zero
+exit above. This is applied by the installer (`sc.exe failure` /
+`sc.exe failureflag`, and in `install-windows.ps1`) and, so existing installs
+repair themselves without a reinstall, re-applied by the daemon itself at every
+service start (best-effort, idempotent). Together this means the broader
+complaint — the service stopping and not restarting — is now covered for any
+unexpected stop, not just the settings-change path: a crash, a stuck-shutdown
+force-exit, or a restart request all bring the service back automatically. A
+deliberate operator stop still exits cleanly (exit 0) and is left stopped, as it
+should be.
 
-- *Concurrent vtysh.* The editor page fired the live-peers query (`/api/bgp`)
-  and the editor's FRR import (`/api/bgp/import`, itself two vtysh calls) at the
-  same moment on load. FRR's vty can return a transient I/O error when a second
-  vtysh hits a daemon already servicing one; when the *import's* call lost that
-  race it returned nothing, so the live table populated while the editor stayed
-  blank. vtysh is now serialized behind a process-wide lock (still bounded by the
-  same hard wall-clock, so a wedged vtysh can never block indefinitely), and
-  moving the live table to its own Monitor section means the editor page no
-  longer issues that concurrent query at all.
-- *String-form 4-byte ASNs.* Some FRR builds emit large (32-bit) ASNs — and the
-  odd counter — as quoted JSON strings rather than numbers. The summary parser
-  used plain `uint64` fields, so a single quoted `as`/`remoteAs` failed the whole
-  object unmarshal and blanked the local AS, router id, and every peer together —
-  precisely the large-ASN regime where the quoting appears. A tolerant numeric
-  type now accepts both forms (and degrades a genuinely malformed value to 0
-  rather than taking down the rest of the parse), fixing both the live panel and
-  the editor import on those hosts.
+## v481 — 2026-07-16
 
-New tests cover timer rendering/parsing/validation, the effective-default
-resolution, and string-form + mixed-garbage ASN parsing end to end (including
-the reported host's exact values, local AS 4216805503 / peer 4216825503).
+**BGP keepalive/hold timers, and Live Peers moved to its own Monitor section.**
 
----
+Two additions to the BGP configuration: a **Keepalive timer** and a **Hold
+timer**, rendered as FRR's `timers bgp <keepalive> <hold>`. A new config now
+defaults these to a fast **4s / 12s** (versus FRR's own 60s/180s), so a dropped
+peer is detected in seconds rather than minutes; the 3:1 ratio is conventional.
+Existing and imported configs keep their actual values (0 means "unset — use
+FRR's defaults"). Validation requires the hold timer to exceed keepalive and
+clear FRR's 3s floor, enforced both client-side and on save. The values also
+round-trip through the FRR-config import.
+
+**Live Peers moved from Traffic › BGP to a new Monitor › BGP Peers section.**
+The read-only live BGP session table is observational state, not configuration,
+so it now sits alongside the other live views (Monitor › Route Table, Mesh
+Peers, DNS State) rather than under the config editor — keeping Traffic › BGP
+purely for editing, consistent with how the rest of the app separates
+"configure" from "observe." The new section is gated on vtysh the same way, and
+the config page carries a one-line pointer to it. (Easy to fold back into the
+editor if co-locating configure-and-observe proves more convenient in practice.)
 
 ## v480 — 2026-07-16
 

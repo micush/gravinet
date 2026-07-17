@@ -265,8 +265,18 @@ func WindowsInstallCommands(o Options) string {
 	return fmt.Sprintf(
 		"sc.exe create %s binPath= \"%s\" start= auto DisplayName= \"%s\"\n"+
 			"sc.exe description %s \"%s\"\n"+
+			// Recovery: restart on the first, second, and subsequent failures,
+			// with a short escalating backoff (5s/10s/30s); reset the failure
+			// count after a day of stability. The failure-actions flag makes
+			// these also fire on a non-zero-exit stop, which is how a restart
+			// after a settings change comes back automatically (the service
+			// reports a failure exit rather than deadlocking on a self-restart).
+			// The daemon also re-applies these at startup, so an existing
+			// install repairs itself without needing this rerun.
+			"sc.exe failure %s reset= 86400 actions= restart/5000/restart/10000/restart/30000\n"+
+			"sc.exe failureflag %s 1\n"+
 			"sc.exe start %s\n",
-		o.Name, bin, o.DisplayName, o.Name, o.Description, o.Name)
+		o.Name, bin, o.DisplayName, o.Name, o.Description, o.Name, o.Name, o.Name)
 }
 
 // Definition returns the service definition appropriate to the current OS.

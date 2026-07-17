@@ -293,16 +293,6 @@ type BGPConfig struct {
 	Enabled  bool   `json:"enabled"`
 	ASN      uint32 `json:"asn"`
 	RouterID string `json:"router_id,omitempty"`
-	// KeepAlive and HoldTime are this speaker's BGP session timers in seconds,
-	// rendered as `timers bgp <keepalive> <holdtime>`. When either is left 0
-	// gravinet applies its own default — 4s keepalive, 12s hold — a fast-
-	// failover baseline that pairs with BFD-on-by-default and is far tighter
-	// than FRR's traditional 60/180. Resolve them through EffectiveKeepAlive /
-	// EffectiveHoldTime rather than reading the raw fields, so the default is
-	// applied consistently. FRR's rule (hold is 0 or >= 3, and keepalive must
-	// not exceed hold) is checked against the effective values in Validate.
-	KeepAlive int `json:"keepalive,omitempty"`
-	HoldTime  int `json:"hold_time,omitempty"`
 	// BFD, when true, enables BFD on every neighbor (equivalent to setting the
 	// per-neighbor bfd flag on all of them); a neighbor may also enable it on
 	// its own. Either turning it on requests FRR's bfdd.
@@ -311,6 +301,15 @@ type BGPConfig struct {
 	Networks              []string      `json:"networks,omitempty"`
 	RedistributeConnected bool          `json:"redistribute_connected,omitempty"`
 	RedistributeStatic    bool          `json:"redistribute_static,omitempty"`
+	// KeepaliveTime and HoldTime are the BGP session timers, in seconds,
+	// rendered as FRR's `timers bgp <keepalive> <hold>`. Keepalive is how often
+	// a peer sends keepalive messages; hold is how long without any message
+	// before the session is declared down. The conventional ratio is 1:3, and
+	// gravinet defaults a new config to a fast 4s/12s (versus FRR's sluggish
+	// 60s/180s) so a dropped peer is detected in seconds. 0 on either means
+	// "unset" — the timers line is omitted and FRR uses its own defaults.
+	KeepaliveTime uint32 `json:"keepalive_time,omitempty"`
+	HoldTime      uint32 `json:"hold_time,omitempty"`
 }
 
 // BGPNeighbor is one BGP peer: its address, the AS it belongs to, an optional
@@ -322,33 +321,6 @@ type BGPNeighbor struct {
 	Description string `json:"description,omitempty"`
 	Password    string `json:"password,omitempty"`
 	BFD         bool   `json:"bfd,omitempty"`
-}
-
-// gravinet's default BGP session timers: a 4s keepalive / 12s hold-time pair.
-// Deliberately aggressive (FRR's traditional default is 60/180) to match the
-// BFD-on-by-default posture — fast neighbor-failure detection is the better
-// baseline for a mesh. The 1:3 keepalive-to-hold ratio is the conventional one.
-const (
-	DefaultBGPKeepAlive = 4
-	DefaultBGPHoldTime  = 12
-)
-
-// EffectiveKeepAlive is the keepalive timer actually rendered into frr.conf:
-// the configured value when set (>0), otherwise gravinet's default.
-func (b BGPConfig) EffectiveKeepAlive() int {
-	if b.KeepAlive > 0 {
-		return b.KeepAlive
-	}
-	return DefaultBGPKeepAlive
-}
-
-// EffectiveHoldTime is the hold timer actually rendered into frr.conf: the
-// configured value when set (>0), otherwise gravinet's default.
-func (b BGPConfig) EffectiveHoldTime() int {
-	if b.HoldTime > 0 {
-		return b.HoldTime
-	}
-	return DefaultBGPHoldTime
 }
 
 // Upgrade configures this node's own binary upgrades. It is strictly
@@ -1847,24 +1819,16 @@ func (c *Config) Validate() error {
 	if c.BGP.Enabled && c.BGP.ASN == 0 {
 		return fmt.Errorf("bgp: a local AS number is required to enable BGP")
 	}
-	// Session timers: raw fields must be in the protocol's 0..65535 range (0
-	// meaning "use gravinet's default"), and the *effective* pair — what's
-	// actually rendered — must satisfy FRR's own constraint that the hold time
-	// is at least 3 seconds and the keepalive never exceeds it. Validating the
-	// effective values catches a lopsided combination (e.g. a 20s keepalive
-	// left with the default 12s hold) that bgpd would otherwise reject at load.
-	if c.BGP.KeepAlive < 0 || c.BGP.KeepAlive > 65535 {
-		return fmt.Errorf("bgp: keepalive %d out of range (0..65535)", c.BGP.KeepAlive)
-	}
-	if c.BGP.HoldTime < 0 || c.BGP.HoldTime > 65535 {
-		return fmt.Errorf("bgp: hold time %d out of range (0..65535)", c.BGP.HoldTime)
-	}
-	ka, hold := c.BGP.EffectiveKeepAlive(), c.BGP.EffectiveHoldTime()
-	if hold < 3 {
-		return fmt.Errorf("bgp: hold time must be at least 3 seconds, got %d", hold)
-	}
-	if ka > hold {
-		return fmt.Errorf("bgp: keepalive (%ds) must not exceed the hold time (%ds)", ka, hold)
+	// BGP timers: hold must exceed keepalive (FRR needs hold >= keepalive, and
+	// the conventional ratio is 3:1); a non-zero hold below FRR's floor of 3s is
+	// rejected. 0/0 means "use FRR defaults" and is fine.
+	if c.BGP.Enabled {
+		if c.BGP.HoldTime > 0 && c.BGP.HoldTime < 3 {
+			return fmt.Errorf("bgp: hold time %ds is below the minimum of 3s", c.BGP.HoldTime)
+		}
+		if c.BGP.HoldTime > 0 && c.BGP.HoldTime <= c.BGP.KeepaliveTime {
+			return fmt.Errorf("bgp: hold time (%ds) must be greater than keepalive (%ds)", c.BGP.HoldTime, c.BGP.KeepaliveTime)
+		}
 	}
 	return nil
 }
