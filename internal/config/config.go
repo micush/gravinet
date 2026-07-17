@@ -267,8 +267,51 @@ type Config struct {
 	// Upgrade governs binary distribution across the mesh (internal/upgrade).
 	Upgrade Upgrade `json:"upgrade,omitempty"`
 
+	// BGP is this node's dynamic-routing configuration, rendered into FRR's
+	// frr.conf and applied by driving the FRR daemon (see internal/webadmin's
+	// frr.go). It's node-global — one BGP speaker per host — not per network,
+	// the same way the firewall object/service catalog is. gravinet doesn't
+	// itself speak BGP; it owns the config and the daemon lifecycle and lets
+	// FRR run the sessions. Empty/disabled by default; when disabled the
+	// rendered config carries no BGP block and bgpd is switched off in
+	// /etc/frr/daemons. Ported from parapet's Bgp model.
+	BGP BGPConfig `json:"bgp,omitempty"`
+
 	// path is where this config was loaded from / will be saved to.
 	path string
+}
+
+// BGPConfig is this node's BGP configuration and the BFD settings attached to
+// it. It maps onto an FRR `router bgp <asn>` block: the local AS and router
+// id, the peers to bring up (each optionally with an MD5 password and BFD),
+// the prefixes to originate, and whether to redistribute connected/static
+// routes into BGP. BFD (Bidirectional Forwarding Detection) gives sub-second
+// neighbor-failure detection: the global BFD toggle turns it on for every
+// neighbor, and a neighbor can also opt in individually. Field-for-field a
+// port of parapet's Bgp model, so both projects drive FRR the same way.
+type BGPConfig struct {
+	Enabled  bool   `json:"enabled"`
+	ASN      uint32 `json:"asn"`
+	RouterID string `json:"router_id,omitempty"`
+	// BFD, when true, enables BFD on every neighbor (equivalent to setting the
+	// per-neighbor bfd flag on all of them); a neighbor may also enable it on
+	// its own. Either turning it on requests FRR's bfdd.
+	BFD                   bool          `json:"bfd,omitempty"`
+	Neighbors             []BGPNeighbor `json:"neighbors,omitempty"`
+	Networks              []string      `json:"networks,omitempty"`
+	RedistributeConnected bool          `json:"redistribute_connected,omitempty"`
+	RedistributeStatic    bool          `json:"redistribute_static,omitempty"`
+}
+
+// BGPNeighbor is one BGP peer: its address, the AS it belongs to, an optional
+// human description, an optional MD5 session password, and whether BFD runs on
+// this specific session. Ported from parapet's BgpNeighbor.
+type BGPNeighbor struct {
+	Peer        string `json:"peer"`
+	RemoteAS    uint32 `json:"remote_as"`
+	Description string `json:"description,omitempty"`
+	Password    string `json:"password,omitempty"`
+	BFD         bool   `json:"bfd,omitempty"`
 }
 
 // Upgrade configures this node's own binary upgrades. It is strictly
@@ -1022,7 +1065,7 @@ type QoSRule struct {
 	PortMin  int      `json:"port_min"`
 	PortMax  int      `json:"port_max"`
 	Services []string `json:"services,omitempty"` // named service-catalog entries (Config.FirewallServices), unioned with Protocol/PortMin/PortMax
-	DSCP     *int     `json:"dscp,omitempty"` // nil = any
+	DSCP     *int     `json:"dscp,omitempty"`     // nil = any
 	Class    int      `json:"class"`
 	Disabled bool     `json:"disabled,omitempty"` // true = rule is skipped; active by default
 }
@@ -1756,6 +1799,16 @@ func (c *Config) Validate() error {
 	}
 	if c.Upgrade.ConfirmSeconds < 0 {
 		return fmt.Errorf("upgrade.confirm_seconds %d is negative", c.Upgrade.ConfirmSeconds)
+	}
+	// BGP: an enabled speaker needs a local AS. Everything else the FRR
+	// renderer filters defensively (a neighbor with an empty peer or a zero
+	// remote-as, an unsafe network token, etc. is simply skipped, never
+	// emitted into frr.conf), so validation here is deliberately light — it
+	// rejects only the one combination that can't produce a runnable config,
+	// mirroring the renderer's own `enabled && asn > 0` gate, and gives a
+	// clear error instead of silently writing a BGP block bgpd would refuse.
+	if c.BGP.Enabled && c.BGP.ASN == 0 {
+		return fmt.Errorf("bgp: a local AS number is required to enable BGP")
 	}
 	return nil
 }

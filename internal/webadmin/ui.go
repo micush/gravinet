@@ -5691,43 +5691,189 @@ function infoRoutes(c){
   })();
 }
 
-// secBgp shows this host's BGP peers as reported by FRR (via vtysh), read live
-// and independent of gravinet's own config — gravinet doesn't manage FRR, it
-// just reports what FRR already has. The whole section is only reachable when
-// state.bgpSupported is true (vtysh present); see sectionVisible(). Modeled on
-// infoRoutes: a single card that fetches once and fills a table, degrading to
-// an explanatory line when FRR isn't answering.
+// secBgp is the BGP/BFD control panel: gravinet owns the configuration and
+// drives the FRR daemon from it. The top card is an editor (local AS, router
+// id, BFD, redistribution, neighbors, advertised networks) that POSTs to
+// /api/bgp/config, which persists the config and reconciles FRR (render
+// frr.conf, sync the daemon set, reload FRR). The bottom card shows the live
+// peer table FRR reports (via vtysh), read-only. The whole section is only
+// reachable when state.bgpSupported is true (vtysh present); see
+// sectionVisible().
 function secBgp(c){
-  secHint(c, 'Live BGP peer sessions from FRR on this host, read through <code>vtysh</code> and independent of gravinet\u2019s own config \u2014 gravinet reports what FRR has, it doesn\u2019t manage the routing daemon. This section appears only on hosts where FRR\u2019s <code>vtysh</code> is installed. Read-only.');
-  const card = $('<div class="card"></div>');
-  card.appendChild($('<h3>BGP peers</h3>'));
-  const meta = $('<div class="hint" style="margin:-4px 0 10px"></div>'); card.appendChild(meta);
-  const body = $('<div></div>'); body.innerHTML = '<div class="hint">loading\u2026</div>'; card.appendChild(body); c.appendChild(card);
+  secHint(c, 'gravinet owns this host\u2019s BGP and BFD configuration and drives the FRR daemon from it \u2014 edit below and save to render FRR\u2019s config, enable the daemons it needs, and reload FRR. BFD (Bidirectional Forwarding Detection) gives sub-second neighbor-failure detection; turn it on globally or per neighbor. The live peer table beneath reflects what FRR actually has.');
+  const editWrap = $('<div></div>'); c.appendChild(editWrap);
+  editWrap.innerHTML = '<div class="card"><div class="hint">loading configuration\u2026</div></div>';
   (async () => {
-    const r = await api('/api/bgp');
-    if (!r.ok || !r.body){ meta.textContent=''; body.innerHTML = '<div class="hint">could not read BGP status.</div>'; return; }
-    if (r.body.available === false){
-      meta.textContent='';
-      body.innerHTML = '<div class="empty">'+esc(r.body.reason || 'BGP status is unavailable.')+'</div>';
-      return;
-    }
-    const rid = r.body.router_id || '', las = r.body.local_as || 0;
-    meta.innerHTML = (las ? 'local AS <b>'+esc(String(las))+'</b>' : '') +
-      (las && rid ? ' \u00b7 ' : '') + (rid ? 'router id <b>'+esc(rid)+'</b>' : '') ||
-      'FRR is reachable.';
-    const peers = r.body.peers || [];
-    if (!peers.length){ body.innerHTML = '<div class="empty">No BGP peers.</div>'; return; }
-    let h = '<table><tr><th>peer</th><th>remote AS</th><th>state</th><th>uptime</th><th>prefixes</th><th>family</th></tr>';
-    for (const p of peers){
-      const est = (p.state||'').toLowerCase() === 'established';
-      const stateCell = '<span class="pill" style="'+(est?'color:var(--ok);border-color:var(--ok)':'color:var(--mut)')+'">'+esc(p.state||'\u2013')+'</span>';
-      h += '<tr><td>'+esc(p.peer)+'</td><td>'+esc(String(p.remote_as||'\u2013'))+'</td><td>'+stateCell+
-        '</td><td>'+esc(p.uptime||'\u2013')+'</td><td>'+esc(String(p.prefixes_received!=null?p.prefixes_received:'\u2013'))+
-        '</td><td>'+(p.afi==='ipv6Unicast'?'IPv6':'IPv4')+'</td></tr>';
-    }
-    body.innerHTML = h+'</table>';
-    enhanceTable(body.querySelector('table')); // async render missed renderSection's pass
+    const r = await api('/api/bgp/config');
+    if (!r.ok || !r.body){ editWrap.innerHTML = '<div class="card"><div class="hint">could not load BGP configuration.</div></div>'; return; }
+    renderBgpEditor(editWrap, r.body.bgp || {}, !!r.body.installed);
   })();
+  // Live status, read from FRR — same reader as the read-only view.
+  const liveCard = $('<div class="card"></div>');
+  liveCard.appendChild($('<h3>Live peers</h3>'));
+  liveCard.appendChild($('<div class="hint" style="margin:-4px 0 10px">What FRR reports right now for the sessions configured above. A newly-added neighbor takes a moment to appear as FRR brings the session up.</div>'));
+  const liveMeta = $('<div class="hint" style="margin:-4px 0 10px" id="bgp-live-meta"></div>'); liveCard.appendChild(liveMeta);
+  const liveBody = $('<div id="bgp-live-body"></div>'); liveBody.innerHTML = '<div class="hint">loading\u2026</div>'; liveCard.appendChild(liveBody);
+  c.appendChild(liveCard);
+  bgpLiveStatus(liveMeta, liveBody);
+}
+
+// bgpLiveStatus fills a meta line and body with FRR's live BGP peer table
+// (GET /api/bgp), degrading to an explanatory line when FRR isn't answering.
+async function bgpLiveStatus(meta, body){
+  const r = await api('/api/bgp');
+  if (!r.ok || !r.body){ meta.textContent=''; body.innerHTML = '<div class="hint">could not read BGP status.</div>'; return; }
+  if (r.body.available === false){
+    meta.textContent='';
+    body.innerHTML = '<div class="empty">'+esc(r.body.reason || 'BGP status is unavailable.')+'</div>';
+    return;
+  }
+  const rid = r.body.router_id || '', las = r.body.local_as || 0;
+  meta.innerHTML = ((las ? 'local AS <b>'+esc(String(las))+'</b>' : '') +
+    (las && rid ? ' \u00b7 ' : '') + (rid ? 'router id <b>'+esc(rid)+'</b>' : '')) ||
+    'FRR is reachable.';
+  const peers = r.body.peers || [];
+  if (!peers.length){ body.innerHTML = '<div class="empty">No BGP peers yet.</div>'; return; }
+  let h = '<table><tr><th>peer</th><th>remote AS</th><th>state</th><th>uptime</th><th>prefixes</th><th>family</th></tr>';
+  for (const p of peers){
+    const est = (p.state||'').toLowerCase() === 'established';
+    const stateCell = '<span class="pill" style="'+(est?'color:var(--ok);border-color:var(--ok)':'color:var(--mut)')+'">'+esc(p.state||'\u2013')+'</span>';
+    h += '<tr><td>'+esc(p.peer)+'</td><td>'+esc(String(p.remote_as||'\u2013'))+'</td><td>'+stateCell+
+      '</td><td>'+esc(p.uptime||'\u2013')+'</td><td>'+esc(String(p.prefixes_received!=null?p.prefixes_received:'\u2013'))+
+      '</td><td>'+(p.afi==='ipv6Unicast'?'IPv6':'IPv4')+'</td></tr>';
+  }
+  body.innerHTML = h+'</table>';
+  enhanceTable(body.querySelector('table'));
+}
+
+// renderBgpEditor builds the editable BGP/BFD form into host from the stored
+// config b. Neighbors and networks are held in local arrays kept in sync with
+// their input fields, so Save gathers a clean object to POST. installed=false
+// (FRR absent) still lets the operator author config — it just warns it won't
+// be applied until FRR is present.
+function renderBgpEditor(host, b, installed){
+  const neighbors = (b.neighbors || []).map(n => ({
+    peer: n.peer||'', remote_as: n.remote_as||0, description: n.description||'',
+    password: n.password||'', bfd: !!n.bfd,
+  }));
+  const networks = (b.networks || []).slice();
+
+  const card = $('<div class="card"></div>');
+  card.appendChild($('<h3>BGP configuration</h3>'));
+  if (!installed){
+    card.appendChild($('<div class="empty" style="margin-bottom:10px">FRR is not installed on this host, so a saved configuration is stored but not applied to a running daemon. Install FRR to have gravinet bring these sessions up.</div>'));
+  }
+
+  const rowTog = (labelText, desc, checked) => {
+    const row = $('<div class="settings-row"></div>');
+    row.appendChild($('<div><div class="settings-label">'+esc(labelText)+'</div><div class="settings-desc">'+desc+'</div></div>'));
+    const sw = $('<label class="sw"><input type="checkbox"><span class="sw-slider"></span></label>');
+    if (checked) sw.querySelector('input').checked = true;
+    row.appendChild(sw); card.appendChild(row);
+    return sw.querySelector('input');
+  };
+  const rowInput = (labelText, desc, value, placeholder, width) => {
+    const row = $('<div class="settings-row"></div>');
+    row.appendChild($('<div><div class="settings-label">'+esc(labelText)+'</div><div class="settings-desc">'+desc+'</div></div>'));
+    const inp = $('<input type="text" style="width:'+(width||220)+'px">');
+    inp.value = value==null ? '' : String(value); inp.placeholder = placeholder||'';
+    row.appendChild(inp); card.appendChild(row);
+    return inp;
+  };
+
+  const enableCb = rowTog('Enable BGP', 'Render and run a <code>router bgp</code> speaker on this host. Off leaves no BGP block in FRR\u2019s config and switches bgpd off.', !!b.enabled);
+  const asnInp = rowInput('Local AS number', 'This node\u2019s autonomous-system number, e.g. 65001. Required to enable BGP.', b.asn||'', 'e.g. 65001', 160);
+  const ridInp = rowInput('Router-id', 'BGP router-id (an IPv4-style id), e.g. 10.0.0.1. Optional \u2014 FRR picks one if left blank.', b.router_id||'', 'e.g. 10.0.0.1', 180);
+  const bfdCb = rowTog('BFD on all neighbors', 'Enable Bidirectional Forwarding Detection for every neighbor (sub-second failure detection). A neighbor can also enable BFD on its own below.', !!b.bfd);
+  const rcCb = rowTog('Redistribute connected', 'Advertise directly-connected routes into BGP.', !!b.redistribute_connected);
+  const rsCb = rowTog('Redistribute static', 'Advertise static routes into BGP.', !!b.redistribute_static);
+
+  // ---- neighbors ----
+  const nbrSec = $('<div style="margin-top:16px;border-top:1px solid var(--line);padding-top:12px"></div>');
+  const nbrHead = $('<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"></div>');
+  nbrHead.appendChild($('<div class="settings-label">Neighbors</div>'));
+  const addNbr = $('<button class="sm">+ add neighbor</button>');
+  nbrHead.appendChild(addNbr); nbrSec.appendChild(nbrHead);
+  const nbrBody = $('<div></div>'); nbrSec.appendChild(nbrBody);
+  card.appendChild(nbrSec);
+
+  function renderNbrs(){
+    if (!neighbors.length){ nbrBody.innerHTML = '<div class="empty">No neighbors. Click \u201c+ add neighbor\u201d to define a BGP peer.</div>'; return; }
+    nbrBody.innerHTML = '';
+    const tbl = $('<table><tr><th>peer address</th><th>remote AS</th><th>description</th><th title="MD5 session password">MD5 password</th><th title="Bidirectional Forwarding Detection for this peer">BFD</th><th></th></tr></table>');
+    neighbors.forEach((n, i) => {
+      const tr = $('<tr></tr>');
+      const mk = (val, ph, w) => { const inp=$('<input type="text" style="width:'+w+'px">'); inp.value=val==null?'':String(val); inp.placeholder=ph||''; return inp; };
+      const peer = mk(n.peer, '10.0.0.2', 130); peer.oninput = () => n.peer = peer.value.trim();
+      const as = mk(n.remote_as||'', '65002', 80); as.oninput = () => n.remote_as = parseInt(as.value,10)||0;
+      const desc = mk(n.description, 'optional', 150); desc.oninput = () => n.description = desc.value;
+      const pw = $('<input type="password" style="width:120px" placeholder="optional">'); pw.value = n.password||''; pw.oninput = () => n.password = pw.value;
+      const bfd = $('<input type="checkbox">'); bfd.checked = !!n.bfd; bfd.onchange = () => n.bfd = bfd.checked;
+      const del = $('<button class="sm danger">\u2212</button>'); del.onclick = () => { neighbors.splice(i,1); renderNbrs(); };
+      const cells = [peer, as, desc, pw, bfd, del];
+      cells.forEach(el => { const td=$('<td></td>'); td.appendChild(el); tr.appendChild(td); });
+      tbl.appendChild(tr);
+    });
+    nbrBody.appendChild(tbl);
+  }
+  addNbr.onclick = () => { neighbors.push({peer:'', remote_as:0, description:'', password:'', bfd:false}); renderNbrs(); };
+  renderNbrs();
+
+  // ---- advertised networks ----
+  const netSec = $('<div style="margin-top:16px;border-top:1px solid var(--line);padding-top:12px"></div>');
+  const netHead = $('<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"></div>');
+  netHead.appendChild($('<div class="settings-label">Advertised networks</div>'));
+  const addNet = $('<button class="sm">+ add network</button>');
+  netHead.appendChild(addNet); netSec.appendChild(netHead);
+  const netBody = $('<div></div>'); netSec.appendChild(netBody);
+  card.appendChild(netSec);
+
+  function renderNets(){
+    if (!networks.length){ netBody.innerHTML = '<div class="empty">No advertised networks. Add a prefix (e.g. 10.0.0.0/24) to originate it into BGP.</div>'; return; }
+    netBody.innerHTML = '';
+    networks.forEach((net, i) => {
+      const rowEl = $('<div style="display:flex;gap:8px;margin-bottom:6px;align-items:center"></div>');
+      const inp = $('<input type="text" style="width:220px" placeholder="e.g. 10.0.0.0/24">'); inp.value = net||'';
+      inp.oninput = () => networks[i] = inp.value.trim();
+      const del = $('<button class="sm danger">\u2212</button>'); del.onclick = () => { networks.splice(i,1); renderNets(); };
+      rowEl.appendChild(inp); rowEl.appendChild(del); netBody.appendChild(rowEl);
+    });
+  }
+  addNet.onclick = () => { networks.push(''); renderNets(); };
+  renderNets();
+
+  // ---- save ----
+  const footer = $('<div style="margin-top:16px;border-top:1px solid var(--line);padding-top:12px;display:flex;gap:12px;align-items:center"></div>');
+  const saveBtn = $('<button class="ok">Save &amp; apply</button>');
+  const status = $('<span class="hint"></span>');
+  footer.appendChild(saveBtn); footer.appendChild(status); card.appendChild(footer);
+
+  saveBtn.onclick = async () => {
+    const asn = parseInt(asnInp.value, 10) || 0;
+    if (enableCb.checked && asn <= 0){ alert('A local AS number is required to enable BGP.'); asnInp.focus(); return; }
+    const payload = {
+      enabled: enableCb.checked,
+      asn: asn,
+      router_id: ridInp.value.trim(),
+      bfd: bfdCb.checked,
+      redistribute_connected: rcCb.checked,
+      redistribute_static: rsCb.checked,
+      // Drop blank rows so what's stored matches what FRR would accept.
+      neighbors: neighbors.filter(n => n.peer && n.remote_as > 0)
+        .map(n => ({ peer:n.peer, remote_as:n.remote_as, description:n.description||'', password:n.password||'', bfd:!!n.bfd })),
+      networks: networks.map(s => (s||'').trim()).filter(s => s.length),
+    };
+    saveBtn.disabled = true; status.textContent = 'saving\u2026';
+    const r = await api('/api/bgp/config', { method:'POST', body: JSON.stringify(payload) });
+    saveBtn.disabled = false;
+    if (!r.ok){ status.textContent=''; alert((r.body && r.body.error) || 'Save failed.'); return; }
+    status.style.color = 'var(--ok)';
+    status.textContent = r.body.applied ? ('Saved \u2014 ' + (r.body.note || 'applied to FRR.')) : ('Saved \u2014 ' + (r.body.note || 'not applied (FRR absent).'));
+    // Refresh live status shortly after, once FRR has had a moment to converge.
+    setTimeout(() => { const m=document.getElementById('bgp-live-meta'), bd=document.getElementById('bgp-live-body'); if (m&&bd) bgpLiveStatus(m, bd); }, 1500);
+  };
+
+  host.innerHTML = ''; host.appendChild(card);
 }
 
 // infoHosts shows the local hosts file contents, read live from disk.

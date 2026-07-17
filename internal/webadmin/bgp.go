@@ -24,6 +24,8 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	"gravinet/internal/config"
 )
 
 // bgpVtyshPaths are the locations vtysh is installed to, in priority order.
@@ -102,7 +104,63 @@ func (s *Server) handleBGP(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// bgpPeer is one row of the peer table shown in the UI. Fields and their
+// handleBGPConfig is the read/write side: gravinet owns the BGP/BFD
+// configuration and drives the FRR daemon from it. GET returns the stored BGP
+// config plus whether FRR is installed (so the editor can warn that a saved
+// config won't be applied on a host without FRR). PUT/POST persists a new BGP
+// config to gravinet's own config.json and then reconciles FRR with it —
+// rendering frr.conf, syncing the daemon set, and reloading FRR (see frr.go).
+// The config is saved even when FRR isn't installed; it just isn't pushed to a
+// daemon that isn't there, exactly as parapet behaves.
+func (s *Server) handleBGPConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		var bgp config.BGPConfig
+		if s.configPath != "" {
+			if cfg, err := config.Load(s.configPath); err == nil {
+				bgp = cfg.BGP
+			}
+		}
+		if bgp.Neighbors == nil {
+			bgp.Neighbors = []config.BGPNeighbor{}
+		}
+		if bgp.Networks == nil {
+			bgp.Networks = []string{}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"bgp":       bgp,
+			"installed": frrInstalled(),
+			"supported": bgpSupported(),
+		})
+		return
+	}
+
+	var req config.BGPConfig
+	if !decode(w, r, &req) {
+		return
+	}
+	// Persist first (mutateConfig validates + saves + fires the daemon's reload
+	// hook), so the durable record is updated before we touch FRR. Neighbor/
+	// network hygiene the renderer would silently drop is normalized here too,
+	// so what's stored is what gets applied.
+	if err := s.mutateConfig(func(cfg *config.Config) error {
+		cfg.BGP = req
+		return nil
+	}); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	// Then reconcile FRR with the freshly-saved config. A no-op (with a note)
+	// when FRR isn't installed — never fatal to the save.
+	note, err := applyBGP(req, s.log)
+	if err != nil {
+		// Config is already saved; report the apply problem without pretending
+		// the save failed.
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "applied": false, "note": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "applied": frrInstalled(), "note": note})
+}
+
 // derivation match parapet's bgp_peer_row so the two projects report BGP the
 // same way.
 type bgpPeer struct {

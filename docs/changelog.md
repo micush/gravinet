@@ -37,6 +37,45 @@ assuming it didn't happen.
 
 ---
 
+## v474 — 2026-07-16
+
+**Traffic › BGP is now a full BGP + BFD control panel — gravinet owns the
+configuration and drives the FRR daemon.** v473 added a read-only view of the
+sessions FRR already held; this makes the section read/write. gravinet now
+stores its own BGP/BFD configuration (node-global, in `config.json` under a new
+`bgp` block) and reconciles FRR with it on save: it renders an integrated
+`/etc/frr/frr.conf`, rewrites `/etc/frr/daemons` so exactly the daemons the
+config needs are enabled (`bgpd` when BGP is on, `bfdd` when BFD is on globally
+or for any neighbor, `staticd` always), and reloads FRR — restarting when a
+daemon has to change state, otherwise reloading, with a `vtysh -b` fallback and
+a single retry, all dispatched to the background so the HTTP save returns
+immediately. gravinet doesn't speak BGP itself; it owns the config and the
+daemon lifecycle and lets FRR run the sessions. This is a port of parapet's
+`frr.rs`, narrowed to the BGP/BFD surface the request named.
+
+The editor exposes: enable toggle, local AS number, router-id, **BFD on all
+neighbors** (Bidirectional Forwarding Detection — sub-second neighbor-failure
+detection), redistribute connected/static, a **neighbors** table (peer address,
+remote AS, description, MD5 session password, and a per-neighbor BFD toggle),
+and an **advertised networks** list. Saving persists to gravinet's config
+(validated: enabling BGP requires a local AS) and then applies to FRR; the live
+peer table beneath refreshes to show FRR converging. On a host without FRR the
+config still saves — it just isn't pushed to a daemon that isn't there, and the
+editor says so — exactly as parapet behaves.
+
+Config generation is injection-safe: every peer address, network prefix, and
+router-id passes a `safeToken` allow-list before it's spliced into a conf line
+(anything with whitespace or shell/comment metacharacters is silently dropped,
+never emitted); descriptions and passwords are single-line-filtered and
+length-capped, and passwords with embedded whitespace have it stripped. New unit
+tests port parapet's render/daemon coverage: the minimal runnable block,
+password+BFD emission, per-neighbor vs global BFD requesting `bfdd`,
+whitespace-stripped passwords, injection filtering, invalid-neighbor skipping,
+the `/etc/frr/daemons` reconciliation (including idempotency and turning BGP back
+off), `safeToken` itself, and config-level BGP validation and JSON round-trip.
+The `/api/bgp` read-only status endpoint and the `vtysh`-presence menu gate from
+v473 are unchanged; a new `/api/bgp/config` endpoint backs the editor.
+
 ## v473 — 2026-07-16
 
 **Traffic › BGP: live BGP peer status from FRR, shown only where it applies.**
