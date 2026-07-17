@@ -61,6 +61,8 @@ const indexHTML = `<!doctype html>
   .global-search .ss-opt { cursor:pointer; }
   .search-hit { animation: search-hit-flash 2s ease-out; }
   @keyframes search-hit-flash { 0% { background:var(--acc); } 100% { background:transparent; } }
+  .peer-link { cursor:pointer; }
+  .peer-link:hover { text-decoration:underline; }
   .toggle:hover { background:var(--hover); }
   .layout { display:flex; flex:1 1 auto; min-height:0; }
   .rail { width:188px; flex:0 0 188px; background:var(--sidebar); border-right:1px solid var(--line); display:flex; flex-direction:column; overflow:hidden; }
@@ -280,7 +282,7 @@ function setTarget(v){ state.target = v; state.targetSeq++; }
 // selection holds the currently ticked rows per multi-select section, keyed by
 // "netid#rowid", so a selection survives the 4s status re-render (peers/bans
 // repaint on their own). Top-of-table buttons act on whatever is ticked.
-const selection = { peers:new Set(), keys:new Set(), bans:new Set() };
+const selection = { peers:new Set(), mpeers:new Set(), keys:new Set(), bans:new Set() };
 
 // DROPDOWN_FILTER_MIN is the option count above which a peer picker grows a
 // filter box. Below this, the list is already easy to scan, so a filter would
@@ -1006,6 +1008,27 @@ function flashAndScroll(target){
   target.scrollIntoView({ behavior:'smooth', block:'center' });
   target.classList.add('search-hit');
   setTimeout(() => target.classList.remove('search-hit'), 2000);
+}
+
+// gotoMeshPeer switches to Monitor > mesh peers and flashes one peer's row,
+// reusing the same card-scoped flashAndScroll the global search uses. Called
+// from the latency table's peer names; those rows are keyed by network *name*
+// (the /api/latency response carries no network id), so the caller resolves
+// the id first and passes it here. Landing is no-op-safe: if the row can't be
+// found (say the peer dropped between the click and the re-render), it still
+// lands on the right network card rather than nowhere.
+async function gotoMeshPeer(netId, nodeId){
+  if (!netId) return;
+  state.section = 'mesh-peers';
+  setActiveRailTab('mesh-peers');
+  await refresh();
+  let card = null;
+  for (const c of document.querySelectorAll('#content .card')){
+    const idEl = c.querySelector('.net-id');
+    if (idEl && idEl.textContent === netId){ card = c; break; }
+  }
+  const target = card ? (card.querySelector('tr[data-peer="'+CSS.escape(nodeId)+'"]') || card) : null;
+  flashAndScroll(target);
 }
 
 // buildGlobalSearch renders the header's global search box, reusing the
@@ -2885,6 +2908,30 @@ function peerRowsForNet(n) {
   return rows;
 }
 
+// openPeerShellFromSel opens a shell on the single ticked row of a peers table,
+// reading the selection from namespace sec so both Mesh > peers ('peers') and
+// Monitor > mesh peers ('mpeers') can share the exact same gate. Rows are
+// recomputed from peerRowsForNet rather than captured, so a peer that dropped
+// between render and click is caught here instead of acting on a stale row.
+function openPeerShellFromSel(n, sec) {
+  const ids = selectedIn(sec, n.id);
+  if (ids.length !== 1){ alert('tick exactly one peer (or this node) to open a shell on'); return; }
+  const p = peerRowsForNet(n).find(x => x.id === ids[0]);
+  if (!p){ alert('that row is no longer available'); return; }
+  // A shell on self runs locally and only needs Remote shell enabled
+  // (checked server-side), but that's only true when self means *this*
+  // browser session's own node. When a remote node is selected up top
+  // (state.target) and its own self row is ticked here, opening a shell
+  // on it is exactly the same cross-node relay as any other peer row on
+  // that node: it still needs Manager mode and a live connection.
+  const trulyLocalSelf = p.self && !state.target;
+  if (!trulyLocalSelf) {
+    if (!state.manager){ alert('enable Manager mode (Settings \u2192 Cluster) to open a shell on a peer'); return; }
+    if (p.disabled || p.pending){ alert('that peer is not currently connected'); return; }
+  }
+  openShellModal(p.id, p.host || p.id);
+}
+
 function secPeers(c) {
   c.appendChild($('<div class="hint" style="margin:0 0 10px">Peers connected to this node, grouped by network. This node is listed too (<b>this node</b>), tickable to look up or shell into, but not disabled, edited, or banned. Double-click a peer to disable it; double-click <b>notes</b> for a local, permanent note on its node id (auto-filled from a matching seed\'s note on first connect, unless you\'ve set your own). Tick rows and Ban to block mesh-wide, or tick one and \ud83d\udec8 for DNS/WHOIS. See Monitor \u2192 mesh peers for connection health and transport detail.</div>'));
   if (state.nat && state.nat.class && state.nat.class !== 'unknown') {
@@ -3004,25 +3051,8 @@ function secPeers(c) {
       for (const id of ids) await api('/api/ban',{method:'POST',body:JSON.stringify({net:n.id,node:id,notes:'banned via admin'})});
       selection.peers.clear(); refresh();
     }},
-      { label:'\u25a0', cls:'tbar-btn', gap:true, title:'open a shell on the selected peer, or on this node itself (a remote peer additionally needs Manager mode here and Remote shell on that peer)', onclick: () => {
-      const ids = selectedIn('peers', n.id);
-      if (ids.length !== 1){ alert('tick exactly one peer (or this node) to open a shell on'); return; }
-      const p = rows.find(x => x.id === ids[0]);
-      if (!p){ alert('that row is no longer available'); return; }
-      // A shell on self runs locally and only needs Remote shell enabled
-      // (checked server-side) — but that's only true when self means *this*
-      // browser session's own node. When a remote node is selected up top
-      // (state.target) and its own self row is ticked here, opening a shell
-      // on it is exactly the same cross-node relay as any other peer row on
-      // that node — it still needs Manager mode and a live connection.
-      const trulyLocalSelf = p.self && !state.target;
-      if (!trulyLocalSelf) {
-        if (!state.manager){ alert('enable Manager mode (Settings \u2192 Cluster) to open a shell on a peer'); return; }
-        if (p.disabled || p.pending){ alert('that peer is not currently connected'); return; }
-      }
-      openShellModal(ids[0], (p && p.host) || ids[0]);
-    }},
-      { label:'\ud83d\udec8', cls:'tbar-btn', gap:true, title:'info', onclick: () => peerInfoRow(n) }];
+      { label:'\u25a0', cls:'tbar-btn', gap:true, title:'open a shell on the selected peer, or on this node itself (a remote peer additionally needs Manager mode here and Remote shell on that peer)', onclick: () => openPeerShellFromSel(n, 'peers') },
+      { label:'\ud83d\udec8', cls:'tbar-btn', gap:true, title:'info', onclick: () => peerInfoRow(n, 'peers') }];
   });
 }
 
@@ -3074,19 +3104,22 @@ function peerOverlayEdit(td, n, p){
   };
   inp.onblur = commit;
 }
-// the shared peerRowsForNet), but connection health and session detail
-// instead of operating controls — no selection, no state toggle, no ban.
-// Kept as its own page under Monitor, alongside the rest of that group's
-// live-diagnostic views (metrics, latency, route-table, ...), rather than a
-// mode flag on secPeers, so there's never a mutating control just one
-// misplaced double-click away while glancing at health.
+// infoMeshPeers renders the same peer set as Mesh > peers (both read from
+// the shared peerRowsForNet), but surfaces connection health and session
+// detail instead of operating controls: no state toggle, no ban, and no
+// mutating double-click. It does allow ticking a row to open a shell or look
+// one up (info), the same two read-and-connect conveniences Mesh > peers
+// offers, wired to its own selection namespace ('mpeers') so a tick here never
+// carries over into the operate view's Ban button. Kept as its own page under
+// Monitor, alongside the rest of that group's live-diagnostic views (metrics,
+// latency, route-table, ...), rather than a mode flag on secPeers.
 function infoMeshPeers(c) {
-  c.appendChild($('<div class="hint" style="margin:0 0 10px">Live connection detail for peers on this node, grouped by network — read-only; see Mesh \u2192 peers to enable, disable, or ban one. <b>key</b> is the label (from this node\'s own Keys table) of the key currently authenticating that peer\'s session — handy for confirming everyone has moved onto a newly-distributed key before you retire the old one. <b>endpoint</b> is the peer\'s observed underlay address — for a peer behind NAT this is its public mapping as seen from here. <b>reach</b> is <i>direct</i> when there\'s a working direct path, or <i>relayed</i> when the peer could only be reached through another node (a strong sign of a restrictive NAT or firewall). <b>time</b> is how long the current session has been established for — it resets on every reconnect.</div>'));
+  c.appendChild($('<div class="hint" style="margin:0 0 10px">Live connection detail for peers on this node, grouped by network. Peer state is read-only here; tick a row and use \u25a0 to open a shell or \ud83d\udec8 to look one up, or see Mesh \u2192 peers to enable, disable, or ban one. <b>key</b> is the label (from this node\'s own Keys table) of the key currently authenticating that peer\'s session, handy for confirming everyone has moved onto a newly-distributed key before you retire the old one. <b>endpoint</b> is the peer\'s observed underlay address; for a peer behind NAT this is its public mapping as seen from here. <b>reach</b> is <i>direct</i> when there\'s a working direct path, or <i>relayed</i> when the peer could only be reached through another node (a strong sign of a restrictive NAT or firewall). <b>time</b> is how long the current session has been established, and it resets on every reconnect.</div>'));
   perNet(c, (card, n) => {
     const rows = peerRowsForNet(n);
 
-    let h = '<table class="peers-table"><colgroup><col class="c-target"><col class="c-key"><col class="c-overlay"><col class="c-endpoint"><col class="c-reach"><col class="c-time"><col class="c-transport"></colgroup><tr><th>target</th><th title="the label (from this node\'s own Keys table) of the key currently authenticating this peer\'s session">key</th><th>overlay</th><th>endpoint</th><th>reach</th><th title="how long the current session with this peer has been established; resets on every reconnect">time</th><th title="discovered path MTU to the peer, fragment counts (tx/rx), and fragment loss (send/reassembly). Clean counters here mean a connectivity problem is not inside the mesh.">transport</th></tr>';
-    if (!rows.length) h += '<tr><td colspan="7" class="empty">no peers</td></tr>';
+    let h = '<table class="peers-table"><colgroup><col class="c-sel"><col class="c-target"><col class="c-key"><col class="c-overlay"><col class="c-endpoint"><col class="c-reach"><col class="c-time"><col class="c-transport"></colgroup><tr><th class="selcol"><input type="checkbox" class="rall"></th><th>target</th><th title="the label (from this node\'s own Keys table) of the key currently authenticating this peer\'s session">key</th><th>overlay</th><th>endpoint</th><th>reach</th><th title="how long the current session with this peer has been established; resets on every reconnect">time</th><th title="discovered path MTU to the peer, fragment counts (tx/rx), and fragment loss (send/reassembly). Clean counters here mean a connectivity problem is not inside the mesh.">transport</th></tr>';
+    if (!rows.length) h += '<tr><td colspan="8" class="empty">no peers</td></tr>';
     for (const p of rows) {
       // None of reach/key/time/transport describe a connection to yourself,
       // so the self row leaves them blank rather than showing something
@@ -3113,11 +3146,15 @@ function infoMeshPeers(c) {
       // (peerRowsForNet fills it from state.nat.public) — a real value once
       // NAT discovery completes, not a placeholder, so it's shown the same
       // way a peer's endpoint is rather than overridden to a dash.
-      h += '<tr title="'+stTitle+'"'+(p.self?' class="peer-self"':'')+'><td>'+nodeCell(p.host,p.id,n.id,p.endpoint)+'</td><td>'+keyCell+'</td>'
+      h += '<tr class="selectable'+(p.self?' peer-self':'')+'" title="'+stTitle+'" data-peer="'+esc(p.id)+'"><td class="selcol"><input type="checkbox" class="rsel" data-k="'+esc(selKey(n.id,p.id))+'"'+(p.self?' title="this is the current node"':'')+'></td><td>'+nodeCell(p.host,p.id,n.id,p.endpoint)+'</td><td>'+keyCell+'</td>'
         + '<td'+(p.overlay?' title="'+(p.self?'this node\'s own overlay address':'overlay address is set by the peer itself')+'">':'>')+esc(p.overlay)+'</td>'
         + '<td'+(p.self?' title="this node\'s own observed public address">':'>')+esc(p.endpointText)+'</td><td>'+reach+'</td><td>'+timeCell+'</td><td class="c-transport-cell">'+xport+'</td></tr>';
     }
     const t = $('<div></div>'); t.innerHTML = h+'</table>'; card.appendChild(t);
+    wireSelectable(t, 'mpeers');
+    t.querySelector('table')._rowButtons = [
+      { label:'\u25a0', cls:'tbar-btn', gap:true, title:'open a shell on the selected peer, or on this node itself (a remote peer additionally needs Manager mode here and Remote shell on that peer)', onclick: () => openPeerShellFromSel(n, 'mpeers') },
+      { label:'\ud83d\udec8', cls:'tbar-btn', gap:true, title:'info', onclick: () => peerInfoRow(n, 'mpeers') }];
   });
 }
 
@@ -3526,8 +3563,8 @@ function geoIPSectionHTML(d){
 // selectedIn('peers', ...) selection Peers already uses for Ban, rather than
 // the seed table's simpler selCheckedRows, since that's how this table's
 // selection actually persists across its periodic re-renders.
-async function peerInfoRow(n){
-  const ids = selectedIn('peers', n.id);
+async function peerInfoRow(n, sec){
+  const ids = selectedIn(sec || 'peers', n.id);
   if (ids.length !== 1){ alert('tick exactly one peer to look up'); return; }
   const p = peerRowsForNet(n).find(x => x.id === ids[0]);
   if (!p || p.disabled || p.pending || !p.endpoint){ alert('no underlay endpoint to look up yet for this peer'); return; }
@@ -5700,6 +5737,10 @@ function infoLatency(c){
       const sub = $('<div class="subcard"></div>');
       sub.appendChild($('<h4>'+esc(n.name)+'</h4>'));
       const peers = n.peers||[];
+      // Resolve the network id once (the /api/latency response is name-keyed
+      // only); Monitor > mesh peers is keyed by id, so the peer-name links
+      // below need it to land on the right card. Empty if the name isn't in cfg.
+      const netId = (state.cfg.find(x => x.name === n.name)||{}).id || '';
       if (!peers.length){ sub.appendChild($('<div class="hint">no other peers on this network.</div>')); body.appendChild(sub); continue; }
       // Alphabetical by the same name shown in the table, and nothing else —
       // sorting by rtt/reachability (as this used to) meant rows reshuffled
@@ -5728,12 +5769,22 @@ function infoLatency(c){
         const rowClass = changed ? (' class="'+(p.ok?'lat-flash-up':'lat-flash-down')+'"') : '';
         const nameLabel = esc(p.hostname||p.node_id.slice(0,8));
         const nameTitle = notesTitleForNetName(n.name, p.node_id);
-        const nameCell = nameTitle ? '<span title="'+nameTitle+'">'+nameLabel+'</span>' : nameLabel;
+        const nameCell = netId
+          ? '<span class="peer-link" data-node="'+esc(p.node_id)+'" title="'+(nameTitle||'show this peer in Monitor \u2192 mesh peers')+'">'+nameLabel+'</span>'
+          : (nameTitle ? '<span title="'+nameTitle+'">'+nameLabel+'</span>' : nameLabel);
         h += '<tr'+rowClass+'><td>'+nameCell+'</td><td>'+esc(p.overlay||'\u2013')+'</td><td>'+rtt+'</td><td>'+trend+'</td></tr>';
       }
       sub.innerHTML += h+'</table>';
       body.appendChild(sub);
-      enhanceTable(sub.querySelector('table'));
+      const tbl = sub.querySelector('table');
+      enhanceTable(tbl);
+      // Clicking a peer name jumps to that peer in Monitor > mesh peers. Wired
+      // after enhanceTable (which only reorders existing nodes, so the handlers
+      // survive a sort) and re-wired on every poll, since load() rebuilds the
+      // table wholesale each refresh.
+      tbl.querySelectorAll('.peer-link').forEach(el => {
+        el.onclick = (e) => { e.stopPropagation(); gotoMeshPeer(netId, el.dataset.node); };
+      });
     }
   };
   load();

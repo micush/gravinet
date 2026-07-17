@@ -37,6 +37,43 @@ assuming it didn't happen.
 
 ---
 
+## v468 — 2026-07-16
+
+Peer names in Monitor > latency are now clickable: clicking one jumps to that
+peer in Monitor > mesh peers (switches the section, scrolls the row into view,
+and gives it the same brief highlight flash the global search uses).
+
+Implementation reuses the existing search-navigation plumbing rather than
+adding a parallel one: mesh-peers rows gained a `data-peer` attribute so a row
+can be pinned down, and a small `gotoMeshPeer(netId, nodeId)` helper switches
+sections and calls the shared `flashAndScroll`. The latency table is keyed by
+network *name* only (the /api/latency response carries no network id), so the
+name link resolves the id from `state.cfg` before navigating; if the name
+isn't found the name stays plain text, and if the target row can't be located
+(peer dropped between click and re-render) it lands on the network card
+instead. Links are re-wired on every latency poll, since the poll rebuilds the
+table wholesale. Verified with `go build`, `go vet`, a `node --check` of the
+extracted client script, and the webadmin test suite.
+
+## v467 — 2026-07-16
+
+Monitor > mesh peers now has the same open-shell (`\u25a0`) and info (`\ud83d\udec8`)
+buttons that Mesh > peers has. Previously the monitor view was deliberately
+selection-free (read-only health only); it now lets you tick a row and open a
+shell on that peer, or look it up, without leaving the diagnostics page.
+
+The two buttons reuse the exact gate from Mesh > peers rather than a second
+copy: the shell handler was extracted into a shared `openPeerShellFromSel(n,
+sec)` (same self-vs-remote / Manager-mode / connected checks), and
+`peerInfoRow` gained a selection-namespace parameter. State toggling and Ban
+are still absent here by design, so there's no mutating double-click on the
+health page.
+
+Selection uses its own namespace (`mpeers`) rather than sharing Mesh > peers'
+`peers` set, so a tick made while glancing at health can never carry over and
+feed the operate view's Ban button. Verified with `go build`, `go vet`, a
+`node --check` of the extracted client script, and the webadmin test suite.
+
 ## v466 — 2026-07-16
 
 Copy edit, no behavior change: removed every em-dash from the web-admin UI
