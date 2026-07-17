@@ -37,6 +37,41 @@ assuming it didn't happen.
 
 ---
 
+## v490 — 2026-07-17
+
+**The actual bug behind "BGP fields are blank" / "stuck on Checking… forever":
+a bad `$()` call silently crashed the neighbors table renderer.**
+
+Server logs confirmed the import itself was working the whole time — reading
+`/etc/frr/frr.conf`, finding a real ASN and neighbor, and returning them
+successfully. The bug was entirely client-side, and entirely unrelated to
+networking, timeouts, or auto-import gating (the last several fixes address
+real, separate issues, but not this one): `renderNbrs()` built each neighbor
+row with `$('<tr></tr>')` and each cell with `$('<td></td>')`. `$()` parses
+its argument as `innerHTML` on a plain `<div>` — and every browser's HTML
+parser silently drops a bare `tr` or `td` element there, since they're only
+valid inside a real `<table>` context. Both calls returned `null`; the very
+next `.appendChild` on that `null` threw; and because this happens deep
+inside a synchronous render call with nothing above it to catch the
+exception, the whole render aborted before the finished card was ever
+attached to the page — leaving exactly whatever was on screen a moment
+before (a blank stored-config form, or, after v488's button, a permanently
+disabled "Checking…" label) with no visible error at all.
+
+This only shows up once a real neighbor reaches that table — a brand-new,
+empty BGP config never exercises it, which is how it shipped unnoticed.
+Reproduced directly by extracting the embedded script and running it against
+the exact data the user's own server logged (asn=65001, 1 neighbor) in a real
+DOM implementation (jsdom): confirmed the crash, fixed it by building both
+elements with `document.createElement` instead (no table-context requirement
+there), and confirmed the fix — the same harness now renders successfully and
+every field (AS number, router-id, the neighbor's peer/AS/description, the
+network) lands correctly in the resulting form.
+
+Added `TestNoStandaloneTrOrTdViaInnerHTML`, a lightweight regression guard
+that scans the served page for this exact anti-pattern so it can't quietly
+come back, here or in any future table built the same way.
+
 ## v489 — 2026-07-17
 
 **Fix: the v488 "Check FRR's live configuration" button could hang on

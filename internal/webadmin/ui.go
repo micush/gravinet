@@ -5986,7 +5986,15 @@ function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
     nbrBody.innerHTML = '';
     const tbl = $('<table><tr><th>peer address</th><th>remote AS</th><th>description</th><th title="MD5 session password">MD5 password</th><th title="Bidirectional Forwarding Detection for this peer">BFD</th><th></th></tr></table>');
     neighbors.forEach((n, i) => {
-      const tr = $('<tr></tr>');
+      // $() parses its argument as innerHTML on a plain <div>; every
+      // browser's HTML parser silently drops a bare tr or td element there
+      // (they aren't valid outside a real <table> context), so building
+      // either one that way comes back null — the header row above works
+      // because it's nested inside a complete <table>...</table> string in
+      // one shot, which parses fine. document.createElement has no such
+      // context requirement, so it's used here instead of $() for exactly
+      // these two tags.
+      const tr = document.createElement('tr');
       const mk = (val, ph, w) => { const inp=$('<input type="text" style="width:'+w+'px">'); inp.value=val==null?'':String(val); inp.placeholder=ph||''; return inp; };
       const peer = mk(n.peer, '10.0.0.2', 130); peer.oninput = () => { n.peer = peer.value.trim(); scheduleSave(false); };
       const as = mk(n.remote_as||'', '65002', 80); as.oninput = () => { n.remote_as = parseInt(as.value,10)||0; scheduleSave(false); };
@@ -5995,7 +6003,7 @@ function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
       const bfd = $('<input type="checkbox">'); bfd.checked = !!n.bfd; bfd.onchange = () => { n.bfd = bfd.checked; scheduleSave(true); };
       const del = $('<button class="sm danger">\u2212</button>'); del.onclick = () => { neighbors.splice(i,1); renderNbrs(); scheduleSave(true); };
       const cells = [peer, as, desc, pw, bfd, del];
-      cells.forEach(el => { const td=$('<td></td>'); td.appendChild(el); tr.appendChild(td); });
+      cells.forEach(el => { const td=document.createElement('td'); td.appendChild(el); tr.appendChild(td); });
       tbl.appendChild(tr);
     });
     nbrBody.appendChild(tbl);
