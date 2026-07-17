@@ -267,7 +267,7 @@ const indexHTML = `<!doctype html>
 <script>
 const $ = (h) => { const d=document.createElement('div'); d.innerHTML=h.trim(); return d.firstChild; };
 const app = document.getElementById('app');
-const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, geoipLookup:false, allowRemoteShell:false, shellSupported:true, selfId:null, selfHostname:'', targetSeq:0 };
+const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, geoipLookup:false, allowRemoteShell:false, shellSupported:true, bgpSupported:false, selfId:null, selfHostname:'', targetSeq:0 };
 // setTarget is the only place state.target is ever assigned — bumping
 // targetSeq alongside it, once, exactly when the *selection itself* actually
 // changes. load()/startPolling()/refreshCluster() each capture targetSeq
@@ -580,6 +580,11 @@ const NAV_GROUPS = [
     ['nat', 'port forwarding and address translation for tunnel traffic'],
     ['qos', 'traffic prioritization and queuing order'],
     ['bandwidth', 'rate limiting per peer or network'],
+    // Dynamic-routing (BGP) peer status, read live from FRR via vtysh. Present
+    // in the model unconditionally but shown only when this host has vtysh —
+    // sectionVisible() filters it out of the rail and search everywhere else,
+    // so on a box without FRR the entry simply doesn't appear.
+    ['bgp', 'live BGP peer status from FRR (shown only when vtysh is present on this host)'],
   ]},
   { name:'naming', items: [
     ['dns', 'conditional forwarding of specific domains to mesh DNS servers'],
@@ -613,7 +618,19 @@ function label(s){
   if (s==='dns-state') return 'DNS State';
   if (s==='mesh-peers') return 'Mesh Peers';
   if (s==='getting-started') return 'Getting Started';
-  return s==='nat'||s==='qos'||s==='dns' ? s.toUpperCase() : s.charAt(0).toUpperCase()+s.slice(1);
+  return s==='nat'||s==='qos'||s==='dns'||s==='bgp' ? s.toUpperCase() : s.charAt(0).toUpperCase()+s.slice(1);
+}
+
+// sectionVisible gates sections whose availability depends on a runtime
+// capability of the node being managed, rather than being universal. Today
+// that's just BGP, which needs FRR's vtysh present (state.bgpSupported, set
+// from /api/config); everything else is always visible. Both the rail nav and
+// the global search index consult this, so a hidden section can't be reached
+// by clicking or by searching, and renderSection guards the dispatch as a
+// belt-and-suspenders backstop.
+function sectionVisible(sec){
+  if (sec === 'bgp') return !!state.bgpSupported;
+  return true;
 }
 
 // groupFor finds which NAV_GROUPS entry a section belongs to (settings/other
@@ -673,6 +690,7 @@ function buildRail(){
     };
     const items = $('<div class="rail-group-items"></div>');
     for (const [s, tip] of g.items) {
+      if (!sectionVisible(s)) continue; // capability-gated section this node can't serve
       const b = $('<button class="rail-tab'+(s===state.section?' active':'')+'" title="'+esc(tip)+'"></button>');
       b.textContent = label(s); b.dataset.sec = s;
       b.onclick = () => { state.section=s; setActiveRailTab(s); refresh(); };
@@ -767,6 +785,13 @@ async function load() {
   state.geoipLookup = !!(c.body && c.body.geoip_lookup);
   state.allowRemoteShell = !!(c.body && c.body.allow_remote_shell);
   state.shellSupported = c.body ? !!c.body.shell_supported : true;
+  // Whether this host can serve dynamic-routing (BGP) status — true only when
+  // FRR's vtysh is installed here (see the server's bgpSupported()). Gates the
+  // Traffic > BGP nav item and section entirely: absent vtysh, there's nothing
+  // to show, so the entry is hidden rather than dead. Read fresh on every load,
+  // so switching to manage a remote peer reflects that peer's capability, not
+  // this node's.
+  state.bgpSupported = !!(c.body && c.body.bgp_supported);
   state.logLevel = (c.body && c.body.log_level) || 'info';
   state.logMaxSize = (c.body && c.body.log_max_size) || '200M';
   // Node-global firewall object/service catalog — shared by every network
@@ -808,7 +833,7 @@ function buildSearchIndex(){
   // that happens to contain the word). Indexed once here, not per network.
   for (const g of NAV_GROUPS) {
     add(g.name, 'Section group', null, null, {kind:'group', firstSection:g.items[0][0]});
-    for (const [s, tip] of g.items) add(label(s), 'Section', s, null, {kind:'section', section:s}, tip);
+    for (const [s, tip] of g.items) { if (!sectionVisible(s)) continue; add(label(s), 'Section', s, null, {kind:'section', section:s}, tip); }
   }
   add('Settings', 'Section', 'settings', null, {kind:'section', section:'settings'}, 'console, security, and node-wide settings');
 
@@ -2019,6 +2044,10 @@ function addLineFilter(container, pre, fullText){
 
 function renderSection() {
   const c = document.getElementById('content'); if (!c) return;
+  // A capability-gated section (e.g. BGP on a host without vtysh) shouldn't be
+  // rendered even if something routed us here — the rail and search already
+  // hide it, this is the backstop. Fall back to the default section.
+  if (!sectionVisible(state.section)) { state.section = 'networks'; setActiveRailTab(state.section); }
   c.innerHTML = '';
   c.appendChild($('<h2 class="sec">'+label(state.section)+'</h2>'));
   restartBanner(c);
@@ -2027,7 +2056,7 @@ function renderSection() {
     secSettings(c);
   } else {
     ({ networks:secNetworks, keys:secKeys, peers:secPeers, bans:secBans, routes:secRoutes,
-       firewall:secFirewall, nat:secNAT, qos:secQoS, bandwidth:secBandwidth, seeds:secSeeds, hosts:secHosts, dns:secDNS,
+       firewall:secFirewall, nat:secNAT, qos:secQoS, bandwidth:secBandwidth, bgp:secBgp, seeds:secSeeds, hosts:secHosts, dns:secDNS,
        upgrade:secUpgrade,
        metrics:infoMetrics, 'mesh-peers':infoMeshPeers, capture:infoCapture, speedtest:infoSpeedtest, latency:infoLatency,
        'route-table':infoRoutes, 'hosts-file':infoHosts, 'dns-state':infoDNS,
@@ -5657,6 +5686,45 @@ function infoRoutes(c){
     if (!ent.length){ body.innerHTML = '<div class="hint">no routes found'+(r.body.error?(': '+esc(r.body.error)):'')+'.</div>'; return; }
     let h = '<table><tr><th>destination</th><th>gateway</th><th>iface</th><th>metric</th><th>family</th></tr>';
     for (const e of ent) h += '<tr><td>'+esc(e.dest)+'</td><td>'+esc(e.gateway||'\u2013')+'</td><td>'+esc(e.iface)+'</td><td>'+esc(e.metric)+'</td><td>'+(e.family===6?'IPv6':'IPv4')+'</td></tr>';
+    body.innerHTML = h+'</table>';
+    enhanceTable(body.querySelector('table')); // async render missed renderSection's pass
+  })();
+}
+
+// secBgp shows this host's BGP peers as reported by FRR (via vtysh), read live
+// and independent of gravinet's own config — gravinet doesn't manage FRR, it
+// just reports what FRR already has. The whole section is only reachable when
+// state.bgpSupported is true (vtysh present); see sectionVisible(). Modeled on
+// infoRoutes: a single card that fetches once and fills a table, degrading to
+// an explanatory line when FRR isn't answering.
+function secBgp(c){
+  secHint(c, 'Live BGP peer sessions from FRR on this host, read through <code>vtysh</code> and independent of gravinet\u2019s own config \u2014 gravinet reports what FRR has, it doesn\u2019t manage the routing daemon. This section appears only on hosts where FRR\u2019s <code>vtysh</code> is installed. Read-only.');
+  const card = $('<div class="card"></div>');
+  card.appendChild($('<h3>BGP peers</h3>'));
+  const meta = $('<div class="hint" style="margin:-4px 0 10px"></div>'); card.appendChild(meta);
+  const body = $('<div></div>'); body.innerHTML = '<div class="hint">loading\u2026</div>'; card.appendChild(body); c.appendChild(card);
+  (async () => {
+    const r = await api('/api/bgp');
+    if (!r.ok || !r.body){ meta.textContent=''; body.innerHTML = '<div class="hint">could not read BGP status.</div>'; return; }
+    if (r.body.available === false){
+      meta.textContent='';
+      body.innerHTML = '<div class="empty">'+esc(r.body.reason || 'BGP status is unavailable.')+'</div>';
+      return;
+    }
+    const rid = r.body.router_id || '', las = r.body.local_as || 0;
+    meta.innerHTML = (las ? 'local AS <b>'+esc(String(las))+'</b>' : '') +
+      (las && rid ? ' \u00b7 ' : '') + (rid ? 'router id <b>'+esc(rid)+'</b>' : '') ||
+      'FRR is reachable.';
+    const peers = r.body.peers || [];
+    if (!peers.length){ body.innerHTML = '<div class="empty">No BGP peers.</div>'; return; }
+    let h = '<table><tr><th>peer</th><th>remote AS</th><th>state</th><th>uptime</th><th>prefixes</th><th>family</th></tr>';
+    for (const p of peers){
+      const est = (p.state||'').toLowerCase() === 'established';
+      const stateCell = '<span class="pill" style="'+(est?'color:var(--ok);border-color:var(--ok)':'color:var(--mut)')+'">'+esc(p.state||'\u2013')+'</span>';
+      h += '<tr><td>'+esc(p.peer)+'</td><td>'+esc(String(p.remote_as||'\u2013'))+'</td><td>'+stateCell+
+        '</td><td>'+esc(p.uptime||'\u2013')+'</td><td>'+esc(String(p.prefixes_received!=null?p.prefixes_received:'\u2013'))+
+        '</td><td>'+(p.afi==='ipv6Unicast'?'IPv6':'IPv4')+'</td></tr>';
+    }
     body.innerHTML = h+'</table>';
     enhanceTable(body.querySelector('table')); // async render missed renderSection's pass
   })();

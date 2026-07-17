@@ -37,6 +37,40 @@ assuming it didn't happen.
 
 ---
 
+## v473 — 2026-07-16
+
+**Traffic › BGP: live BGP peer status from FRR, shown only where it applies.**
+gravinet can now surface the BGP sessions FRR holds on a host, read live through
+FRR's CLI (`vtysh`) and displayed as a read-only table under Traffic › BGP. This
+is a port of how the separate `parapet` project exposes dynamic-routing
+adjacencies: gravinet does **not** run BGP or manage FRR's configuration — it
+asks `vtysh` for `show ip bgp summary json` and reshapes the result (peer
+address, remote AS, session state, uptime, prefixes received, address family)
+into a table, across both IPv4 and IPv6 unicast, with the local AS and router id
+shown above it. Sessions that FRR reports as established are marked as such;
+where FRR omits the state field it's inferred from a positive peer uptime, the
+same rule parapet uses.
+
+The section is **capability-gated on `vtysh` being present at runtime**. A new
+`bgpSupported()` check probes the standard FRR install paths
+(`/usr/bin/vtysh`, `/usr/sbin/vtysh`, `/bin/vtysh`) and is surfaced as
+`bgp_supported` in `/api/config`. When `vtysh` is installed, Traffic › BGP
+appears in the left rail (and in global search); when it isn't — every Windows
+host, and any Unix host without FRR — the entry is hidden entirely rather than
+offering a page that could only say "not installed." The gating is enforced in
+three places (the rail, the search index, and a `renderSection` backstop) so a
+hidden section can't be reached by clicking or searching. Because the flag is
+read per-load, browsing to manage a remote peer reflects *that* peer's
+capability, not this node's. The backing endpoint (`/api/bgp`) mirrors parapet's
+response shape: `{available, reason?, peers[]}`, returning `available:false` with
+a human reason (`"FRR/vtysh is not installed"`, or `"FRR is not running"`) when
+the query can't be served, so the UI degrades to an explanatory line instead of
+an error. The `vtysh` call is bounded by an 8s context deadline — the idiomatic,
+portable equivalent of the external `timeout` guard parapet wraps the same call
+in — so a slow FRR socket right after boot can't hang the request. New unit
+tests cover the summary parser (v4/v6, established/idle/inferred-state peers, and
+empty/garbage input) and the `vtysh` detection seam.
+
 ## v472 — 2026-07-16
 
 The build-from-source installers now delete the build scratch directory

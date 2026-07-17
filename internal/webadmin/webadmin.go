@@ -337,6 +337,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/nat", s.authed(s.handleNAT))
 	mux.HandleFunc("/api/qos", s.authed(s.handleQoS))
 	mux.HandleFunc("/api/bandwidth", s.authed(s.handleBandwidth))
+	mux.HandleFunc("/api/bgp", s.authed(s.handleBGP)) // read-only BGP peer status via FRR/vtysh
 	mux.HandleFunc("/api/restart", s.authed(s.handleRestart))
 	mux.HandleFunc("/api/cluster", s.authed(s.handleCluster))
 	mux.HandleFunc("/api/loglevel", s.authed(s.handleLogLevel))
@@ -825,7 +826,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"nets": out, "primary_port": cfg.PrimaryPort, "tcp_fallback_port": cfg.TCPFallbackPortValue(), "tcp_fallback_disabled": !cfg.TCPFallbackEnabled(), "extra_listen_ports": cfg.ExtraListenPorts, "extra_tcp_listen_ports": cfg.ExtraTCPListenPorts, "nat_state_timeout": cfg.NATStateTimeout, "geoip_lookup": s.cfg.GeoIPEnabled(), "allow_remote_shell": s.cfg.AllowRemoteShell, "shell_supported": ptySupported, "log_level": s.be.LogLevel(), "log_max_size": cfg.LogMaxSizeString(),
+		"nets": out, "primary_port": cfg.PrimaryPort, "tcp_fallback_port": cfg.TCPFallbackPortValue(), "tcp_fallback_disabled": !cfg.TCPFallbackEnabled(), "extra_listen_ports": cfg.ExtraListenPorts, "extra_tcp_listen_ports": cfg.ExtraTCPListenPorts, "nat_state_timeout": cfg.NATStateTimeout, "geoip_lookup": s.cfg.GeoIPEnabled(), "allow_remote_shell": s.cfg.AllowRemoteShell, "shell_supported": ptySupported, "bgp_supported": bgpSupported(), "log_level": s.be.LogLevel(), "log_max_size": cfg.LogMaxSizeString(),
 		// Node-global firewall object/service catalog (see Config.FirewallObjects'
 		// doc comment) — shared by every network above, not nested under any one
 		// of them. The seeded flags let the admin UI populate the well-known
