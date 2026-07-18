@@ -59,7 +59,7 @@ func TestBGPValidateRequiresASN(t *testing.T) {
 // neighbors and their BFD/password flags.
 func TestBGPRoundTrip(t *testing.T) {
 	in := BGPConfig{
-		Enabled: true, ASN: 65001, RouterID: "10.0.0.1", BFD: true,
+		Enabled: true, ASN: 65001, RouterID: "10.0.0.1",
 		Neighbors: []BGPNeighbor{
 			{Peer: "10.0.0.2", RemoteAS: 65002, Description: "core", Password: "s3cr3t", BFD: false},
 			{Peer: "fd00::2", RemoteAS: 65010, BFD: true},
@@ -75,7 +75,7 @@ func TestBGPRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(raw, &out); err != nil {
 		t.Fatal(err)
 	}
-	if out.ASN != 65001 || out.RouterID != "10.0.0.1" || !out.BFD || !out.RedistributeConnected {
+	if out.ASN != 65001 || out.RouterID != "10.0.0.1" || !out.RedistributeConnected {
 		t.Errorf("scalar round-trip mismatch: %+v", out)
 	}
 	if len(out.Neighbors) != 2 || out.Neighbors[0].Password != "s3cr3t" || !out.Neighbors[1].BFD {

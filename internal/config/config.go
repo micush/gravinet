@@ -286,17 +286,13 @@ type Config struct {
 // id, the peers to bring up (each optionally with an MD5 password and BFD),
 // the prefixes to originate, and whether to redistribute connected/static
 // routes into BGP. BFD (Bidirectional Forwarding Detection) gives sub-second
-// neighbor-failure detection: the global BFD toggle turns it on for every
-// neighbor, and a neighbor can also opt in individually. Field-for-field a
-// port of parapet's Bgp model, so both projects drive FRR the same way.
+// neighbor-failure detection and is set per neighbor — there is no global
+// toggle; a fresh neighbor defaults to BFD on (see the web UI's isNewCfg
+// handling), but each one is its own setting from then on.
 type BGPConfig struct {
-	Enabled  bool   `json:"enabled"`
-	ASN      uint32 `json:"asn"`
-	RouterID string `json:"router_id,omitempty"`
-	// BFD, when true, enables BFD on every neighbor (equivalent to setting the
-	// per-neighbor bfd flag on all of them); a neighbor may also enable it on
-	// its own. Either turning it on requests FRR's bfdd.
-	BFD                   bool          `json:"bfd,omitempty"`
+	Enabled               bool          `json:"enabled"`
+	ASN                   uint32        `json:"asn"`
+	RouterID              string        `json:"router_id,omitempty"`
 	Neighbors             []BGPNeighbor `json:"neighbors,omitempty"`
 	Networks              []string      `json:"networks,omitempty"`
 	RedistributeConnected bool          `json:"redistribute_connected,omitempty"`

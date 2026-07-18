@@ -34,6 +34,18 @@
 #                        don't want this host's system-wide DNS resolution
 #                        changed (/etc/resolv.conf ends up pointing at
 #                        127.0.0.1 once local-unbound takes over).
+#   --no-frr             don't install FRR. By default, if vtysh isn't already on
+#                        the host, this installs FRR (zebra/bgpd/vtysh) via pkg —
+#                        specifically whichever "frrN" package (net/frr9,
+#                        net/frr10, ...) is newest in this host's repo, since
+#                        FreeBSD's ports tree names FRR's package after its major
+#                        version rather than a version-agnostic "frr". gravinet's
+#                        Traffic > BGP / Monitor > BGP Peers pages recognize FRR
+#                        here the same as on Linux (config under
+#                        /usr/local/etc/frr, daemons gated through rc.conf's
+#                        frr_daemons, driven via service(8)) — no separate setup
+#                        needed beyond this. Pass this if you don't want this
+#                        host's package set changed.
 set -eu
 
 PREFIX=/usr/local
@@ -42,6 +54,7 @@ SRC=""
 START=1
 ACTION=install
 ENABLE_LOCAL_UNBOUND=1
+INSTALL_FRR=1
 RCSCRIPT=/usr/local/etc/rc.d/gravinet
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 GO_MIN_MINOR=21
@@ -69,7 +82,9 @@ while [ $# -gt 0 ]; do
     --start) START=1 ;;
     --no-local-unbound) ENABLE_LOCAL_UNBOUND=0 ;;
     --enable-local-unbound) ENABLE_LOCAL_UNBOUND=1 ;; # now the default; kept as a harmless no-op for anyone already scripting it
-    -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
+    --no-frr) INSTALL_FRR=0 ;;
+    --frr) INSTALL_FRR=1 ;;
+    -h|--help) sed -n '2,49p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -403,6 +418,65 @@ EOF
   fi
 }
 
+# frr_installed reports whether FRR (specifically vtysh) is already on this
+# host, checking pkg's install location (/usr/local/{sbin,bin}) — the same
+# locations gravinet's own detection (bgpVtyshPaths in
+# internal/webadmin/bgp.go) checks, so this and gravinet's Traffic > BGP /
+# Monitor > BGP Peers pages agree on what "installed" means here.
+frr_installed() {
+  command -v vtysh >/dev/null 2>&1 && return 0
+  for p in /usr/local/sbin/vtysh /usr/local/bin/vtysh; do
+    [ -x "$p" ] && return 0
+  done
+  return 1
+}
+
+# frr_pkg_name finds the newest "frrN" package this host's repo currently
+# offers. FreeBSD's ports tree names FRR's port after its major version
+# (net/frr9, net/frr10, ...) and retires the old one when a new major ships,
+# unlike Linux distros which just call the package "frr" and let its own
+# version field track upstream — so hardcoding e.g. "frr10" here would go
+# stale the day net/frr11 replaces it. `pkg search` lists what the repo
+# actually has right now; `sort -V` picks the highest version number off
+# that list. Falls back to a fixed guess only if the search comes back empty
+# (offline, repo unreachable, unexpected output shape).
+frr_pkg_name() {
+  local newest
+  newest="$(pkg search -q '^frr[0-9]+$' 2>/dev/null | sort -V | tail -1)"
+  [ -n "$newest" ] && { echo "$newest"; return 0; }
+  echo "frr10"
+}
+
+# ensure_frr installs FRR (zebra/bgpd/vtysh) via pkg if it isn't already
+# present, mirroring install-linux.sh's ensure_frr. gravinet's own BGP/BFD
+# code (internal/webadmin/bgp.go, frr.go, frr_freebsd.go) recognizes FRR
+# here the same way it does on Linux — Traffic > BGP and Monitor > BGP Peers
+# work as soon as FRR is present, no separate setup needed. Deliberately
+# does not touch frr_enable/frr_daemons in rc.conf itself, though: the first
+# time a BGP config is actually saved through gravinet, its own apply step
+# sets both via sysrc(8) to exactly what that config needs — setting them
+# here first would just mean gravinet immediately overwrites them anyway,
+# and in the meantime (FRR installed, nothing configured yet) there's
+# nothing useful to have running.
+ensure_frr() {
+  if frr_installed; then
+    echo "    FRR is already installed"
+    return 0
+  fi
+  command -v pkg >/dev/null 2>&1 || { echo "    warning: pkg(8) not found; cannot install FRR automatically" >&2; return 0; }
+  local pkg_name; pkg_name="$(frr_pkg_name)"
+  echo "    FRR is not installed; installing $pkg_name"
+  if pkg install -y "$pkg_name" >/dev/null 2>&1 && frr_installed; then
+    echo "    installed $pkg_name"
+    echo "    FRR is ready — configure it from gravinet's Traffic > BGP page."
+    return 0
+  fi
+  cat <<NOTE >&2
+    warning: could not install FRR ($pkg_name) automatically. Install it
+             yourself: pkg install $pkg_name
+NOTE
+}
+
 echo "==> DNS forwarding (local-unbound)"
 if local_unbound_configured; then
   echo "    local-unbound is already configured on this host"
@@ -437,6 +511,13 @@ else
               sysrc local_unbound_enable=YES && service local_unbound start
           Skip this if you don't use gravinet's DNS-forwarding feature.
 NOTE
+fi
+
+echo "==> FRR (BGP/BFD)"
+if [ "$INSTALL_FRR" = 1 ]; then
+  ensure_frr
+else
+  echo "    --no-frr passed; leaving FRR alone."
 fi
 
 echo "==> writing rc.d script $RCSCRIPT"

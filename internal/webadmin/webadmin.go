@@ -421,10 +421,12 @@ func (s *Server) Start() error {
 	}
 	s.metrics = newMetricsCollector(s.be, s.log)
 	go s.metrics.run()
-	// If FRR is on this host, make sure the daemons BGP/BFD need (bgpd, bfdd)
-	// are enabled in /etc/frr/daemons, restarting FRR if they weren't. Runs in
-	// the background so a slow `systemctl restart frr` can't hold up serving;
-	// it's a one-time no-op on every subsequent boot once they're on.
+	// If FRR is on this host, make sure the daemons BGP/BFD need are enabled
+	// (Linux: bgpd/bfdd in /etc/frr/daemons; a no-op on FreeBSD, which has no
+	// equivalent default-off step to compensate for — see
+	// frr_freebsd.go's ensureFRRDaemonsEnabled), restarting FRR if it had to
+	// change anything. Runs in the background so a slow restart can't hold up
+	// serving; it's a one-time no-op on every subsequent boot once they're on.
 	go ensureFRRDaemonsEnabled(s.log)
 	go func() {
 		if err := s.httpSrv.ServeTLS(ln, "", ""); err != nil && err != http.ErrServerClosed {

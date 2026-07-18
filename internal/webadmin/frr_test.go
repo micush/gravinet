@@ -88,12 +88,13 @@ func TestFRRBGPMinimalBlock(t *testing.T) {
 	}
 }
 
-// Password + BFD: an MD5 password is emitted, the global BFD toggle implies bfd
-// on every neighbor, and bfdd is requested. Ported from parapet's
-// bgp_password_and_bfd test.
+// Password + per-neighbor BFD: an MD5 password is emitted, each neighbor's
+// own BFD setting is independent (no global toggle to imply it), and bfdd is
+// requested whenever any neighbor has it on. Ported from parapet's
+// bgp_password_and_bfd test, adapted for gravinet's lack of a global toggle.
 func TestFRRBGPPasswordAndBFD(t *testing.T) {
 	b := config.BGPConfig{
-		Enabled: true, ASN: 65001, RouterID: "1.2.3.4", BFD: true,
+		Enabled: true, ASN: 65001, RouterID: "1.2.3.4",
 		Neighbors: []config.BGPNeighbor{
 			{Peer: "10.0.0.2", RemoteAS: 65002, Password: "s3cr3t", BFD: false},
 			{Peer: "10.0.0.3", RemoteAS: 65003, BFD: true},
@@ -103,8 +104,8 @@ func TestFRRBGPPasswordAndBFD(t *testing.T) {
 	frrHas(t, c, " bgp router-id 1.2.3.4\n")
 	frrHas(t, c, " neighbor 10.0.0.2 remote-as 65002\n")
 	frrHas(t, c, " neighbor 10.0.0.2 password s3cr3t\n")
-	// Global BFD implies bfd on all neighbors.
-	frrHas(t, c, " neighbor 10.0.0.2 bfd\n")
+	// Each neighbor's own BFD setting, independently: on for .3, off for .2.
+	frrLacks(t, c, "neighbor 10.0.0.2 bfd")
 	frrHas(t, c, " neighbor 10.0.0.3 bfd\n")
 	// address-family activation for each neighbor.
 	frrHas(t, c, "  neighbor 10.0.0.2 activate\n")
@@ -114,8 +115,8 @@ func TestFRRBGPPasswordAndBFD(t *testing.T) {
 	}
 }
 
-// A single neighbor with BFD (no global toggle) still requests bfdd. Guards the
-// per-neighbor branch of neededDaemons.
+// A single neighbor with BFD still requests bfdd. Guards neededDaemons' only
+// path to bfdd now that there's no global toggle.
 func TestFRRPerNeighborBFDRequestsBfdd(t *testing.T) {
 	b := config.BGPConfig{
 		Enabled: true, ASN: 65001,
@@ -294,7 +295,10 @@ func TestSyncDaemonsContent(t *testing.T) {
 		"bfdd=no\n" +
 		"staticd=yes\n" +
 		"vtysh_enable=yes\n"
-	want := neededDaemons(config.BGPConfig{Enabled: true, ASN: 65001, BFD: true}) // staticd, bgpd, bfdd
+	want := neededDaemons(config.BGPConfig{
+		Enabled: true, ASN: 65001,
+		Neighbors: []config.BGPNeighbor{{Peer: "10.0.0.2", RemoteAS: 65002, BFD: true}},
+	}) // staticd, bgpd, bfdd
 
 	body, changed := syncDaemonsContent(existing, want)
 	if !changed {
@@ -341,7 +345,14 @@ func TestEnableDaemonsContent(t *testing.T) {
 		"staticd=yes\n" +
 		"vtysh_enable=yes\n"
 
-	body, changed := enableDaemonsContent(existing, frrBGPBFDDaemons)
+	// bgpd/bfdd, spelled out here rather than referencing frrBGPBFDDaemons
+	// directly: that var now lives in frr_default.go (tagged !freebsd, since
+	// FreeBSD's ensureFRRDaemonsEnabled has nothing analogous to enable — see
+	// its doc comment), so this file needs to stand on its own to compile and
+	// run on every platform, FreeBSD included.
+	bgpBFD := []string{"bgpd", "bfdd"}
+
+	body, changed := enableDaemonsContent(existing, bgpBFD)
 	if !changed {
 		t.Fatal("expected a change (bgpd/bfdd flipped on)")
 	}
@@ -354,7 +365,7 @@ func TestEnableDaemonsContent(t *testing.T) {
 	frrHas(t, body, "vtysh_enable=yes\n")
 
 	// Idempotent: a second pass with them already on reports no change.
-	body2, changed2 := enableDaemonsContent(body, frrBGPBFDDaemons)
+	body2, changed2 := enableDaemonsContent(body, bgpBFD)
 	if changed2 {
 		t.Error("second pass with bgpd/bfdd already on must be a no-op")
 	}
@@ -365,7 +376,7 @@ func TestEnableDaemonsContent(t *testing.T) {
 	// One already on, one off: still a change, and it only enables (never the
 	// reverse).
 	mixed := "bgpd=yes\nbfdd=no\n"
-	out, changed3 := enableDaemonsContent(mixed, frrBGPBFDDaemons)
+	out, changed3 := enableDaemonsContent(mixed, bgpBFD)
 	if !changed3 {
 		t.Error("bfdd=no should flip to yes")
 	}

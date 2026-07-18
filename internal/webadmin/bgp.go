@@ -29,11 +29,23 @@ import (
 )
 
 // bgpVtyshPaths are the locations vtysh is installed to, in priority order.
-// Ported verbatim from parapet's FRR integration (frr.rs / status.rs), which
-// probes exactly these three. A path check (rather than a $PATH lookup) keeps
-// detection cheap and side-effect-free: no subprocess is spawned just to learn
-// whether the binary exists.
-var bgpVtyshPaths = []string{"/usr/bin/vtysh", "/usr/sbin/vtysh", "/bin/vtysh"}
+// The first three are ported verbatim from parapet's FRR integration
+// (frr.rs / status.rs), which probes exactly those — Linux FHS conventions.
+// The last two are FreeBSD's: its frr port installs under /usr/local (pkg's
+// convention for anything outside the base system), specifically to
+// /usr/local/bin/vtysh — confirmed against the actual rc.d script FreeBSD
+// ships (net/frrN/files/frr.in in the freebsd-ports tree), which invokes
+// %%PREFIX%%/bin/vtysh; /usr/local/sbin is checked too as a harmless extra
+// in case a given port revision ever places it there instead. A path check
+// (rather than a $PATH lookup) keeps detection cheap and side-effect-free:
+// no subprocess is spawned just to learn whether the binary exists, and
+// checking two extra candidate paths that will never match on a non-FreeBSD
+// host costs one failed stat(2) each — negligible, and simpler than
+// build-tagging this list apart per OS.
+var bgpVtyshPaths = []string{
+	"/usr/bin/vtysh", "/usr/sbin/vtysh", "/bin/vtysh", // Linux
+	"/usr/local/bin/vtysh", "/usr/local/sbin/vtysh", // FreeBSD
+}
 
 // vtyshPath returns the first vtysh binary that exists on this host, and
 // whether one was found at all. On Windows (and any Unix host without FRR)

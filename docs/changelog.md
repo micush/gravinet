@@ -37,6 +37,169 @@ assuming it didn't happen.
 
 ---
 
+## v501 — 2026-07-17
+
+**Removed the "BFD on all neighbors" global toggle from Traffic › BGP.** BFD
+is now purely a per-neighbor setting, as it already was for anyone who'd
+opted a specific peer in independently of the global switch. A brand-new
+neighbor row now defaults to BFD on (previously this default came from the
+global toggle, which itself defaulted on for a fresh configuration); an
+existing neighbor keeps whatever it already has.
+
+- `config.BGPConfig.BFD` removed. `BGPNeighbor.BFD` (per-neighbor) is
+  unchanged.
+- `renderFRR` emits `neighbor <peer> bfd` from each neighbor's own flag
+  only — no more `n.BFD || b.BFD`.
+- `neededDaemons` requests `bfdd` when any neighbor has BFD on — no more
+  global-toggle shortcut.
+- Editor: the "BFD on all neighbors" row is gone. Adding a neighbor now
+  defaults its BFD tag to on (previously off, relying on the global toggle
+  to cover the common case); editing an existing neighbor still leaves its
+  BFD setting untouched unless explicitly toggled.
+- No migration needed: a config saved with the old global toggle on but
+  individual neighbors off would have rendered BFD for every neighbor
+  anyway (the toggle was equivalent to setting each neighbor's flag); the
+  stored JSON's `bfd` field at the top level is simply ignored by the new
+  binary rather than causing an error, so existing configs keep working,
+  just without the field having any further effect. Per-neighbor `bfd`
+  values, which is what determines behavior now, are untouched by this
+  change either way.
+- Updated `TestFRRBGPPasswordAndBFD` (now tests independent per-neighbor
+  BFD instead of the global toggle implying it), `TestSyncDaemonsContent`,
+  `TestFreebsdNeededDaemons`, and `config.TestBGPRoundTrip` accordingly.
+
+---
+
+## v500 — 2026-07-17
+
+**Full BGP/BFD support on FreeBSD** — Traffic › BGP now actually configures
+FRR there, not just Monitor › BGP Peers' read-only view. Follow-up to v499,
+which only installed FRR without gravinet recognizing it.
+
+FRR's FreeBSD packaging (`net/frr9`, `net/frr10`, ...) is a materially
+different shape from Debian/RHEL's: config lives under `/usr/local/etc/frr`
+instead of `/etc/frr`, there's no single per-daemon on/off file — rc.conf's
+`frr_daemons` variable lists every daemon to run, in one line, with `mgmtd`
+and `zebra` required first — and it's driven through `service(8)`, not
+systemd. None of this was guessed: it's confirmed against the actual rc.d
+script FreeBSD ships (`net/frrN/files/frr.in` in the freebsd-ports tree),
+including two details that would otherwise have been easy to get wrong or
+miss entirely:
+
+- **`vtysh` lives at `/usr/local/bin/vtysh`**, confirmed from the script's
+  own `vtysh -b` invocation. Added to `bgpVtyshPaths` (`bgp.go`) alongside
+  `/usr/local/sbin/vtysh` as a harmless extra — this is what actually makes
+  `bgpSupported()` (and so the whole Traffic › BGP / Monitor › BGP Peers UI)
+  light up on FreeBSD at all.
+- **FreeBSD's `service frr reload` can silently no-op and still report
+  success.** The rc.d script's reload case checks for
+  `frr-reload.py` (the separate `frrN-pythontools` package, which
+  gravinet's installer doesn't pull in) and, if it's missing, prints a
+  message and *exits 0* — having done nothing. Trusting that exit code
+  would mean gravinet believes a config change was applied when it
+  silently wasn't. So on FreeBSD, `applyFRRService` never calls reload at
+  all — every apply is a restart, unconditionally, the same posture v498
+  already took for *removals specifically* on Linux (where the equivalent
+  gap is `frr-reload.py`/`frr-pythontools` not being installed) — see
+  `applyFRRService` in the new `frr_freebsd.go`.
+- The rc.d script only writes the "integrated config" marker
+  (`/usr/local/etc/frr/vtysh.conf`) on a plain `service frr start`, never on
+  `restart` — and gravinet's FreeBSD path always uses restart (previous
+  point), so a box that's never had a bare `start` would otherwise never
+  get it, and every daemon would silently ignore gravinet's `frr.conf` and
+  look for its own `bgpd.conf`/`zebra.conf` instead. `syncDaemons` writes
+  that marker itself instead of relying on the rc.d script's bootstrap.
+
+**Code structure**: `internal/webadmin/frr.go`'s OS-specific pieces
+(`frrDir`/`frrConf`, `syncDaemons`, `applyFRRService` — renamed from
+`runSystemctl` — `ensureFRRDaemonsEnabled`, `managedDaemonSet`) moved into
+two new per-OS files following this codebase's existing convention (see
+`metrics_linux.go`/`metrics_freebsd.go`/etc.): `frr_default.go`
+(`//go:build !freebsd` — Linux is the only platform any of this ever really
+ran on; Windows/macOS/OpenBSD harmlessly share its definitions since vtysh
+is never found there) and `frr_freebsd.go` (`//go:build freebsd`). `frr.go`
+itself is now purely the shared shape (`renderFRR`, `applyBGP`'s
+orchestration, `bgpConfigRemovesSomething`, etc.) that calls into whichever
+side got compiled in through identically-named functions.
+
+**`daemonAlive` (frr.go) is now portable** rather than Linux-only: it used
+to check for a live `/proc/<pid>` directory, which silently returned false
+on every non-Linux platform (FreeBSD included) for lack of a mounted
+procfs — meaning every FreeBSD config change was forced through a full
+daemon restart even for a one-line edit, since "can't confirm alive" reads
+the same as "needs a restart" to `applyBGP`. Replaced with `os.FindProcess`
++ sending it signal 0 (delivers nothing, just checks the pid exists) — the
+standard portable Unix liveness probe, working identically on Linux and
+FreeBSD. Verified this (and the rest of the split) actually compiles on
+every platform gravinet targets, not just the two directly involved:
+cross-compiled clean for `linux`, `freebsd`, `darwin`, `windows`, and
+`openbsd`.
+
+**`install-freebsd.sh`'s FRR step and help text updated** to say what's now
+true — FRR being installed means Traffic › BGP works, the same as Linux —
+replacing v499's "installed but gravinet won't recognize it yet" notes.
+
+New tests: `frr_freebsd_test.go` (`//go:build freebsd`) covers
+`freebsdNeededDaemons`'s required `mgmtd`/`zebra`-first ordering across
+BGP-disabled/enabled/BFD-enabled configs, that it never mutates or aliases
+`freebsdBaseDaemons`, and that `managedDaemonSet` includes the baseline
+daemons. Cross-compiled and `go vet`-clean for FreeBSD; not executed here
+(no FreeBSD host in this environment) — flagged as the one part of this
+change that's verified by careful reading of FRR's actual rc.d script and
+compilation rather than an end-to-end run against real FreeBSD packaging,
+so it's worth a first real-world check before relying on it.
+
+---
+
+## v499 — 2026-07-17
+
+**The FreeBSD installer now installs FRR automatically if it isn't already
+present** — mirroring v498's `install-linux.sh` change.
+
+`install-freebsd.sh` gained the same `ensure_frr` step, adapted to this
+platform: `pkg install`s whichever `frrN` package (`net/frr9`, `net/frr10`,
+...) is newest in the host's repo — FreeBSD's ports tree retires the old
+port name every time a new FRR major version ships, unlike Linux distros
+which just call the package `frr`, so the newest `frrN` is found with
+`pkg search` rather than a version number hardcoded here that would go
+stale the next time that happens. New `--no-frr` flag to opt out, same as
+the Linux installer.
+
+**Answering "will gravinet show the BGP sections on FreeBSD if FRR is
+installed?": not yet, even after this change** — and this is a real gap
+worth fixing, not just a detection tweak, so it's called out explicitly
+rather than silently patched halfway:
+
+- `bgpSupported()` (`internal/webadmin/bgp.go`), which gates whether
+  Traffic › BGP and Monitor › BGP Peers even appear, only looks for `vtysh`
+  at Linux FHS paths (`/usr/bin`, `/usr/sbin`, `/bin`). FreeBSD's pkg
+  installs it under `/usr/local/{sbin,bin}` instead, so today FRR being
+  present on a FreeBSD host is invisible to gravinet regardless of this
+  installer change — the same as before.
+- Fixing detection alone would be a small, safe change (just more
+  candidate paths), and it's enough to make the read-only Monitor pages
+  (BGP peers, BFD neighbors, the BGP Table added in v497) work correctly,
+  since those only ever shell out to `vtysh -c "..."`.
+- The editable Traffic › BGP side is the bigger gap: `applyBGP` writes
+  `/etc/frr/frr.conf`, toggles daemons in `/etc/frr/daemons`, and drives
+  FRR through `systemctl` — none of which is how FRR works on FreeBSD
+  (config under `/usr/local/etc/frr`, daemon selection via rc.conf's
+  `frr_daemons`, control via `service(8)`). Detection alone would make
+  that card appear but silently fail to push saved config to FRR while
+  showing a misleading "FRR is not installed" banner.
+- Full support needs `frrDir`/`frrConf`/`frrDaemons`, `syncDaemons`,
+  `runSystemctl`, and `daemonAlive`'s pid-file path made OS-aware — several
+  of which (particularly the pid-file location under FreeBSD's `frr` rc.d
+  wrapper) aren't things this could verify without a real FreeBSD host
+  running the packaged FRR, so it's flagged for a follow-up decision on how
+  far to take it rather than shipped as an unverified guess.
+
+`install-freebsd.sh`'s new FRR step prints this same explanation to anyone
+who runs it, so installing FRR there doesn't quietly imply gravinet is
+about to manage it.
+
+---
+
 ## v498 — 2026-07-17
 
 **Confirmed: removing an advertised network under Traffic › BGP is already

@@ -5,39 +5,52 @@ package webadmin
 // port of parapet's frr.rs, narrowed to the BGP + BFD surface: gravinet does
 // not supervise FRR as a child process (FRR is a multi-daemon suite, better
 // driven through its config) — instead it renders an integrated frr.conf,
-// makes sure the daemons BGP needs are enabled in /etc/frr/daemons, and
-// reloads FRR. The same "generate a config and apply it" shape gravinet already
-// uses elsewhere.
+// makes sure the daemons BGP needs are enabled, and reloads FRR. The same
+// "generate a config and apply it" shape gravinet already uses elsewhere.
 //
-// Rendering is a pure function (unit-tested). Applying writes the files and
-// reloads FRR; if FRR isn't installed the apply is a logged no-op, so a routing
-// edit can never take down the node — the config still persists to gravinet's
-// own config.json, it just isn't pushed to a daemon that isn't there.
+// Rendering (this file) is OS-agnostic and pure (unit-tested): FRR's config
+// language and vtysh's JSON output don't vary by platform. Applying it does
+// vary — Linux's package puts config under /etc/frr, gates daemons through a
+// single /etc/frr/daemons file, and is driven via systemctl; FreeBSD's puts
+// config under /usr/local/etc/frr, gates daemons through rc.conf's
+// frr_daemons variable, and is driven via service(8). frr_default.go
+// (everything except FreeBSD — Linux is the only platform any of this has
+// ever really run on, but Windows/macOS/OpenBSD harmlessly share its
+// definitions since vtysh is never found there anyway) and frr_freebsd.go
+// hold that split; this file calls into it through frrDir/frrConf (each a
+// const, but a different value per file — the build tag picks which one
+// actually compiles in) and a handful of identically-named functions
+// (syncDaemons, applyFRRService, ensureFRRDaemonsEnabled, managedDaemonSet)
+// each side implements. Applying writes the files and reloads FRR; if FRR
+// isn't installed the apply is a logged no-op, so a routing edit can never
+// take down the node — the config still persists to gravinet's own
+// config.json, it just isn't pushed to a daemon that isn't there.
 
 import (
 	"context"
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"gravinet/internal/config"
 	"gravinet/internal/logx"
 )
 
-const (
-	frrDir     = "/etc/frr"
-	frrConf    = "/etc/frr/frr.conf"
-	frrDaemons = "/etc/frr/daemons"
-)
-
 // frrManagedDaemons is the set of FRR daemons this module owns the on/off state
-// of in /etc/frr/daemons. Any daemon here that a config doesn't need is forced
-// =no so a previously-enabled protocol is actually turned off, not left
-// running; daemons outside this set are left exactly as the operator/package
-// left them. Ported verbatim from parapet's managed list.
+// of. Any daemon here that a config doesn't need is forced off so a
+// previously-enabled protocol is actually turned off, not left running;
+// daemons outside this set are left exactly as the operator/package left
+// them. Ported verbatim from parapet's managed list. This is the OS-agnostic
+// logical set — FreeBSD additionally always needs mgmtd and zebra listed
+// first regardless of this list (see freebsdNeededDaemons in
+// frr_freebsd.go); Linux's package already defaults those two to on and
+// deliberately isn't asked to manage them here, for parity with how it
+// always has.
 var frrManagedDaemons = []string{
 	"bgpd", "ospfd", "ospf6d", "ripd", "ripngd", "isisd", "pimd",
 	"ldpd", "nhrpd", "eigrpd", "babeld", "sharpd", "pbrd", "bfdd",
@@ -45,7 +58,8 @@ var frrManagedDaemons = []string{
 }
 
 // frrInstalled reports whether FRR is present on this host (its config
-// directory exists). Apply is a no-op when it isn't.
+// directory exists — frrDir is set per-OS in frr_default.go/frr_freebsd.go).
+// Apply is a no-op when it isn't.
 func frrInstalled() bool {
 	fi, err := statFile(frrDir)
 	return err == nil && fi.IsDir()
@@ -148,8 +162,9 @@ func renderFRR(b config.BGPConfig) string {
 				fmt.Fprintf(&out, " neighbor %s password %s\n", n.Peer, pw)
 			}
 		}
-		// Per-neighbor BFD, also implied by the global BGP BFD toggle.
-		if n.BFD || b.BFD {
+		// Per-neighbor BFD — there's no global toggle (see BGPConfig's doc
+		// comment); each neighbor's own setting is authoritative.
+		if n.BFD {
 			fmt.Fprintf(&out, " neighbor %s bfd\n", n.Peer)
 		}
 		if n.Shutdown {
@@ -179,19 +194,17 @@ func renderFRR(b config.BGPConfig) string {
 
 // neededDaemons is which FRR daemons this config requires. staticd is always
 // on (FRR's general-purpose daemon); bgpd whenever BGP is enabled; bfdd
-// whenever BFD is on globally or for any neighbor. Ported from parapet's
-// needed_daemons (BGP/BFD subset).
+// whenever BFD is on for any neighbor. Ported from parapet's needed_daemons
+// (BGP/BFD subset), minus its global BFD toggle — gravinet doesn't have one.
 func neededDaemons(b config.BGPConfig) []string {
 	d := []string{"staticd"}
 	if b.Enabled && b.ASN != 0 {
 		d = append(d, "bgpd")
-		bfd := b.BFD
-		if !bfd {
-			for _, n := range b.Neighbors {
-				if n.BFD {
-					bfd = true
-					break
-				}
+		bfd := false
+		for _, n := range b.Neighbors {
+			if n.BFD {
+				bfd = true
+				break
 			}
 		}
 		if bfd {
@@ -284,37 +297,22 @@ func syncDaemonsContent(existing string, want []string) (string, bool) {
 
 // syncDaemons applies syncDaemonsContent to the real /etc/frr/daemons file.
 // Returns whether the file changed. An empty/missing file means FRR isn't
-// installed the way we expect and is a hard error (the caller has already
-// checked frrInstalled, so this is a belt-and-suspenders guard).
-func syncDaemons(b config.BGPConfig) (bool, error) {
-	raw, err := os.ReadFile(frrDaemons)
-	if err != nil || len(raw) == 0 {
-		return false, fmt.Errorf("%s not found (is FRR installed?)", frrDaemons)
-	}
-	body, changed := syncDaemonsContent(string(raw), neededDaemons(b))
-	if changed {
-		if !strings.HasSuffix(body, "\n") {
-			body += "\n"
-		}
-		if err := writeAtomicFile(frrDaemons, body); err != nil {
-			return false, err
-		}
-	}
-	return changed, nil
-}
+// syncDaemons, which reconciles the FRR daemon set to a given config, and
+// ensureFRRDaemonsEnabled, which makes sure BGP/BFD can come up the moment
+// FRR is detected, are both OS-specific (Linux manages a single
+// /etc/frr/daemons file; FreeBSD manages rc.conf's frr_daemons variable) —
+// see frr_default.go and frr_freebsd.go.
 
-// frrBGPBFDDaemons are the daemons that must be running for gravinet's BGP and
-// BFD features to work when FRR is present: the BGP speaker and the BFD session
-// daemon. These are exactly the two values ensureFRRDaemonsEnabled makes sure
-// read `=yes` in /etc/frr/daemons whenever FRR is detected.
-var frrBGPBFDDaemons = []string{"bgpd", "bfdd"}
-
-// enableDaemonsContent turns each named daemon on in the body of
-// /etc/frr/daemons: any `<name>=no` line becomes `<name>=yes`. It only ever
-// enables — never disables — and leaves every other line untouched (including
-// managed daemons not named here, and unrelated settings/comments). Pure string
-// transform returning the new body and whether anything actually changed, so the
-// logic is unit-testable without touching disk.
+// enableDaemonsContent turns each named daemon on in the body of a
+// Linux-style `<name>=yes`/`<name>=no` daemons file: any `<name>=no` line
+// becomes `<name>=yes`. It only ever enables — never disables — and leaves
+// every other line untouched (including managed daemons not named here, and
+// unrelated settings/comments). Pure string transform returning the new body
+// and whether anything actually changed, so the logic is unit-testable
+// without touching disk. FreeBSD has no equivalent file to transform (see
+// frr_freebsd.go's ensureFRRDaemonsEnabled for why it doesn't need one); this
+// stays here rather than in frr_default.go only because it's pure and
+// harmless to keep alongside its test on every platform.
 //
 // This is deliberately separate from syncDaemonsContent, which reconciles the
 // whole managed set to a specific BGP config and will turn unused daemons off.
@@ -337,47 +335,6 @@ func enableDaemonsContent(existing string, names []string) (string, bool) {
 	return strings.Join(lines, "\n"), changed
 }
 
-// ensureFRRDaemonsEnabled makes sure bgpd and bfdd are enabled in
-// /etc/frr/daemons whenever FRR is detected on this host, restarting FRR if it
-// had to change anything. Run once in the background at daemon startup (see
-// Server.Start): a stock FRR install ships with every optional daemon set to
-// =no, so BGP/BFD would never come up until something turned them on — this is
-// that something.
-//
-// It only ever flips =no to =yes for those two daemons; it never disables
-// anything and never touches other lines, so it can't fight the config-driven
-// reconciliation in applyBGP (which owns turning daemons back off when a saved
-// BGP config doesn't need them). No-op when FRR isn't installed, and idempotent:
-// on every later boot the values already read =yes, nothing changes, and FRR is
-// not restarted.
-func ensureFRRDaemonsEnabled(log *logx.Logger) {
-	if !frrInstalled() {
-		return // no FRR here — nothing to enable.
-	}
-	raw, err := os.ReadFile(frrDaemons)
-	if err != nil || len(raw) == 0 {
-		// FRR's config directory exists but the daemons file doesn't (or is
-		// empty): not the layout we manage. Leave it alone rather than guess.
-		return
-	}
-	body, changed := enableDaemonsContent(string(raw), frrBGPBFDDaemons)
-	if !changed {
-		return // bgpd and bfdd already enabled — nothing to do.
-	}
-	if !strings.HasSuffix(body, "\n") {
-		body += "\n"
-	}
-	if err := writeAtomicFile(frrDaemons, body); err != nil {
-		log.Warnf("bgp: could not enable bgpd/bfdd in %s: %v", frrDaemons, err)
-		return
-	}
-	if runSystemctl("restart") {
-		log.Infof("bgp: enabled bgpd and bfdd in %s and restarted FRR", frrDaemons)
-	} else {
-		log.Warnf("bgp: enabled bgpd and bfdd in %s but could not restart FRR", frrDaemons)
-	}
-}
-
 // writeAtomicFile writes body to path via a temp file + rename, so a reader
 // never sees a half-written config. Ported from parapet's write_atomic.
 func writeAtomicFile(path, body string) error {
@@ -396,7 +353,7 @@ func writeAtomicFile(path, body string) error {
 // the daemon set, and restart or reload FRR so the change takes effect. It
 // returns a human note describing what it did. When FRR isn't installed it's a
 // no-op with an explanatory note (never an error that would block the config
-// save). The actual systemctl call is dispatched to a background goroutine —
+// save). The actual service call is dispatched to a background goroutine —
 // an frr restart can take many seconds, and the HTTP handler shouldn't block on
 // it — after the config has been written synchronously (so the save is durable
 // and the API can return success immediately). Ported from parapet's
@@ -406,6 +363,10 @@ func writeAtomicFile(path, body string) error {
 // wasn't one, e.g. the first-ever save) — used solely to detect whether this
 // save removes a neighbor, network, or the whole BGP stanza, which forces a
 // real restart instead of a reload (see bgpConfigRemovesSomething).
+//
+// syncDaemons, applyFRRService, and managedDaemonSet are each implemented
+// once per OS (frr_default.go / frr_freebsd.go); everything below this line
+// is the shared reconciliation shape both sides plug into.
 func applyBGP(b, prev config.BGPConfig, log *logx.Logger) (string, error) {
 	if !frrInstalled() {
 		return "FRR is not installed; BGP config saved but not applied", nil
@@ -413,17 +374,16 @@ func applyBGP(b, prev config.BGPConfig, log *logx.Logger) (string, error) {
 	if err := writeAtomicFile(frrConf, renderFRR(b)); err != nil {
 		return "", err
 	}
-	wanted := neededDaemons(b)
-	daemonsFileChanged, err := syncDaemons(b)
+	wanted := managedDaemonSet(b)
+	daemonSetChanged, err := syncDaemons(b)
 	if err != nil {
 		return "", err
 	}
-	// A daemon can be "wanted" (=yes in /etc/frr/daemons) without actually
-	// being alive — e.g. an earlier restart failed partway, or it crash-looped
-	// on bad config. In that case syncDaemons sees no file change and would
-	// wrongly take the reload path forever, which can't start a stopped daemon.
-	// Treat "wanted but not alive" the same as "file changed" so it gets a real
-	// restart.
+	// A daemon can be "wanted" without actually being alive — e.g. an earlier
+	// restart failed partway, or it crash-looped on bad config. In that case
+	// syncDaemons sees no change and would wrongly take the reload path
+	// forever, which can't start a stopped daemon. Treat "wanted but not
+	// alive" the same as "changed" so it gets a real restart.
 	needsStart := false
 	for _, d := range wanted {
 		if !daemonAlive(d) {
@@ -432,53 +392,75 @@ func applyBGP(b, prev config.BGPConfig, log *logx.Logger) (string, error) {
 		}
 	}
 	// A removed neighbor/network (or BGP being turned off, or the ASN
-	// changing) needs the same real restart: neither `systemctl reload frr`
-	// (not guaranteed to have frr-reload.py behind it) nor the vtysh -b
-	// fallback below can retract config that's no longer in the file, only
-	// add to what's running. See bgpConfigRemovesSomething.
+	// changing) needs the same real restart: neither a reload (not
+	// guaranteed to actually diff-and-retract — see applyFRRService's two
+	// implementations for why) nor the vtysh -b fallback below can retract
+	// config that's no longer in the file, only add to what's running. See
+	// bgpConfigRemovesSomething.
 	removed := bgpConfigRemovesSomething(prev, b)
-	daemonsChanged := daemonsFileChanged || needsStart || removed
+	daemonsChanged := daemonSetChanged || needsStart || removed
 	daemonCount := len(wanted)
+
+	// FreeBSD's reload path can silently no-op and still report success (see
+	// applyFRRService in frr_freebsd.go) — not a "sometimes fails" case a
+	// retry helps with, but a "may lie about succeeding" one no fallback can
+	// catch after the fact, so it's never used at all: every apply there is a
+	// restart, exactly as if daemonsChanged were always true.
+	restartOnly := runtime.GOOS == "freebsd"
 
 	go func() {
 		action := "reload"
-		if daemonsChanged {
+		if daemonsChanged || restartOnly {
 			action = "restart"
 		}
-		ok := runSystemctl(action)
+		ok := applyFRRService(action)
 		// A restart failure when a daemon needs to transition (e.g. bgpd just
 		// got enabled) has no vtysh safety net (vtysh -b can only push config
 		// into an already-running daemon, not spawn one), but such failures are
-		// often transient (FRR startup races, a queued systemd job); retry once.
-		if daemonsChanged && !ok {
+		// often transient (FRR startup races, a queued service job); retry once.
+		if (daemonsChanged || restartOnly) && !ok {
 			time.Sleep(3 * time.Second)
-			ok = runSystemctl("restart")
+			ok = applyFRRService("restart")
 		}
 		switch {
 		case ok:
 			log.Infof("bgp: routing applied: %d daemon(s), frr %sed", daemonCount, action)
 		case !daemonsChanged && vtyshApplyBoot():
 			// vtysh -b only pushes config into already-running daemons — valid
-			// only when no daemon needed to change state (a pure config reload).
+			// only when no daemon needed to change state (a pure config reload)
+			// and nothing was removed (daemonsChanged already covers both).
 			log.Infof("bgp: routing applied via vtysh -b")
 		default:
+			svc := "systemctl"
+			if runtime.GOOS == "freebsd" {
+				svc = "service(8)"
+			}
 			tried := " and vtysh"
-			if daemonsChanged {
+			if daemonsChanged || restartOnly {
 				tried = " (twice)"
 			}
-			log.Warnf("bgp: config written but could not %s FRR (tried systemctl%s)", action, tried)
+			log.Warnf("bgp: config written but could not %s FRR (tried %s%s)", action, svc, tried)
 		}
 	}()
 
 	return fmt.Sprintf("%d daemon(s) configured, reloading FRR in background", daemonCount), nil
 }
 
-// daemonAlive reports whether an FRR daemon is actually running, via its pid
-// file at /var/run/frr/<daemon>.pid plus a live /proc/<pid>. This is more
-// reliable than what /etc/frr/daemons merely says should be running. Ported
-// from parapet's daemon_alive. On systems without /proc (non-Linux) the /proc
-// check simply fails, so this returns false and applyBGP falls back to a full
-// restart rather than a reload — the safe direction.
+// daemonAlive reports whether an FRR daemon is actually running: read its pid
+// from /var/run/frr/<daemon>.pid — the same path on both Linux and FreeBSD,
+// confirmed against FreeBSD's own frr rc.d script (net/frrN's files/frr.in) —
+// and check that pid is a live process by sending it signal 0, which delivers
+// nothing but fails with ESRCH if the pid is gone. This is more reliable than
+// what a daemon-enable file/variable merely says should be running. Ported
+// from parapet's daemon_alive, generalized past Linux's /proc: signal 0 is
+// the same portable liveness probe on every Unix, whereas the previous
+// /proc/<pid>-directory check only ever worked on Linux, silently returning
+// false on FreeBSD (and macOS) for lack of a mounted procfs — which forced
+// every non-Linux config change through a full restart even for a one-line
+// edit, since applyBGP treats "can't confirm alive" as "needs a restart, the
+// safe direction". On Windows (BGP is never reachable there — bgpSupported()
+// gates on vtysh, which Windows never has) Signal is simply unsupported and
+// this returns false, the same safe fallback as before.
 func daemonAlive(name string) bool {
 	raw, err := os.ReadFile("/var/run/frr/" + name + ".pid")
 	if err != nil {
@@ -488,23 +470,11 @@ func daemonAlive(name string) bool {
 	if err != nil || pid <= 0 {
 		return false
 	}
-	fi, err := statFile("/proc/" + strconv.Itoa(pid))
-	return err == nil && fi.IsDir()
-}
-
-// runSystemctl runs `systemctl <action> frr`, wrapped in `timeout` so a stuck
-// systemd job can't hang the background goroutine forever. Falls back to a
-// direct systemctl call if `timeout` itself is missing. Ported from parapet's
-// run_systemctl.
-func runSystemctl(action string) bool {
-	if err := exec.Command("timeout", "45", "systemctl", action, "frr").Run(); err == nil {
-		return true
-	} else if _, lookErr := exec.LookPath("timeout"); lookErr == nil {
-		// timeout ran but the job failed/timed out.
+	proc, err := os.FindProcess(pid)
+	if err != nil {
 		return false
 	}
-	// timeout binary missing — direct call.
-	return exec.Command("systemctl", action, "frr").Run() == nil
+	return proc.Signal(syscall.Signal(0)) == nil
 }
 
 // vtyshApplyBoot runs `vtysh -b`, pushing the on-disk frr.conf into the running
@@ -581,9 +551,11 @@ func runVtysh(cmd string) (out []byte, ok bool) {
 // Read-only: importing never writes frr.conf or config.json. gravinet takes
 // ownership only when the operator explicitly saves (adopts) the config.
 // frrConfigPaths are the on-disk FRR configs to read the BGP stanza from, in
-// priority order: the integrated config first, then a per-daemon bgpd.conf. A
-// var (not a const list) so tests can point it at a fixture.
-var frrConfigPaths = []string{frrConf, "/etc/frr/bgpd.conf"}
+// priority order: the integrated config first, then a per-daemon bgpd.conf.
+// Built from frrDir (set per-OS) rather than a hardcoded Linux path, so this
+// looks in the right place on FreeBSD too. A var (not a const list) so tests
+// can point it at a fixture.
+var frrConfigPaths = []string{frrConf, frrDir + "/bgpd.conf"}
 
 // importBGPFromFRR reads the BGP configuration FRR is set up with and reshapes
 // it into a config.BGPConfig, so gravinet reflects a pre-existing setup rather

@@ -5771,12 +5771,12 @@ function infoRoutes(c){
 
 // secBgp is the BGP/BFD control panel: gravinet owns the configuration and
 // drives the FRR daemon from it. The top card is an editor (local AS, router
-// id, BFD, redistribution, neighbors, advertised networks) that POSTs to
-// /api/bgp/config, which persists the config and reconciles FRR (render
-// frr.conf, sync the daemon set, reload FRR). The bottom card shows the live
-// peer table FRR reports (via vtysh), read-only. The whole section is only
-// reachable when state.bgpSupported is true (vtysh present); see
-// sectionVisible().
+// id, redistribution, neighbors — each with its own BFD toggle — advertised
+// networks) that POSTs to /api/bgp/config, which persists the config and
+// reconciles FRR (render frr.conf, sync the daemon set, reload FRR). The
+// bottom card shows the live peer table FRR reports (via vtysh), read-only.
+// The whole section is only reachable when state.bgpSupported is true (vtysh
+// present); see sectionVisible().
 function secBgp(c){
   secHint(c, 'BGP configuration for dynamic routing. For neighbors and advertised networks: use + to add a row, double-click a field to edit it (double-click BFD to toggle it), tick rows and \u2212 to remove. Click the \ud83d\udc41\ufe0f next to a neighbor\u2019s MD5 password to reveal or mask it.');
   const editWrap = $('<div></div>'); c.appendChild(editWrap);
@@ -6023,13 +6023,10 @@ function renderBgpEditor(host, b, installed, imported){
   const enableCb = rowTog('Enable BGP', 'Render and run a <code>router bgp</code> speaker on this host. Off leaves no BGP block in FRR\u2019s config and switches bgpd off.', !!b.enabled);
   const asnInp = rowInput('Local AS number', 'This node\u2019s autonomous-system number, e.g. 65001. Required to enable BGP.', b.asn||'', 'e.g. 65001', 180);
   const ridInp = rowInput('Router-id', 'BGP router-id (an IPv4-style id), e.g. 10.0.0.1. Optional \u2014 FRR picks one if left blank.', b.router_id||'', 'e.g. 10.0.0.1', 180);
-  // BFD defaults on for a brand-new configuration ("always enable BFD by
-  // default"): sub-second neighbor-failure detection is the better baseline. An
-  // existing config — one gravinet already stored, or one imported live from
-  // FRR — keeps whatever it actually has, so we never silently flip a peer's
-  // real setting.
+  // isNewCfg still drives the session-timer defaults below; BFD itself has no
+  // global toggle (see nbrAddRow's own default for how a brand-new neighbor
+  // row gets BFD on).
   const isNewCfg = !imported && !b.enabled && !b.asn && !(b.neighbors && b.neighbors.length);
-  const bfdCb = rowTog('BFD on all neighbors', 'Enable Bidirectional Forwarding Detection for every neighbor (sub-second failure detection). A neighbor can also enable BFD on its own below.', isNewCfg ? true : !!b.bfd);
   const rcCb = rowTog('Redistribute connected', 'Advertise directly-connected routes into BGP.', !!b.redistribute_connected);
   const rsCb = rowTog('Redistribute static', 'Advertise static routes into BGP.', !!b.redistribute_static);
   // Session timers. A new config defaults to a fast 4s/12s (FRR's own default is
@@ -6039,6 +6036,7 @@ function renderBgpEditor(host, b, installed, imported){
   const holdDefault = isNewCfg ? 12 : (b.hold_time || '');
   const kaInp = rowInput('Keepalive timer (seconds)', 'How often to send BGP keepalives. Default 4s.', kaDefault, 'e.g. 4', 100);
   const holdInp = rowInput('Hold timer (seconds)', 'Silence before a session is declared down; must exceed keepalive (3\u00d7 is conventional). Default 12s.', holdDefault, 'e.g. 12', 100);
+
 
   // ---- neighbors ----
   // Table styling matches every other list-editing section in the app
@@ -6163,7 +6161,11 @@ function renderBgpEditor(host, b, installed, imported){
         peer, remote_as,
         description: tr.querySelector('.nbre-desc').value.trim(),
         password: pwInp.value,
-        bfd: idx != null ? neighbors[idx].bfd : false,
+        // New neighbors default to BFD on (sub-second failure detection is
+        // the better baseline, and there's no global toggle to inherit it
+        // from any more — see BGPConfig's doc comment); an existing
+        // neighbor being edited keeps whatever it actually has.
+        bfd: idx != null ? neighbors[idx].bfd : true,
         shutdown: idx != null ? neighbors[idx].shutdown : false,
       };
       if (idx != null) neighbors[idx] = entry; else neighbors.push(entry);
@@ -6187,7 +6189,7 @@ function renderBgpEditor(host, b, installed, imported){
       + '<td><input class="nbre-as" style="width:80px" placeholder="65002"></td>'
       + '<td><input class="nbre-desc" style="width:150px" placeholder="optional"></td>'
       + '<td><input class="nbre-pw" type="password" style="width:90px" placeholder="optional"> <button class="ghost sm nbre-pw-toggle" title="show while editing">\ud83d\udc41\ufe0f</button> <button class="sm nbre-save">save</button> <button class="ghost sm nbre-cancel">cancel</button></td>'
-      + '<td><span class="hint">off</span></td>'
+      + '<td><span class="hint">on</span></td>'
       + '<td><span class="hint">enabled</span></td>';
     if (!insertNewRow(table, tr)) return;
     wireNbrForm(tr, null);
@@ -6275,7 +6277,6 @@ function renderBgpEditor(host, b, installed, imported){
       enabled: enableCb.checked,
       asn: asn,
       router_id: ridInp.value.trim(),
-      bfd: bfdCb.checked,
       redistribute_connected: rcCb.checked,
       redistribute_static: rsCb.checked,
       keepalive_time: ka,
@@ -6304,7 +6305,6 @@ function renderBgpEditor(host, b, installed, imported){
   // Toggles and structural changes apply at once; the four text fields debounce.
 
   enableCb.onchange = () => scheduleSave(true);
-  bfdCb.onchange = () => scheduleSave(true);
   rcCb.onchange = () => scheduleSave(true);
   rsCb.onchange = () => scheduleSave(true);
   [asnInp, ridInp, kaInp, holdInp].forEach(inp => { inp.oninput = () => scheduleSave(false); });
