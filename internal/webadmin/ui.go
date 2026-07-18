@@ -3673,8 +3673,17 @@ function routeCidrEdit(cell, cf, kind){
 function routeAddCidr(table, net, op, cols){
   const tr = document.createElement('tr');
   const btns = ' <button class="sm re-save">save</button> <button class="ghost sm re-cancel">cancel</button>';
-  if (cols===3) tr.innerHTML = '<td class="selcol"></td><td><input class="re-cidr" placeholder="cidr e.g. 192.168.0.0/24" style="width:210px"></td><td><input class="re-metric" type="text" inputmode="numeric" value="0" style="width:60px" title="metric (lower wins)">'+btns+'</td>';
-  else tr.innerHTML = '<td class="selcol"></td><td><input class="re-cidr" placeholder="cidr e.g. 192.168.0.0/24" style="width:210px"></td><td><label style="font-size:12px;white-space:nowrap"><input type="checkbox" class="re-inc"> inclusive</label>'+btns+'</td>';
+  // routes-table's colgroup is 4 columns (sel/state/cidr/metric-or-inclusive)
+  // with fixed pixel widths so the three Mesh Routes subcards line up with
+  // each other. This row has no state of its own yet (it's still being
+  // typed), so everything past the selcol placeholder — the cidr input, the
+  // metric input (or inclusive checkbox), and the save/cancel buttons —
+  // goes in one cell colspanning the other three columns, giving them that
+  // combined width to lay out in rather than each landing in a single
+  // fixed-width column too narrow for an input, an inline label, and two
+  // buttons, and spilling into its neighbor.
+  if (cols===3) tr.innerHTML = '<td class="selcol"></td><td colspan="3"><input class="re-cidr" placeholder="cidr e.g. 192.168.0.0/24" style="width:210px"> <input class="re-metric" type="text" inputmode="numeric" value="0" style="width:60px" title="metric (lower wins)">'+btns+'</td>';
+  else tr.innerHTML = '<td class="selcol"></td><td colspan="3"><input class="re-cidr" placeholder="cidr e.g. 192.168.0.0/24" style="width:210px"> <label style="font-size:12px;white-space:nowrap"><input type="checkbox" class="re-inc"> inclusive</label>'+btns+'</td>';
   if (!insertNewRow(table, tr)) return;
   tr.querySelector('.re-cancel').onclick = () => refresh();
   tr.querySelector('.re-save').onclick = () => { const v=tr.querySelector('.re-cidr').value.trim(); if(!v){ alert('cidr required'); return; }

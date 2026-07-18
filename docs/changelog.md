@@ -37,6 +37,34 @@ assuming it didn't happen.
 
 ---
 
+## v523 — 2026-07-18
+
+**Fixed: clicking + on the Advertise or Reject table (Mesh Routes) now
+rendered a garbled, overlapping add-row — the cidr input, the metric
+input or inclusive checkbox, and the save/cancel buttons all crammed on
+top of each other — a regression from v520's fixed 4-column grid.**
+
+`routeAddCidr` (`ui.go`) builds that row with only 3 `<td>`s (a selcol
+placeholder, the cidr input, then the metric/inclusive control plus
+buttons together) — correct for the header's old auto-sized 4 columns,
+where the browser could still stretch cells to fit their content. Once
+routes-table switched to a real fixed 4-column colgroup, those 3 cells
+mapped straight into the first 3 columns instead: the cidr input landed
+in the 90px `rt-state` column meant for the state tag, and the
+metric/inclusive+buttons cell landed in `rt-col2` (296px, meant for the
+cidr value) — both wider than the column they were actually in, so they
+visibly spilled into their neighbors rather than being laid out.
+
+The row now has a blank state cell of its own, then one cell colspanning
+the remaining three columns (476px combined) for the cidr input, the
+metric input or inclusive checkbox, and both buttons — the same total
+column count as the header (1 + colspan 3 = 4), so it maps onto the
+shared grid correctly instead of by accident. No other row in either
+table needed this: existing rows' inline edits (cidr, metric, inclusive)
+already targeted a single real column each and fit within it.
+
+---
+
 ## v522 — 2026-07-18
 
 **Fixed: v521's routes-table width (~370px, shrink-to-content) now sat
