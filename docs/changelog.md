@@ -37,6 +37,85 @@ assuming it didn't happen.
 
 ---
 
+## v516 — 2026-07-18
+
+**Added: BGP-into-mesh redistribution — a network's current BGP-learned
+routes can now be gossiped to its mesh peers, at an operator-set metric.
+The reverse direction from v512's "Redistribute mesh routes" (mesh into
+BGP).**
+
+New per-network `RedistributeBGP`/`RedistributeBGPMetric`
+(`config.Network`), edited from a new "Redistribute from BGP" subcard on
+the Mesh Routes page (Traffic > Mesh Routes), right below each network's
+own Advertise table: a state toggle plus a single metric — one value for
+the whole redistributed batch, not per-prefix, since a live BGP RIB can
+hold thousands of entries and there's no per-route UI for that the way the
+Advertise table has for its hand-typed CIDRs.
+
+**Why this needed a poller, not a config reaction.** Every other
+redistribution feature so far reacts to a config edit, because its source
+*is* config — the Mesh Routes page's Advertise table, for the existing
+mesh-into-BGP direction. This direction's source is FRR's live BGP RIB,
+state gravinet doesn't own and gets no edit event for at all: a route can
+appear or disappear because a *remote* BGP peer changed something, which
+nothing in gravinet's own config ever observes. New
+`bgpMeshRedistributor` (`internal/webadmin/bgp_redistribute.go`) polls
+every 15s (`bgpRedistributePollInterval`), pulls FRR's current best-path
+routes (`bgpLearnedRoutes`/`parseBGPLearnedRoutes` — `show bgp ipv4/ipv6
+unicast json`, filtered to `valid && bestpath`, i.e. the path FRR actually
+has installed, not every alternate one it's holding onto), and pushes them
+into the mesh via a new `Backend.SetBGPRoutes(networkID, routes, metric)`.
+An edit that can change the answer sooner than the next poll tick — saving
+the "Redistribute from BGP" toggle/metric itself, or saving the BGP page
+(BGP turning on/off, or its ASN changing) — triggers an immediate
+backgrounded resync instead of waiting; everything else (a network
+disabled/deleted out from under it) self-corrects within one poll interval,
+the same eventually-consistent tolerance the plain config-reload hook
+already extends to most edits.
+
+**Loop guard.** With `RedistributeMesh` also on, this node's own mesh
+Advertise routes appear right back in its own BGP RIB — without a check,
+they'd bounce straight back into the mesh looking like genuinely external
+routes. `bgpMeshRedistributor.sync` excludes every CIDR currently on
+*any* of this node's networks' Advertise tables (`meshRouteCIDRs` — BGP
+is one global speaker shared across every mesh network on this node, so a
+route advertised on network A has to be excluded from network B's
+redistribution too, not just A's) before pushing. This catches the
+immediate, single-node case; it does not (and, short of FRR carrying a
+route tag or community gravinet could check for, cannot) catch every
+possible loop across a larger multi-node topology — the same caveat any
+router vendor's mutual-redistribution documentation carries.
+
+**Mesh engine.** `netState` gains `bgpRoutes` (`internal/mesh/routes.go`,
+type `bgpRedistSet`) — a network's current BGP-into-mesh set plus its
+shared metric, bundled behind one atomic pointer so a concurrent reader can
+never pair routes from one poll with the metric from another. Deliberately
+separate state from the config-driven `advRoutes`/`advMetric`, each with
+its own diff-and-flood (`reloadBGPRoutes` alongside the existing
+`reloadRoutes`): folding a live BGP RIB into the same pointer config
+reloads already swap wholesale would mean an unrelated config edit could
+race a BGP poll and clobber whichever updated last. `advertiseRoutes` (the
+full-flood-to-a-newly-connected-peer path) and `shouldReadvertise` (the
+periodic lost-packet-guard re-flood) both had to learn to look at *both*
+sources — each previously gated on `advRoutes` alone, which silently
+starved a node using only BGP-into-mesh redistribution (no config
+Advertise routes at all) of both: a peer connecting after the fact never
+got the routes, and a lost flood packet never got a periodic retry. Caught
+by `TestSetBGPRoutesAdvertisedToNewPeer`
+(`internal/mesh/bgp_redistribute_test.go`) failing during development —
+exactly the gap it exists to guard now.
+
+New tests: `internal/mesh/bgp_redistribute_test.go` (live gossip,
+withdrawal, metric-change re-advertisement, the newly-connected-peer gap
+above, and the `ok=false`-for-unknown-network contract);
+`internal/webadmin/bgp_redistribute_test.go` (the poller's filtering,
+loop-guard, and active-set-clearing logic, via a swappable
+`bgpLearnedRoutesFn` — no live FRR needed); `TestParseBGPLearnedRoutes`
+(`bgp_test.go`); `TestNetworkSetRedistributeBGP` (`ops_test.go`);
+`TestRedistributeFromBGPSubcard` (`ui_dom_helper_test.go`).
+
+---
+
 ## v515 — 2026-07-18
 
 **Simplified the "Redistribute mesh routes" toggle's description text

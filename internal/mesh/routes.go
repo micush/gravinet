@@ -75,14 +75,22 @@ func (ns *netState) metricFor(p netip.Prefix) int {
 	return 0
 }
 
-// advertiseRoutes floods this node's configured routes to the mesh.
+// advertiseRoutes floods this node's configured routes to the mesh, plus
+// (see bgpRedistSet's doc comment) anything currently redistributed from
+// BGP — the two live in separate state but are combined here, since a
+// newly-connected peer needs the complete picture in one flood, not just
+// whichever source it happens to ask about.
 func (e *Engine) advertiseRoutes(ns *netState) {
 	rs := ns.advRoutes.Load()
-	if rs == nil {
-		return
+	if rs != nil {
+		for _, p := range *rs {
+			e.floodControl(ns, encodeRouteAdd(e.nodeID, p, ns.metricFor(p)), nil)
+		}
 	}
-	for _, p := range *rs {
-		e.floodControl(ns, encodeRouteAdd(e.nodeID, p, ns.metricFor(p)), nil)
+	if br := ns.bgpRoutes.Load(); br != nil {
+		for _, p := range br.routes {
+			e.floodControl(ns, encodeRouteAdd(e.nodeID, p, br.metric), nil)
+		}
 	}
 }
 
@@ -175,6 +183,104 @@ func (e *Engine) reloadRoutes(ns *netState, newRoutes []netip.Prefix, newReject 
 	if len(removed) > 0 {
 		e.withdrawRoutes(ns, removed)
 	}
+}
+
+// bgpRedistSet is a network's current BGP-into-mesh redistribution set: the
+// CIDRs pulled from FRR's RIB (see webadmin's bgpMeshRedistributor) plus the
+// single metric config.Network.RedistributeBGPMetric assigns to all of them.
+// Bundled into one struct behind one atomic pointer — rather than a separate
+// slice and int the way advRoutes/advMetric are two pointers — so a
+// concurrent reader (advertiseRoutes, mid-flood, racing a poll's update) can
+// never observe routes from one update paired with the metric from another;
+// advRoutes/advMetric can only tear that way across a genuinely simultaneous
+// reload, which reloadRoutes already treats as acceptable (see its own
+// sequential Store calls), but bgpRoutes updates on every poll tick even when
+// nothing changed, so the same assumption held less comfortably here.
+type bgpRedistSet struct {
+	routes []netip.Prefix
+	metric int
+}
+
+// reloadBGPRoutes swaps this node's BGP-into-mesh redistribution set live and
+// floods the delta — the BGP-sourced counterpart to reloadRoutes, kept
+// entirely separate (own atomic state, own diff-and-flood) so a BGP RIB poll
+// and a config-driven Advertise-route reload can never race to clobber each
+// other; see bgpRoutes's doc comment on netState. Called from SetBGPRoutes
+// below, which is what webadmin's poller actually calls — every poll tick,
+// whether or not the RIB changed, since there's no cheaper way for the
+// caller to know that in advance than to just call this and let the diff
+// below do nothing when nothing changed.
+func (e *Engine) reloadBGPRoutes(ns *netState, newRoutes []netip.Prefix, metric int) {
+	var old []netip.Prefix
+	oldMetric := 0
+	if oldp := ns.bgpRoutes.Load(); oldp != nil {
+		old, oldMetric = oldp.routes, oldp.metric
+	}
+	nr := append([]netip.Prefix(nil), newRoutes...)
+	ns.bgpRoutes.Store(&bgpRedistSet{routes: nr, metric: metric})
+
+	inSet := func(set []netip.Prefix, p netip.Prefix) bool {
+		for _, q := range set {
+			if q == p {
+				return true
+			}
+		}
+		return false
+	}
+	var added, removed []netip.Prefix
+	for _, p := range newRoutes {
+		if !inSet(old, p) {
+			added = append(added, p)
+		}
+	}
+	for _, p := range old {
+		if !inSet(newRoutes, p) {
+			removed = append(removed, p)
+		}
+	}
+	for _, p := range added {
+		e.floodControl(ns, encodeRouteAdd(e.nodeID, p, metric), nil)
+		e.log.Infof("mesh: advertising BGP-redistributed route %s on net %x", p, ns.spec.ID)
+	}
+	// Unlike reloadRoutes, this is a single metric for the whole batch, so a
+	// metric change re-advertises every currently-held prefix at once (no
+	// per-prefix comparison needed) rather than hunting for which ones
+	// changed — there's only ever one value that could have.
+	if oldMetric != metric {
+		for _, p := range newRoutes {
+			if inSet(old, p) {
+				e.floodControl(ns, encodeRouteAdd(e.nodeID, p, metric), nil)
+			}
+		}
+		if len(old) > 0 || len(newRoutes) > 0 {
+			e.log.Infof("mesh: BGP-redistributed routes metric -> %d on net %x", metric, ns.spec.ID)
+		}
+	}
+	if len(removed) > 0 {
+		e.withdrawRoutes(ns, removed)
+	}
+}
+
+// SetBGPRoutes updates the CIDRs this node is currently redistributing from
+// its BGP RIB into networkID's mesh gossip (config.Network.RedistributeBGP),
+// tagged with metric. It's webadmin's bgpMeshRedistributor that calls this —
+// gravinet's mesh engine never talks to FRR itself, it just accepts whatever
+// route set the caller currently has and reconciles the mesh side (see
+// reloadBGPRoutes). Passing an empty routes slice clears redistribution for
+// this network (withdrawing anything previously sent), which is exactly what
+// the poller does the moment RedistributeBGP turns off, BGP itself goes
+// down, or the network is disabled — this function has no opinion on why the
+// set is empty, only that it now is.
+//
+// ok is false if networkID isn't configured on this node; the caller should
+// treat that as "nothing to do" rather than a error worth logging.
+func (e *Engine) SetBGPRoutes(networkID uint64, routes []netip.Prefix, metric int) (ok bool) {
+	ns := e.network(networkID)
+	if ns == nil {
+		return false
+	}
+	e.reloadBGPRoutes(ns, routes, metric)
+	return true
 }
 
 func (e *Engine) onRouteAdd(ps *peerSession, body []byte) {
@@ -683,9 +789,19 @@ func (ns *netState) shouldReadvertiseDNS(now time.Time, interval time.Duration) 
 	return true
 }
 
+// shouldReadvertise reports whether it's time to re-flood this network's
+// currently-advertised routes — both the config-driven set (advRoutes) and
+// anything currently redistributed from BGP (bgpRoutes, see bgpRedistSet's
+// doc comment) — as a guard against a lost flood packet quietly leaving a
+// peer without a route it should have. False when there is nothing at all to
+// (re)advertise from either source, so a node with no redistributed routes
+// isn't paying for the interval check every tick for nothing.
 func (ns *netState) shouldReadvertise(now time.Time, interval time.Duration) bool {
 	rs := ns.advRoutes.Load()
-	if rs == nil || len(*rs) == 0 {
+	br := ns.bgpRoutes.Load()
+	haveAdv := rs != nil && len(*rs) > 0
+	haveBGP := br != nil && len(br.routes) > 0
+	if !haveAdv && !haveBGP {
 		return false
 	}
 	if now.Sub(ns.lastRouteAdv) < interval {

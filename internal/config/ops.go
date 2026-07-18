@@ -252,6 +252,24 @@ func (c *Config) NetworkSetSubnets(ref, v4, v6 string) error {
 	return nil
 }
 
+// NetworkSetRedistributeBGP turns a network's BGP-into-mesh redistribution on
+// or off and sets the metric every such route carries — see
+// Network.RedistributeBGP's doc comment for what this actually gossips.
+// Unlike NetworkSetSubnets/NetworkSetAddress, this needs no restart and no
+// validation beyond finding the network: it doesn't touch addressing or
+// re-key anything, only what gets fed to the mesh's gossip (applied live by
+// webadmin's bgpMeshRedistributor, the same way editing the Advertise table
+// already applies live via reloadRoutes).
+func (c *Config) NetworkSetRedistributeBGP(ref string, enabled bool, metric int) error {
+	n := c.FindNetwork(ref)
+	if n == nil {
+		return fmt.Errorf("no network named %q", ref)
+	}
+	n.RedistributeBGP = enabled
+	n.RedistributeBGPMetric = metric
+	return nil
+}
+
 // NetworkSetAddress sets this node's own overlay address on the given network
 // (CIDR, e.g. "10.42.0.5/16"). An empty value leaves a family unchanged; "none"
 // clears it, restoring DAD self-assignment. Each address must be a valid host

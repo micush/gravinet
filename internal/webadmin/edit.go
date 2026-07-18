@@ -41,11 +41,14 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 }
 
 // handleNetwork: add / delete / enable / disable / rename / notes / subnet /
-// join. Most are structural (need a restart to bring interfaces up/down or
-// re-home addresses); rename and notes are local label changes and apply live.
+// join / redistribute-bgp. Most are structural (need a restart to bring
+// interfaces up/down or re-home addresses); rename, notes, and
+// redistribute-bgp are local changes and apply live.
 func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Op, Net, Id, NewName, Subnet4, Subnet6, Address4, Address6, Key, Peer, Token, Notes string
+		Enabled                                                                             bool
+		Metric                                                                              int
 	}
 	if !decode(w, r, &req) {
 		return
@@ -87,12 +90,29 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 		case "join-token":
 			_, _, e := cfg.NetworkJoinToken(req.Token)
 			return e
+		case "redistribute-bgp":
+			return cfg.NetworkSetRedistributeBGP(req.Net, req.Enabled, req.Metric)
 		default:
 			return fmt.Errorf("unknown op %q", req.Op)
 		}
 	})
 	if err == nil {
 		s.reconcileMeshRedistribute(prevMesh)
+		// Only redistribute-bgp itself needs an immediate resync — it's the
+		// only op above that can change which networks want BGP-into-mesh
+		// redistribution, or the metric they redistribute at, without also
+		// changing something reconcileMeshRedistribute already reacted to.
+		// (disable/delete also affect it — meshRouteCIDRs-style eligibility
+		// — but bgpMeshRedistributor's own poll interval catches those
+		// within bgpRedistributePollInterval regardless, the same
+		// eventually-consistent tolerance every other op above already
+		// accepts from the plain reload hook for anything that isn't routes
+		// or BGP.) Guarded: s.bgpRedis is nil until Start() runs (see
+		// reconcileMeshRedistribute's own guards elsewhere for the same
+		// "not wired up in this test/context" shape).
+		if req.Op == "redistribute-bgp" && s.bgpRedis != nil {
+			go s.bgpRedis.sync()
+		}
 	}
 	s.editResult(w, err, restart)
 }

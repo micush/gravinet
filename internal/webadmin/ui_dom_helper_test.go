@@ -158,3 +158,28 @@ func TestSubnetChangeWarnsOfSilentPeerMismatch(t *testing.T) {
 		t.Error("the subnet-change confirm() no longer explains the actual consequence (a peer on the old range becoming unreachable)")
 	}
 }
+
+// TestRedistributeFromBGPSubcard guards the Mesh Routes page's
+// "Redistribute from BGP" subcard (config.Network.RedistributeBGP/
+// RedistributeBGPMetric — BGP-into-mesh redistribution, the reverse of BGP's
+// own "Redistribute mesh routes" toggle): that it exists, that its state
+// toggle and metric cell both post to /api/network's redistribute-bgp op
+// (not /api/route — this isn't a Route entry), and that toggling preserves
+// the current metric rather than silently resetting it to 0.
+func TestRedistributeFromBGPSubcard(t *testing.T) {
+	if !strings.Contains(indexHTML, "Redistribute from BGP") {
+		t.Fatal("secRoutes is missing the \"Redistribute from BGP\" subcard heading")
+	}
+	if !strings.Contains(indexHTML, "cf.redistribute_bgp") || !strings.Contains(indexHTML, "cf.redistribute_bgp_metric") {
+		t.Error("the subcard no longer reads cf.redistribute_bgp/cf.redistribute_bgp_metric from the loaded config")
+	}
+	if n := strings.Count(indexHTML, "op:'redistribute-bgp'"); n < 2 {
+		t.Errorf("op:'redistribute-bgp' appears %d times, want at least 2 (the state-toggle and metric-cell edits)", n)
+	}
+	// The state toggle must read the metric back out of the row's own data
+	// attribute (not hardcode 0), or double-clicking the state tag would
+	// silently reset a nonzero metric every time it's flipped.
+	if !strings.Contains(indexHTML, "metric: parseInt(tag.closest('tr').dataset.metric,10)||0") {
+		t.Error("the state-toggle no longer preserves the row's current metric when posting redistribute-bgp")
+	}
+}

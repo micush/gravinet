@@ -186,8 +186,16 @@ func (e *Engine) install(ns *netState, ps *peerSession) {
 	}
 	e.syncPeerBypassRoute(ns, ps)
 
-	// Push our redistributed routes to the (possibly new) peer right away.
-	if rs := ns.advRoutes.Load(); rs != nil && len(*rs) > 0 {
+	// Push our redistributed routes to the (possibly new) peer right away —
+	// both config Advertise routes (advRoutes) and anything currently
+	// redistributed from BGP (bgpRoutes, see bgpRedistSet's doc comment):
+	// advertiseRoutes floods both, so the gate here has to consider both too,
+	// or a node with only BGP-into-mesh redistribution active (no config
+	// Advertise routes at all) would never flood its BGP routes to a newly
+	// connected peer until something else happened to trigger a call.
+	rs := ns.advRoutes.Load()
+	br := ns.bgpRoutes.Load()
+	if (rs != nil && len(*rs) > 0) || (br != nil && len(br.routes) > 0) {
 		e.advertiseRoutes(ns)
 	}
 

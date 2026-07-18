@@ -3452,6 +3452,7 @@ function secBans(c) {
 function secRoutes(c) {
   if (!state.cfg.length) return emptyCard(c, 'No networks.');
   secHint(c, 'CIDRs advertised into the mesh from this node. Double-click a cidr or metric to edit it (lower metric wins); double-click the state tag to toggle the route.');
+  secHint(c, 'This node\u2019s current BGP-learned routes (FRR\u2019s RIB), gossiped to this network\u2019s peers alongside the Advertise table above \u2014 the reverse of the "Redistribute mesh routes" toggle on the BGP page. Every route redistributed this way carries the one metric set here (lower wins, same as an Advertise route\u2019s own). Needs FRR/bgpd actually running; a route this node already advertises above is never redistributed back to avoid a loop.');
   secHint(c, 'CIDRs rejected when advertised by other nodes. A reject matches only that exact CIDR; tick inclusive to also reject every more-specific network inside it. Double-click a cidr to edit it, the inclusive cell to toggle it, or the state tag to toggle the entry.');
   for (const cf of state.cfg) {
     const card = $('<div class="card"></div>');
@@ -3506,6 +3507,49 @@ function secRoutes(c) {
     // Double-click a cidr to edit the advertised network in place.
     rtable.querySelectorAll('tr[data-cidr] .cidr-cell').forEach(cell => routeCidrEdit(cell, cf, 'advertise'));
     card.appendChild(rsub);
+
+    // --- Redistribute from BGP sub-card ---
+    // Unlike Advertise/Reject above, this isn't a list — one toggle and one
+    // metric per network, so it gets a single-row table rather than an
+    // add/remove-rows one (_rowAdd/_rowRemove are deliberately not set).
+    const bsub = $('<div class="subcard"></div>');
+    bsub.appendChild($('<h4>Redistribute from BGP</h4>'));
+    const rbEnabled = !!cf.redistribute_bgp;
+    const rbMetric = cf.redistribute_bgp_metric || 0;
+    const rbTag = '<span class="tag-toggle '+(rbEnabled?'on':'off')+'" data-rbstate="1" title="double-click to '+(rbEnabled?'disable':'enable')+'">'+(rbEnabled?'enabled':'disabled')+'</span>';
+    let bh = '<table><tr><th>state</th><th>metric</th></tr>'
+      + '<tr data-enabled="'+(rbEnabled?1:0)+'" data-metric="'+esc(rbMetric)+'">'
+      + '<td class="rb-state">'+rbTag+'</td><td class="metric-cell">'+esc(rbMetric)+'</td></tr>';
+    const bt = $('<div></div>'); bt.innerHTML = bh+'</table>'; bsub.appendChild(bt);
+    // Double-click the state tag to toggle redistribution on/off (live),
+    // preserving whatever metric is currently set — same shape as the
+    // Advertise/Reject state toggles above, just posting to /api/network's
+    // redistribute-bgp op instead of /api/route.
+    bt.querySelectorAll('[data-rbstate]').forEach(tag => {
+      tag.ondblclick = (e) => {
+        e.stopPropagation();
+        toggleTagState(tag, '/api/network', on => ({op:'redistribute-bgp', net:cf.name, enabled:on, metric: parseInt(tag.closest('tr').dataset.metric,10)||0}));
+      };
+    });
+    // Double-click the metric cell to edit it in place — same pattern as the
+    // Advertise table's own metric cell, preserving the current enabled state.
+    bt.querySelectorAll('tr .metric-cell').forEach(cell => {
+      const tr = cell.closest('tr');
+      cell.title = 'double-click to edit metric';
+      cell.ondblclick = () => {
+        const cur = cell.textContent.trim();
+        cell.innerHTML = '<input type="text" inputmode="numeric" value="'+esc(cur)+'" style="width:60px">';
+        const inp = cell.querySelector('input'); inp.focus(); inp.select();
+        let done = false;
+        const commit = async () => { if(done) return; done=true; const m=Math.max(0,parseInt(inp.value,10)||0);
+          const ar = await api('/api/network',{method:'POST',body:JSON.stringify({op:'redistribute-bgp', net:cf.name, enabled: tr.dataset.enabled==='1', metric:m})});
+          if (!ar.ok){ alert((ar.body&&ar.body.error)||'edit failed'); refresh(); return; }
+          refresh(); };
+        inp.onkeydown = (e) => { if(e.key==='Enter'){ commit(); } else if(e.key==='Escape'){ done=true; refresh(); } };
+        inp.onblur = commit;
+      };
+    });
+    card.appendChild(bsub);
 
     // --- Reject sub-card ---
     const xsub = $('<div class="subcard"></div>');

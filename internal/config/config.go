@@ -503,7 +503,25 @@ type Network struct {
 
 	Routes   []Route       `json:"routes"`       // local routes to redistribute
 	RouteRej []RejectRoute `json:"route_reject"` // advertised routes to reject (see RejectRoute)
-	NAT      NAT           `json:"nat"`
+	// RedistributeBGP, when on, gossips this node's current BGP-learned
+	// routes (FRR's RIB) to this network's mesh peers alongside its own
+	// Route entries above — the reverse direction from BGPConfig's own
+	// RedistributeMesh (mesh routes into BGP): this is BGP routes into the
+	// mesh. Each redistributed route is tagged with RedistributeBGPMetric so
+	// peers can rank it against any other path to the same prefix the normal
+	// way a route's metric already works (lower wins) — see webadmin's
+	// bgpMeshRedistributor, which polls FRR and calls mesh's SetBGPRoutes;
+	// gravinet itself never originates or terminates a BGP session, so this
+	// only ever has anything to redistribute while FRR/bgpd is actually up
+	// and BGP.Enabled is true.
+	RedistributeBGP bool `json:"redistribute_bgp,omitempty"`
+	// RedistributeBGPMetric is the metric every route RedistributeBGP
+	// gossips carries. One value for the whole batch, not per-prefix like
+	// Route.Metric: a live BGP RIB can hold thousands of entries, so there's
+	// no per-route UI for this the way the Advertise table has one for its
+	// hand-typed routes.
+	RedistributeBGPMetric int `json:"redistribute_bgp_metric,omitempty"`
+	NAT                   NAT `json:"nat"`
 
 	// DisabledPeers is a local-only blocklist of peer node IDs this node refuses
 	// to connect to. Unlike bans (which flood mesh-wide), disabling a peer only

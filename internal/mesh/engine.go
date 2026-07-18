@@ -794,6 +794,23 @@ type netState struct {
 	advDNS    atomic.Pointer[[]dnsForward]         // conditional-forward domains this node advertises
 	advMetric atomic.Pointer[map[netip.Prefix]int] // metric for each advertised route
 
+	// bgpRoutes is this node's current BGP-into-mesh redistribution set (see
+	// config.Network.RedistributeBGP) — the CIDRs pulled from FRR's RIB and
+	// gossiped to this network's peers, each carrying the single metric the
+	// whole batch shares. Deliberately separate state from advRoutes/
+	// advMetric above rather than merged into them: advRoutes is swapped
+	// wholesale on every config reload (reloadRoutes, driven by
+	// ReloadRuntime), which runs for any config edit at all, not just a
+	// routes-related one — folding a live BGP RIB into that same pointer
+	// would mean an unrelated config change (renaming this network, say)
+	// could race a BGP poll and clobber whichever updated last. Kept apart,
+	// each side only ever touches its own state; reloadBGPRoutes does its
+	// own diff-and-flood exactly the way reloadRoutes does for the
+	// config-driven set, and advertiseRoutes (flooding the full current set
+	// to a newly-connected peer) is what brings the two together, at read
+	// time, into what actually gets sent.
+	bgpRoutes atomic.Pointer[bgpRedistSet]
+
 	advHostReject atomic.Pointer[[]string] // hostnames whose learned records this node refuses (lowercased)
 	advDNSReject  atomic.Pointer[[]string] // forward domains whose learned records this node refuses (lowercased)
 

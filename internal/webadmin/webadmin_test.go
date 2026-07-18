@@ -88,6 +88,18 @@ type stubBackend struct {
 	lastRetractKeyB64       string
 	natClass                string // empty defaults to "cone" in NATStatusStrings, matching the old hardcoded value
 	natPublic               string // empty defaults to "203.0.113.5:51820"
+
+	// bgpRoutesCalls records every SetBGPRoutes call, in order — what
+	// TestBGPMeshRedistributorSync (bgp_redistribute_test.go) asserts
+	// against, since a plain bool return can't show what was actually
+	// pushed.
+	bgpRoutesCalls []bgpRoutesCall
+}
+
+type bgpRoutesCall struct {
+	networkID uint64
+	routes    []netip.Prefix
+	metric    int
 }
 
 func (s *stubBackend) NetworkIDs() []uint64 { return []uint64{0x1234} }
@@ -112,6 +124,10 @@ func (s *stubBackend) DisabledPeers(uint64) []mesh.DisabledPeerInfo {
 	return s.disabledPeers
 }
 func (s *stubBackend) Routes(uint64) []mesh.RouteInfo { return nil }
+func (s *stubBackend) SetBGPRoutes(id uint64, routes []netip.Prefix, metric int) bool {
+	s.bgpRoutesCalls = append(s.bgpRoutesCalls, bgpRoutesCall{networkID: id, routes: routes, metric: metric})
+	return true
+}
 func (s *stubBackend) BanNode(_ uint64, t, _ string) error {
 	s.banned = append(s.banned, t)
 	return nil

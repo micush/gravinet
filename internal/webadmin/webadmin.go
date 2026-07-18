@@ -46,6 +46,13 @@ type Backend interface {
 	ListBans(networkID uint64) []mesh.BanInfo
 	DisabledPeers(networkID uint64) []mesh.DisabledPeerInfo
 	Routes(networkID uint64) []mesh.RouteInfo
+	// SetBGPRoutes updates networkID's BGP-into-mesh redistribution set (see
+	// config.Network.RedistributeBGP and mesh's SetBGPRoutes) — the reverse
+	// direction from Routes above, which reports what this node has *learned*
+	// from peers; this pushes what it's currently *originating* from its own
+	// BGP RIB. Called by bgpMeshRedistributor, never directly by an HTTP
+	// handler.
+	SetBGPRoutes(networkID uint64, routes []netip.Prefix, metric int) bool
 	BanNode(networkID uint64, target, notes string) error
 	UnbanNode(networkID uint64, target string) error
 	EditBanNotes(networkID uint64, target, notes string) error
@@ -128,8 +135,9 @@ type Server struct {
 	version string // gravinet build version (for the About tab); set via SetVersion
 	commit  string // gravinet build commit
 
-	metrics *metricsCollector // CPU/mem/interface time series for the Metrics tab
-	capture *captureState     // live packet capture for the Capture tab
+	metrics  *metricsCollector     // CPU/mem/interface time series for the Metrics tab
+	capture  *captureState         // live packet capture for the Capture tab
+	bgpRedis *bgpMeshRedistributor // polls FRR's RIB, pushes BGP routes into the mesh (config.Network.RedistributeBGP)
 }
 
 // SetVersion records the build version/commit for the Info → About tab.
@@ -422,6 +430,8 @@ func (s *Server) Start() error {
 	}
 	s.metrics = newMetricsCollector(s.be, s.log)
 	go s.metrics.run()
+	s.bgpRedis = newBGPMeshRedistributor(s)
+	go s.bgpRedis.run()
 	// If FRR is on this host, make sure the daemons BGP/BFD need are enabled
 	// and actually running (Linux: bgpd/bfdd in /etc/frr/daemons; FreeBSD:
 	// rc.conf's frr_enable/frr_daemons plus the /var/lib/frr bootstrap its
@@ -475,6 +485,9 @@ func (s *Server) EnsureListener(addr string) error {
 func (s *Server) Close() error {
 	if s.capture != nil {
 		s.capture.stop()
+	}
+	if s.bgpRedis != nil {
+		s.bgpRedis.close()
 	}
 	if s.httpSrv != nil {
 		return s.httpSrv.Close()
@@ -807,15 +820,21 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		Seeds    config.SeedList      `json:"seeds"`
 		Routes   []config.Route       `json:"routes"`
 		RouteRej []config.RejectRoute `json:"route_reject"`
-		NAT      config.NAT           `json:"nat"`
-		QoS      config.QoS           `json:"qos"`
-		Throttle config.Throttle      `json:"throttle"`
-		Firewall config.Firewall      `json:"firewall"`
-		Hosts    []config.HostRecord  `json:"hosts_advertise"`
-		HostsRej []config.HostReject  `json:"hosts_reject"`
-		DNS      []config.DNSForward  `json:"dns_advertise"`
-		DNSRej   []config.DNSReject   `json:"dns_reject"`
-		Keys     []keyMeta            `json:"keys"`
+		// RedistributeBGP/RedistributeBGPMetric mirror config.Network's own
+		// fields verbatim — see its doc comment. Surfaced here (not folded
+		// into Routes above) because they're a single per-network toggle +
+		// metric, not another entry in that list.
+		RedistributeBGP       bool                `json:"redistribute_bgp"`
+		RedistributeBGPMetric int                 `json:"redistribute_bgp_metric"`
+		NAT                   config.NAT          `json:"nat"`
+		QoS                   config.QoS          `json:"qos"`
+		Throttle              config.Throttle     `json:"throttle"`
+		Firewall              config.Firewall     `json:"firewall"`
+		Hosts                 []config.HostRecord `json:"hosts_advertise"`
+		HostsRej              []config.HostReject `json:"hosts_reject"`
+		DNS                   []config.DNSForward `json:"dns_advertise"`
+		DNSRej                []config.DNSReject  `json:"dns_reject"`
+		Keys                  []keyMeta           `json:"keys"`
 	}
 	var out []cfgNet
 	for _, n := range cfg.Networks {
@@ -834,6 +853,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			ID: id, Name: n.Name, Enabled: n.Enabled, Notes: n.Notes,
 			Subnet4: n.Subnet4, Subnet6: n.Subnet6, Address4: n.Address4, Address6: n.Address6, Seeds: n.Seeds,
 			Routes: n.Routes, RouteRej: n.RouteRej,
+			RedistributeBGP: n.RedistributeBGP, RedistributeBGPMetric: n.RedistributeBGPMetric,
 			NAT: n.NAT, QoS: n.QoS, Throttle: n.Throttle, Firewall: n.Firewall, Hosts: n.HostsAdvertise, HostsRej: n.HostsReject,
 			DNS: n.DNSAdvertise, DNSRej: n.DNSReject, Keys: keys,
 		})

@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sort"
@@ -187,6 +188,81 @@ func (s *Server) handleBGPTable(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// bgpLearnedRoutes queries FRR for the CIDRs currently installed as this
+// node's best BGP path, across both address families — what
+// bgpMeshRedistributor actually gossips into the mesh when
+// config.Network.RedistributeBGP is on. "show bgp ipv4/ipv6 unicast json"
+// (not "show bgp summary json" — that's peers, not routes; not plain "show
+// bgp ipv4 unicast" — no JSON form) returns an object keyed by prefix, each
+// holding every path FRR knows for it — see parseBGPLearnedRoutes, which
+// does the actual selection, for what "best path" means here.
+//
+// Thin wrapper around runVtysh + parseBGPLearnedRoutes, split apart the same
+// way handleBGP/parseBGPSummary already are: this is the only half that
+// touches a live FRR (untestable without one installed), the parser is a
+// pure function this package's tests exercise directly against captured
+// JSON.
+func bgpLearnedRoutes() []netip.Prefix {
+	seen := make(map[netip.Prefix]bool)
+	var out []netip.Prefix
+	for _, cmd := range []string{"show bgp ipv4 unicast json", "show bgp ipv6 unicast json"} {
+		raw, ran := runVtysh(cmd)
+		if !ran {
+			continue
+		}
+		for _, pfx := range parseBGPLearnedRoutes(raw) {
+			if !seen[pfx] {
+				seen[pfx] = true
+				out = append(out, pfx)
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].String() < out[j].String() })
+	return out
+}
+
+// parseBGPLearnedRoutes reshapes one AFI's "show bgp ipv4/ipv6 unicast json"
+// into the CIDRs FRR currently has installed — the prefixes with a path that
+// is both "valid" and "bestpath": the one FRR actually selected and uses, as
+// opposed to every alternate path it's merely holding onto for the prefix,
+// which isn't in use and would just be noise to redistribute (and, the
+// moment the selected path changes, briefly wrong). The map key is the CIDR
+// string itself, so unlike bgpPeerRow this never needs to reconstruct a
+// prefix from separate fields — the one part of this shape solid enough to
+// lean on without a live FRR install in this repo's test environment to
+// verify every other field name against.
+//
+// Silent best-effort, matching parseBGPSummary/parseBFDPeers: invalid JSON,
+// or a prefix string FRR emits that netip can't parse, is just skipped
+// rather than erroring the whole call — bgpMeshRedistributor treats "FRR had
+// nothing usable to say this tick" as "redistribute nothing this tick", not
+// a reason to alarm.
+func parseBGPLearnedRoutes(raw []byte) []netip.Prefix {
+	var top struct {
+		Routes map[string][]struct {
+			Valid    bool `json:"valid"`
+			Bestpath bool `json:"bestpath"`
+		} `json:"routes"`
+	}
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return nil
+	}
+	var out []netip.Prefix
+	for cidr, paths := range top.Routes {
+		pfx, err := netip.ParsePrefix(cidr)
+		if err != nil {
+			continue
+		}
+		for _, p := range paths {
+			if p.Valid && p.Bestpath {
+				out = append(out, pfx)
+				break
+			}
+		}
+	}
+	return out
+}
+
 // handleBGPConfig is the read/write side: gravinet owns the BGP/BFD
 // configuration and drives the FRR daemon from it. GET returns the stored BGP
 // config plus whether FRR is installed. It deliberately does NOT touch vtysh —
@@ -259,6 +335,15 @@ func (s *Server) handleBGPConfig(w http.ResponseWriter, r *http.Request) {
 	// Then reconcile FRR with the freshly-saved config. A no-op (with a note)
 	// when FRR isn't installed — never fatal to the save.
 	note, err := applyBGP(req, prev, meshRoutes, meshRoutes, s.log)
+	// BGP itself turning on/off (or its ASN changing) changes whether
+	// bgpMeshRedistributor's bgpUp check passes, independent of anything on
+	// the Mesh Routes page — worth an immediate nudge rather than waiting up
+	// to bgpRedistributePollInterval. Backgrounded: sync() can make its own
+	// vtysh calls (bgpLearnedRoutes), each bounded by bgpQueryTimeout, and
+	// this response shouldn't wait on that.
+	if s.bgpRedis != nil {
+		go s.bgpRedis.sync()
+	}
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "applied": false, "note": err.Error()})
 		return

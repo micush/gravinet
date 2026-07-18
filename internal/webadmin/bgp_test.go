@@ -239,6 +239,50 @@ func TestMeshRouteCIDRsEmpty(t *testing.T) {
 	}
 }
 
+// TestParseBGPLearnedRoutes covers the selection rule bgpMeshRedistributor
+// depends on for loop-safety and correctness: only a bestpath+valid path
+// counts, a prefix with no such path is skipped entirely (not "picked
+// arbitrarily"), and an unparseable map key is dropped rather than panicking
+// or propagating a zero-value prefix into the redistribution set.
+func TestParseBGPLearnedRoutes(t *testing.T) {
+	raw := []byte(`{
+	  "routes": {
+	    "10.0.1.0/24": [
+	      {"valid": true, "bestpath": true},
+	      {"valid": true, "bestpath": false}
+	    ],
+	    "10.0.2.0/24": [
+	      {"valid": true, "bestpath": false},
+	      {"valid": false, "bestpath": false}
+	    ],
+	    "10.0.3.0/24": [
+	      {"valid": true, "bestpath": true}
+	    ],
+	    "not-a-prefix": [
+	      {"valid": true, "bestpath": true}
+	    ]
+	  }
+	}`)
+	got := parseBGPLearnedRoutes(raw)
+	want := map[string]bool{"10.0.1.0/24": true, "10.0.3.0/24": true}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want exactly %v", got, want)
+	}
+	for _, p := range got {
+		if !want[p.String()] {
+			t.Errorf("unexpected prefix %s in result", p)
+		}
+	}
+}
+
+func TestParseBGPLearnedRoutesEmptyOrGarbage(t *testing.T) {
+	for _, raw := range [][]byte{nil, []byte(""), []byte("not json"), []byte(`{"routes": {}}`)} {
+		if got := parseBGPLearnedRoutes(raw); len(got) != 0 {
+			t.Errorf("parseBGPLearnedRoutes(%q) = %v, want empty", raw, got)
+		}
+	}
+}
+
 func TestParseBFDPeersEmptyOrGarbage(t *testing.T) {
 	for _, in := range [][]byte{[]byte(""), []byte("not json"), []byte("{}"), []byte("[]")} {
 		peers := parseBFDPeers(in)

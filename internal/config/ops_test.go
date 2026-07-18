@@ -135,6 +135,34 @@ func TestNetworkSetSubnets(t *testing.T) {
 	}
 }
 
+func TestNetworkSetRedistributeBGP(t *testing.T) {
+	c := &Config{Networks: []Network{
+		{Name: "corp", ID: "0000000000000001", Subnet4: "10.1.0.0/16"},
+	}}
+	n := &c.Networks[0]
+
+	if n.RedistributeBGP {
+		t.Fatal("expected RedistributeBGP off by default")
+	}
+	if err := c.NetworkSetRedistributeBGP("corp", true, 42); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	if !n.RedistributeBGP || n.RedistributeBGPMetric != 42 {
+		t.Fatalf("got enabled=%v metric=%d, want enabled=true metric=42", n.RedistributeBGP, n.RedistributeBGPMetric)
+	}
+	// Turning it off still updates the metric in the same call — the UI
+	// posts both together (see ui.go's redistribute-bgp toggle/metric cells).
+	if err := c.NetworkSetRedistributeBGP("corp", false, 7); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	if n.RedistributeBGP || n.RedistributeBGPMetric != 7 {
+		t.Fatalf("got enabled=%v metric=%d, want enabled=false metric=7", n.RedistributeBGP, n.RedistributeBGPMetric)
+	}
+	if err := c.NetworkSetRedistributeBGP("nope", true, 0); err == nil {
+		t.Fatal("expected error for unknown network")
+	}
+}
+
 func TestThrottleSetPreservesEnabled(t *testing.T) {
 	c := &Config{Networks: []Network{{Name: "n", ID: "0000000000000001", Subnet4: "10.1.0.0/16"}}}
 	tn := &c.Networks[0]
