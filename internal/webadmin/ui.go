@@ -956,7 +956,7 @@ function buildSearchIndex(){
     const netName = nameOf(n.id);
     for (const p of peerRowsForNet(n)) {
       if (p.self) continue; // this node itself isn't a useful search target
-      add(p.host || p.id, (p.disabled?'Disabled peer':'Peer')+' \u00b7 '+netName, 'peers', n.id, {kind:'peer', nodeId:p.id}, p.id+' '+(p.notes||'')+' '+(p.overlay||'')+' '+(p.endpoint||''));
+      add(p.host || p.id, (p.disabled?'Disabled peer':'Peer')+' \u00b7 '+netName, 'peers', n.id, {kind:'peer', nodeId:p.id}, p.id+' '+(p.notes||'')+' '+(p.overlay4||'')+' '+(p.overlay6||'')+' '+(p.endpoint||''));
     }
     for (const b of (n.bans||[])) {
       const tgt = b.Target||b.target||'', tgtHost = b.Hostname||b.hostname||'', notes = b.Notes||b.notes||'';
@@ -3016,8 +3016,10 @@ function peerRowsForNet(n) {
     // 🛈 info lookup has something to resolve for self the same way it does
     // for any other row. Empty until NAT discovery completes, same as a
     // peer's endpoint is empty before its first handshake.
+    const selfOv4 = self.Overlay4 || self.overlay4 || '';
+    const selfOv6 = self.Overlay6 || self.overlay6 || '';
     rows.push({ id:selfID, host:self.Hostname||self.hostname||'',
-      overlay:self.Overlay4||self.overlay4||self.Overlay6||self.overlay6||'',
+      overlay:selfOv4||selfOv6||'', overlay4:selfOv4, overlay6:selfOv6,
       endpoint:(state.nat && state.nat.public) || '', endpointText:(state.nat && state.nat.public) || '', relayed:false,
       disabled:false, self:true, notes:'' });
   }
@@ -3028,11 +3030,17 @@ function peerRowsForNet(n) {
     // ships may still be holding a stale self-session from before it
     // restarted onto the fix — don't let that resurrect the duplicate row.
     if (selfID && pid === selfID) continue;
-    // Overlay4 preferred (unchanged for a dual-stack or v4-only peer); a
-    // v6-only peer (no Overlay4 assigned at all — a fully supported
-    // configuration, see mesh.newNetState's independent need4/need6 gating)
-    // previously showed a blank overlay column here instead of falling
-    // back to their actual (v6) address.
+    // Overlay4 preferred as the "primary"/editable address (unchanged for
+    // a dual-stack or v4-only peer — peerOverlayEdit's inline editor only
+    // ever targets one family at a time, see its doc comment, so p.overlay
+    // stays a single value); a v6-only peer (no Overlay4 assigned at all —
+    // a fully supported configuration, see mesh.newNetState's independent
+    // need4/need6 gating) falls back to their actual (v6) address instead
+    // of a blank overlay column. overlay4/overlay6 are carried separately
+    // too, so a dual-stack peer's *display* isn't limited to whichever one
+    // p.overlay picked — see overlayCellHTML, used everywhere this is
+    // actually rendered.
+    //
     // A relayed peer has no direct underlay endpoint of its own to report —
     // ps.endpoint is deliberately the zero value for one (see mesh's
     // peerSession.endpoint doc comment) — so p.Endpoint there is Go's raw
@@ -3049,8 +3057,10 @@ function peerRowsForNet(n) {
     const rawEndpoint = p.Endpoint||p.endpoint||'';
     const endpoint = rawEndpoint === 'invalid AddrPort' ? '' : rawEndpoint;
     const endpointText = relayed && relayVia ? ('via '+relayVia) : endpoint;
+    const ov4 = p.Overlay4||p.overlay4||'';
+    const ov6 = p.Overlay6||p.overlay6||'';
     rows.push({ id:pid, host:p.Hostname||p.hostname||'',
-      overlay:p.Overlay4||p.overlay4||p.Overlay6||p.overlay6||'', endpoint:endpoint, endpointText:endpointText,
+      overlay:ov4||ov6||'', overlay4:ov4, overlay6:ov6, endpoint:endpoint, endpointText:endpointText,
       relayed:relayed, disabled:false,
       transport:(p.Transport||p.transport||'udp'),
       est:(p.EstablishedAt||p.established_at_unix_nano||0),
@@ -3089,6 +3099,22 @@ function peerRowsForNet(n) {
   // deterministic even if two peers ever share a hostname.
   rows.sort((a, b) => netNameCmp(a.host || a.id, b.host || b.id) || a.id.localeCompare(b.id));
   return rows;
+}
+
+// overlayCellHTML renders a peerRowsForNet row's overlay address(es) as a
+// table cell's inner HTML: both v4 and v6 stacked when the peer has both
+// (dual-stack), just the one it has otherwise, blank if it has neither yet.
+// p.overlay itself (used elsewhere as the editable target in Mesh > peers
+// — see peerOverlayEdit) deliberately stays a single address, since the
+// inline editor there only ever targets one family's field at a time; this
+// is purely the read side, shared by every place a peer row's overlay
+// column is actually drawn (Mesh > peers' non-editable cells, and Monitor
+// > Mesh peers, which has no editing at all) so a dual-stack peer's second
+// address isn't silently dropped from either.
+function overlayCellHTML(p) {
+  const v4 = p.overlay4 || '', v6 = p.overlay6 || '';
+  if (v4 && v6) return esc(v4) + '<br><span class="hint">' + esc(v6) + '</span>';
+  return esc(v4 || v6 || '');
 }
 
 // openPeerShellFromSel opens a shell on the single ticked row of a peers table,
@@ -3157,8 +3183,8 @@ function secPeers(c) {
       // offered as editable in this table regardless of Manager mode.
       const canEditOv = !p.self && !p.disabled && !p.pending && p.overlay && state.manager && (state.cluster||[]).some(cp => cp.node_id===p.id && cp.manageable);
       const ovCell = canEditOv
-        ? '<td class="peer-ov" data-peer-ov="'+esc(p.id)+'" style="cursor:pointer" title="double-click to edit this peer\'s overlay address on its own node">'+esc(p.overlay)+'</td>'
-        : '<td'+(p.overlay?' title="'+(p.self?'this node\'s own overlay address':'overlay address is set by the peer itself — change it on that node')+'"':'')+'>'+esc(p.overlay)+'</td>';
+        ? '<td class="peer-ov" data-peer-ov="'+esc(p.id)+'" style="cursor:pointer" title="double-click to edit this peer\'s overlay address on its own node">'+overlayCellHTML(p)+'</td>'
+        : '<td'+(p.overlay?' title="'+(p.self?'this node\'s own overlay address':'overlay address is set by the peer itself — change it on that node')+'"':'')+'>'+overlayCellHTML(p)+'</td>';
       // The self row IS selectable — ticking it and using 🛈 or the shell
       // button both work (see peerInfoRow and the shell button below); it's
       // only Ban that refuses to act on it once selected. Its notes cell has
@@ -3330,7 +3356,7 @@ function infoMeshPeers(c) {
       // NAT discovery completes, not a placeholder, so it's shown the same
       // way a peer's endpoint is rather than overridden to a dash.
       h += '<tr class="selectable'+(p.self?' peer-self':'')+'" title="'+stTitle+'" data-peer="'+esc(p.id)+'"><td class="selcol"><input type="checkbox" class="rsel" data-k="'+esc(selKey(n.id,p.id))+'"'+(p.self?' title="this is the current node"':'')+'></td><td>'+nodeCell(p.host,p.id,n.id,p.endpoint)+'</td><td>'+keyCell+'</td>'
-        + '<td'+(p.overlay?' title="'+(p.self?'this node\'s own overlay address':'overlay address is set by the peer itself')+'">':'>')+esc(p.overlay)+'</td>'
+        + '<td'+(p.overlay?' title="'+(p.self?'this node\'s own overlay address':'overlay address is set by the peer itself')+'">':'>')+overlayCellHTML(p)+'</td>'
         + '<td'+(p.self?' title="this node\'s own observed public address">':'>')+esc(p.endpointText)+'</td><td>'+reach+'</td><td>'+timeCell+'</td><td class="c-transport-cell">'+xport+'</td></tr>';
     }
     const t = $('<div></div>'); t.innerHTML = h+'</table>'; card.appendChild(t);

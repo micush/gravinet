@@ -37,6 +37,47 @@ assuming it didn't happen.
 
 ---
 
+## v511 — 2026-07-18
+
+**Fixed: a dual-stack peer's IPv6 overlay address never showed up in
+Mesh > peers or Monitor > mesh peers — only its IPv4 address did.**
+
+`mesh.PeerInfo` (the struct behind every peer entry in `/api/status`)
+already carries both `overlay4` and `overlay6` as independent fields —
+the handshake genuinely exchanges both, and the backend was never the
+problem. The bug was entirely in the admin UI: `peerRowsForNet` (`ui.go`)
+folded them into a single `p.overlay` value with
+`Overlay4||...||Overlay6`, picking v4 whenever a peer had one at all, and
+every table that showed a peer's overlay column rendered only that one
+value. Only a genuinely v6-only peer (no v4 assigned) ever showed v6 —
+which is exactly why this shipped unnoticed: nothing looks broken unless
+you're specifically checking a peer that has both.
+
+`peerRowsForNet` now carries `overlay4`/`overlay6` as their own fields on
+every row (self included), independent of `p.overlay` — which
+deliberately stays a single value, since `peerOverlayEdit`'s inline
+editor only ever targets one family's config field at a time (typing a
+combined string there would break the "does this look like a v6 address"
+heuristic that already decides which field to save). A new shared
+`overlayCellHTML(p)` helper renders both, stacked (v4 on the first line,
+v6 dimmed below it) when a peer has both, or whichever one it has
+otherwise — used by both known render sites: Mesh > peers' overlay cell
+(both its editable-peer and read-only branches) and Monitor > mesh
+peers'. The search index (⌘K-style peer search) now matches on both
+addresses too, not just whichever `p.overlay` picked.
+
+New test `TestDualStackOverlayAddressNotCollapsedToOneFamily`
+(`ui_dom_helper_test.go`) scans the served page directly for this wiring
+— this package has no JS runtime in its test suite, same reasoning as
+the existing `TestNoStandaloneTrOrTdViaInnerHTML` guard — checking that
+`overlayCellHTML` still exists, is still called from all 4 places (its
+own definition plus 3 call sites), and that `peerRowsForNet` still
+carries `overlay4`/`overlay6` on both self and peer rows. Verified
+meaningful by temporarily reverting one call site back to `esc(p.overlay)`
+and confirming the test fails, then restoring and confirming it passes.
+
+---
+
 ## v510 — 2026-07-18
 
 **Fixed a flaky test in v509's multi-port UPnP suite** —
