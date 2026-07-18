@@ -100,6 +100,39 @@ func (s *Server) handleBGP(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleBFD returns the current BFD session table as reported by FRR's
+// bfdd, for the Monitor > BGP Peers page's separate "BFD Neighbors" card.
+// vtysh is the shared CLI front end for every FRR daemon including bfdd, so
+// this is gated on the same bgpSupported() check as handleBGP — a BFD
+// session can back a BGP neighbor, an OSPF adjacency, or a monitored static
+// route, so it isn't itself gated on BGP being enabled or configured, only
+// on FRR/vtysh being present at all. Same degrade-with-a-reason shape as
+// handleBGP: available=false with a human reason and an empty list rather
+// than an error, when vtysh is absent or bfdd isn't answering.
+func (s *Server) handleBFD(w http.ResponseWriter, r *http.Request) {
+	if !bgpSupported() {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"available": false,
+			"reason":    "FRR/vtysh is not installed",
+			"peers":     []any{},
+		})
+		return
+	}
+	out, ran := runVtysh("show bfd peers json")
+	if !ran {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"available": false,
+			"reason":    "FRR is not running (no routing daemons active)",
+			"peers":     []any{},
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"available": true,
+		"peers":     parseBFDPeers(out),
+	})
+}
+
 // handleBGPConfig is the read/write side: gravinet owns the BGP/BFD
 // configuration and drives the FRR daemon from it. GET returns the stored BGP
 // config plus whether FRR is installed. It deliberately does NOT touch vtysh —
@@ -323,6 +356,53 @@ func bgpPeerRow(ip, afi string, raw json.RawMessage) bgpPeer {
 		Prefixes: info.PfxRcd,
 		AFI:      afi,
 	}
+}
+
+// bfdPeer is one BFD session row for the BFD Neighbors card. Field selection
+// mirrors bgpPeer: enough to tell what's up/down and since when, not every
+// counter `show bfd peers json` carries (detect-multiplier, RTT, etc. are
+// left out — this is a status glance, not a diagnostics dump).
+type bfdPeer struct {
+	Peer       string `json:"peer"`
+	Local      string `json:"local,omitempty"`
+	Interface  string `json:"interface,omitempty"`
+	Status     string `json:"status"`
+	Uptime     int64  `json:"uptime,omitempty"`   // seconds; present when status is "up"
+	Downtime   int64  `json:"downtime,omitempty"` // seconds; present when status is "down"
+	Diagnostic string `json:"diagnostic,omitempty"`
+}
+
+// parseBFDPeers reshapes FRR's `show bfd peers json` — a flat array of
+// session objects, unlike show ip bgp summary json's per-AFI nesting — into
+// the bfdPeer rows the card needs. Field names (peer, local, interface,
+// status, uptime, downtime, diagnostic) match bfdd_vty.c's
+// __display_peer_json verbatim. Sorted by peer address for a stable display
+// order, same reasoning as parseBGPSummary (Go map iteration isn't ordered,
+// though here the source is an array — sorting still keeps the table from
+// reshuffling if FRR's own array order isn't stable across calls).
+func parseBFDPeers(raw []byte) []bfdPeer {
+	var arr []struct {
+		Peer       string `json:"peer"`
+		Local      string `json:"local"`
+		Interface  string `json:"interface"`
+		Status     string `json:"status"`
+		Uptime     int64  `json:"uptime"`
+		Downtime   int64  `json:"downtime"`
+		Diagnostic string `json:"diagnostic"`
+	}
+	if err := json.Unmarshal(raw, &arr); err != nil {
+		return []bfdPeer{}
+	}
+	peers := make([]bfdPeer, 0, len(arr))
+	for _, p := range arr {
+		peers = append(peers, bfdPeer{
+			Peer: p.Peer, Local: p.Local, Interface: p.Interface,
+			Status: p.Status, Uptime: p.Uptime, Downtime: p.Downtime,
+			Diagnostic: p.Diagnostic,
+		})
+	}
+	sort.Slice(peers, func(i, j int) bool { return peers[i].Peer < peers[j].Peer })
+	return peers
 }
 
 // statFile is a thin seam over os.Stat so vtysh detection can be exercised in

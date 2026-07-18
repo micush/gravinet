@@ -5778,7 +5778,7 @@ function infoRoutes(c){
 // reachable when state.bgpSupported is true (vtysh present); see
 // sectionVisible().
 function secBgp(c){
-  secHint(c, 'BGP configuration for dynamic routing.');
+  secHint(c, 'BGP configuration for dynamic routing. For neighbors and advertised networks: use + to add a row, double-click a field to edit it (double-click BFD to toggle it), tick rows and \u2212 to remove. Click show/hide next to a neighbor\u2019s MD5 password to reveal or mask it.');
   const editWrap = $('<div></div>'); c.appendChild(editWrap);
 
   const fail = (msg) => {
@@ -5850,13 +5850,53 @@ function secBgp(c){
 // Monitor holds live read-only state). Gated on vtysh presence, same as the
 // editor.
 function secBgpPeers(c){
-  secHint(c, 'Live BGP peer sessions as reported by FRR on this host. Read-only \u2014 configure BGP under Traffic \u203a BGP.');
+  secHint(c, 'Live BGP and BFD session status as reported by FRR on this host. Read-only \u2014 configure BGP under Traffic \u203a BGP.');
   const card = $('<div class="card"></div>');
-  card.appendChild($('<h3>BGP peers</h3>'));
+  card.appendChild($('<h3>BGP Neighbors</h3>'));
   const meta = $('<div class="hint" style="margin:-4px 0 10px" id="bgp-live-meta"></div>'); card.appendChild(meta);
   const body = $('<div id="bgp-live-body"></div>'); body.innerHTML = '<div class="hint">loading\u2026</div>'; card.appendChild(body);
   c.appendChild(card);
   bgpLiveStatus(meta, body);
+
+  // A BFD session can back a BGP neighbor, an OSPF adjacency, or a monitored
+  // static route — it isn't itself BGP-specific — so it gets its own card
+  // rather than being folded into the BGP peers table above, even though
+  // both live on this same Monitor page and both come from FRR via vtysh.
+  const bfdCard = $('<div class="card"></div>');
+  bfdCard.appendChild($('<h3>BFD Neighbors</h3>'));
+  const bfdBody = $('<div id="bfd-live-body"></div>'); bfdBody.innerHTML = '<div class="hint">loading\u2026</div>'; bfdCard.appendChild(bfdBody);
+  c.appendChild(bfdCard);
+  bfdLiveStatus(bfdBody);
+}
+
+// bfdLiveStatus fills the BFD Neighbors card body with FRR's live BFD
+// session table (GET /api/bfd), degrading to an explanatory line when FRR
+// isn't answering — same shape and reasoning as bgpLiveStatus, just against
+// bfdd instead of bgpd.
+async function bfdLiveStatus(body){
+  const r = await api('/api/bfd');
+  if (!r.ok || !r.body){ body.innerHTML = '<div class="hint">could not read BFD status.</div>'; return; }
+  if (r.body.available === false){
+    body.innerHTML = '<div class="empty">'+esc(r.body.reason || 'BFD status is unavailable.')+'</div>';
+    return;
+  }
+  const peers = r.body.peers || [];
+  if (!peers.length){ body.innerHTML = '<div class="empty">No BFD sessions yet.</div>'; return; }
+  // show bfd peers json reports uptime/downtime as raw seconds-elapsed, not a
+  // pre-formatted string the way FRR's BGP summary reports peerUptime — so
+  // this converts to fmtElapsed's expected shape (a nanosecond-scale
+  // timestamp to diff against now) rather than duplicating its d/h/m/s logic.
+  const durAgo = (secs) => fmtElapsed((Date.now() - (secs||0)*1000) * 1e6);
+  let h = '<table><tr><th>peer</th><th>local</th><th>interface</th><th>state</th><th>up/down time</th><th>diagnostic</th></tr>';
+  for (const p of peers){
+    const est = (p.status||'').toLowerCase() === 'up';
+    const stateCell = '<span class="pill" style="'+(est?'color:var(--ok);border-color:var(--ok)':'color:var(--mut)')+'">'+esc(p.status||'\u2013')+'</span>';
+    const time = est ? durAgo(p.uptime) : ((p.status||'').toLowerCase()==='down' ? durAgo(p.downtime) : '\u2013');
+    h += '<tr><td>'+esc(p.peer||'\u2013')+'</td><td>'+esc(p.local||'\u2013')+'</td><td>'+esc(p.interface||'\u2013')+
+      '</td><td>'+stateCell+'</td><td>'+time+'</td><td>'+esc(p.diagnostic||'\u2013')+'</td></tr>';
+  }
+  body.innerHTML = h+'</table>';
+  enhanceTable(body.querySelector('table'));
 }
 
 // bgpLiveStatus fills a meta line and body with FRR's live BGP peer table
@@ -5962,75 +6002,188 @@ function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
   const holdInp = rowInput('Hold timer (seconds)', 'Silence before a session is declared down; must exceed keepalive (3\u00d7 is conventional). Default 12s.', holdDefault, 'e.g. 12', 100);
 
   // ---- neighbors ----
+  // Table styling matches every other list-editing section in the app
+  // (Networks/Keys/Seeds/Firewall/NAT/QoS): a selcol checkbox column, +/- on
+  // the toolbar enhanceTable renders from table._rowAdd/_rowRemove, and
+  // double-click a field to edit a row in place with save/cancel — rather
+  // than the old model of every cell being a permanently-live, per-keystroke
+  // autosaving input. BFD is a separate double-click-to-toggle tag (same
+  // pattern as NAT/QoS's rule state column), not part of the edit form.
+  //
+  // The MD5 password is masked by default with a show/hide toggle, right in
+  // the row — no round trip needed to reveal it, unlike Keys' masked keys:
+  // the plaintext is already sitting in this array (the GET that populated
+  // it sent it in cleartext), the mask is purely a display choice.
   const nbrSec = $('<div style="margin-top:16px;border-top:1px solid var(--line);padding-top:12px"></div>');
-  const nbrHead = $('<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"></div>');
-  nbrHead.appendChild($('<div class="settings-label">Neighbors</div>'));
-  const addNbr = $('<button class="sm">+ add neighbor</button>');
-  nbrHead.appendChild(addNbr); nbrSec.appendChild(nbrHead);
+  nbrSec.appendChild($('<div class="settings-label" style="margin-bottom:8px">Neighbors</div>'));
   const nbrBody = $('<div></div>'); nbrSec.appendChild(nbrBody);
   card.appendChild(nbrSec);
 
+  const nbrPwCell = (n) => n.password
+    ? '<span class="kval masked nbr-pw-val">\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022</span> <button class="ghost sm nbr-pw-toggle" title="show/hide this neighbor\u2019s MD5 password">show</button>'
+    : '<span class="hint">none</span>';
+
   function renderNbrs(){
-    if (!neighbors.length){ nbrBody.innerHTML = '<div class="empty">No neighbors. Click \u201c+ add neighbor\u201d to define a BGP peer.</div>'; return; }
     nbrBody.innerHTML = '';
-    const tbl = $('<table><tr><th>peer address</th><th>remote AS</th><th>description</th><th title="MD5 session password">MD5 password</th><th title="Bidirectional Forwarding Detection for this peer">BFD</th><th></th></tr></table>');
-    neighbors.forEach((n, i) => {
-      // $() parses its argument as innerHTML on a plain <div>; every
-      // browser's HTML parser silently drops a bare tr or td element there
-      // (they aren't valid outside a real <table> context), so building
-      // either one that way comes back null — the header row above works
-      // because it's nested inside a complete <table>...</table> string in
-      // one shot, which parses fine. document.createElement has no such
-      // context requirement, so it's used here instead of $() for exactly
-      // these two tags.
-      const tr = document.createElement('tr');
-      tr.dataset.peer = n.peer || '';
-      const mk = (val, ph, w) => { const inp=$('<input type="text" style="width:'+w+'px">'); inp.value=val==null?'':String(val); inp.placeholder=ph||''; return inp; };
-      const peer = mk(n.peer, '10.0.0.2', 130); peer.oninput = () => { n.peer = peer.value.trim(); tr.dataset.peer = n.peer; scheduleSave(false); };
-      const as = mk(n.remote_as||'', '65002', 80); as.oninput = () => { n.remote_as = parseInt(as.value,10)||0; scheduleSave(false); };
-      const desc = mk(n.description, 'optional', 150); desc.oninput = () => { n.description = desc.value; scheduleSave(false); };
-      const pw = $('<input type="password" style="width:120px" placeholder="optional">'); pw.value = n.password||''; pw.oninput = () => { n.password = pw.value; scheduleSave(false); };
-      const bfd = $('<input type="checkbox">'); bfd.checked = !!n.bfd; bfd.onchange = () => { n.bfd = bfd.checked; scheduleSave(true); };
-      const del = $('<button class="sm danger">\u2212</button>'); del.onclick = () => { neighbors.splice(i,1); renderNbrs(); scheduleSave(true); };
-      const cells = [peer, as, desc, pw, bfd, del];
-      cells.forEach(el => { const td=document.createElement('td'); td.appendChild(el); tr.appendChild(td); });
-      tbl.appendChild(tr);
+    let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>peer address</th><th>remote AS</th><th>description</th>'
+      + '<th title="MD5 session password">MD5 password</th><th title="Bidirectional Forwarding Detection for this peer">BFD</th></tr>';
+    if (!neighbors.length) h += '<tr><td colspan="6" class="empty">No neighbors \u2014 click + to define a BGP peer.</td></tr>';
+    else neighbors.forEach((n, i) => {
+      const bfdOn = !!n.bfd;
+      h += '<tr class="nbrrow" data-idx="'+i+'" data-peer="'+esc(n.peer||'')+'">'
+        + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
+        + '<td class="nbr-field nbr-peer-cell">'+esc(n.peer||'')+'</td>'
+        + '<td class="nbr-field nbr-as-cell">'+esc(String(n.remote_as||''))+'</td>'
+        + '<td class="nbr-field nbr-desc-cell">'+esc(n.description||'')+'</td>'
+        + '<td class="nbr-pw-cell">'+nbrPwCell(n)+'</td>'
+        + '<td><span class="tag-toggle '+(bfdOn?'on':'off')+'" data-nbrbfd="1" title="double-click to '+(bfdOn?'disable':'enable')+' BFD for this peer">'+(bfdOn?'on':'off')+'</span></td></tr>';
     });
-    nbrBody.appendChild(tbl);
+    const t = $('<div></div>'); t.innerHTML = h+'</table>'; nbrBody.appendChild(t);
+    const table = t.querySelector('table');
+
+    t.querySelectorAll('tr.nbrrow').forEach(tr => {
+      tr.querySelectorAll('.nbr-field').forEach(td => { td.title = 'double-click to edit'; td.ondblclick = () => startNbrEdit(tr); });
+    });
+    t.querySelectorAll('[data-nbrbfd]').forEach(tag => {
+      tag.ondblclick = (e) => {
+        e.stopPropagation();
+        const i = parseInt(tag.closest('tr').dataset.idx, 10);
+        const on = !neighbors[i].bfd;
+        neighbors[i].bfd = on;
+        tag.className = 'tag-toggle ' + (on?'on':'off'); tag.textContent = on?'on':'off';
+        tag.title = 'double-click to '+(on?'disable':'enable')+' BFD for this peer';
+        scheduleSave(true);
+      };
+    });
+    // Purely client-side reveal — see nbrPwCell's comment on why no fetch is
+    // needed here — just swaps the masked span for the real value and back.
+    t.querySelectorAll('.nbr-pw-toggle').forEach(btn => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const i = parseInt(btn.closest('tr').dataset.idx, 10);
+        const n = neighbors[i]; if (!n) return;
+        const span = btn.previousElementSibling;
+        if (span.classList.contains('masked')){ span.textContent = n.password; span.classList.remove('masked'); btn.textContent = 'hide'; }
+        else { span.textContent = '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022'; span.classList.add('masked'); btn.textContent = 'show'; }
+      };
+    });
+    selAllWire(t);
+    table._rowAdd = () => nbrAddRow(table);
+    table._rowRemove = () => {
+      const rows = selCheckedRows(table);
+      if (!rows.length){ alert('tick one or more rows to remove'); return; }
+      const idxs = rows.map(tr => parseInt(tr.dataset.idx, 10)).sort((a,b) => b-a);
+      for (const idx of idxs) neighbors.splice(idx, 1);
+      renderNbrs(); scheduleSave(true);
+    };
+    enhanceTable(table); // secBgp's tables are built async, outside renderSection()'s own blanket enhanceTable pass, so this has to happen here explicitly.
   }
-  addNbr.onclick = () => { neighbors.push({peer:'', remote_as:0, description:'', password:'', bfd:false}); renderNbrs(); };
+
+  // wireNbrForm wires the shared peer/AS/description/password edit form —
+  // used by both a brand-new row (idx null, appended on save) and an
+  // existing row being edited in place (idx is its position in neighbors).
+  function wireNbrForm(tr, idx){
+    const pwInp = tr.querySelector('.nbre-pw'), pwToggle = tr.querySelector('.nbre-pw-toggle');
+    pwToggle.onclick = (e) => {
+      e.stopPropagation();
+      const showing = pwInp.type === 'text';
+      pwInp.type = showing ? 'password' : 'text';
+      pwToggle.textContent = showing ? 'show' : 'hide';
+    };
+    tr.querySelector('.nbre-cancel').onclick = () => renderNbrs();
+    tr.querySelector('.nbre-save').onclick = () => {
+      const peer = tr.querySelector('.nbre-peer').value.trim();
+      const remote_as = parseInt(tr.querySelector('.nbre-as').value, 10) || 0;
+      if (!peer || remote_as <= 0){ alert('peer address and remote AS are required'); return; }
+      const entry = {
+        peer, remote_as,
+        description: tr.querySelector('.nbre-desc').value.trim(),
+        password: pwInp.value,
+        bfd: idx != null ? neighbors[idx].bfd : false,
+      };
+      if (idx != null) neighbors[idx] = entry; else neighbors.push(entry);
+      renderNbrs(); scheduleSave(true);
+    };
+  }
+  function startNbrEdit(tr){
+    if (tr.querySelector('.nbre-peer')) return; // already editing
+    const idx = parseInt(tr.dataset.idx, 10), n = neighbors[idx];
+    tr.querySelector('.nbr-peer-cell').innerHTML = '<input class="nbre-peer" style="width:130px" placeholder="10.0.0.2" value="'+esc(n.peer||'')+'">';
+    tr.querySelector('.nbr-as-cell').innerHTML = '<input class="nbre-as" style="width:80px" placeholder="65002" value="'+esc(String(n.remote_as||''))+'">';
+    tr.querySelector('.nbr-desc-cell').innerHTML = '<input class="nbre-desc" style="width:150px" placeholder="optional" value="'+esc(n.description||'')+'">';
+    tr.querySelector('.nbr-pw-cell').innerHTML = '<input class="nbre-pw" type="password" style="width:90px" placeholder="optional" value="'+esc(n.password||'')+'"> '
+      + '<button class="ghost sm nbre-pw-toggle" title="show/hide while editing">show</button> <button class="sm nbre-save">save</button> <button class="ghost sm nbre-cancel">cancel</button>';
+    wireNbrForm(tr, idx);
+  }
+  function nbrAddRow(table){
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td class="selcol"></td>'
+      + '<td><input class="nbre-peer" style="width:130px" placeholder="10.0.0.2"></td>'
+      + '<td><input class="nbre-as" style="width:80px" placeholder="65002"></td>'
+      + '<td><input class="nbre-desc" style="width:150px" placeholder="optional"></td>'
+      + '<td><input class="nbre-pw" type="password" style="width:90px" placeholder="optional"> <button class="ghost sm nbre-pw-toggle" title="show/hide while editing">show</button> <button class="sm nbre-save">save</button> <button class="ghost sm nbre-cancel">cancel</button></td>'
+      + '<td><span class="hint">off</span></td>';
+    if (!insertNewRow(table, tr)) return;
+    wireNbrForm(tr, null);
+  }
   renderNbrs();
 
   // ---- advertised networks ----
   const netSec = $('<div style="margin-top:16px;border-top:1px solid var(--line);padding-top:12px"></div>');
-  const netHead = $('<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"></div>');
-  netHead.appendChild($('<div class="settings-label">Advertised networks</div>'));
-  const addNet = $('<button class="sm">+ add network</button>');
-  netHead.appendChild(addNet); netSec.appendChild(netHead);
+  netSec.appendChild($('<div class="settings-label" style="margin-bottom:8px">Advertised networks</div>'));
   const netBody = $('<div></div>'); netSec.appendChild(netBody);
   card.appendChild(netSec);
 
   function renderNets(){
-    if (!networks.length){ netBody.innerHTML = '<div class="empty">No advertised networks. Add a prefix (e.g. 10.0.0.0/24) to originate it into BGP.</div>'; return; }
     netBody.innerHTML = '';
-    networks.forEach((net, i) => {
-      const rowEl = $('<div style="display:flex;gap:8px;margin-bottom:6px;align-items:center"></div>');
-      const inp = $('<input type="text" style="width:220px" placeholder="e.g. 10.0.0.0/24">'); inp.value = net||'';
-      inp.oninput = () => { networks[i] = inp.value.trim(); scheduleSave(false); };
-      const del = $('<button class="sm danger">\u2212</button>'); del.onclick = () => { networks.splice(i,1); renderNets(); scheduleSave(true); };
-      rowEl.appendChild(inp); rowEl.appendChild(del); netBody.appendChild(rowEl);
+    let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>network prefix</th></tr>';
+    if (!networks.length) h += '<tr><td colspan="2" class="empty">No advertised networks \u2014 click + to add a prefix (e.g. 10.0.0.0/24) to originate into BGP.</td></tr>';
+    else networks.forEach((net, i) => {
+      h += '<tr data-idx="'+i+'"><td class="selcol"><input type="checkbox" class="selbox"></td>'
+        + '<td class="netg-cell" title="double-click to edit">'+esc(net||'')+'</td></tr>';
     });
+    const t = $('<div></div>'); t.innerHTML = h+'</table>'; netBody.appendChild(t);
+    const table = t.querySelector('table');
+    t.querySelectorAll('td.netg-cell').forEach(td => td.ondblclick = () =>
+      inlineCellEdit(td, td.textContent, 'e.g. 10.0.0.0/24', (v, prev) => {
+        const idx = parseInt(td.closest('tr').dataset.idx, 10);
+        if (v === prev){ renderNets(); return; }
+        if (!v) networks.splice(idx, 1); else networks[idx] = v;
+        renderNets(); scheduleSave(true);
+      }));
+    selAllWire(t);
+    table._rowAdd = () => netAddRow(table);
+    table._rowRemove = () => {
+      const rows = selCheckedRows(table);
+      if (!rows.length){ alert('tick one or more rows to remove'); return; }
+      const idxs = rows.map(tr => parseInt(tr.dataset.idx, 10)).sort((a,b) => b-a);
+      for (const idx of idxs) networks.splice(idx, 1);
+      renderNets(); scheduleSave(true);
+    };
+    enhanceTable(table);
   }
-  addNet.onclick = () => { networks.push(''); renderNets(); };
+  function netAddRow(table){
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td class="selcol"></td><td><input class="nete-val" style="width:220px" placeholder="e.g. 10.0.0.0/24"> <button class="sm nete-save">save</button> <button class="ghost sm nete-cancel">cancel</button></td>';
+    if (!insertNewRow(table, tr)) return;
+    tr.querySelector('.nete-cancel').onclick = () => renderNets();
+    tr.querySelector('.nete-save').onclick = () => {
+      const v = tr.querySelector('.nete-val').value.trim();
+      if (!v){ alert('enter a network prefix'); return; }
+      networks.push(v);
+      renderNets(); scheduleSave(true);
+    };
+  }
   renderNets();
 
   // ---- autosave ----
   // No Save button: like every other form in the app, edits persist — and apply
-  // to FRR — automatically. Text fields debounce so we don't POST on every
-  // keystroke; toggles and neighbor/network add-or-remove save at once. An
-  // intermediate invalid state (BGP enabled with no AS, or hold <= keepalive) is
-  // held back with an inline hint instead of POSTed, and the next valid edit
-  // saves it — so autosave never pushes a config FRR would reject.
+  // to FRR — automatically. The scalar fields above debounce so we don't POST
+  // on every keystroke; toggles and neighbor/network add/edit/remove save at
+  // once. An intermediate invalid state (BGP enabled with no AS, or hold <=
+  // keepalive) is held back with an inline hint instead of POSTed, and the
+  // next valid edit saves it — so autosave never pushes a config FRR would
+  // reject.
   const status = $('<div class="hint" style="margin-top:16px;border-top:1px solid var(--line);padding-top:12px"></div>');
   card.appendChild(status);
 
@@ -6079,6 +6232,7 @@ function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
   }
 
   // Toggles and structural changes apply at once; the four text fields debounce.
+
   enableCb.onchange = () => scheduleSave(true);
   bfdCb.onchange = () => scheduleSave(true);
   rcCb.onchange = () => scheduleSave(true);

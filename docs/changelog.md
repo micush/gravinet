@@ -37,6 +37,81 @@ assuming it didn't happen.
 
 ---
 
+## v493 — 2026-07-17
+
+**FRR config: always emit five global BGP session-level directives.**
+
+`renderFRR` fully regenerates `frr.conf` from scratch on every apply rather
+than patching an existing file (its own header says as much: "Do not edit by
+hand"), so "add if not present" means unconditionally rendering these inside
+the `router bgp` block whenever BGP is enabled:
+
+- `bgp log-neighbor-changes`
+- `no bgp ebgp-requires-policy`
+- `bgp deterministic-med`
+- `bgp bestpath as-path multipath-relax`
+- `bgp conditional-advertisement timer 10`
+
+New test (`TestFRRGlobalBGPDirectives`) checks all five are present on both a
+minimal and a fully-populated config, and entirely absent when BGP is
+disabled (no `router bgp` block at all).
+
+**Monitor › BGP Peers: renamed to "BGP Neighbors", added a "BFD Neighbors"
+card.**
+
+The existing live-peers card is now titled BGP Neighbors. A new BFD
+Neighbors card sits below it, backed by a new read-only `/api/bfd` endpoint
+(`handleBFD`, gated on the same vtysh presence as `/api/bgp`) that runs
+`show bfd peers json` and reports peer, local address, interface, status,
+and up/down time — a BFD session isn't itself BGP-specific (it can back an
+OSPF adjacency or a monitored static route too), hence its own card rather
+than folding into the BGP table. Field names (`peer`, `local`, `interface`,
+`status`, `uptime`, `downtime`, `diagnostic`) were taken directly from FRR's
+own `bfdd_vty.c` source (`__display_peer_json`) rather than guessed at, and
+`TestParseBFDPeers` checks parsing against a realistic sample built from
+those exact fields. Verified the full card renders correctly end-to-end in a
+real DOM, including that a raw seconds-elapsed uptime/downtime value comes
+out through the existing `fmtElapsed` duration formatting correctly (e.g.
+125s \u2192 "2m 5s").
+
+## v492 — 2026-07-17
+
+**BGP editor: Neighbors and Advertised networks are now real tables, matching
+Networks/Keys/Seeds/Firewall/NAT/QoS.**
+
+Both were previously bespoke, always-live-input widgets (a raw list of input
+rows for neighbors; a plain div-per-row list, not even a `<table>`, for
+networks) that autosaved on every keystroke — the only section in the app
+built that way. Replaced with the same interaction model every other
+list-editing section uses: a checkbox-select column, a `+`/`\u2212` toolbar
+(`enhanceTable`'s standard `table._rowAdd`/`_rowRemove`), double-click a field
+to edit a row in place with save/cancel, tick rows and `\u2212` to remove.
+BFD is a separate double-click-to-toggle tag on each neighbor row (the same
+pattern NAT/QoS use for a rule's enabled/disabled state), immediate like
+before. The scalar fields above the tables (Enable BGP, AS number, router-id,
+BFD-for-all, redistribute, timers) are unchanged — still debounced autosave.
+
+Since `secBgp`'s data loads asynchronously (outside `renderSection()`'s own
+blanket `enhanceTable` pass over the page), `renderBgpEditor` now calls
+`enhanceTable` on its own two tables directly rather than relying on that.
+
+**Added a way to see a neighbor's MD5 password.**
+
+There was previously no way to view a saved neighbor password at all — the
+field was a permanently-masked `<input type="password">` with nothing to
+reveal it. Each neighbor row now shows a masked placeholder with a show/hide
+toggle right in the table (no round trip needed \u2014 the plaintext is
+already in the config the page loaded, the mask was purely a display choice),
+and the row-edit form's own password field has the same show/hide toggle
+while typing.
+
+Verified in a real DOM (jsdom): rendered a two-neighbor config, revealed and
+re-masked a password, toggled BFD, edited a row's description in place, added
+a row, removed a row via checkbox+toolbar \u2014 confirmed each one actually
+POSTs the right resulting config. Re-ran the v490/v491 reproduction tests
+(the render-crash repro and the Monitor\u2009\u203a\u2009BGP\u2009Peers
+click-through) against the restructured tables to confirm no regression.
+
 ## v491 — 2026-07-17
 
 **Remove the now-redundant "Check FRR's live configuration" button.**

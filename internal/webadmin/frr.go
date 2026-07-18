@@ -106,6 +106,26 @@ func renderFRR(b config.BGPConfig) string {
 	}
 
 	fmt.Fprintf(&out, "router bgp %d\n", b.ASN)
+	// Global session-level knobs gravinet always applies, regardless of what's
+	// configured above: log-neighbor-changes (visibility into session
+	// state transitions in the log), no ebgp-requires-policy (modern FRR
+	// defaults to rejecting eBGP routes with no inbound/outbound route-map
+	// attached; gravinet doesn't manage route-maps, so a neighbor configured
+	// here would otherwise exchange no routes at all), deterministic-med
+	// (consistent best-path selection across peers from the same AS,
+	// independent of the order routes arrived in), bestpath as-path
+	// multipath-relax (allows ECMP across paths with equal-length but
+	// different AS-paths — otherwise multipath is limited to
+	// literally-identical AS-paths), and a 10s conditional-advertisement
+	// timer (how often conditionally-advertised routes are re-evaluated).
+	// Since this function fully regenerates frr.conf from scratch on every
+	// apply rather than patching an existing file, "add if not present"
+	// means unconditionally emitting them here.
+	out.WriteString(" bgp log-neighbor-changes\n")
+	out.WriteString(" no bgp ebgp-requires-policy\n")
+	out.WriteString(" bgp deterministic-med\n")
+	out.WriteString(" bgp bestpath as-path multipath-relax\n")
+	out.WriteString(" bgp conditional-advertisement timer 10\n")
 	if safeToken(b.RouterID) {
 		fmt.Fprintf(&out, " bgp router-id %s\n", b.RouterID)
 	}

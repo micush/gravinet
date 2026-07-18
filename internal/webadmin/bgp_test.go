@@ -122,3 +122,43 @@ func TestParseBGPSummaryEmptyOrGarbage(t *testing.T) {
 		}
 	}
 }
+
+// Field names (peer, local, interface, status, uptime, downtime, diagnostic)
+// match bfdd_vty.c's __display_peer_json verbatim, straight from FRR's own
+// source rather than guessed at — `show bfd peers json` is a flat array, one
+// object per session, unlike show ip bgp summary json's per-AFI nesting.
+func TestParseBFDPeers(t *testing.T) {
+	raw := []byte(`[
+	  {"multihop": false, "peer": "10.0.0.2", "local": "10.0.0.1", "id": 1, "remote-id": 2,
+	   "passive-mode": false, "status": "up", "uptime": 125, "diagnostic": "ok",
+	   "remote-diagnostic": "ok", "type": "configured", "receive-interval": 300, "transmit-interval": 300},
+	  {"multihop": false, "peer": "10.0.0.3", "interface": "eth0", "id": 3, "remote-id": 0,
+	   "status": "down", "downtime": 40, "diagnostic": "control-detect-time-expired",
+	   "remote-diagnostic": "ok", "type": "dynamic"}
+	]`)
+	peers := parseBFDPeers(raw)
+	if len(peers) != 2 {
+		t.Fatalf("got %d peers, want 2", len(peers))
+	}
+	// Sorted by peer address: 10.0.0.2 before 10.0.0.3.
+	if peers[0].Peer != "10.0.0.2" || peers[0].Local != "10.0.0.1" || peers[0].Status != "up" ||
+		peers[0].Uptime != 125 || peers[0].Diagnostic != "ok" {
+		t.Errorf("peers[0] parsed wrong: %+v", peers[0])
+	}
+	if peers[1].Peer != "10.0.0.3" || peers[1].Interface != "eth0" || peers[1].Status != "down" ||
+		peers[1].Downtime != 40 || peers[1].Diagnostic != "control-detect-time-expired" {
+		t.Errorf("peers[1] parsed wrong: %+v", peers[1])
+	}
+}
+
+func TestParseBFDPeersEmptyOrGarbage(t *testing.T) {
+	for _, in := range [][]byte{[]byte(""), []byte("not json"), []byte("{}"), []byte("[]")} {
+		peers := parseBFDPeers(in)
+		if peers == nil {
+			t.Errorf("peers nil for input %q; want empty slice", in)
+		}
+		if len(peers) != 0 {
+			t.Errorf("input %q: got %d peers, want 0", in, len(peers))
+		}
+	}
+}

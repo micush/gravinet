@@ -32,6 +32,43 @@ func daemonSet(b config.BGPConfig) map[string]bool {
 	return m
 }
 
+// gravinet always applies a fixed set of global BGP session-level knobs,
+// unconditionally, whenever BGP is enabled — regardless of what else is
+// configured. Since renderFRR fully regenerates frr.conf from scratch on
+// every apply (rather than patching an existing file), there's no
+// "if not present" branch to test separately: they're either in the output
+// (enabled) or the whole router bgp block is absent (disabled).
+func TestFRRGlobalBGPDirectives(t *testing.T) {
+	always := []string{
+		" bgp log-neighbor-changes\n",
+		" no bgp ebgp-requires-policy\n",
+		" bgp deterministic-med\n",
+		" bgp bestpath as-path multipath-relax\n",
+		" bgp conditional-advertisement timer 10\n",
+	}
+	// Present on a minimal config...
+	c := renderFRR(config.BGPConfig{Enabled: true, ASN: 65001})
+	for _, line := range always {
+		frrHas(t, c, line)
+	}
+	// ...and still present alongside a fully populated one — not crowded out
+	// by router-id, timers, neighbors, or networks.
+	full := renderFRR(config.BGPConfig{
+		Enabled: true, ASN: 65001, RouterID: "1.2.3.4",
+		KeepaliveTime: 4, HoldTime: 12,
+		Neighbors: []config.BGPNeighbor{{Peer: "10.0.0.2", RemoteAS: 65002}},
+		Networks:  []string{"10.0.0.0/24"},
+	})
+	for _, line := range always {
+		frrHas(t, full, line)
+	}
+	// Absent entirely when BGP is disabled — no router bgp block at all.
+	d := renderFRR(config.BGPConfig{Enabled: false, ASN: 65001})
+	for _, line := range always {
+		frrLacks(t, d, line)
+	}
+}
+
 // A minimal enabled BGP config must still emit a runnable `router bgp <asn>`
 // block and request bgpd, even with nothing else filled in. Ported from
 // parapet's bgp_minimal_block test.
