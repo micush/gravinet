@@ -37,6 +37,22 @@ assuming it didn't happen.
 
 ---
 
+## v494 — 2026-07-17
+
+**BGP editor: three small UI fixes.**
+
+- The MD5 password reveal toggle (both the read-mode row and the row-edit
+  form) now shows an eye glyph (\ud83d\udc41\ufe0f) instead of the word "show"/"hide" —
+  the glyph stays constant on click; only its tooltip text and the masked
+  value underneath change.
+- The success status after saving no longer appends the server's apply note
+  (e.g. "3 daemon(s) configured, reloading FRR in background") — it's
+  routine detail on every single save. Now just "Saved." The one case
+  actually worth surfacing, FRR not installed, already has its own
+  persistent banner elsewhere in the card, so nothing is lost.
+- The Local AS number field is now the same width as Router-id (180px,
+  was 160px).
+
 ## v493 — 2026-07-17
 
 **FRR config: always emit five global BGP session-level directives.**

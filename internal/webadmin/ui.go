@@ -5778,7 +5778,7 @@ function infoRoutes(c){
 // reachable when state.bgpSupported is true (vtysh present); see
 // sectionVisible().
 function secBgp(c){
-  secHint(c, 'BGP configuration for dynamic routing. For neighbors and advertised networks: use + to add a row, double-click a field to edit it (double-click BFD to toggle it), tick rows and \u2212 to remove. Click show/hide next to a neighbor\u2019s MD5 password to reveal or mask it.');
+  secHint(c, 'BGP configuration for dynamic routing. For neighbors and advertised networks: use + to add a row, double-click a field to edit it (double-click BFD to toggle it), tick rows and \u2212 to remove. Click the \ud83d\udc41\ufe0f next to a neighbor\u2019s MD5 password to reveal or mask it.');
   const editWrap = $('<div></div>'); c.appendChild(editWrap);
 
   const fail = (msg) => {
@@ -5982,7 +5982,7 @@ function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
   };
 
   const enableCb = rowTog('Enable BGP', 'Render and run a <code>router bgp</code> speaker on this host. Off leaves no BGP block in FRR\u2019s config and switches bgpd off.', !!b.enabled);
-  const asnInp = rowInput('Local AS number', 'This node\u2019s autonomous-system number, e.g. 65001. Required to enable BGP.', b.asn||'', 'e.g. 65001', 160);
+  const asnInp = rowInput('Local AS number', 'This node\u2019s autonomous-system number, e.g. 65001. Required to enable BGP.', b.asn||'', 'e.g. 65001', 180);
   const ridInp = rowInput('Router-id', 'BGP router-id (an IPv4-style id), e.g. 10.0.0.1. Optional \u2014 FRR picks one if left blank.', b.router_id||'', 'e.g. 10.0.0.1', 180);
   // BFD defaults on for a brand-new configuration ("always enable BFD by
   // default"): sub-second neighbor-failure detection is the better baseline. An
@@ -6020,7 +6020,7 @@ function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
   card.appendChild(nbrSec);
 
   const nbrPwCell = (n) => n.password
-    ? '<span class="kval masked nbr-pw-val">\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022</span> <button class="ghost sm nbr-pw-toggle" title="show/hide this neighbor\u2019s MD5 password">show</button>'
+    ? '<span class="kval masked nbr-pw-val">\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022</span> <button class="ghost sm nbr-pw-toggle" title="show this neighbor\u2019s MD5 password">\ud83d\udc41\ufe0f</button>'
     : '<span class="hint">none</span>';
 
   function renderNbrs(){
@@ -6063,8 +6063,13 @@ function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
         const i = parseInt(btn.closest('tr').dataset.idx, 10);
         const n = neighbors[i]; if (!n) return;
         const span = btn.previousElementSibling;
-        if (span.classList.contains('masked')){ span.textContent = n.password; span.classList.remove('masked'); btn.textContent = 'hide'; }
-        else { span.textContent = '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022'; span.classList.add('masked'); btn.textContent = 'show'; }
+        if (span.classList.contains('masked')){
+          span.textContent = n.password; span.classList.remove('masked');
+          btn.title = 'hide this neighbor\u2019s MD5 password';
+        } else {
+          span.textContent = '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022'; span.classList.add('masked');
+          btn.title = 'show this neighbor\u2019s MD5 password';
+        }
       };
     });
     selAllWire(t);
@@ -6088,7 +6093,7 @@ function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
       e.stopPropagation();
       const showing = pwInp.type === 'text';
       pwInp.type = showing ? 'password' : 'text';
-      pwToggle.textContent = showing ? 'show' : 'hide';
+      pwToggle.title = showing ? 'show while editing' : 'hide while editing';
     };
     tr.querySelector('.nbre-cancel').onclick = () => renderNbrs();
     tr.querySelector('.nbre-save').onclick = () => {
@@ -6112,7 +6117,7 @@ function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
     tr.querySelector('.nbr-as-cell').innerHTML = '<input class="nbre-as" style="width:80px" placeholder="65002" value="'+esc(String(n.remote_as||''))+'">';
     tr.querySelector('.nbr-desc-cell').innerHTML = '<input class="nbre-desc" style="width:150px" placeholder="optional" value="'+esc(n.description||'')+'">';
     tr.querySelector('.nbr-pw-cell').innerHTML = '<input class="nbre-pw" type="password" style="width:90px" placeholder="optional" value="'+esc(n.password||'')+'"> '
-      + '<button class="ghost sm nbre-pw-toggle" title="show/hide while editing">show</button> <button class="sm nbre-save">save</button> <button class="ghost sm nbre-cancel">cancel</button>';
+      + '<button class="ghost sm nbre-pw-toggle" title="show while editing">\ud83d\udc41\ufe0f</button> <button class="sm nbre-save">save</button> <button class="ghost sm nbre-cancel">cancel</button>';
     wireNbrForm(tr, idx);
   }
   function nbrAddRow(table){
@@ -6121,7 +6126,7 @@ function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
       + '<td><input class="nbre-peer" style="width:130px" placeholder="10.0.0.2"></td>'
       + '<td><input class="nbre-as" style="width:80px" placeholder="65002"></td>'
       + '<td><input class="nbre-desc" style="width:150px" placeholder="optional"></td>'
-      + '<td><input class="nbre-pw" type="password" style="width:90px" placeholder="optional"> <button class="ghost sm nbre-pw-toggle" title="show/hide while editing">show</button> <button class="sm nbre-save">save</button> <button class="ghost sm nbre-cancel">cancel</button></td>'
+      + '<td><input class="nbre-pw" type="password" style="width:90px" placeholder="optional"> <button class="ghost sm nbre-pw-toggle" title="show while editing">\ud83d\udc41\ufe0f</button> <button class="sm nbre-save">save</button> <button class="ghost sm nbre-cancel">cancel</button></td>'
       + '<td><span class="hint">off</span></td>';
     if (!insertNewRow(table, tr)) return;
     wireNbrForm(tr, null);
@@ -6225,10 +6230,14 @@ function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
     if (seq !== saveSeq) return; // a newer edit already superseded this save
     if (!r.ok){ status.style.color = 'var(--danger)'; status.textContent = (r.body && r.body.error) || 'Save failed.'; return; }
     status.style.color = 'var(--ok)';
-    // Saving applies the config the same as every other form here — there is no
-    // separate "apply" step. The server note just describes what reaching FRR
-    // did (reloading in the background, or that FRR is absent so nothing to push).
-    status.textContent = 'Saved' + (r.body.note ? (' \u2014 ' + r.body.note) : '.');
+    // Saving applies the config the same as every other form here — there is
+    // no separate "apply" step. The server's note describing what reaching
+    // FRR did (daemon count, reload vs restart, or that FRR is absent) isn't
+    // shown here — it's routine detail on every single save, and the one
+    // case actually worth surfacing (FRR not installed) already has its own
+    // persistent banner elsewhere in this card (see the !installed check
+    // above).
+    status.textContent = 'Saved.';
   }
 
   // Toggles and structural changes apply at once; the four text fields debounce.
