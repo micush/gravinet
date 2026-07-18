@@ -172,7 +172,6 @@ func TestFRRNeighborShutdown(t *testing.T) {
 	}
 }
 
-
 func TestFRRBGPPasswordWhitespaceStripped(t *testing.T) {
 	b := config.BGPConfig{
 		Enabled: true, ASN: 65001,
@@ -362,6 +361,75 @@ func TestBGPConfigRemovesSomething(t *testing.T) {
 		}
 		if got := bgpConfigRemovesSomething(prev, c.next); got != c.want {
 			t.Errorf("%s: bgpConfigRemovesSomething = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// RedistributeMesh renders one `network` statement per CIDR passed in, same
+// mechanism as a manually-typed Networks entry — never FRR's `redistribute
+// kernel`, which this feature exists specifically to avoid (see BGPConfig's
+// doc comment): a mesh-learned route is just another kernel-table entry, so
+// `redistribute kernel` would sweep in everything else on the host too.
+func TestFRRRedistributeMesh(t *testing.T) {
+	b := config.BGPConfig{Enabled: true, ASN: 65001, RedistributeMesh: true}
+	c := renderFRR(b, "10.10.0.0/24", "fd00:10::/64")
+	frrHas(t, c, "  network 10.10.0.0/24\n")
+	frrLacks(t, c, "redistribute kernel")
+	// The v6 mesh route lands in the ipv6 unicast block, not ipv4.
+	if i4 := strings.Index(c, "address-family ipv4 unicast"); i4 >= 0 {
+		if strings.Contains(c[:strings.Index(c, "exit-address-family")], "fd00:10::/64") {
+			t.Error("v6 mesh route must not appear in the ipv4 unicast block")
+		}
+	}
+	frrHas(t, c, "  network fd00:10::/64\n")
+
+	// Off entirely when the toggle is off, even with routes passed in — the
+	// caller (reconcileMeshRedistribute) always has a list handy, but it must
+	// only be used when the operator actually turned this on.
+	off := renderFRR(config.BGPConfig{Enabled: true, ASN: 65001, RedistributeMesh: false}, "10.10.0.0/24")
+	frrLacks(t, off, "10.10.0.0/24")
+}
+
+// A CIDR that's both manually typed into Networks and on the Mesh Routes page
+// must not be emitted twice.
+func TestFRRRedistributeMeshDedup(t *testing.T) {
+	b := config.BGPConfig{
+		Enabled: true, ASN: 65001, RedistributeMesh: true,
+		Networks: []string{"10.10.0.0/24"},
+	}
+	c := renderFRR(b, "10.10.0.0/24", "10.20.0.0/24")
+	if n := strings.Count(c, "network 10.10.0.0/24\n"); n != 1 {
+		t.Errorf("expected exactly one 'network 10.10.0.0/24' line, got %d in:\n%s", n, c)
+	}
+	frrHas(t, c, "  network 10.20.0.0/24\n")
+}
+
+// meshRedistributeRemovesSomething mirrors bgpConfigRemovesSomething for the
+// mesh-derived side: it must catch a mesh route dropping off the Mesh Routes
+// page, or the toggle itself turning off, while leaving ordinary
+// additions/no-ops alone.
+func TestMeshRedistributeRemovesSomething(t *testing.T) {
+	on := config.BGPConfig{Enabled: true, ASN: 65001, RedistributeMesh: true}
+	off := config.BGPConfig{Enabled: true, ASN: 65001, RedistributeMesh: false}
+
+	cases := []struct {
+		name               string
+		prev, next         config.BGPConfig
+		prevMesh, nextMesh []string
+		want               bool
+	}{
+		{"identical routes, nothing removed", on, on, []string{"10.0.0.0/24"}, []string{"10.0.0.0/24"}, false},
+		{"route added, none removed", on, on, []string{"10.0.0.0/24"}, []string{"10.0.0.0/24", "10.1.0.0/24"}, false},
+		{"route dropped", on, on, []string{"10.0.0.0/24", "10.1.0.0/24"}, []string{"10.0.0.0/24"}, true},
+		{"toggle turned off with routes live", on, off, []string{"10.0.0.0/24"}, nil, true},
+		{"toggle turned off, nothing was ever live", on, off, nil, nil, false},
+		{"toggle was never on", off, off, nil, []string{"10.0.0.0/24"}, false},
+		{"toggle just turned on", off, on, nil, []string{"10.0.0.0/24"}, false},
+		{"BGP disabled entirely while routes were live", on, config.BGPConfig{Enabled: false, ASN: 65001, RedistributeMesh: true}, []string{"10.0.0.0/24"}, nil, true},
+	}
+	for _, c := range cases {
+		if got := meshRedistributeRemovesSomething(c.prev, c.next, c.prevMesh, c.nextMesh); got != c.want {
+			t.Errorf("%s: meshRedistributeRemovesSomething = %v, want %v", c.name, got, c.want)
 		}
 	}
 }

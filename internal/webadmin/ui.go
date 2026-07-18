@@ -5854,8 +5854,9 @@ function secBgp(c){
     // page is usable at once. Guard the render: a bug in here used to throw and
     // leave the "loading…" placeholder up with no hint why, which looked exactly
     // like a hung request. Now the actual error is shown.
+    const meshRoutes = r.body.mesh_routes || [];
     try {
-      renderBgpEditor(editWrap, r.body.bgp || {}, !!r.body.installed, false);
+      renderBgpEditor(editWrap, r.body.bgp || {}, !!r.body.installed, false, meshRoutes);
     } catch (e){
       fail('editor error \u2014 ' + ((e && e.message) || e)); return;
     }
@@ -5867,7 +5868,10 @@ function secBgp(c){
         const im = await api('/api/bgp/import');
         if (state.section !== 'bgp') return; // navigated away while it ran
         if (im.ok && im.body && im.body.imported && im.body.bgp){
-          renderBgpEditor(editWrap, im.body.bgp, true, true);
+          // meshRoutes still comes from the earlier /api/bgp/config GET — an
+          // import only ever replaces the neighbor/network editor state, not
+          // what's on the Mesh Routes page.
+          renderBgpEditor(editWrap, im.body.bgp, true, true, meshRoutes);
         }
         // Nothing to reflect otherwise (no existing FRR BGP config found, or
         // the import itself failed) — the editor already rendered from the
@@ -6027,7 +6031,7 @@ async function bgpTableLiveStatus(body){
 // running config (gravinet isn't managing BGP yet) rather than gravinet's own
 // stored config — see isNewCfg below, which uses it to tell "freshly imported"
 // from "genuinely never configured" so the debounce timing feels right either way.
-function renderBgpEditor(host, b, installed, imported){
+function renderBgpEditor(host, b, installed, imported, meshRoutes){
   const neighbors = (b.neighbors || []).map(n => ({
     peer: n.peer||'', remote_as: n.remote_as||0, description: n.description||'',
     password: n.password||'', bfd: !!n.bfd, shutdown: !!n.shutdown,
@@ -6065,6 +6069,16 @@ function renderBgpEditor(host, b, installed, imported){
   const isNewCfg = !imported && !b.enabled && !b.asn && !(b.neighbors && b.neighbors.length);
   const rcCb = rowTog('Redistribute connected', 'Advertise directly-connected routes into BGP.', !!b.redistribute_connected);
   const rsCb = rowTog('Redistribute static', 'Advertise static routes into BGP.', !!b.redistribute_static);
+  // Scoped to exactly the CIDRs on the Mesh Routes page — not FRR's plain
+  // "redistribute kernel", which would also pull in every other kernel-table
+  // route on the box (mesh-learned routes are installed as ordinary kernel
+  // routes, indistinguishable from anything else there). The count updates
+  // live as routes are added/removed/enabled on that page, independent of
+  // this form's own save.
+  const meshCount = (meshRoutes && meshRoutes.length) || 0;
+  const meshDesc = 'Advertise only the CIDRs currently on the Mesh Routes page\u2019s Advertise table ('
+    + (meshCount ? (meshCount + ' right now') : 'none right now') + '), not every kernel route on this host.';
+  const rmCb = rowTog('Redistribute mesh routes', meshDesc, !!b.redistribute_mesh);
   // Session timers. A new config defaults to a fast 4s/12s (FRR's own default is
   // a sluggish 60s/180s); an existing/imported config shows its actual values,
   // blank meaning "FRR default".
@@ -6315,6 +6329,7 @@ function renderBgpEditor(host, b, installed, imported){
       router_id: ridInp.value.trim(),
       redistribute_connected: rcCb.checked,
       redistribute_static: rsCb.checked,
+      redistribute_mesh: rmCb.checked,
       keepalive_time: ka,
       hold_time: hold,
       // Drop blank rows so what's stored matches what FRR would accept.

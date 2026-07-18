@@ -37,6 +37,50 @@ assuming it didn't happen.
 
 ---
 
+## v512 — 2026-07-18
+
+**Added: a "Redistribute mesh routes" toggle in Traffic › BGP, scoped to
+exactly the Mesh Routes page rather than the whole kernel routing table.**
+
+A mesh-learned route is installed into the OS routing table like any other
+kernel route (`internal/mesh`'s `syncRoute`/`AddRoute`) — so FRR's own
+`redistribute kernel` was never a safe way to put the mesh into BGP: it
+would sweep in *every* kernel-table entry on the box, mesh-originated or
+not (a manually-added static route, another VPN's routes, whatever else is
+there). The new toggle takes a narrower, explicit path instead: gravinet
+renders one `network <cidr>` statement per CIDR currently on the Mesh
+Routes page's Advertise table (`meshRouteCIDRs`, `internal/webadmin/bgp.go`)
+— the same mechanism `BGPConfig.Networks` already uses for manually-typed
+prefixes (and deduplicated against it, `effectiveBGPNetworks` in
+`frr.go`), just sourced live from config instead of typed in by hand.
+Disabled routes and routes on a disabled network are excluded, matching
+what the mesh engine itself is actually carrying.
+
+This has to stay live, not just apply at the next BGP save: adding,
+removing, or enabling/disabling a route on the Mesh Routes page (`/api/route`)
+now also reconciles FRR when RedistributeMesh is on
+(`reconcileMeshRedistribute`), and the same applies to a network being
+enabled, disabled, or deleted out from under its routes. A new
+`meshRedistributeRemovesSomething` (`frr.go`) extends the existing
+remove-forces-restart logic (`bgpConfigRemovesSomething`) to this
+mesh-derived side: a `vtysh -b` reload can only ever add lines from a
+freshly-written frr.conf into the running daemons, never retract one that's
+no longer there, so a mesh route dropping off the page forces a real
+restart the same way a manually deleted network already did.
+
+`config.BGPConfig` gains `RedistributeMesh bool`
+(`redistribute_mesh` in JSON). The BGP editor shows the toggle beside the
+existing Redistribute connected/static rows, with a live count of how many
+CIDRs are currently on the Mesh Routes page. `GET /api/bgp/config` now also
+returns `mesh_routes` (the same list) so the UI has it without a second
+request. Imported/reflected FRR configs (`handleBGPImport`) never set this
+field — it has no FRR keyword of its own, only the `network` lines it
+causes, indistinguishable on import from manually-typed ones — but that
+path only ever runs before gravinet is managing BGP in the first place, so
+there's nothing of this feature's for it to have produced yet.
+
+---
+
 ## v511 — 2026-07-18
 
 **Fixed: a dual-stack peer's IPv6 overlay address never showed up in

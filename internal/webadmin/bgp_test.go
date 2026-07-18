@@ -8,6 +8,8 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"gravinet/internal/config"
 )
 
 // fakeFileInfo is a minimal fs.FileInfo for driving the statFile seam without
@@ -184,6 +186,56 @@ func TestHandleBGPTableNoVtysh(t *testing.T) {
 	}
 	if out.Text != "" {
 		t.Errorf("text = %q, want empty", out.Text)
+	}
+}
+
+// meshRouteCIDRs is the source list behind the "Redistribute mesh routes" BGP
+// toggle: exactly the CIDRs on the Mesh Routes page's Advertise table, for
+// networks that are themselves enabled — disabled networks and disabled
+// individual routes are excluded, duplicates across networks collapse to one
+// entry, and the result is sorted for a stable frr.conf.
+func TestMeshRouteCIDRs(t *testing.T) {
+	cfg := &config.Config{
+		Networks: []config.Network{
+			{
+				ID: "1", Name: "lan", Enabled: true,
+				Routes: []config.Route{
+					{CIDR: "10.2.0.0/24", Enabled: true},
+					{CIDR: "10.1.0.0/24", Enabled: true},
+					{CIDR: "10.9.0.0/24", Enabled: false}, // disabled route: excluded
+				},
+			},
+			{
+				ID: "2", Name: "other", Enabled: true,
+				Routes: []config.Route{
+					{CIDR: "10.1.0.0/24", Enabled: true}, // duplicate across networks: collapses
+					{CIDR: "10.3.0.0/24", Enabled: true},
+				},
+			},
+			{
+				ID: "3", Name: "disabled-net", Enabled: false,
+				Routes: []config.Route{
+					{CIDR: "10.99.0.0/24", Enabled: true}, // whole network disabled: excluded
+				},
+			},
+		},
+	}
+	got := meshRouteCIDRs(cfg)
+	want := []string{"10.1.0.0/24", "10.2.0.0/24", "10.3.0.0/24"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got %v, want %v", got, want)
+			break
+		}
+	}
+}
+
+func TestMeshRouteCIDRsEmpty(t *testing.T) {
+	if got := meshRouteCIDRs(&config.Config{}); len(got) != 0 {
+		t.Errorf("expected no routes from an empty config, got %v", got)
 	}
 }
 

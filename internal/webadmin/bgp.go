@@ -200,9 +200,11 @@ func (s *Server) handleBGPTable(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleBGPConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		var bgp config.BGPConfig
+		var meshRoutes []string
 		if s.configPath != "" {
 			if cfg, err := config.Load(s.configPath); err == nil {
 				bgp = cfg.BGP
+				meshRoutes = meshRouteCIDRs(cfg)
 			}
 		}
 		if bgp.Neighbors == nil {
@@ -219,6 +221,12 @@ func (s *Server) handleBGPConfig(w http.ResponseWriter, r *http.Request) {
 			// installed, the UI follows up with /api/bgp/import to reflect the
 			// live config.
 			"active": bgp.Enabled && bgp.ASN != 0,
+			// mesh_routes is what the "Redistribute mesh routes" toggle would
+			// carry into BGP right now (the Mesh Routes page's enabled Advertise
+			// entries, on enabled networks) — shown next to the toggle whether or
+			// not it's currently on, so the operator can see what turning it on
+			// would mean.
+			"mesh_routes": meshRoutes,
 		})
 		return
 	}
@@ -231,10 +239,17 @@ func (s *Server) handleBGPConfig(w http.ResponseWriter, r *http.Request) {
 	// hook), so the durable record is updated before we touch FRR. Captured
 	// inside the mutation so it's exactly what was persisted before this save
 	// overwrote it — applyBGP diffs against it to tell a removal (which needs a
-	// real restart) from a pure addition/edit (safe to just reload).
+	// real restart) from a pure addition/edit (safe to just reload). meshRoutes
+	// is read from the same loaded snapshot; this save doesn't touch the Mesh
+	// Routes page, so the same list serves as both applyBGP's "before" and
+	// "after" — only RedistributeMesh itself turning on/off can change what's
+	// redistributed here, and meshRedistributeRemovesSomething already handles
+	// that from prev/next BGPConfig alone.
 	var prev config.BGPConfig
+	var meshRoutes []string
 	if err := s.mutateConfig(func(cfg *config.Config) error {
 		prev = cfg.BGP
+		meshRoutes = meshRouteCIDRs(cfg)
 		cfg.BGP = req
 		return nil
 	}); err != nil {
@@ -243,12 +258,76 @@ func (s *Server) handleBGPConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	// Then reconcile FRR with the freshly-saved config. A no-op (with a note)
 	// when FRR isn't installed — never fatal to the save.
-	note, err := applyBGP(req, prev, s.log)
+	note, err := applyBGP(req, prev, meshRoutes, meshRoutes, s.log)
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "applied": false, "note": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "applied": frrInstalled(), "note": note})
+}
+
+// meshRouteCIDRs collects the CIDRs currently on the Mesh Routes page (Traffic
+// > Mesh Routes' "Advertise" table) across every enabled network: each
+// enabled Route's CIDR, from every network that's itself enabled. A disabled
+// network isn't actually carrying its routes across the mesh, and a disabled
+// route isn't being advertised either, so both are excluded — this must match
+// what the mesh engine itself is doing (config.Network.Enabled /
+// config.Route.Enabled), not just what the page happens to display. Reject
+// entries (RouteRej) never appear here: they filter what's accepted *from*
+// other nodes, nothing to do with what this node redistributes into BGP.
+//
+// Deduplicated (the same CIDR can legitimately be advertised on more than one
+// network) and sorted, so renderFRR's `network` statements — and therefore
+// frr.conf itself — come out in a stable order from one call to the next
+// rather than reshuffling because config.Network iteration order changed.
+func meshRouteCIDRs(cfg *config.Config) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, n := range cfg.Networks {
+		if !n.Enabled {
+			continue
+		}
+		for _, r := range n.Routes {
+			if !r.Enabled || r.CIDR == "" || seen[r.CIDR] {
+				continue
+			}
+			seen[r.CIDR] = true
+			out = append(out, r.CIDR)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// reconcileMeshRedistribute re-renders and reapplies frr.conf's mesh-derived
+// `network` statements after something changed that can affect what
+// meshRouteCIDRs returns — a route added/removed/enabled/disabled, or a
+// network enabled/disabled/deleted — so a route that just disappeared from
+// the Mesh Routes page stops being redistributed promptly, rather than only
+// the next time the BGP config itself is saved. prevRoutes is the
+// meshRouteCIDRs snapshot from immediately before the edit (the caller
+// captures it inside the same mutateConfig closure that made the change, so
+// the diff applyBGP/meshRedistributeRemovesSomething sees is exact).
+//
+// A no-op — one extra config.Load, nothing more — unless BGP is enabled with
+// RedistributeMesh on, which keeps every ordinary route edit on a node that
+// doesn't use this feature cheap. Errors are logged, not returned: this runs
+// after the HTTP response for the route edit itself has already been decided
+// (that edit succeeded regardless of whether FRR could be reached), the same
+// "never let a routing reconcile block or fail an unrelated save" shape
+// mutateConfig's own reload hook already uses.
+func (s *Server) reconcileMeshRedistribute(prevRoutes []string) {
+	if s.configPath == "" {
+		return
+	}
+	cfg, err := config.Load(s.configPath)
+	if err != nil || !cfg.BGP.Enabled || cfg.BGP.ASN == 0 || !cfg.BGP.RedistributeMesh {
+		return
+	}
+	nextRoutes := meshRouteCIDRs(cfg)
+	if _, err := applyBGP(cfg.BGP, cfg.BGP, nextRoutes, prevRoutes, s.log); err != nil {
+		s.log.Warnf("bgp: reconciling mesh-route redistribution: %v", err)
+	}
 }
 
 // bgpImportTimeout bounds handleBGPImport's total work end to end. Each

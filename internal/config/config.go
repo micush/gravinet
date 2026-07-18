@@ -321,6 +321,20 @@ type BGPConfig struct {
 	Networks              []string      `json:"networks,omitempty"`
 	RedistributeConnected bool          `json:"redistribute_connected,omitempty"`
 	RedistributeStatic    bool          `json:"redistribute_static,omitempty"`
+	// RedistributeMesh advertises into BGP exactly the CIDRs currently listed
+	// on the Mesh Routes page (Traffic > Mesh Routes' "Advertise" table, i.e.
+	// each enabled Route on an enabled Network) — and only those. This is
+	// deliberately not FRR's `redistribute kernel`: a mesh-learned route is
+	// installed into the OS routing table like any other kernel route (see
+	// internal/mesh's syncRoute/AddRoute), so a blanket `redistribute kernel`
+	// would sweep in every other kernel-table entry on the box too (a manual
+	// static route, another VPN's routes, whatever else is there) — not just
+	// the mesh's own. gravinet instead renders one explicit `network`
+	// statement per mesh route (see renderFRR/meshRouteCIDRs), scoping
+	// redistribution to precisely what the Mesh Routes page shows, and keeps
+	// it live as routes are added, removed, or enabled/disabled there — not
+	// only when this BGP config itself is next saved.
+	RedistributeMesh bool `json:"redistribute_mesh,omitempty"`
 	// KeepaliveTime and HoldTime are the BGP session timers, in seconds,
 	// rendered as FRR's `timers bgp <keepalive> <hold>`. Keepalive is how often
 	// a peer sends keepalive messages; hold is how long without any message

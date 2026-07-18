@@ -55,7 +55,13 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 	// without a restart. Re-addressing changes (subnet, overlay address) still
 	// need one — the hot reload does not re-address a running interface.
 	restart := false
+	// Captured for reconcileMeshRedistribute below: disabling or deleting a
+	// network takes its routes off the Mesh Routes page (meshRouteCIDRs skips
+	// disabled networks entirely) just as surely as deleting the routes
+	// themselves would.
+	var prevMesh []string
 	err := s.mutateConfig(func(cfg *config.Config) error {
+		prevMesh = meshRouteCIDRs(cfg)
 		switch req.Op {
 		case "add":
 			_, e := cfg.NetworkAdd(req.Net, req.Subnet4, req.Subnet6)
@@ -85,6 +91,9 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 			return fmt.Errorf("unknown op %q", req.Op)
 		}
 	})
+	if err == nil {
+		s.reconcileMeshRedistribute(prevMesh)
+	}
 	s.editResult(w, err, restart)
 }
 
@@ -247,7 +256,15 @@ func (s *Server) handleRoute(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
+	// Captured inside the mutation, before the op below changes anything, so
+	// it's an exact "before" snapshot for reconcileMeshRedistribute regardless
+	// of which op ran (only add/delete/enable/disable actually move a CIDR in
+	// or out of meshRouteCIDRs — reject/reject-enable/reject-disable never do,
+	// but capturing it unconditionally is one extra map build, not worth
+	// special-casing per op).
+	var prevMesh []string
 	err := s.mutateConfig(func(cfg *config.Config) error {
+		prevMesh = meshRouteCIDRs(cfg)
 		switch req.Op {
 		case "add", "advertise", "redistribute":
 			return cfg.RouteAdd(req.Net, req.CIDR, req.Metric)
@@ -267,6 +284,12 @@ func (s *Server) handleRoute(w http.ResponseWriter, r *http.Request) {
 			return fmt.Errorf("unknown op %q", req.Op)
 		}
 	})
+	if err == nil {
+		// If this node redistributes the Mesh Routes page into BGP, keep FRR in
+		// sync with whatever this edit just changed — not just at the next BGP
+		// config save. See reconcileMeshRedistribute's doc comment.
+		s.reconcileMeshRedistribute(prevMesh)
+	}
 	s.editResult(w, err, false)
 }
 
