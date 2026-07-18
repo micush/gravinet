@@ -172,17 +172,28 @@ const indexHTML = `<!doctype html>
      actually needs it (never mid-IPv4-octet or mid-word), so a short value
      still renders on one line and only a genuinely long one wraps. */
   table.peers-table td.ov-cell, table.peers-table td.ep-cell { overflow:visible; text-overflow:clip; white-space:normal; overflow-wrap:anywhere; }
-  /* table-compact: for a fixed-shape table with only a couple of narrow
-     columns and no list to grow (e.g. Mesh Routes' "Redistribute from BGP"
-     subcard) — the default width:100% above stretches a table like that
-     across the full card width, and with barely any content to fill it the
-     auto layout algorithm dumps nearly all of that leftover space into one
-     column, leaving its neighbor stranded far to the right with a big dead
-     gap between them. colgroup widths on these tables size each column to
-     its own content instead of that unevenly-distributed leftover. */
-  table.table-compact { width:auto; min-width:0; }
-  table.table-compact col.c-rbstate { width:120px; }
-  table.table-compact col.c-rbmetric { width:100px; }
+  /* routes-table: shared column grid for Mesh Routes' three per-network
+     subcards (Advertise, Redistribute from BGP, Reject) — they're separate
+     <table>s, each sized from its own content under the default auto
+     layout, so their columns drift out of alignment with each other (most
+     visibly Redistribute from BGP's, which has only 2 real columns and no
+     list to grow, versus the other two's 3-4 and open-ended row count).
+     Fixed layout + a shared colgroup forces identical column widths across
+     all three, so "state" lines up under "state", and the CIDR/metric and
+     metric/inclusive columns line up the same way even though what's
+     actually in them differs per table. Redistribute from BGP has no
+     checkbox and no 4th column, so it fills those slots with blank
+     <th>/<td> using the same rt-sel/rt-col3 widths, rather than a
+     differently-shaped table that just happens to render the same. */
+  table.routes-table { table-layout:fixed; }
+  table.routes-table col.rt-sel { width:32px; }
+  table.routes-table col.rt-state { width:15%; }
+  table.routes-table col.rt-col2 { width:55%; }
+  table.routes-table col.rt-col3 { width:30%; }
+  /* The general td.selcol/th.selcol width:1% (below) is a shrink-to-content
+     hack that only means anything under auto layout; under routes-table's
+     fixed layout the column width comes entirely from col.rt-sel above. */
+  table.routes-table td.selcol, table.routes-table th.selcol { width:auto; }
   th,td { text-align:left; padding:6px 10px; border-bottom:1px solid var(--line); font-size:13px; }
   th { color:var(--mut); font-weight:600; }
   tr:last-child td { border-bottom:0; }
@@ -3478,7 +3489,7 @@ function secRoutes(c) {
     const rsub = $('<div class="subcard"></div>');
     rsub.appendChild($('<h4>Advertise</h4>'));
     const rs = cf.routes||[];
-    let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>cidr</th><th>metric</th></tr>';
+    let h = '<table class="routes-table"><colgroup><col class="rt-sel"><col class="rt-state"><col class="rt-col2"><col class="rt-col3"></colgroup><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>cidr</th><th>metric</th></tr>';
     if (!rs.length) h += '<tr><td colspan="4" class="empty">none — click + to advertise a cidr</td></tr>';
     else for (const r of rs){
       const enabled = r.enabled!==false;
@@ -3533,9 +3544,9 @@ function secRoutes(c) {
     const rbEnabled = !!cf.redistribute_bgp;
     const rbMetric = cf.redistribute_bgp_metric || 0;
     const rbTag = '<span class="tag-toggle '+(rbEnabled?'on':'off')+'" data-rbstate="1" title="double-click to '+(rbEnabled?'disable':'enable')+'">'+(rbEnabled?'enabled':'disabled')+'</span>';
-    let bh = '<table class="table-compact"><colgroup><col class="c-rbstate"><col class="c-rbmetric"></colgroup><tr><th>state</th><th>metric</th></tr>'
+    let bh = '<table class="routes-table"><colgroup><col class="rt-sel"><col class="rt-state"><col class="rt-col2"><col class="rt-col3"></colgroup><tr><th></th><th>state</th><th>metric</th><th></th></tr>'
       + '<tr data-enabled="'+(rbEnabled?1:0)+'" data-metric="'+esc(rbMetric)+'">'
-      + '<td class="rb-state">'+rbTag+'</td><td class="metric-cell">'+esc(rbMetric)+'</td></tr>';
+      + '<td></td><td class="rb-state">'+rbTag+'</td><td class="metric-cell">'+esc(rbMetric)+'</td><td></td></tr>';
     const bt = $('<div></div>'); bt.innerHTML = bh+'</table>'; bsub.appendChild(bt);
     // One row, one value — no cross-column filter box needed here.
     bt.querySelector('table')._noFilter = true;
@@ -3573,7 +3584,7 @@ function secRoutes(c) {
     const xsub = $('<div class="subcard"></div>');
     xsub.appendChild($('<h4>Reject</h4>'));
     const rej = cf.route_reject||[];
-    let rh = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>cidr</th><th>inclusive</th></tr>';
+    let rh = '<table class="routes-table"><colgroup><col class="rt-sel"><col class="rt-state"><col class="rt-col2"><col class="rt-col3"></colgroup><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>cidr</th><th>inclusive</th></tr>';
     if (!rej.length) rh += '<tr><td colspan="4" class="empty">none — click + to reject a cidr</td></tr>';
     else for (const x of rej) {
       const xc = (typeof x==='string')?x:((x&&x.cidr)||'');

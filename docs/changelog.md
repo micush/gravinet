@@ -37,6 +37,29 @@ assuming it didn't happen.
 
 ---
 
+## v520 — 2026-07-18
+
+**Fixed: Mesh Routes' three per-network subcards (Advertise, Redistribute
+from BGP, Reject) didn't line up with each other — v519's fix made
+Redistribute from BGP's own two columns tidy in isolation, but each of
+the three tables still sized its columns from its own content
+independently, so "state" in one didn't land under "state" in another.**
+
+New `table.routes-table` CSS class (`table-layout:fixed`, `ui.go`) plus a
+shared `colgroup` (`rt-sel` 32px, `rt-state` 15%, `rt-col2` 55%,
+`rt-col3` 30%) applied to all three subcards' tables, so every column
+boundary is identical across them regardless of what each one actually
+holds: `state` lines up under `state`; column 2 lines up cidr (Advertise)
+with metric (Redistribute from BGP) with cidr (Reject); column 3 lines
+up metric (Advertise) with inclusive (Reject) — Redistribute from BGP
+has nothing there, so that slot is a blank `<th>`/`<td>` on its shared
+32px/30% columns rather than a differently-shaped table that happened to
+render at the same width. Superset of v519's fix (that change is
+subsumed here — Redistribute from BGP's table now gets its sizing from
+this shared grid, not its own standalone rule).
+
+---
+
 ## v519 — 2026-07-18
 
 **Fixed: the "Redistribute from BGP" subcard's two columns (Traffic ›
