@@ -34,6 +34,19 @@ param(
 )
 $ErrorActionPreference = "Stop"
 
+# $BuildTmp mirrors BUILD_TMP in install-linux.sh/install-macos.sh/
+# install-freebsd.sh/install-openbsd.sh: when building from source below, the
+# freshly-built exe is staged under a fresh, never-reused folder in $env:TEMP
+# (see the "gravinet-build-<guid>" block further down). Those Unix installers
+# used to leave that scratch folder behind on every single run until an EXIT
+# trap was added to remove it unconditionally; this trap is the same fix for
+# PowerShell, since $ErrorActionPreference = "Stop" turns any later failure
+# (Npcap, the firewall rule, the service install, ...) into a terminating
+# error that would otherwise skip the explicit cleanup right after the build
+# (below) and leave this run's build folder behind.
+$BuildTmp = $null
+trap { if ($BuildTmp -and (Test-Path $BuildTmp)) { Remove-Item $BuildTmp -Recurse -Force -ErrorAction SilentlyContinue }; break }
+
 $ServiceName = "gravinet"
 $DisplayName = "gravinet"
 $Description = "[gravinet] full-mesh encrypted overlay VPN daemon"
@@ -435,6 +448,7 @@ if (-not $Bin -or -not (Test-Path $Bin)) {
   Install-Go
   Write-Host "==> building gravinet from source with $((& go version))"
   $out = Join-Path ([IO.Path]::GetTempPath()) ("gravinet-build-" + [guid]::NewGuid().ToString('N'))
+  $BuildTmp = $out   # tracked so the trap above (or the explicit cleanup after install) removes it
   New-Item -ItemType Directory -Force -Path $out | Out-Null
   $built = Join-Path $out 'gravinet.exe'
   $env:CGO_ENABLED = '0'; $env:GOTOOLCHAIN = 'auto'
@@ -513,6 +527,13 @@ Stop-GravinetService | Out-Null
 Write-Host "==> installing $Bin -> $Exe"
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 Copy-Item $Bin $Exe -Force
+
+# $Exe now holds the binary, so the build scratch folder (if any — a
+# supplied -Bin never sets $BuildTmp) has served its purpose; remove it now
+# rather than holding it through the rest of the run, the same reasoning the
+# Unix installers use for BUILD_TMP. The trap above still covers every path
+# that exits before reaching here.
+if ($BuildTmp -and (Test-Path $BuildTmp)) { Remove-Item $BuildTmp -Recurse -Force -ErrorAction SilentlyContinue; $BuildTmp = $null }
 
 # Install meshping.bat (the Windows equivalent of the POSIX meshping
 # diagnostic script) beside the exe, the same way pkgman rides along with

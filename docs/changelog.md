@@ -37,6 +37,64 @@ assuming it didn't happen.
 
 ---
 
+## v518 — 2026-07-18
+
+**Fixed: all five installers could leave scratch files behind in the
+system temp directory after a completed run, filling up `/tmp` (or
+`%TEMP%`) over repeated installs/upgrades — reported on OpenBSD, where a
+tmpfs-backed `/tmp` had filled completely.**
+
+Two separate leaks, plus one platform-specific one:
+
+- **`go build`'s own scratch directory leaked straight into `/tmp`.**
+  `install-linux.sh`, `install-freebsd.sh`, `install-macos.sh`, and
+  `install-openbsd.sh` already redirect `GOCACHE`/`GOPATH` into the
+  per-run `BUILD_TMP` staging directory (a `mktemp -d`, removed by an
+  `EXIT` trap on every exit path) — but none of them redirected
+  `GOTMPDIR`, the separate variable controlling where `go build` stages
+  its own per-invocation work directory (`go-buildNNNNNN`). Left unset,
+  that defaults to `/tmp` regardless of `BUILD_TMP`, and survives if the
+  build is interrupted or killed rather than exiting normally. All four
+  now also set `GOTMPDIR="$BUILD_TMP/.gotmp"` alongside `GOCACHE`/
+  `GOPATH`, so that directory is gone with everything else the moment the
+  trap fires.
+- **Two fixed-name error logs on OpenBSD, never cleaned up.**
+  `install-openbsd.sh`'s pf and unbound setup steps captured
+  `pfctl`/`unbound-checkconf` validation output to `/tmp/gravinet-pferr`
+  and `/tmp/gravinet-unberr` respectively — written on every run
+  (success or failure) and never deleted. Both now use `mktemp`-generated
+  files, explicitly `rm -f`'d after use on every branch instead of left
+  at a fixed path forever.
+- **Windows never had the Unix fix at all.** `install-windows.ps1` builds
+  into a fresh `%TEMP%\gravinet-build-<guid>` folder on every run and
+  never removed it — the same bug the Unix installers had before their
+  `EXIT` trap fix, just never ported over. Added a `$BuildTmp` tracker, a
+  script-level `trap` block (the closest PowerShell equivalent to a bash
+  `EXIT` trap) as a backstop against a later terminating error, and
+  explicit removal right after the binary is copied into `$InstallDir` —
+  matching the "clean it up now, don't hold it through the rest of the
+  run" pattern the Unix installers already use for `BUILD_TMP`.
+
+No changes to what gets installed or how — this only affects what's left
+behind in temp storage afterward.
+
+---
+
+## v517 — 2026-07-18
+
+**Removed the cross-column filter box from the "Redistribute from BGP"
+subcard (Traffic › Mesh Routes), added in v516.**
+
+`enhanceTable` (`ui.go`) unconditionally gave every rendered table a
+filter box, including this one — a single fixed-shape row (one state
+toggle, one metric) with nothing to filter or search for, unlike the
+Advertise/Reject tables above and below it, which can each hold an
+arbitrary number of CIDRs. `enhanceTable` now honors a `table._noFilter`
+flag, set on this subcard's table only; every other table's filter box
+(and this subcard's own sort-by-column headers, unaffected) is unchanged.
+
+---
+
 ## v516 — 2026-07-18
 
 **Added: BGP-into-mesh redistribution — a network's current BGP-learned

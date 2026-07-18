@@ -550,9 +550,17 @@ build_from_source() {
   # that's not a cache, it's litter left behind on every run — the same class
   # of bug reported (and fixed) on the OpenBSD installer, present here too.
   # Redirect both under BUILD_TMP instead, which the EXIT trap above already
-  # removes on every exit path.
+  # removes on every exit path. GOTMPDIR gets the same treatment: separately
+  # from GOCACHE, `go build` stages its own per-invocation scratch work
+  # (go-buildNNNNNN directories) under $TMPDIR/os.TempDir() unless told
+  # otherwise, which without this defaults straight to /tmp — the exact
+  # go-build* litter this fix is for, left behind by an interrupted or
+  # OOM-killed build regardless of how tidy the shell script around it is.
+  # Pointed under BUILD_TMP, that scratch dir is gone with everything else the
+  # moment the trap fires.
+  mkdir -p "$BUILD_TMP/.gotmp"
   ( cd "$REPO" && CGO_ENABLED=$cgo GOTOOLCHAIN=auto \
-      GOCACHE="$BUILD_TMP/.gocache" GOPATH="$BUILD_TMP/.gopath" \
+      GOCACHE="$BUILD_TMP/.gocache" GOPATH="$BUILD_TMP/.gopath" GOTMPDIR="$BUILD_TMP/.gotmp" \
       go build -buildvcs=false -trimpath -ldflags "-s -w" -o "$out" ./cmd/gravinet ) \
     || { echo "error: build failed" >&2; exit 1; }
   SRC="$out"

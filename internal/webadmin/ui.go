@@ -2098,22 +2098,27 @@ function enhanceTable(table){
   // needs its + button, so don't bail just because there are no rows yet.
   if (!hasData && !table._rowAdd && !table._rowRemove && !table._rowButtons) return;
 
-  const filt = $('<input class="tfilter" type="text" spellcheck="false" placeholder="filter all columns…" title="'+esc(filterTitle)+'">');
   const bar = $('<div class="tbar"></div>');
-  bar.appendChild(filt);
+  // table._noFilter opts a table out of the filter box — for a table that
+  // only ever holds a single fixed-shape row (one value, nothing to search
+  // for), like Mesh Routes' "Redistribute from BGP" sub-card, a filter box
+  // is pure clutter.
+  const filt = table._noFilter ? null : $('<input class="tfilter" type="text" spellcheck="false" placeholder="filter all columns…" title="'+esc(filterTitle)+'">');
+  if (filt) bar.appendChild(filt);
   if (table._rowAdd){ const b=$('<button class="sm tbar-btn" title="add a row">+</button>'); b.onclick=table._rowAdd; bar.appendChild(b); }
   if (table._rowRemove){ const b=$('<button class="sm tbar-btn" title="remove selected rows">\u2212</button>'); b.onclick=table._rowRemove; bar.appendChild(b); }
   if (table._rowButtons) table._rowButtons.forEach(spec => {
     const b=$('<button class="sm '+(spec.cls||'')+(spec.gap?' tbar-gap':'')+'" title="'+esc(spec.title||'')+'">'+esc(spec.label)+'</button>'); b.onclick=spec.onclick; bar.appendChild(b);
   });
-  table.parentNode.insertBefore(bar, table);
+  if (bar.children.length) table.parentNode.insertBefore(bar, table);
   const applyFilter = () => {
+    if (!filt) return;
     const q = filt.value.trim();
     const ast = q ? parseFilterQuery(q) : null;
     allRows().forEach(r => { if (r === header) return;
       r.style.display = (!ast || evalFilterAst(ast, r.textContent.toLowerCase())) ? '' : 'none'; });
   };
-  filt.oninput = applyFilter;
+  if (filt) filt.oninput = applyFilter;
 
   const ths = [].slice.call(header.cells);
   const pureNum = (s) => s !== '' && /^-?[\d.]+$/.test(s.replace(/[, ]/g,''));
@@ -3521,6 +3526,8 @@ function secRoutes(c) {
       + '<tr data-enabled="'+(rbEnabled?1:0)+'" data-metric="'+esc(rbMetric)+'">'
       + '<td class="rb-state">'+rbTag+'</td><td class="metric-cell">'+esc(rbMetric)+'</td></tr>';
     const bt = $('<div></div>'); bt.innerHTML = bh+'</table>'; bsub.appendChild(bt);
+    // One row, one value — no cross-column filter box needed here.
+    bt.querySelector('table')._noFilter = true;
     // Double-click the state tag to toggle redistribution on/off (live),
     // preserving whatever metric is currently set — same shape as the
     // Advertise/Reject state toggles above, just posting to /api/network's

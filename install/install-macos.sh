@@ -243,9 +243,12 @@ build_from_source() {
   # one-shot install/upgrade that isn't going to happen again anytime soon,
   # that's not a cache, it's litter left behind on every run. Redirect both
   # under BUILD_TMP instead, which the EXIT trap above already removes on
-  # every exit path.
+  # every exit path. Same treatment for GOTMPDIR: go build's own per-run
+  # scratch dir (go-buildNNNNNN, separate from GOCACHE) otherwise defaults
+  # straight to /tmp and outlives an interrupted or OOM-killed build.
+  mkdir -p "$BUILD_TMP/.gotmp"
   ( cd "$REPO" && CGO_ENABLED=$cgo GOTOOLCHAIN=auto \
-      GOCACHE="$BUILD_TMP/.gocache" GOPATH="$BUILD_TMP/.gopath" \
+      GOCACHE="$BUILD_TMP/.gocache" GOPATH="$BUILD_TMP/.gopath" GOTMPDIR="$BUILD_TMP/.gotmp" \
       go build -buildvcs=false -trimpath -ldflags "-s -w" -o "$out" ./cmd/gravinet ) \
     || { echo "error: build failed" >&2; exit 1; }
   SRC="$out"

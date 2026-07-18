@@ -195,9 +195,13 @@ build_from_source() {
   # separate large /home) that quietly eats the filesystem it's on. Redirect
   # both under BUILD_TMP instead, which the EXIT trap above already removes
   # on every exit path — the build gets it own scratch space and nothing
-  # outlives this run.
+  # outlives this run. GOTMPDIR gets the same treatment: go build's own
+  # per-run scratch dir (go-buildNNNNNN, separate from GOCACHE) otherwise
+  # defaults straight to /tmp and is exactly the kind of leftover this whole
+  # function exists to avoid.
+  mkdir -p "$BUILD_TMP/.gotmp"
   ( cd "$REPO" && CGO_ENABLED=0 GOTOOLCHAIN=auto \
-      GOCACHE="$BUILD_TMP/.gocache" GOPATH="$BUILD_TMP/.gopath" \
+      GOCACHE="$BUILD_TMP/.gocache" GOPATH="$BUILD_TMP/.gopath" GOTMPDIR="$BUILD_TMP/.gotmp" \
       go build -buildvcs=false -trimpath -ldflags "-s -w" -o "$out" ./cmd/gravinet ) \
     || { echo "error: build failed" >&2; exit 1; }
   SRC="$out"
@@ -317,25 +321,31 @@ if command -v pfctl >/dev/null 2>&1; then
     echo "    rule already present in $PF_CONF"
   else
     tmp="$(mktemp)"
+    pferr="$(mktemp)"
     [ -f "$PF_CONF" ] && cat "$PF_CONF" > "$tmp"
     {
       echo ""
       echo "$PF_MARKER"
       echo "pass in proto { tcp udp } to port ${UNDERLAY_PORT}"
     } >> "$tmp"
-    if pfctl -nf "$tmp" 2>/tmp/gravinet-pferr; then
+    # pferr (like tmp above) is a plain mktemp file, not BUILD_TMP's
+    # directory — nothing else on this run's exit path removes it, so it's
+    # cleared explicitly on every branch below instead of left at a fixed
+    # /tmp path forever.
+    if pfctl -nf "$tmp" 2>"$pferr"; then
       cat "$tmp" > "$PF_CONF"; rm -f "$tmp"
-      if pfctl -f "$PF_CONF" 2>/tmp/gravinet-pferr; then
+      if pfctl -f "$PF_CONF" 2>"$pferr"; then
         echo "    added pass rule and reloaded pf"
       else
         echo "    warning: wrote the rule to $PF_CONF but 'pfctl -f' failed:" >&2
-        sed 's/^/      /' /tmp/gravinet-pferr >&2
+        sed 's/^/      /' "$pferr" >&2
       fi
     else
       echo "    warning: proposed rule failed 'pfctl -nf' validation; left $PF_CONF untouched:" >&2
-      sed 's/^/      /' /tmp/gravinet-pferr >&2
+      sed 's/^/      /' "$pferr" >&2
       rm -f "$tmp"
     fi
+    rm -f "$pferr"
   fi
 else
   echo "    pfctl not found (unexpected on OpenBSD); open ${UNDERLAY_PORT}/tcp+udp inbound yourself"
@@ -364,6 +374,7 @@ if [ "$SETUP_UNBOUND" = 1 ]; then
       echo "    remote-control already configured in $UNBOUND_CONF"
     else
       utmp="$(mktemp)"
+      unberr="$(mktemp)"
       [ -f "$UNBOUND_CONF" ] && cat "$UNBOUND_CONF" > "$utmp"
       {
         echo ""
@@ -372,14 +383,18 @@ if [ "$SETUP_UNBOUND" = 1 ]; then
         echo "    control-enable: yes"
         echo "    control-interface: /var/run/unbound.sock"
       } >> "$utmp"
-      if unbound-checkconf "$utmp" >/tmp/gravinet-unberr 2>&1; then
+      # unberr (like utmp above) is a plain mktemp file, not BUILD_TMP's
+      # directory — nothing else on this run's exit path removes it, so it's
+      # cleared explicitly below instead of left at a fixed /tmp path forever.
+      if unbound-checkconf "$utmp" >"$unberr" 2>&1; then
         cat "$utmp" > "$UNBOUND_CONF"; rm -f "$utmp"
         echo "    enabled remote-control in $UNBOUND_CONF"
       else
         echo "    warning: adding remote-control failed unbound-checkconf; left $UNBOUND_CONF untouched:" >&2
-        sed 's/^/      /' /tmp/gravinet-unberr >&2
+        sed 's/^/      /' "$unberr" >&2
         rm -f "$utmp"
       fi
+      rm -f "$unberr"
     fi
 
     # 2) Point resolv.conf at unbound and stop resolvd from clobbering it.
