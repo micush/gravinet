@@ -267,7 +267,7 @@ const indexHTML = `<!doctype html>
 <script>
 const $ = (h) => { const d=document.createElement('div'); d.innerHTML=h.trim(); return d.firstChild; };
 const app = document.getElementById('app');
-const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, geoipLookup:false, allowRemoteShell:false, shellSupported:true, bgpSupported:false, selfId:null, selfHostname:'', targetSeq:0 };
+const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, geoipLookup:false, allowRemoteShell:false, shellSupported:true, bgpSupported:false, selfId:null, selfHostname:'', targetSeq:0, pendingBgpHighlight:null };
 // setTarget is the only place state.target is ever assigned — bumping
 // targetSeq alongside it, once, exactly when the *selection itself* actually
 // changes. load()/startPolling()/refreshCluster() each capture targetSeq
@@ -1113,7 +1113,42 @@ async function gotoNetwork(netId){
   flashAndScroll(row || document.querySelector('#content .card'));
 }
 
-// buildGlobalSearch renders the header's global search box, reusing the
+// gotoBgpNeighbor switches to Traffic > BGP and flashes the neighbor row
+// matching peerAddr, so clicking a live peer under Monitor > BGP Peers lands
+// on that peer's actual definition instead of just the bare section. Unlike
+// gotoMeshPeer/gotoNetwork, the target can't be applied right after refresh()
+// resolves: the BGP editor's own data comes from secBgp's local async load()
+// (fetching /api/bgp/config, and possibly a background /api/bgp/import),
+// which renderSection() kicks off but refresh() does not wait on. So the
+// target peer is left in state.pendingBgpHighlight instead, and
+// renderBgpEditor consumes it itself, right after it attaches its finished
+// card — whenever that turns out to be, however many renders that takes.
+// No-op-safe: a peer configured outside gravinet, with no matching row in the
+// stored config, still lands on the BGP card itself rather than nowhere (see
+// applyPendingBgpHighlight).
+async function gotoBgpNeighbor(peerAddr){
+  if (!peerAddr) return;
+  state.pendingBgpHighlight = peerAddr;
+  state.section = 'bgp';
+  setActiveRailTab('bgp');
+  await refresh();
+}
+
+// applyPendingBgpHighlight consumes state.pendingBgpHighlight (if any)
+// against a just-attached BGP editor card: flashes the matching neighbor row
+// by its data-peer attribute (set in renderNbrs), or the card itself if no
+// row matches. Cleared unconditionally on the first render it's checked
+// against, same as every other goto*-style jump here — one attempt, landing
+// on the section is the fallback rather than chasing a row across multiple
+// re-renders.
+function applyPendingBgpHighlight(card){
+  if (!state.pendingBgpHighlight) return;
+  const peer = state.pendingBgpHighlight;
+  state.pendingBgpHighlight = null;
+  flashAndScroll(card.querySelector('tr[data-peer="'+CSS.escape(peer)+'"]') || card);
+}
+
+
 // existing .search-select/.ss-* component styling already in the
 // stylesheet (unused until now) rather than introducing a second dropdown
 // pattern. Arrow keys move the selection, Enter picks it, Escape clears —
@@ -5844,12 +5879,21 @@ async function bgpLiveStatus(meta, body){
   for (const p of peers){
     const est = (p.state||'').toLowerCase() === 'established';
     const stateCell = '<span class="pill" style="'+(est?'color:var(--ok);border-color:var(--ok)':'color:var(--mut)')+'">'+esc(p.state||'\u2013')+'</span>';
-    h += '<tr><td>'+esc(p.peer)+'</td><td>'+esc(String(p.remote_as||'\u2013'))+'</td><td>'+stateCell+
+    const peerCell = '<span class="peer-link" data-peer="'+esc(p.peer)+'" title="show this neighbor\u2019s definition under Traffic \u2192 BGP">'+esc(p.peer)+'</span>';
+    h += '<tr><td>'+peerCell+'</td><td>'+esc(String(p.remote_as||'\u2013'))+'</td><td>'+stateCell+
       '</td><td>'+esc(p.uptime||'\u2013')+'</td><td>'+esc(String(p.prefixes_received!=null?p.prefixes_received:'\u2013'))+
       '</td><td>'+(p.afi==='ipv6Unicast'?'IPv6':'IPv4')+'</td></tr>';
   }
   body.innerHTML = h+'</table>';
-  enhanceTable(body.querySelector('table'));
+  const tbl = body.querySelector('table');
+  enhanceTable(tbl);
+  // Clicking a peer address jumps to that neighbor's row under Traffic > BGP
+  // (see gotoBgpNeighbor), following the same peer-link pattern used for
+  // mesh-peer names elsewhere. Wired after enhanceTable, which only reorders
+  // existing nodes so the handler survives a sort.
+  tbl.querySelectorAll('.peer-link').forEach(el => {
+    el.onclick = (e) => { e.stopPropagation(); gotoBgpNeighbor(el.dataset.peer); };
+  });
 }
 
 // renderBgpEditor builds the editable BGP/BFD form into host from the stored
@@ -5869,61 +5913,6 @@ function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
 
   const card = $('<div class="card"></div>');
   card.appendChild($('<h3>BGP configuration</h3>'));
-  // Manual re-check, independent of the automatic background import in
-  // secBgp's load(). That auto-import only ever fires once, and only when
-  // gravinet doesn't yet consider itself the active BGP manager (!active) —
-  // deliberately, so re-opening this page never silently overwrites settings
-  // the operator has already saved here with whatever FRR happens to be
-  // running. That gate means: once BGP has ever been enabled and saved
-  // through gravinet (even from an old/abandoned attempt), the page will
-  // never look at FRR's live config again on its own — and a failed
-  // background import fails silently into a blank form with no visible
-  // reason. This button removes both gaps: it always attempts an import when
-  // clicked, and always reports why, so "the fields are blank" becomes a
-  // concrete reason (permission denied reading the config file, vtysh not
-  // answering, no 'router bgp' stanza, …) instead of an unexplained empty
-  // page.
-  if (installed){
-    const checkRow = $('<div style="margin:-4px 0 12px;display:flex;align-items:center;gap:10px"></div>');
-    const checkBtn = $('<button class="sm">Check FRR\u2019s live configuration</button>');
-    const checkMsg = $('<span class="hint"></span>');
-    checkRow.appendChild(checkBtn); checkRow.appendChild(checkMsg);
-    card.appendChild(checkRow);
-    checkBtn.onclick = async () => {
-      checkBtn.disabled = true;
-      checkMsg.style.color = ''; checkMsg.textContent = 'checking\u2026';
-      let im;
-      try {
-        // Unlike the config GET above, this genuinely touches FRR — up to two
-        // sequential vtysh calls, each internally bounded to ~10s (see
-        // runVtysh's own hard timeout) — so 25s comfortably covers the
-        // legitimate slow-but-working case with margin. Bounding it here too
-        // is what actually fixes "stuck on Checking… forever": without this,
-        // a request that never resolves (dropped connection, a proxied hop to
-        // an unreachable peer, or a server-side path that isn't as bounded in
-        // practice as intended) had nothing client-side to time it out either.
-        im = await withTimeout(api('/api/bgp/import'), 25000);
-      } catch (e){
-        checkMsg.style.color = 'var(--danger)';
-        checkMsg.textContent = 'Request failed \u2014 ' + ((e && e.message) || e);
-        checkBtn.disabled = false;
-        return;
-      }
-      if (im.ok && im.body && im.body.imported && im.body.bgp){
-        // Replaces this whole card with a fresh render of the imported
-        // values; nothing is saved until the operator edits a field (see
-        // the autosave block below), so pulling in FRR's live state here is
-        // always safe to look at even when gravinet already has its own
-        // saved config.
-        renderBgpEditor(host, im.body.bgp, installed, true, !!im.body.imported_has_passwords);
-        return;
-      }
-      checkBtn.disabled = false;
-      const reason = (im.body && (im.body.reason || im.body.error)) || 'no response from the server';
-      checkMsg.style.color = 'var(--danger)';
-      checkMsg.textContent = 'No BGP configuration found \u2014 ' + reason;
-    };
-  }
   if (imported){
     let msg = 'These settings were read from FRR\u2019s running configuration \u2014 gravinet is not managing BGP on this host yet. Save to adopt them into gravinet\u2019s management.';
     if (importedHasPasswords){
@@ -5995,8 +5984,9 @@ function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
       // context requirement, so it's used here instead of $() for exactly
       // these two tags.
       const tr = document.createElement('tr');
+      tr.dataset.peer = n.peer || '';
       const mk = (val, ph, w) => { const inp=$('<input type="text" style="width:'+w+'px">'); inp.value=val==null?'':String(val); inp.placeholder=ph||''; return inp; };
-      const peer = mk(n.peer, '10.0.0.2', 130); peer.oninput = () => { n.peer = peer.value.trim(); scheduleSave(false); };
+      const peer = mk(n.peer, '10.0.0.2', 130); peer.oninput = () => { n.peer = peer.value.trim(); tr.dataset.peer = n.peer; scheduleSave(false); };
       const as = mk(n.remote_as||'', '65002', 80); as.oninput = () => { n.remote_as = parseInt(as.value,10)||0; scheduleSave(false); };
       const desc = mk(n.description, 'optional', 150); desc.oninput = () => { n.description = desc.value; scheduleSave(false); };
       const pw = $('<input type="password" style="width:120px" placeholder="optional">'); pw.value = n.password||''; pw.oninput = () => { n.password = pw.value; scheduleSave(false); };
@@ -6099,6 +6089,7 @@ function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
   // the line whose loss in v485 left the BGP section stuck on "loading
   // configuration…" — the whole form was built but never inserted.
   host.innerHTML = ''; host.appendChild(card);
+  applyPendingBgpHighlight(card);
 }
 
 // infoHosts shows the local hosts file contents, read live from disk.

@@ -37,6 +37,36 @@ assuming it didn't happen.
 
 ---
 
+## v491 — 2026-07-17
+
+**Remove the now-redundant "Check FRR's live configuration" button.**
+
+It existed to work around the v490 render crash (blank fields / stuck
+"Checking…") by giving the operator a way to retry and see a concrete
+failure reason. With that crash actually fixed at the root, the automatic
+background import works correctly again on its own, so the manual button was
+just clutter. Removed, along with its now-unused 25s request timeout on that
+one call site (`withTimeout` itself stays — the config GET still uses it).
+
+**Monitor › BGP Peers: clicking a peer now jumps to its definition under
+Traffic › BGP.**
+
+Peer addresses in the live BGP peers table are now links (same `.peer-link`
+pattern already used for mesh-peer names in the latency table). Clicking one
+switches to Traffic › BGP and scrolls to/flashes the matching neighbor row —
+`gotoBgpNeighbor` sets `state.pendingBgpHighlight` before navigating and
+`renderBgpEditor` consumes it once its card actually attaches, since the BGP
+editor's own data load is async and not something `refresh()` waits on (same
+reason `gotoMeshPeer`/`gotoNetwork` seed selection state before navigating
+rather than searching for the row immediately after). No-op-safe: a live peer
+that isn't in gravinet's own stored neighbor list (BGP configured outside
+gravinet) still lands on the BGP card itself rather than nowhere.
+
+Verified end-to-end in a real DOM (jsdom): rendered the live peers table,
+simulated a click on a peer address, and confirmed the resulting page lands
+on Traffic › BGP with that exact neighbor's row flashed and its fields
+(peer/AS/description) intact.
+
 ## v490 — 2026-07-17
 
 **The actual bug behind "BGP fields are blank" / "stuck on Checking… forever":
