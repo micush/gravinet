@@ -37,6 +37,45 @@ assuming it didn't happen.
 
 ---
 
+## v515 — 2026-07-18
+
+**Simplified the "Redistribute mesh routes" toggle's description text
+(Traffic › BGP).**
+
+"...Advertise table (none right now), not every kernel route on this
+host." is now just "...Advertise table (0)" — a plain count, no "right
+now"/"none right now" phrasing and no trailing kernel-route clause.
+
+---
+
+## v514 — 2026-07-18
+
+**Strengthened the confirmation shown when editing a network's subnet4/
+subnet6 in place (Mesh › networks) to explain the actual failure mode, not
+just that a restart happens.**
+
+Changing a network's subnet was already allowed and already forced a
+restart with a confirm() first — but the confirm only said "the same
+change must be made on every other node," which understates the risk:
+gravinet has no protocol-level check for a fleet that's only partway
+migrated. Each node installs its own on-link kernel route scoped to its
+own configured subnet (`assignAddr`, `internal/mesh/addressing.go`), so a
+peer still on the old range simply stops being reachable from a node
+that's moved to the new one — no error, nothing in the logs pointing at
+the mismatch, it just looks like that peer dropped off. The confirm()
+text (`startInlineEdit`, `ui.go`) now says so explicitly, so a mismatch
+gets diagnosed in seconds instead of an hour of debugging a "dead" peer.
+address4/address6's own confirm (a plain restart notice — re-addressing a
+live interface isn't hot-reloadable, but there's no cross-node
+coordination risk to explain there) is unchanged.
+
+New `TestSubnetChangeWarnsOfSilentPeerMismatch`
+(`ui_dom_helper_test.go`) scans for the specific wording, in the same
+style as the existing JS-behavior guard tests (this package has no JS
+runtime in its test suite).
+
+---
+
 ## v513 — 2026-07-18
 
 **Fixed: a long IPv6 address in Mesh › peers / Monitor › mesh peers got cut

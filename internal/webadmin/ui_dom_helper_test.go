@@ -135,3 +135,26 @@ func TestPeerAddressDisplayStripsIPv6Brackets(t *testing.T) {
 		t.Errorf("esc(dispAddr(p.endpointText)) appears %d times, want at least 2 (secPeers' and infoMeshPeers' endpoint cells)", n)
 	}
 }
+
+// TestSubnetChangeWarnsOfSilentPeerMismatch guards against losing the
+// specific warning on editing a network's subnet4/subnet6 in place (Mesh >
+// networks): changing it is allowed (see startInlineEdit), but nothing in
+// the protocol detects a fleet that's only partway migrated — each node's
+// own on-link kernel route only covers its own configured subnet (see
+// mesh's assignAddr), so a peer still on the old range simply stops being
+// reachable from a node that's moved to the new one, with no error anywhere
+// to explain why. The confirm() dialog is the only place that risk is ever
+// surfaced to the operator, so this scans for the specific wording rather
+// than just "a confirm exists" — a generic restart notice (like
+// address4/address6 already have) would not carry the same warning.
+func TestSubnetChangeWarnsOfSilentPeerMismatch(t *testing.T) {
+	if !strings.Contains(indexHTML, "op:'subnet'") {
+		t.Fatal("no op:'subnet' payload found in indexHTML — has the subnet edit path moved?")
+	}
+	if !strings.Contains(indexHTML, "gravinet does not detect a mismatch") {
+		t.Error("the subnet-change confirm() no longer explains that a fleet-wide mismatch goes undetected")
+	}
+	if !strings.Contains(indexHTML, "simply stop being reachable from this node") {
+		t.Error("the subnet-change confirm() no longer explains the actual consequence (a peer on the old range becoming unreachable)")
+	}
+}

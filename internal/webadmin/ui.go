@@ -1769,7 +1769,16 @@ function startInlineEdit(td){
       if (!state.restartPending && !confirm('Change this node\'s overlay '+field+' for "'+nameOf(net)+'"?\n\nA running interface is not re-addressed live, so this node will restart immediately to apply it. Type "none" to clear and auto-assign.')){ renderSection(); return; }
       payload = { op:'address', net }; payload[field] = v;
     } else {
-      if (!confirm('Change '+field+' for "'+nameOf(net)+'"?\n\nThis node will restart immediately to apply it, and the same change must be made on every other node in this network.')){ renderSection(); return; }
+      // Unlike address4/address6 above, this isn't just a "this node
+      // restarts" warning — a subnet mismatch between nodes has no
+      // detection anywhere in the protocol. Each node's own on-link kernel
+      // route only covers its own subnet4/subnet6 (see mesh's assignAddr),
+      // so a peer whose real overlay address falls outside the new range
+      // just stops being reachable from this node — no error, no log line
+      // pointing at the mismatch, it just looks like that peer dropped off.
+      // Spelling that out here is cheap insurance against the "changed it
+      // on one box, spent an hour debugging a 'dead' peer" case.
+      if (!confirm('Change '+field+' for "'+nameOf(net)+'"?\n\nThis node will restart immediately to apply it. The same change must be made on every other node in this network — gravinet does not detect a mismatch, so a peer still on the old range will simply stop being reachable from this node, with nothing in the logs to explain why.')){ renderSection(); return; }
       payload = { op:'subnet', net }; payload[field] = v;
     }
     const ok = await edit('/api/network', payload, true); // restarts automatically once saved; refreshes on success, alerts on error
@@ -6100,8 +6109,7 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes){
   // live as routes are added/removed/enabled on that page, independent of
   // this form's own save.
   const meshCount = (meshRoutes && meshRoutes.length) || 0;
-  const meshDesc = 'Advertise only the CIDRs currently on the Mesh Routes page\u2019s Advertise table ('
-    + (meshCount ? (meshCount + ' right now') : 'none right now') + '), not every kernel route on this host.';
+  const meshDesc = 'Advertise only the CIDRs currently on the Mesh Routes page\u2019s Advertise table (' + meshCount + ')';
   const rmCb = rowTog('Redistribute mesh routes', meshDesc, !!b.redistribute_mesh);
   // Session timers. A new config defaults to a fast 4s/12s (FRR's own default is
   // a sluggish 60s/180s); an existing/imported config shows its actual values,
