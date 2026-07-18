@@ -215,6 +215,88 @@ func TestFRRSkipsInvalidNeighbors(t *testing.T) {
 	frrHas(t, c, " neighbor 10.0.0.4 remote-as 65004\n")
 }
 
+// An IPv6-addressed neighbor must be explicitly deactivated in
+// `address-family ipv4 unicast` — FRR activates every neighbor there by
+// default regardless of its own address family, so left alone a v6 peer
+// would end up running an IPv4 unicast exchange over its v6 session — and
+// activated instead in its own `address-family ipv6 unicast` block. An
+// IPv4-addressed neighbor is unaffected: activated in ipv4 unicast, absent
+// from the ipv6 block entirely.
+func TestFRRIPv6NeighborDeactivatedInIPv4ActivatedInIPv6(t *testing.T) {
+	b := config.BGPConfig{
+		Enabled: true, ASN: 65001,
+		Neighbors: []config.BGPNeighbor{
+			{Peer: "10.0.0.2", RemoteAS: 65002},
+			{Peer: "fd00::2", RemoteAS: 65003},
+		},
+	}
+	c := renderFRR(b)
+	v4Block, v6Block, found := strings.Cut(c, " address-family ipv6 unicast\n")
+	if !found {
+		t.Fatalf("expected an address-family ipv6 unicast block\n--- got ---\n%s", c)
+	}
+	frrHas(t, v4Block, "  neighbor 10.0.0.2 activate\n")
+	frrHas(t, v4Block, "  no neighbor fd00::2 activate\n")
+	frrLacks(t, v4Block, "  neighbor fd00::2 activate\n")
+	frrHas(t, v6Block, "  neighbor fd00::2 activate\n")
+	frrLacks(t, v6Block, "10.0.0.2")
+}
+
+// With no IPv6 neighbor and no IPv6 advertised network, no
+// `address-family ipv6 unicast` block is emitted at all — there'd be
+// nothing to activate in it.
+func TestFRRNoIPv6AFBlockWhenUnneeded(t *testing.T) {
+	b := config.BGPConfig{
+		Enabled: true, ASN: 65001,
+		Neighbors: []config.BGPNeighbor{{Peer: "10.0.0.2", RemoteAS: 65002}},
+		Networks:  []string{"10.0.0.0/24"},
+	}
+	c := renderFRR(b)
+	frrLacks(t, c, "address-family ipv6 unicast")
+}
+
+// A v6-only advertised network (no v6 neighbor at all) still gets its own
+// ipv6 unicast block — presence is keyed off having anything to carry, not
+// specifically a v6 peer.
+func TestFRRIPv6AFBlockFromNetworkAlone(t *testing.T) {
+	b := config.BGPConfig{
+		Enabled: true, ASN: 65001,
+		Neighbors: []config.BGPNeighbor{{Peer: "10.0.0.2", RemoteAS: 65002}},
+		Networks:  []string{"fd00::/64"},
+	}
+	c := renderFRR(b)
+	frrHas(t, c, " address-family ipv6 unicast\n")
+	frrHas(t, c, "  network fd00::/64\n")
+}
+
+// Advertised networks are split by address family — a v6 prefix goes under
+// ipv6 unicast only (FRR rejects a mismatched-family prefix), and vice
+// versa. The redistribute toggles aren't family-specific, so both are
+// mirrored into the v6 block once it exists, alongside the v4 block.
+func TestFRRNetworksSplitByFamily(t *testing.T) {
+	b := config.BGPConfig{
+		Enabled:               true,
+		ASN:                   65001,
+		Neighbors:             []config.BGPNeighbor{{Peer: "fd00::2", RemoteAS: 65002}},
+		Networks:              []string{"10.0.0.0/24", "fd00:1::/64"},
+		RedistributeConnected: true,
+		RedistributeStatic:    true,
+	}
+	c := renderFRR(b)
+	v4Block, v6Block, found := strings.Cut(c, " address-family ipv6 unicast\n")
+	if !found {
+		t.Fatalf("expected an address-family ipv6 unicast block\n--- got ---\n%s", c)
+	}
+	frrHas(t, v4Block, "  network 10.0.0.0/24\n")
+	frrLacks(t, v4Block, "fd00:1::/64")
+	frrHas(t, v6Block, "  network fd00:1::/64\n")
+	frrLacks(t, v6Block, "10.0.0.0/24")
+	frrHas(t, v4Block, "  redistribute connected\n")
+	frrHas(t, v4Block, "  redistribute static\n")
+	frrHas(t, v6Block, "  redistribute connected\n")
+	frrHas(t, v6Block, "  redistribute static\n")
+}
+
 func TestFRRNetworksAndRedistribute(t *testing.T) {
 	b := config.BGPConfig{
 		Enabled: true, ASN: 65001,
@@ -642,6 +724,50 @@ func TestSummaryToBGPConfigDedupAndEmpty(t *testing.T) {
 	// Nothing at all → not ok.
 	if _, _, ok3 := summaryToBGPConfig([]byte(`{}`)); ok3 {
 		t.Error("empty summary should not import")
+	}
+}
+
+// renderFRR's own output — including the new ipv6 unicast block — must
+// round-trip cleanly through parseRunningConfigBGP: the parser doesn't
+// branch on which address-family stanza a line is nested under, so both
+// the v6 neighbor and the v6 network land back in cfg regardless. The
+// `no neighbor fd00::2 activate` line in the v4 block is a negation and is
+// correctly skipped rather than misread as clearing the neighbor.
+func TestFRRIPv6RenderParseRoundTrip(t *testing.T) {
+	b := config.BGPConfig{
+		Enabled: true, ASN: 65001,
+		Neighbors: []config.BGPNeighbor{
+			{Peer: "10.0.0.2", RemoteAS: 65002},
+			{Peer: "fd00::2", RemoteAS: 65003, Description: "v6 peer"},
+		},
+		Networks: []string{"10.0.0.0/24", "fd00:1::/64"},
+	}
+	rendered := renderFRR(b)
+	cfg, _, ok := parseRunningConfigBGP(rendered)
+	if !ok {
+		t.Fatalf("round-trip parse failed\n--- rendered ---\n%s", rendered)
+	}
+	if len(cfg.Neighbors) != 2 {
+		t.Fatalf("expected 2 neighbors back, got %d: %+v", len(cfg.Neighbors), cfg.Neighbors)
+	}
+	byPeer := map[string]config.BGPNeighbor{}
+	for _, n := range cfg.Neighbors {
+		byPeer[n.Peer] = n
+	}
+	if n, ok := byPeer["fd00::2"]; !ok || n.RemoteAS != 65003 || n.Description != "v6 peer" {
+		t.Errorf("v6 neighbor didn't round-trip cleanly: %+v (present=%v)", n, ok)
+	}
+	if n, ok := byPeer["10.0.0.2"]; !ok || n.RemoteAS != 65002 {
+		t.Errorf("v4 neighbor didn't round-trip cleanly: %+v (present=%v)", n, ok)
+	}
+	wantNets := map[string]bool{"10.0.0.0/24": true, "fd00:1::/64": true}
+	if len(cfg.Networks) != 2 {
+		t.Fatalf("expected 2 networks back, got %d: %v", len(cfg.Networks), cfg.Networks)
+	}
+	for _, net := range cfg.Networks {
+		if !wantNets[net] {
+			t.Errorf("unexpected network %q in round-trip result: %v", net, cfg.Networks)
+		}
 	}
 }
 

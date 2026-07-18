@@ -29,6 +29,7 @@ package webadmin
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"runtime"
@@ -82,6 +83,34 @@ func safeToken(t string) bool {
 		}
 	}
 	return true
+}
+
+// isIPv6Peer reports whether a neighbor's peer address is an IPv6 literal
+// (vs. IPv4 or something unparsable, e.g. an interface name for an
+// unnumbered peer). FRR — like Cisco, which it mirrors here — activates
+// every configured neighbor under `address-family ipv4 unicast` by default,
+// regardless of the peer's own address family: an IPv6-addressed neighbor
+// gets swept into that same implicit activation unless it's explicitly
+// deactivated there. Left alone, that's a peer with an IPv6 transport
+// session negotiating the IPv4 unicast AFI/SAFI, which is not what an
+// operator adding a v6 neighbor wants.
+func isIPv6Peer(peer string) bool {
+	ip := net.ParseIP(peer)
+	return ip != nil && ip.To4() == nil
+}
+
+// isIPv6Network reports whether an advertised-network prefix (e.g.
+// "10.0.0.0/24" or "fd00::/64" — a bare address, sans "/len", also works)
+// is IPv6. Determines which address-family block a `network` statement
+// belongs under: FRR rejects a prefix whose family doesn't match the AF
+// it's declared in.
+func isIPv6Network(prefix string) bool {
+	host := prefix
+	if i := strings.IndexByte(prefix, '/'); i >= 0 {
+		host = prefix[:i]
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.To4() == nil
 }
 
 // filterInline strips characters that could break out of an frr.conf line
@@ -172,9 +201,11 @@ func renderFRR(b config.BGPConfig) string {
 		}
 	}
 	out.WriteString(" address-family ipv4 unicast\n")
-	for _, net := range b.Networks {
-		if safeToken(net) {
-			fmt.Fprintf(&out, "  network %s\n", net)
+	for _, pfx := range b.Networks {
+		// A v6 prefix belongs in the ipv6 unicast block below — FRR rejects
+		// a `network` statement here whose prefix doesn't match the AF.
+		if safeToken(pfx) && !isIPv6Network(pfx) {
+			fmt.Fprintf(&out, "  network %s\n", pfx)
 		}
 	}
 	if b.RedistributeConnected {
@@ -183,12 +214,66 @@ func renderFRR(b config.BGPConfig) string {
 	if b.RedistributeStatic {
 		out.WriteString("  redistribute static\n")
 	}
+	var v6Neighbors, v4Neighbors []config.BGPNeighbor
 	for _, n := range b.Neighbors {
-		if safeToken(n.Peer) && n.RemoteAS != 0 {
-			fmt.Fprintf(&out, "  neighbor %s activate\n", n.Peer)
+		if !safeToken(n.Peer) || n.RemoteAS == 0 {
+			continue
+		}
+		if isIPv6Peer(n.Peer) {
+			v6Neighbors = append(v6Neighbors, n)
+		} else {
+			v4Neighbors = append(v4Neighbors, n)
 		}
 	}
-	out.WriteString(" exit-address-family\n!\n")
+	for _, n := range v4Neighbors {
+		fmt.Fprintf(&out, "  neighbor %s activate\n", n.Peer)
+	}
+	for _, n := range v6Neighbors {
+		// FRR defaults every neighbor active in ipv4 unicast, v6 peers
+		// included; explicitly deactivate a v6 peer here so it isn't left
+		// running an IPv4 unicast exchange over its v6 session (see
+		// isIPv6Peer's doc comment). It's activated in ipv6 unicast instead,
+		// below.
+		fmt.Fprintf(&out, "  no neighbor %s activate\n", n.Peer)
+	}
+	out.WriteString(" exit-address-family\n")
+
+	// A v6 neighbor with nothing activated anywhere would come up but
+	// exchange no routes at all, so only bother with this block — and only
+	// emit it — when there's an actual v6 peer or v6 prefix to carry.
+	var v6Networks []string
+	for _, pfx := range b.Networks {
+		if safeToken(pfx) && isIPv6Network(pfx) {
+			v6Networks = append(v6Networks, pfx)
+		}
+	}
+	if len(v6Neighbors) > 0 || len(v6Networks) > 0 {
+		// A real FRR running-config uses an indented `!` between sub-blocks
+		// that are still inside the same stanza; only a column-0 `!` ends
+		// the stanza (see parseRunningConfigBGP's stanza-end check, and
+		// TestImportBGPFromFRRFile's sample text for what FRR itself
+		// emits). An unindented separator here would end `router bgp`
+		// before this block is ever reached on import.
+		out.WriteString(" !\n")
+		out.WriteString(" address-family ipv6 unicast\n")
+		for _, pfx := range v6Networks {
+			fmt.Fprintf(&out, "  network %s\n", pfx)
+		}
+		// Mirrors the ipv4 unicast block: gravinet's redistribute toggles
+		// aren't family-specific, so "on" means both — FRR still requires
+		// the directive under each address-family that should carry it.
+		if b.RedistributeConnected {
+			out.WriteString("  redistribute connected\n")
+		}
+		if b.RedistributeStatic {
+			out.WriteString("  redistribute static\n")
+		}
+		for _, n := range v6Neighbors {
+			fmt.Fprintf(&out, "  neighbor %s activate\n", n.Peer)
+		}
+		out.WriteString(" exit-address-family\n")
+	}
+	out.WriteString("!\n")
 	return out.String()
 }
 

@@ -37,6 +37,73 @@ assuming it didn't happen.
 
 ---
 
+## v507 — 2026-07-18
+
+**Added an `address-family ipv6 unicast` block, so a deactivated-in-ipv4
+IPv6 neighbor (v506) actually exchanges routes instead of coming up idle.**
+v506 correctly deactivated IPv6 peers in `address-family ipv4 unicast`, but
+gravinet never rendered any other address-family block for them to be
+activated in — leaving a v6 session established with nothing activated
+anywhere, and therefore no routes exchanged over it. `renderFRR` (`frr.go`)
+now:
+
+- Splits `b.Neighbors` into v4/v6 by peer address (`isIPv6Peer`) and emits
+  a plain `neighbor <peer> activate` for v6 peers under a new
+  `address-family ipv6 unicast` block instead of the `no activate` it gets
+  in the ipv4 block.
+- Splits `b.Networks` by prefix family (new `isIPv6Network`) so a v6
+  advertised prefix renders under `network` in the ipv6 block, never the
+  ipv4 one — FRR rejects a `network` statement whose prefix doesn't match
+  its enclosing address-family, and previously every prefix in the list
+  was dumped into ipv4 unicast regardless.
+- Mirrors `redistribute connected`/`redistribute static` into the ipv6
+  block when it's emitted — the toggles aren't family-specific, and FRR
+  needs the directive present in whichever address-family should carry it.
+- Only emits the ipv6 block at all when there's an actual v6 peer or v6
+  network to put in it.
+
+Also fixed along the way: the separator between the two address-family
+blocks needed to be an *indented* `" !\n"`, not the column-0 `"!\n"` the
+single-address-family version used to close out the whole stanza — a
+column-0 `!` is (correctly) read by `parseRunningConfigBGP`'s stanza-end
+check as ending the `router bgp` block entirely, matching what real FRR
+`show running-config` output does. Emitting it between the two blocks was
+silently truncating the ipv6 block right out of anything read back via
+import — caught by a new render→parse round-trip test before it shipped.
+The lone stanza-terminating `!` now moves to the very end, after whichever
+blocks were actually emitted.
+
+No parser changes were needed: `parseRunningConfigBGP` never branched on
+which `address-family` stanza a line was nested under, and already
+skipped any `no `-prefixed line as a negation — so both blocks, and the
+`no neighbor <v6> activate` line from v506, round-trip through it as-is.
+
+New tests: `TestFRRIPv6NeighborDeactivatedInIPv4ActivatedInIPv6`,
+`TestFRRNoIPv6AFBlockWhenUnneeded`, `TestFRRIPv6AFBlockFromNetworkAlone`,
+`TestFRRNetworksSplitByFamily`, `TestFRRIPv6RenderParseRoundTrip`. The
+existing v506 test (`TestFRRIPv6NeighborDeactivatedInIPv4AF`) was replaced
+since its old assertion — that a v6 peer should never get a plain
+`activate` line anywhere — is no longer the intended behavior.
+
+---
+
+## v506 — 2026-07-18
+
+**IPv6 BGP neighbors are now explicitly deactivated in
+`address-family ipv4 unicast`.** FRR (mirroring Cisco here) activates every
+configured neighbor under `address-family ipv4 unicast` by default,
+regardless of the peer's own address family — so an IPv6-addressed
+neighbor was getting swept into that same implicit IPv4 unicast activation
+alongside its own session. `renderFRR` (`frr.go`) now detects an IPv6
+literal peer (new `isIPv6Peer`, via `net.ParseIP`) and emits
+`no neighbor <peer> activate` for it in that address-family block instead
+of `neighbor <peer> activate`; IPv4 peers are unaffected. The FRR-config
+import parser already treats any `no `-prefixed line as a skipped
+negation, so reading this back in doesn't need a matching change.
+New test: `TestFRRIPv6NeighborDeactivatedInIPv4AF`.
+
+---
+
 ## v505 — 2026-07-17
 
 **Set `autocomplete="off"` on the BGP neighbor edit fields (Traffic › BGP).**
