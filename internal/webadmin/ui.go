@@ -5899,6 +5899,19 @@ async function bfdLiveStatus(body){
   enhanceTable(body.querySelector('table'));
 }
 
+// bgpStateLabel maps FRR's raw BGP FSM state to what's shown in the BGP
+// Neighbors table. "Active" is technically correct — the FSM is retrying the
+// TCP connection to the peer — but reads as if something's actively working,
+// when what it actually means is simply that the session isn't up. Every
+// other non-Established state already reads as clearly-not-up on its own
+// (Idle, Connect, OpenSent, OpenConfirm), so Active is the one state
+// substituted with a plain "down" instead. The real FSM state is still
+// available as a tooltip on the pill (see its call site) for anyone who
+// wants the precise value.
+function bgpStateLabel(state){
+  return (state||'').toLowerCase() === 'active' ? 'down' : (state || '\u2013');
+}
+
 // bgpLiveStatus fills a meta line and body with FRR's live BGP peer table
 // (GET /api/bgp), degrading to an explanatory line when FRR isn't answering.
 async function bgpLiveStatus(meta, body){
@@ -5917,8 +5930,12 @@ async function bgpLiveStatus(meta, body){
   if (!peers.length){ body.innerHTML = '<div class="empty">No BGP peers yet.</div>'; return; }
   let h = '<table><tr><th>peer</th><th>remote AS</th><th>state</th><th>uptime</th><th>prefixes</th><th>family</th></tr>';
   for (const p of peers){
-    const est = (p.state||'').toLowerCase() === 'established';
-    const stateCell = '<span class="pill" style="'+(est?'color:var(--ok);border-color:var(--ok)':'color:var(--mut)')+'">'+esc(p.state||'\u2013')+'</span>';
+    const rawState = p.state || '';
+    const est = rawState.toLowerCase() === 'established';
+    const label = bgpStateLabel(rawState);
+    const stateCell = '<span class="pill" style="'+(est?'color:var(--ok);border-color:var(--ok)':'color:var(--mut)')+'"'
+      + (label !== rawState && rawState ? ' title="FRR reports this as \u2018'+esc(rawState)+'\u2019"' : '')
+      + '>'+esc(label)+'</span>';
     const peerCell = '<span class="peer-link" data-peer="'+esc(p.peer)+'" title="show this neighbor\u2019s definition under Traffic \u2192 BGP">'+esc(p.peer)+'</span>';
     h += '<tr><td>'+peerCell+'</td><td>'+esc(String(p.remote_as||'\u2013'))+'</td><td>'+stateCell+
       '</td><td>'+esc(p.uptime||'\u2013')+'</td><td>'+esc(String(p.prefixes_received!=null?p.prefixes_received:'\u2013'))+
@@ -5947,7 +5964,7 @@ async function bgpLiveStatus(meta, body){
 function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
   const neighbors = (b.neighbors || []).map(n => ({
     peer: n.peer||'', remote_as: n.remote_as||0, description: n.description||'',
-    password: n.password||'', bfd: !!n.bfd,
+    password: n.password||'', bfd: !!n.bfd, shutdown: !!n.shutdown,
   }));
   const networks = (b.networks || []).slice();
 
@@ -6026,17 +6043,20 @@ function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
   function renderNbrs(){
     nbrBody.innerHTML = '';
     let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>peer address</th><th>remote AS</th><th>description</th>'
-      + '<th title="MD5 session password">MD5 password</th><th title="Bidirectional Forwarding Detection for this peer">BFD</th></tr>';
-    if (!neighbors.length) h += '<tr><td colspan="6" class="empty">No neighbors \u2014 click + to define a BGP peer.</td></tr>';
+      + '<th title="MD5 session password">MD5 password</th><th title="Bidirectional Forwarding Detection for this peer">BFD</th>'
+      + '<th title="administrative state of this session">state</th></tr>';
+    if (!neighbors.length) h += '<tr><td colspan="7" class="empty">No neighbors \u2014 click + to define a BGP peer.</td></tr>';
     else neighbors.forEach((n, i) => {
       const bfdOn = !!n.bfd;
+      const shutdown = !!n.shutdown;
       h += '<tr class="nbrrow" data-idx="'+i+'" data-peer="'+esc(n.peer||'')+'">'
         + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
         + '<td class="nbr-field nbr-peer-cell">'+esc(n.peer||'')+'</td>'
         + '<td class="nbr-field nbr-as-cell">'+esc(String(n.remote_as||''))+'</td>'
         + '<td class="nbr-field nbr-desc-cell">'+esc(n.description||'')+'</td>'
         + '<td class="nbr-pw-cell">'+nbrPwCell(n)+'</td>'
-        + '<td><span class="tag-toggle '+(bfdOn?'on':'off')+'" data-nbrbfd="1" title="double-click to '+(bfdOn?'disable':'enable')+' BFD for this peer">'+(bfdOn?'on':'off')+'</span></td></tr>';
+        + '<td><span class="tag-toggle '+(bfdOn?'on':'off')+'" data-nbrbfd="1" title="double-click to '+(bfdOn?'disable':'enable')+' BFD for this peer">'+(bfdOn?'on':'off')+'</span></td>'
+        + '<td><span class="tag-toggle '+(shutdown?'off':'on')+'" data-nbrstate="1" title="double-click to '+(shutdown?'enable':'disable')+' this neighbor">'+(shutdown?'disabled':'enabled')+'</span></td></tr>';
     });
     const t = $('<div></div>'); t.innerHTML = h+'</table>'; nbrBody.appendChild(t);
     const table = t.querySelector('table');
@@ -6052,6 +6072,23 @@ function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
         neighbors[i].bfd = on;
         tag.className = 'tag-toggle ' + (on?'on':'off'); tag.textContent = on?'on':'off';
         tag.title = 'double-click to '+(on?'disable':'enable')+' BFD for this peer';
+        scheduleSave(true);
+      };
+    });
+    // Administrative state — disabling emits 'neighbor <peer> shutdown' in
+    // FRR's config (the session stays fully configured, just held down),
+    // enabling removes that line. Same double-click-to-toggle, immediate-save
+    // shape as BFD above and as every other table's state column in the app
+    // (NAT/QoS rule state, etc.) — the state field the user pointed to as the
+    // pattern to follow.
+    t.querySelectorAll('[data-nbrstate]').forEach(tag => {
+      tag.ondblclick = (e) => {
+        e.stopPropagation();
+        const i = parseInt(tag.closest('tr').dataset.idx, 10);
+        const shuttingDown = !neighbors[i].shutdown;
+        neighbors[i].shutdown = shuttingDown;
+        tag.className = 'tag-toggle ' + (shuttingDown?'off':'on'); tag.textContent = shuttingDown?'disabled':'enabled';
+        tag.title = 'double-click to '+(shuttingDown?'enable':'disable')+' this neighbor';
         scheduleSave(true);
       };
     });
@@ -6105,6 +6142,7 @@ function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
         description: tr.querySelector('.nbre-desc').value.trim(),
         password: pwInp.value,
         bfd: idx != null ? neighbors[idx].bfd : false,
+        shutdown: idx != null ? neighbors[idx].shutdown : false,
       };
       if (idx != null) neighbors[idx] = entry; else neighbors.push(entry);
       renderNbrs(); scheduleSave(true);
@@ -6127,7 +6165,8 @@ function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
       + '<td><input class="nbre-as" style="width:80px" placeholder="65002"></td>'
       + '<td><input class="nbre-desc" style="width:150px" placeholder="optional"></td>'
       + '<td><input class="nbre-pw" type="password" style="width:90px" placeholder="optional"> <button class="ghost sm nbre-pw-toggle" title="show while editing">\ud83d\udc41\ufe0f</button> <button class="sm nbre-save">save</button> <button class="ghost sm nbre-cancel">cancel</button></td>'
-      + '<td><span class="hint">off</span></td>';
+      + '<td><span class="hint">off</span></td>'
+      + '<td><span class="hint">enabled</span></td>';
     if (!insertNewRow(table, tr)) return;
     wireNbrForm(tr, null);
   }
@@ -6221,7 +6260,7 @@ function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
       hold_time: hold,
       // Drop blank rows so what's stored matches what FRR would accept.
       neighbors: neighbors.filter(n => n.peer && n.remote_as > 0)
-        .map(n => ({ peer:n.peer, remote_as:n.remote_as, description:n.description||'', password:n.password||'', bfd:!!n.bfd })),
+        .map(n => ({ peer:n.peer, remote_as:n.remote_as, description:n.description||'', password:n.password||'', bfd:!!n.bfd, shutdown:!!n.shutdown })),
       networks: networks.map(s => (s||'').trim()).filter(s => s.length),
     };
     const seq = ++saveSeq;

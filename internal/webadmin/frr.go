@@ -152,6 +152,9 @@ func renderFRR(b config.BGPConfig) string {
 		if n.BFD || b.BFD {
 			fmt.Fprintf(&out, " neighbor %s bfd\n", n.Peer)
 		}
+		if n.Shutdown {
+			fmt.Fprintf(&out, " neighbor %s shutdown\n", n.Peer)
+		}
 	}
 	out.WriteString(" address-family ipv4 unicast\n")
 	for _, net := range b.Networks {
@@ -652,12 +655,12 @@ func summaryToBGPConfig(sum []byte) (cfg config.BGPConfig, at map[string]int, ok
 
 // parseRunningConfigBGP extracts the BGP config from FRR `show running-config`
 // text. Pure function (no I/O) so it's fully unit-testable. It reads the single
-// `router bgp <asn>` stanza — router-id, per-neighbor remote-as/description/bfd,
-// and the address-family's networks and redistribute directives — mirroring
-// exactly the surface renderFRR emits, so what's imported round-trips through
-// the same fields. Neighbor order is preserved (first appearance). hasPasswords
-// is set if any neighbor carried a `password` line, though the secret itself is
-// not captured.
+// `router bgp <asn>` stanza — router-id, per-neighbor remote-as/description/
+// bfd/shutdown, and the address-family's networks and redistribute
+// directives — mirroring exactly the surface renderFRR emits, so what's
+// imported round-trips through the same fields. Neighbor order is preserved
+// (first appearance). hasPasswords is set if any neighbor carried a
+// `password` line, though the secret itself is not captured.
 func parseRunningConfigBGP(text string) (cfg config.BGPConfig, hasPasswords bool, ok bool) {
 	// Normalize line endings first: a config that ever passed through a CRLF
 	// editor would otherwise leave a trailing \r on the ASN token (`65001\r`),
@@ -741,6 +744,8 @@ func parseRunningConfigBGP(text string) (cfg config.BGPConfig, hasPasswords bool
 				hasPasswords = true
 			case "bfd":
 				getN(peer).BFD = true
+			case "shutdown":
+				getN(peer).Shutdown = true
 			case "activate":
 				// address-family activation — neighbor already captured.
 				_ = getN(peer)

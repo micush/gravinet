@@ -37,6 +37,50 @@ assuming it didn't happen.
 
 ---
 
+## v496 — 2026-07-17
+
+**Traffic › BGP › Neighbors: added a "state" column (enabled/disabled).**
+
+New last column on each neighbor row, same double-click-to-toggle
+tag-toggle shape as the existing BFD column and every other table's state
+column in the app (NAT/QoS rule state, etc.) — the pattern the request
+pointed at directly. Disabling a neighbor emits FRR's `neighbor <peer>
+shutdown` (the session stays fully configured, just held administratively
+down); enabling removes that line. New neighbors default to enabled.
+
+- `config.BGPNeighbor` gained a `Shutdown bool` field.
+- `renderFRR` emits `neighbor <peer> shutdown` when set.
+- `parseRunningConfigBGP` recognizes the line on import, so a neighbor
+  someone shut down directly in FRR reflects as disabled here too.
+- New test `TestFRRNeighborShutdown` covers both directions (render and
+  round-trip through the importer) and confirms an unrelated neighbor's
+  activation/other directives are untouched.
+- Verified the full column in a real DOM: default state, toggling in both
+  directions, and that a brand-new neighbor POSTs `shutdown:false`.
+
+Caught and fixed a real bug before shipping this: an explanatory code
+comment used backticks around `neighbor <peer> shutdown`, which — since the
+entire embedded UI script lives inside a single Go raw-string literal —
+prematurely closed that string and broke the build. Fixed by not using
+backticks anywhere in the embedded script's source (comments included); full
+build/vet/test all pass, and every earlier reproduction test was re-run
+against the fixed file to confirm nothing else was affected.
+
+## v495 — 2026-07-17
+
+**Monitor › BGP Peers: the BGP Neighbors table shows "down" instead of
+"Active" for FRR's Active FSM state.**
+
+"Active" is technically correct — the FSM is retrying the TCP connection to
+the peer — but it reads as though something's actively working, when what it
+actually means is just that the session isn't up. Every other non-Established
+state already reads as clearly-not-up on its own (Idle, Connect, OpenSent,
+OpenConfirm), so Active was the one genuinely misleading label. The raw FRR
+state is still available as a tooltip on the pill for anyone who wants the
+precise value. New helper `bgpStateLabel`; verified in a real DOM against
+Established/Active/Idle/Connect that only Active gets relabeled and the
+tooltip carries the original state.
+
 ## v494 — 2026-07-17
 
 **BGP editor: three small UI fixes.**

@@ -131,8 +131,47 @@ func TestFRRPerNeighborBFDRequestsBfdd(t *testing.T) {
 	}
 }
 
-// Whitespace in a password is stripped before it's emitted (it would otherwise
-// break the conf line). Ported from parapet's bgp_password_whitespace_stripped.
+// A neighbor with Shutdown set emits `neighbor <peer> shutdown`; one without
+// it doesn't. Independent of BFD/password — a shut-down neighbor still gets
+// its other directives (it stays fully configured, just held down).
+func TestFRRNeighborShutdown(t *testing.T) {
+	b := config.BGPConfig{
+		Enabled: true, ASN: 65001,
+		Neighbors: []config.BGPNeighbor{
+			{Peer: "10.0.0.2", RemoteAS: 65002, Shutdown: true},
+			{Peer: "10.0.0.3", RemoteAS: 65003},
+		},
+	}
+	c := renderFRR(b)
+	frrHas(t, c, " neighbor 10.0.0.2 shutdown\n")
+	frrLacks(t, c, "10.0.0.3 shutdown")
+	// Still activated in the address-family regardless of shutdown — shutdown
+	// holds the session down administratively; it doesn't remove the neighbor
+	// from AFI negotiation once lifted.
+	frrHas(t, c, "  neighbor 10.0.0.2 activate\n")
+
+	// Round-trips through the importer: a config file with the shutdown line
+	// present sets Shutdown=true on that neighbor and only that neighbor.
+	imported, _, ok := parseRunningConfigBGP(c)
+	if !ok {
+		t.Fatal("expected import to succeed")
+	}
+	if len(imported.Neighbors) != 2 {
+		t.Fatalf("got %d neighbors, want 2", len(imported.Neighbors))
+	}
+	byPeer := map[string]config.BGPNeighbor{}
+	for _, n := range imported.Neighbors {
+		byPeer[n.Peer] = n
+	}
+	if !byPeer["10.0.0.2"].Shutdown {
+		t.Error("expected 10.0.0.2 to import as Shutdown=true")
+	}
+	if byPeer["10.0.0.3"].Shutdown {
+		t.Error("expected 10.0.0.3 to import as Shutdown=false")
+	}
+}
+
+
 func TestFRRBGPPasswordWhitespaceStripped(t *testing.T) {
 	b := config.BGPConfig{
 		Enabled: true, ASN: 65001,

@@ -313,14 +313,21 @@ type BGPConfig struct {
 }
 
 // BGPNeighbor is one BGP peer: its address, the AS it belongs to, an optional
-// human description, an optional MD5 session password, and whether BFD runs on
-// this specific session. Ported from parapet's BgpNeighbor.
+// human description, an optional MD5 session password, whether BFD runs on
+// this specific session, and whether the session is administratively shut
+// down. Ported from parapet's BgpNeighbor.
 type BGPNeighbor struct {
 	Peer        string `json:"peer"`
 	RemoteAS    uint32 `json:"remote_as"`
 	Description string `json:"description,omitempty"`
 	Password    string `json:"password,omitempty"`
 	BFD         bool   `json:"bfd,omitempty"`
+	// Shutdown administratively disables this one session (FRR's
+	// `neighbor <peer> shutdown`) without removing the neighbor's
+	// configuration — the peer stays defined, just held down. Independent of
+	// the other neighbors on this router; disabling one doesn't touch the
+	// rest.
+	Shutdown bool `json:"shutdown,omitempty"`
 }
 
 // Upgrade configures this node's own binary upgrades. It is strictly
