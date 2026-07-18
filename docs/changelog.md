@@ -37,6 +37,50 @@ assuming it didn't happen.
 
 ---
 
+## v513 — 2026-07-18
+
+**Fixed: a long IPv6 address in Mesh › peers / Monitor › mesh peers got cut
+off with no way to see the rest, and endpoints showed with brackets around
+the address.**
+
+Two related display bugs in the peer tables that v511 (dual-stack overlay
+display) made visible for the first time — a v4-only peer's short address
+never hit either:
+
+1. **Truncation.** `table.peers-table` (`ui.go`) is `table-layout:fixed`
+   with every cell defaulting to `overflow:hidden; text-overflow:ellipsis;
+   white-space:nowrap`, so the network's cards line up column-for-column
+   regardless of content — but a full IPv6 address, or one paired with a
+   port, is easily wider than the 13%/19% given to the overlay/endpoint
+   columns, and the overflow was silently hidden behind an ellipsis with no
+   tooltip or other way to read the rest. The overlay and endpoint `<td>`s
+   in both `secPeers` (Mesh › peers) and `infoMeshPeers` (Monitor › mesh
+   peers) now carry `ov-cell`/`ep-cell` classes with a wrapping override
+   (`overflow-wrap:anywhere`), so a long value wraps onto a second line
+   instead of being clipped — a short one still renders on one line, since
+   the wrap only kicks in once content actually doesn't fit.
+
+2. **Brackets.** The underlay endpoint (`p.endpointText`, and the "This
+   node: … public endpoint" line's `state.nat.public`) comes straight from
+   Go's `netip.AddrPort.String()`, which brackets an IPv6 host exactly the
+   way `net.JoinHostPort` does — `"[fd00::2]:51820"` — correct and
+   necessary for anything that gets reparsed (the `/api/peer-info` request
+   body, seed-address matching), wrong for a read-only table cell. New
+   `dispAddr` (`ui.go`) strips the brackets for display only, reusing
+   `splitHostPort`'s own bracket-aware parsing so the two can't disagree
+   about where the address ends and the port begins; applied at every
+   display site — both tables' endpoint cells, the NAT banner's public
+   endpoint, and the peer-info lookup dialog's "looking up …" line — while
+   the raw `p.endpoint` passed to the API call itself is untouched.
+
+`ui_dom_helper_test.go` gained two scan-based guards
+(`TestPeerAddressCellsWrapInsteadOfTruncating`,
+`TestPeerAddressDisplayStripsIPv6Brackets`) in the same style as v511's
+dual-stack-overlay one, since this package has no JS runtime in its test
+suite.
+
+---
+
 ## v512 — 2026-07-18
 
 **Added: a "Redistribute mesh routes" toggle in Traffic › BGP, scoped to

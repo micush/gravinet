@@ -157,14 +157,21 @@ const indexHTML = `<!doctype html>
   table.peers-table col.c-target-op { width:38%; }
   table.peers-table col.c-state-op { width:20%; }
   table.peers-table col.c-key { width:10%; }
-  table.peers-table col.c-overlay { width:11%; }
-  table.peers-table col.c-endpoint { width:17%; }
+  table.peers-table col.c-overlay { width:13%; }
+  table.peers-table col.c-endpoint { width:19%; }
   table.peers-table col.c-reach { width:7%; }
   table.peers-table col.c-time { width:7%; }
   table.peers-table col.c-transport { width:auto; }
   table.peers-table col.c-fill { width:auto; }
   table.peers-table td, table.peers-table th { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   table.peers-table td.c-transport-cell, table.peers-table th:last-child { overflow:visible; white-space:normal; }
+  /* Overlay/endpoint cells hold addresses that can run long (a full IPv6
+     address, or one paired with a port) — ellipsis-truncating them like an
+     ordinary text cell would hide part of the address with no way to see
+     the rest. These wrap instead: overflow-wrap breaks only where the text
+     actually needs it (never mid-IPv4-octet or mid-word), so a short value
+     still renders on one line and only a genuinely long one wraps. */
+  table.peers-table td.ov-cell, table.peers-table td.ep-cell { overflow:visible; text-overflow:clip; white-space:normal; overflow-wrap:anywhere; }
   th,td { text-align:left; padding:6px 10px; border-bottom:1px solid var(--line); font-size:13px; }
   th { color:var(--mut); font-weight:600; }
   tr:last-child td { border-bottom:0; }
@@ -458,6 +465,23 @@ function splitHostPort(addr){
   if ((addr.match(/:/g)||[]).length > 1) return { host:addr, port:'' };
   const idx = addr.lastIndexOf(':');
   return idx === -1 ? { host:addr, port:'' } : { host:addr.slice(0,idx), port:addr.slice(idx+1) };
+}
+// dispAddr returns addr with a bracketed IPv6 literal's brackets stripped,
+// for display only — reuses splitHostPort's own bracket-aware parsing so the
+// two can never disagree about where the address ends and the port begins.
+// The underlying host:port form Go sends (netip.AddrPort.String() brackets
+// IPv6 the way net.JoinHostPort does — "[fd00::2]:51820") is exactly right
+// for anything that has to be reparsed or reused elsewhere, so this is never
+// applied to the value passed to an API call, only to what's rendered on
+// screen (see its call sites in secPeers/infoMeshPeers/peerInfoRow).
+// "via <relay>" text (a relayed peer's endpointText — see peerRowsForNet)
+// passes through untouched: it's a relay label, not an address.
+function dispAddr(addr){
+  addr = (addr||'').trim();
+  if (!addr || addr.indexOf('via ') === 0) return addr;
+  const hp = splitHostPort(addr);
+  if (!hp.host) return addr;
+  return hp.port ? (hp.host+':'+hp.port) : hp.host;
 }
 // seedNotesForAddr finds the notes on a configured seed (network netId)
 // whose address matches a peer's observed underlay endpoint. Tries a full
@@ -3152,7 +3176,7 @@ function secPeers(c) {
     };
     const info = m[state.nat.class] || [state.nat.class, 'on'];
     let txt = 'This node: <span class="'+info[1]+'">'+esc(info[0])+'</span>';
-    if (state.nat.public) txt += ', public endpoint <b>'+esc(state.nat.public)+'</b>';
+    if (state.nat.public) txt += ', public endpoint <b>'+esc(dispAddr(state.nat.public))+'</b>';
     c.appendChild($('<div class="card" style="margin:0 0 12px">'+txt+'</div>'));
   }
   perNet(c, (card, n) => {
@@ -3183,8 +3207,8 @@ function secPeers(c) {
       // offered as editable in this table regardless of Manager mode.
       const canEditOv = !p.self && !p.disabled && !p.pending && p.overlay && state.manager && (state.cluster||[]).some(cp => cp.node_id===p.id && cp.manageable);
       const ovCell = canEditOv
-        ? '<td class="peer-ov" data-peer-ov="'+esc(p.id)+'" style="cursor:pointer" title="double-click to edit this peer\'s overlay address on its own node">'+overlayCellHTML(p)+'</td>'
-        : '<td'+(p.overlay?' title="'+(p.self?'this node\'s own overlay address':'overlay address is set by the peer itself — change it on that node')+'"':'')+'>'+overlayCellHTML(p)+'</td>';
+        ? '<td class="ov-cell peer-ov" data-peer-ov="'+esc(p.id)+'" style="cursor:pointer" title="double-click to edit this peer\'s overlay address on its own node">'+overlayCellHTML(p)+'</td>'
+        : '<td class="ov-cell"'+(p.overlay?' title="'+(p.self?'this node\'s own overlay address':'overlay address is set by the peer itself — change it on that node')+'"':'')+'>'+overlayCellHTML(p)+'</td>';
       // The self row IS selectable — ticking it and using 🛈 or the shell
       // button both work (see peerInfoRow and the shell button below); it's
       // only Ban that refuses to act on it once selected. Its notes cell has
@@ -3193,7 +3217,7 @@ function secPeers(c) {
       // to attach.
       h += '<tr class="selectable'+(p.self?' peer-self':(p.disabled?' peer-dis':''))+'"><td class="selcol"><input type="checkbox" class="rsel" data-k="'+esc(selKey(n.id,p.id))+'"'+(p.self?' title="this is the current node"':'')+'></td>'
         + '<td>'+nodeCell(p.host,p.id,n.id,p.endpoint)+'</td><td>'+st+'</td>'
-        + ovCell+'<td title="'+(p.self?'this node\'s own observed public address (same as the NAT summary above)':(p.relayed?'no direct underlay address — reached through the relay named here':'observed underlay address — for a peer behind NAT this is its public mapping as seen from here'))+'">'+esc(p.endpointText)+'</td>'
+        + ovCell+'<td class="ep-cell" title="'+(p.self?'this node\'s own observed public address (same as the NAT summary above)':(p.relayed?'no direct underlay address — reached through the relay named here':'observed underlay address — for a peer behind NAT this is its public mapping as seen from here'))+'">'+esc(dispAddr(p.endpointText))+'</td>'
         + (p.self
           ? '<td class="hint" title="a local note on your own node\'s id isn\'t meaningful here">\u2013</td>'
           : '<td class="peer-notes" data-peer-notes="'+esc(p.id)+'" title="double-click to edit — local-only, never sent to the peer">'+esc(p.notes||'')+'</td>')
@@ -3356,8 +3380,8 @@ function infoMeshPeers(c) {
       // NAT discovery completes, not a placeholder, so it's shown the same
       // way a peer's endpoint is rather than overridden to a dash.
       h += '<tr class="selectable'+(p.self?' peer-self':'')+'" title="'+stTitle+'" data-peer="'+esc(p.id)+'"><td class="selcol"><input type="checkbox" class="rsel" data-k="'+esc(selKey(n.id,p.id))+'"'+(p.self?' title="this is the current node"':'')+'></td><td>'+nodeCell(p.host,p.id,n.id,p.endpoint)+'</td><td>'+keyCell+'</td>'
-        + '<td'+(p.overlay?' title="'+(p.self?'this node\'s own overlay address':'overlay address is set by the peer itself')+'">':'>')+overlayCellHTML(p)+'</td>'
-        + '<td'+(p.self?' title="this node\'s own observed public address">':'>')+esc(p.endpointText)+'</td><td>'+reach+'</td><td>'+timeCell+'</td><td class="c-transport-cell">'+xport+'</td></tr>';
+        + '<td class="ov-cell"'+(p.overlay?' title="'+(p.self?'this node\'s own overlay address':'overlay address is set by the peer itself')+'">':'>')+overlayCellHTML(p)+'</td>'
+        + '<td class="ep-cell"'+(p.self?' title="this node\'s own observed public address">':'>')+esc(dispAddr(p.endpointText))+'</td><td>'+reach+'</td><td>'+timeCell+'</td><td class="c-transport-cell">'+xport+'</td></tr>';
     }
     const t = $('<div></div>'); t.innerHTML = h+'</table>'; card.appendChild(t);
     wireSelectable(t, 'mpeers');
@@ -3778,7 +3802,7 @@ async function peerInfoRow(n, sec){
   const p = peerRowsForNet(n).find(x => x.id === ids[0]);
   if (!p || p.disabled || p.pending || !p.endpoint){ alert('no underlay endpoint to look up yet for this peer'); return; }
   const shown = p.host || p.id.slice(0,8);
-  const body = $('<div class="hint">looking up '+esc(p.endpoint)+'\u2026</div>');
+  const body = $('<div class="hint">looking up '+esc(dispAddr(p.endpoint))+'\u2026</div>');
   showModal('Peer info: ' + shown, body);
   const r = await api('/api/peer-info', { method:'POST', body:JSON.stringify({ net:n.id, node:p.id, endpoint:p.endpoint }) });
   body.className = '';

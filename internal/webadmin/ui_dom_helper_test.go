@@ -81,3 +81,57 @@ func TestDualStackOverlayAddressNotCollapsedToOneFamily(t *testing.T) {
 		t.Error("peerRowsForNet no longer carries overlay4/overlay6 on the self row — a dual-stack node's own second address would be missing from its own peers table")
 	}
 }
+
+// TestPeerAddressCellsWrapInsteadOfTruncating guards against reintroducing
+// the bug behind "a long IPv6 address in Mesh > peers / Monitor > mesh peers
+// gets cut off with no way to see the rest": table.peers-table's cells
+// default to overflow:hidden + text-overflow:ellipsis + white-space:nowrap
+// (so every network's card lines up under table-layout:fixed — see that
+// rule's own comment), which silently hides whatever doesn't fit instead of
+// showing it. A full IPv6 address, or one paired with a port, is exactly the
+// kind of content long enough to hit that. The ov-cell/ep-cell classes carry
+// an override back to a wrapping, fully-visible cell; this scans for that
+// override and for both classes actually being used at every known overlay/
+// endpoint render site, rather than running the JS (this package has no JS
+// runtime dependency in its test suite).
+func TestPeerAddressCellsWrapInsteadOfTruncating(t *testing.T) {
+	if !strings.Contains(indexHTML, "td.ov-cell") || !strings.Contains(indexHTML, "td.ep-cell") {
+		t.Fatal("no CSS override for td.ov-cell/td.ep-cell — the peers-table default (ellipsis + nowrap) would truncate a long address with no way to see the rest")
+	}
+	if n := strings.Count(indexHTML, `class="ov-cell`); n < 2 {
+		t.Errorf(`class="ov-cell" appears %d times, want at least 2 (secPeers' editable and non-editable overlay cells)`, n)
+	}
+	if !strings.Contains(indexHTML, `<td class="ov-cell"`) {
+		t.Error("infoMeshPeers' overlay cell is missing the ov-cell class — its long addresses would still be ellipsis-truncated")
+	}
+	if n := strings.Count(indexHTML, `class="ep-cell"`); n < 2 {
+		t.Errorf(`class="ep-cell" appears %d times, want at least 2 (secPeers' and infoMeshPeers' endpoint cells)`, n)
+	}
+}
+
+// TestPeerAddressDisplayStripsIPv6Brackets guards against reintroducing
+// bracketed IPv6 literals ("[fd00::2]:51820", Go's netip.AddrPort.String()
+// format — correct for anything reparsed elsewhere, but not what should sit
+// in a read-only table cell) into Mesh > peers, Monitor > mesh peers, or the
+// peer-info lookup dialog. dispAddr strips the brackets for display only,
+// reusing splitHostPort's own bracket-aware parsing; this checks the helper
+// exists and that every known display site (as opposed to sites that still
+// need the raw, reparseable value, like the /api/peer-info request body or
+// nodeNotesTitle's seed-address matching, which must NOT change) calls it.
+func TestPeerAddressDisplayStripsIPv6Brackets(t *testing.T) {
+	if !strings.Contains(indexHTML, "function dispAddr(addr)") {
+		t.Fatal("dispAddr helper is missing from indexHTML")
+	}
+	for _, want := range []string{
+		"esc(dispAddr(p.endpointText))",
+		"esc(dispAddr(state.nat.public))",
+		"esc(dispAddr(p.endpoint))",
+	} {
+		if !strings.Contains(indexHTML, want) {
+			t.Errorf("indexHTML is missing %q — that display site would still show a bracketed IPv6 endpoint", want)
+		}
+	}
+	if n := strings.Count(indexHTML, "esc(dispAddr(p.endpointText))"); n < 2 {
+		t.Errorf("esc(dispAddr(p.endpointText)) appears %d times, want at least 2 (secPeers' and infoMeshPeers' endpoint cells)", n)
+	}
+}
