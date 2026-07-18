@@ -37,6 +37,62 @@ assuming it didn't happen.
 
 ---
 
+## v503 — 2026-07-17
+
+**Removed the "No existing FRR BGP configuration was imported" banner from
+Traffic › BGP.** This showed whenever FRR was present but gravinet wasn't
+managing BGP yet and there was nothing existing to import — the normal
+state for a freshly-installed FRR, not an error — so it read like a warning
+for what's actually just the default starting point. The editor still
+renders normally in that case; it just no longer says anything about the
+(non-)import. The other branch of the same code path — reflecting a config
+that *was* found on FRR — is unchanged.
+
+---
+
+## v502 — 2026-07-17
+
+**Fixed: `install-freebsd.sh` was silently failing to install FRR.**
+
+Reported as "the installer is supposed to install FRR — why does gravinet
+still say it's not installed?" The root cause was in `frr_pkg_name`
+(introduced in v499): it ran `pkg search -q '^frr[0-9]+$'` to find the
+current `frrN` package, but `pkg search`'s default matched/printed field is
+`pkg-name` — name **and** version together, e.g. `frr10-10.5.1_2` — not the
+bare port name. An anchored pattern requiring the *whole* field to be just
+`frr` + digits, with no version suffix, could never match anything real, so
+that search silently returned empty on every single run, on every host,
+regardless of what was actually in the repo. Every install therefore fell
+back to `frr_pkg_name`'s one hardcoded guess (`frr10`) — and if that
+particular version wasn't available on a given FreeBSD release/quarterly
+branch (the port gets renamed/retired every major FRR release), `pkg
+install` failed, the warning went to stderr where it was easy to miss
+scrolling past the rest of the install output, and FRR quietly never got
+installed at all.
+
+- Replaced `frr_pkg_name` (the search-based guess) with `FRR_PKG_CANDIDATES`
+  (`frr12 frr11 frr10 frr9 frr8`) and a loop in `ensure_frr` that tries a
+  real `pkg install -y` against each in turn, newest first, stopping at the
+  first one that actually installs. This depends on nothing but the
+  install's real exit code — no more guessing at `pkg search`'s exact
+  output shape. A losing candidate is a quick "no such package" from pkg,
+  not a real download attempt.
+- Added a clear `FRR: installed` / `FRR: NOT installed` line to the
+  install's final summary (where the version/web-admin-URL info already
+  is), rather than leaving FRR's status to whatever `ensure_frr` printed
+  mid-scroll earlier — that's exactly how the original failure went
+  unnoticed.
+- `install-linux.sh`'s `ensure_frr` was not affected: it installs a fixed
+  `frr` package name via each distro's own package manager (apt/dnf/zypper/
+  pacman), with no version-discovery search involved.
+
+If you hit this on an existing install, the fix is either to re-run
+`install-freebsd.sh` (now v502), or manually: `pkg search -S name -x
+'^frr[0-9]+$'` to see what your repo actually has, then `pkg install
+frrNN`.
+
+---
+
 ## v501 — 2026-07-17
 
 **Removed the "BFD on all neighbors" global toggle from Traffic › BGP.** BFD

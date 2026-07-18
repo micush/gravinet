@@ -5826,16 +5826,10 @@ function secBgp(c){
         if (state.section !== 'bgp') return; // navigated away while it ran
         if (im.ok && im.body && im.body.imported && im.body.bgp){
           renderBgpEditor(editWrap, im.body.bgp, true, true);
-        } else if (im.ok && im.body && !im.body.imported){
-          // FRR is present but no existing BGP config could be read. Say why, so an
-          // empty editor isn't indistinguishable from a broken import — the reason
-          // (permissions, no stanza, bgpd not answering, …) is what to act on.
-          const card = editWrap.querySelector('.card');
-          if (card){
-            const why = im.body.reason ? (': ' + esc(im.body.reason)) : '.';
-            card.insertBefore($('<div class="empty" style="margin-bottom:10px;border-left:3px solid var(--acc)">No existing FRR BGP configuration was imported'+why+'</div>'), card.firstChild);
-          }
         }
+        // Nothing to reflect otherwise (no existing FRR BGP config found, or
+        // the import itself failed) — the editor already rendered from the
+        // stored config is left as-is, with no extra banner about it.
       }
     } catch (e){ /* editor already rendered; import reflection is best-effort */ }
   }

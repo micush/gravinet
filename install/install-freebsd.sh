@@ -418,6 +418,25 @@ EOF
   fi
 }
 
+# FRR_PKG_CANDIDATES are the "frrN" package names to try, newest first.
+# FreeBSD's ports tree names FRR's port after its major version (net/frr9,
+# net/frr10, ...) and retires the old one when a new major ships, unlike
+# Linux distros which just call the package "frr" and let its own version
+# field track upstream. An earlier version of this list tried to discover
+# the current one dynamically via `pkg search`, but got the field wrong:
+# pkg search's default matched/printed field is "pkg-name" (name AND
+# version, e.g. "frr10-10.5.1_2"), not the bare port name, so an anchored
+# `^frr[0-9]+$` pattern could never match anything — it silently returned
+# empty on every single run, every install fell back to a single hardcoded
+# guess, and that guess failing (wrong FreeBSD release/quarterly branch, a
+# retired port, ...) meant FRR quietly never got installed at all. Trying a
+# real `pkg install` against each of a few candidates in turn sidesteps
+# needing to get pkg-search's output format exactly right: the actual exit
+# code is the only thing this depends on. Costs a handful of doomed
+# lookups against whichever candidates don't exist in a given repo; each is
+# a quick "no such package" from pkg, not a real download attempt.
+FRR_PKG_CANDIDATES="frr12 frr11 frr10 frr9 frr8"
+
 # frr_installed reports whether FRR (specifically vtysh) is already on this
 # host, checking pkg's install location (/usr/local/{sbin,bin}) — the same
 # locations gravinet's own detection (bgpVtyshPaths in
@@ -431,49 +450,40 @@ frr_installed() {
   return 1
 }
 
-# frr_pkg_name finds the newest "frrN" package this host's repo currently
-# offers. FreeBSD's ports tree names FRR's port after its major version
-# (net/frr9, net/frr10, ...) and retires the old one when a new major ships,
-# unlike Linux distros which just call the package "frr" and let its own
-# version field track upstream — so hardcoding e.g. "frr10" here would go
-# stale the day net/frr11 replaces it. `pkg search` lists what the repo
-# actually has right now; `sort -V` picks the highest version number off
-# that list. Falls back to a fixed guess only if the search comes back empty
-# (offline, repo unreachable, unexpected output shape).
-frr_pkg_name() {
-  local newest
-  newest="$(pkg search -q '^frr[0-9]+$' 2>/dev/null | sort -V | tail -1)"
-  [ -n "$newest" ] && { echo "$newest"; return 0; }
-  echo "frr10"
-}
-
 # ensure_frr installs FRR (zebra/bgpd/vtysh) via pkg if it isn't already
-# present, mirroring install-linux.sh's ensure_frr. gravinet's own BGP/BFD
-# code (internal/webadmin/bgp.go, frr.go, frr_freebsd.go) recognizes FRR
-# here the same way it does on Linux — Traffic > BGP and Monitor > BGP Peers
-# work as soon as FRR is present, no separate setup needed. Deliberately
-# does not touch frr_enable/frr_daemons in rc.conf itself, though: the first
-# time a BGP config is actually saved through gravinet, its own apply step
-# sets both via sysrc(8) to exactly what that config needs — setting them
-# here first would just mean gravinet immediately overwrites them anyway,
-# and in the meantime (FRR installed, nothing configured yet) there's
-# nothing useful to have running.
+# present, mirroring install-linux.sh's ensure_frr. Tries each of
+# FRR_PKG_CANDIDATES in turn, newest first, and stops at the first one that
+# actually installs — see that var's comment for why this doesn't try to
+# be cleverer about picking exactly one. gravinet's own BGP/BFD code
+# (internal/webadmin/bgp.go, frr.go, frr_freebsd.go) recognizes FRR here the
+# same way it does on Linux — Traffic > BGP and Monitor > BGP Peers work as
+# soon as FRR is present, no separate setup needed. Deliberately does not
+# touch frr_enable/frr_daemons in rc.conf itself, though: the first time a
+# BGP config is actually saved through gravinet, its own apply step sets
+# both via sysrc(8) to exactly what that config needs — setting them here
+# first would just mean gravinet immediately overwrites them anyway, and in
+# the meantime (FRR installed, nothing configured yet) there's nothing
+# useful to have running.
 ensure_frr() {
   if frr_installed; then
     echo "    FRR is already installed"
     return 0
   fi
   command -v pkg >/dev/null 2>&1 || { echo "    warning: pkg(8) not found; cannot install FRR automatically" >&2; return 0; }
-  local pkg_name; pkg_name="$(frr_pkg_name)"
-  echo "    FRR is not installed; installing $pkg_name"
-  if pkg install -y "$pkg_name" >/dev/null 2>&1 && frr_installed; then
-    echo "    installed $pkg_name"
-    echo "    FRR is ready — configure it from gravinet's Traffic > BGP page."
-    return 0
-  fi
+  echo "    FRR is not installed; trying: $FRR_PKG_CANDIDATES"
+  local pkg_name
+  for pkg_name in $FRR_PKG_CANDIDATES; do
+    if pkg install -y "$pkg_name" >/dev/null 2>&1 && frr_installed; then
+      echo "    installed $pkg_name"
+      echo "    FRR is ready — configure it from gravinet's Traffic > BGP page."
+      return 0
+    fi
+  done
   cat <<NOTE >&2
-    warning: could not install FRR ($pkg_name) automatically. Install it
-             yourself: pkg install $pkg_name
+    warning: could not install FRR automatically (tried: $FRR_PKG_CANDIDATES).
+             Find what your repo actually has and install it yourself, e.g.:
+                 pkg search -S name -x '^frr[0-9]+\$'
+                 pkg install frrNN
 NOTE
 }
 
@@ -551,6 +561,22 @@ if [ -x "$BIN" ]; then
     else
       echo "Installed version: $INST_VER"
     fi
+  fi
+fi
+
+# Surfaced here, in the summary anyone actually reads, rather than left to
+# whatever ensure_frr printed mid-scroll earlier — a failed FRR install is
+# easy to miss buried among the rest of this script's output otherwise,
+# which is exactly how this went unnoticed before: the install silently
+# fell back to a single guessed package name, that guess didn't exist on
+# some hosts' repo, and the only sign was a stderr warning nobody scrolled
+# back to see.
+if [ "$INSTALL_FRR" = 1 ]; then
+  if frr_installed; then
+    echo "FRR: installed — Traffic > BGP / Monitor > BGP Peers are ready to use."
+  else
+    echo "FRR: NOT installed — see the warning above. Traffic > BGP will let you"
+    echo "     author a config, but nothing runs until FRR is installed somehow."
   fi
 fi
 
