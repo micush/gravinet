@@ -172,6 +172,17 @@ const indexHTML = `<!doctype html>
      actually needs it (never mid-IPv4-octet or mid-word), so a short value
      still renders on one line and only a genuinely long one wraps. */
   table.peers-table td.ov-cell, table.peers-table td.ep-cell { overflow:visible; text-overflow:clip; white-space:normal; overflow-wrap:anywhere; }
+  /* table-compact: for a fixed-shape table with only a couple of narrow
+     columns and no list to grow (e.g. Mesh Routes' "Redistribute from BGP"
+     subcard) — the default width:100% above stretches a table like that
+     across the full card width, and with barely any content to fill it the
+     auto layout algorithm dumps nearly all of that leftover space into one
+     column, leaving its neighbor stranded far to the right with a big dead
+     gap between them. colgroup widths on these tables size each column to
+     its own content instead of that unevenly-distributed leftover. */
+  table.table-compact { width:auto; min-width:0; }
+  table.table-compact col.c-rbstate { width:120px; }
+  table.table-compact col.c-rbmetric { width:100px; }
   th,td { text-align:left; padding:6px 10px; border-bottom:1px solid var(--line); font-size:13px; }
   th { color:var(--mut); font-weight:600; }
   tr:last-child td { border-bottom:0; }
@@ -3522,7 +3533,7 @@ function secRoutes(c) {
     const rbEnabled = !!cf.redistribute_bgp;
     const rbMetric = cf.redistribute_bgp_metric || 0;
     const rbTag = '<span class="tag-toggle '+(rbEnabled?'on':'off')+'" data-rbstate="1" title="double-click to '+(rbEnabled?'disable':'enable')+'">'+(rbEnabled?'enabled':'disabled')+'</span>';
-    let bh = '<table><tr><th>state</th><th>metric</th></tr>'
+    let bh = '<table class="table-compact"><colgroup><col class="c-rbstate"><col class="c-rbmetric"></colgroup><tr><th>state</th><th>metric</th></tr>'
       + '<tr data-enabled="'+(rbEnabled?1:0)+'" data-metric="'+esc(rbMetric)+'">'
       + '<td class="rb-state">'+rbTag+'</td><td class="metric-cell">'+esc(rbMetric)+'</td></tr>';
     const bt = $('<div></div>'); bt.innerHTML = bh+'</table>'; bsub.appendChild(bt);

@@ -37,6 +37,30 @@ assuming it didn't happen.
 
 ---
 
+## v519 — 2026-07-18
+
+**Fixed: the "Redistribute from BGP" subcard's two columns (Traffic ›
+Mesh Routes) were spaced unevenly, with a large dead gap between "state"
+and "metric".**
+
+Every default table in the web admin is `width:100%` (`ui.go`), which
+looks fine for the Advertise/Reject tables above and below it — they
+have 3-4 columns and can hold an arbitrary number of CIDR rows, so there's
+always enough content to fill the width reasonably evenly. This subcard's
+table has only two columns and exactly one row of short content ("enabled"/
+"disabled", a 2-3 digit metric), so stretching it to the same full card
+width left almost the entire row empty — and the auto layout algorithm
+dumped nearly all of that leftover space into one column, stranding its
+neighbor far to the right.
+
+New `table.table-compact` CSS class (`width:auto`), applied to this
+table only, so it sizes itself to its own content — plus a `colgroup`
+giving `state`/`metric` fixed 120px/100px columns for a bit of
+consistent breathing room rather than a bare minimum hug. The
+Advertise/Reject tables are unaffected.
+
+---
+
 ## v518 — 2026-07-18
 
 **Fixed: all five installers could leave scratch files behind in the
