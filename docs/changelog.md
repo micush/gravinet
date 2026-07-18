@@ -37,6 +37,60 @@ assuming it didn't happen.
 
 ---
 
+## v505 — 2026-07-17
+
+**Set `autocomplete="off"` on the BGP neighbor edit fields (Traffic › BGP).**
+Browsers were autofilling the neighbor row's inputs — most visibly the
+description and MD5 password, which a browser sees as a generic text field
+and a password field and offers saved values for. That put values into
+fields the operator never typed, which is misleading for a router-config
+form (the app itself never pre-fills these; a brand-new row's inputs are
+empty). All four inputs — peer address, remote AS, description, and MD5
+password — now carry `autocomplete="off"`, in both the add-a-row path
+(`nbrAddRow`) and the in-place edit path (`startNbrEdit`). UI-string-only
+change in `ui.go`; no behavior change to what's saved or rendered.
+
+---
+
+## v504 — 2026-07-17
+
+**Fixed: FRR successfully installs on FreeBSD but never actually runs.**
+Two separate gaps, both found by reading FRR's actual FreeBSD rc.d script
+(`net/frrN/files/frr.in`) rather than guessing:
+
+1. **Nothing was enabling FRR in the first place.** v500's
+   `ensureFRRDaemonsEnabled` was a deliberate no-op on FreeBSD, on the
+   reasoning that `syncDaemons` already computes the full daemon set from
+   scratch on every BGP config save, so there was no Linux-style "flip two
+   defaults-off flags" gap to fill. That reasoning missed what
+   `ensureFRRDaemonsEnabled` actually *does* on Linux: it doesn't just edit
+   a file, it forces FRR to start running (`restart` if anything changed)
+   the moment FRR is detected — independent of whether anyone has saved a
+   BGP config yet. On FreeBSD, `frr_enable` defaults to `"NO"` in the rc.d
+   script, and with the old no-op, nothing ever set it to `"YES"` until an
+   operator saved a config through Traffic › BGP. `ensureFRRDaemonsEnabled`
+   now does real work here: sets `frr_daemons` to a minimal baseline
+   (`mgmtd zebra staticd bgpd bfdd` — not the port's own default of nearly
+   every protocol daemon it ships), sets `frr_enable="YES"`, and restarts
+   FRR — mirroring Linux's actual effect, not just its mechanism.
+
+2. **`/var/lib/frr` never got created.** FreeBSD's frr rc.d script does
+   `mkdir -p /var/lib/frr; chown -R frr:frr /var/lib/frr` — FRR's runtime
+   state directory, needed for daemons to fully start — but only inside its
+   `start` command, never `restart`. gravinet's `applyFRRService` never
+   calls `start` at all (always `restart`, even for what's effectively a
+   first activation — see v500's reload-footgun writeup for why). A box
+   that's never had a bare `service frr start` run against it by a human
+   would have its daemons trying to come up with nowhere to write their
+   state. New `frrVarLibBootstrap` (`frr_freebsd.go`) does this step
+   itself: called from `ensureFRRDaemonsEnabled` at startup (failure
+   logged) and from `syncDaemons` on every config save (best-effort,
+   doesn't block the save).
+
+Both are `frr_freebsd.go`-only changes; Linux is unaffected.
+
+---
+
 ## v503 — 2026-07-17
 
 **Removed the "No existing FRR BGP configuration was imported" banner from

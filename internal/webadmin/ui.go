@@ -6169,20 +6169,20 @@ function renderBgpEditor(host, b, installed, imported){
   function startNbrEdit(tr){
     if (tr.querySelector('.nbre-peer')) return; // already editing
     const idx = parseInt(tr.dataset.idx, 10), n = neighbors[idx];
-    tr.querySelector('.nbr-peer-cell').innerHTML = '<input class="nbre-peer" style="width:130px" placeholder="10.0.0.2" value="'+esc(n.peer||'')+'">';
-    tr.querySelector('.nbr-as-cell').innerHTML = '<input class="nbre-as" style="width:80px" placeholder="65002" value="'+esc(String(n.remote_as||''))+'">';
-    tr.querySelector('.nbr-desc-cell').innerHTML = '<input class="nbre-desc" style="width:150px" placeholder="optional" value="'+esc(n.description||'')+'">';
-    tr.querySelector('.nbr-pw-cell').innerHTML = '<input class="nbre-pw" type="password" style="width:90px" placeholder="optional" value="'+esc(n.password||'')+'"> '
+    tr.querySelector('.nbr-peer-cell').innerHTML = '<input class="nbre-peer" style="width:130px" placeholder="10.0.0.2" autocomplete="off" value="'+esc(n.peer||'')+'">';
+    tr.querySelector('.nbr-as-cell').innerHTML = '<input class="nbre-as" style="width:80px" placeholder="65002" autocomplete="off" value="'+esc(String(n.remote_as||''))+'">';
+    tr.querySelector('.nbr-desc-cell').innerHTML = '<input class="nbre-desc" style="width:150px" placeholder="optional" autocomplete="off" value="'+esc(n.description||'')+'">';
+    tr.querySelector('.nbr-pw-cell').innerHTML = '<input class="nbre-pw" type="password" style="width:90px" placeholder="optional" autocomplete="off" value="'+esc(n.password||'')+'"> '
       + '<button class="ghost sm nbre-pw-toggle" title="show while editing">\ud83d\udc41\ufe0f</button> <button class="sm nbre-save">save</button> <button class="ghost sm nbre-cancel">cancel</button>';
     wireNbrForm(tr, idx);
   }
   function nbrAddRow(table){
     const tr = document.createElement('tr');
     tr.innerHTML = '<td class="selcol"></td>'
-      + '<td><input class="nbre-peer" style="width:130px" placeholder="10.0.0.2"></td>'
-      + '<td><input class="nbre-as" style="width:80px" placeholder="65002"></td>'
-      + '<td><input class="nbre-desc" style="width:150px" placeholder="optional"></td>'
-      + '<td><input class="nbre-pw" type="password" style="width:90px" placeholder="optional"> <button class="ghost sm nbre-pw-toggle" title="show while editing">\ud83d\udc41\ufe0f</button> <button class="sm nbre-save">save</button> <button class="ghost sm nbre-cancel">cancel</button></td>'
+      + '<td><input class="nbre-peer" style="width:130px" placeholder="10.0.0.2" autocomplete="off"></td>'
+      + '<td><input class="nbre-as" style="width:80px" placeholder="65002" autocomplete="off"></td>'
+      + '<td><input class="nbre-desc" style="width:150px" placeholder="optional" autocomplete="off"></td>'
+      + '<td><input class="nbre-pw" type="password" style="width:90px" placeholder="optional" autocomplete="off"> <button class="ghost sm nbre-pw-toggle" title="show while editing">\ud83d\udc41\ufe0f</button> <button class="sm nbre-save">save</button> <button class="ghost sm nbre-cancel">cancel</button></td>'
       + '<td><span class="hint">on</span></td>'
       + '<td><span class="hint">enabled</span></td>';
     if (!insertNewRow(table, tr)) return;
