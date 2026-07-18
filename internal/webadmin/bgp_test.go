@@ -1,7 +1,10 @@
 package webadmin
 
 import (
+	"encoding/json"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
@@ -148,6 +151,39 @@ func TestParseBFDPeers(t *testing.T) {
 	if peers[1].Peer != "10.0.0.3" || peers[1].Interface != "eth0" || peers[1].Status != "down" ||
 		peers[1].Downtime != 40 || peers[1].Diagnostic != "control-detect-time-expired" {
 		t.Errorf("peers[1] parsed wrong: %+v", peers[1])
+	}
+}
+
+// TestHandleBGPTableNoVtysh covers the degrade path for the Monitor > BGP
+// Peers "BGP Table" card's endpoint: with vtysh absent, it must report
+// available=false with a human reason and empty text — same shape as
+// handleBGP/handleBFD — rather than an error or a hang.
+func TestHandleBGPTableNoVtysh(t *testing.T) {
+	withStatFile(t, func(string) (fs.FileInfo, error) { return nil, os.ErrNotExist })
+
+	s := &Server{}
+	rr := httptest.NewRecorder()
+	s.handleBGPTable(rr, httptest.NewRequest(http.MethodGet, "/api/bgp/table", nil))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	var out struct {
+		Available bool   `json:"available"`
+		Reason    string `json:"reason"`
+		Text      string `json:"text"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.Available {
+		t.Error("available should be false when vtysh is absent")
+	}
+	if out.Reason == "" {
+		t.Error("reason should explain why the table is unavailable")
+	}
+	if out.Text != "" {
+		t.Errorf("text = %q, want empty", out.Text)
 	}
 }
 

@@ -37,6 +37,75 @@ assuming it didn't happen.
 
 ---
 
+## v497 — 2026-07-17
+
+**Fixed IPv6 BGP neighbors not appearing under Monitor › BGP Peers.**
+
+The live BGP status query was `show ip bgp summary json` — the `ip` keyword
+restricts FRR to the IPv4-unicast address family only, so an IPv6 session
+never appeared in the JSON no matter how `parseBGPSummary` walked it (it
+already handled an `ipv6Unicast` block correctly; that block just never
+arrived). Switched to `show bgp summary json`, which returns every
+configured AFI, in both places this query runs: the live peers endpoint
+(`handleBGP`) and the BGP-config importer's summary enrichment
+(`importBGPFromFRR`). No parsing logic changed — `parseBGPSummary` and
+`summaryToBGPConfig` were already correct; they just needed the right
+input.
+
+**Added a "BGP Table" card to Monitor › BGP Peers.**
+
+New third card on that page (after BGP Neighbors and BFD Neighbors) showing
+the live output of FRR's `show bgp` — the full prefix/next-hop/AS-path
+table, one level below the per-peer summary the existing card shows.
+
+- New `GET /api/bgp/table` (`handleBGPTable`), gated on vtysh presence like
+  every other BGP/BFD endpoint, degrading to `available:false` with a human
+  reason rather than an error when vtysh is absent or FRR isn't answering.
+  `show bgp` has no JSON form, so the response carries FRR's text output
+  verbatim (`text`) rather than a reshaped struct.
+- Rendered in a `<pre class="mono-block">`, same pattern as the local
+  hosts-file view, with the same line-filter box for finding a prefix in a
+  large table.
+- New `TestHandleBGPTableNoVtysh` covers the degrade path.
+
+**Fixed deleting a BGP neighbor (or network) in Traffic › BGP not actually
+removing it from FRR's running configuration.**
+
+`renderFRR` regenerates `frr.conf` from scratch on every save, so the
+deleted neighbor was always correctly absent from the file on disk — the
+bug was downstream, in how that file gets pushed into the running daemon.
+A plain edit (add a neighbor, tweak a field) only ever needed a *reload*,
+which the code got right; but removing something needs FRR to actually
+retract a line it's already running, and neither of the two mechanisms
+`applyBGP` had for that can do it: `systemctl reload frr` only performs a
+real diff-and-retract when the host has `frr-reload.py`
+(`frr-pythontools`) installed — not something gravinet requires or
+checks for — and the `vtysh -b` fallback is documented (in this codebase's
+own comments) as push-only, integrating whatever lines the file currently
+has into the running daemons without ever retracting a line that's gone.
+So a host without `frr-pythontools`, or one where reload silently didn't
+diff, kept the "deleted" neighbor running indefinitely.
+
+- New pure function `bgpConfigRemovesSomething(prev, next)`: true when
+  `next` drops a neighbor or network `prev` had, or tears down the whole
+  `router bgp` stanza (BGP disabled, or the ASN changed).
+- `applyBGP` now takes `prev` (the config being replaced) alongside the new
+  one, and folds `bgpConfigRemovesSomething` into the same decision that
+  already forces a restart over a reload for a daemon-set change — so a
+  removal always gets a real `systemctl restart frr` (which re-reads
+  `frr.conf` from scratch, unconditionally correct regardless of what
+  optional FRR tooling is present) instead of a reload or the additive-only
+  `vtysh -b`.
+- `handleBGPConfig` captures the previous stored `BGPConfig` inside the same
+  `mutateConfig` transaction that overwrites it, so `applyBGP` always diffs
+  against exactly what was persisted a moment before — no separate read, no
+  race with a concurrent save.
+- New `TestBGPConfigRemovesSomething` covers: an identical config,
+  neighbor/network removed, neighbor added, an in-place field edit,
+  BGP disabled outright, an ASN change, and the first-ever save.
+
+---
+
 ## v496 — 2026-07-17
 
 **Traffic › BGP › Neighbors: added a "state" column (enabled/disabled).**

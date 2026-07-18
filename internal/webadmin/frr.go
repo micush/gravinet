@@ -210,6 +210,50 @@ func daemonWanted(want []string, name string) bool {
 	return false
 }
 
+// bgpConfigRemovesSomething reports whether next drops a neighbor or
+// advertised network that prev had, or tears down the whole `router bgp`
+// stanza (BGP disabled, or the ASN itself changed — FRR treats a different
+// ASN as a distinct instance, not an edit of the old one). renderFRR simply
+// omits what's gone rather than emitting a `no neighbor ...`/`no network ...`
+// negation, so nothing in the newly-written frr.conf actually tells FRR to
+// drop it — applyBGP uses this to force a real restart in that case rather
+// than trust a reload to notice.
+//
+// This is the fix for deleting a neighbor in the editor not actually
+// disappearing from FRR: a plain `vtysh -b` only ever integrates the lines a
+// config *has* into the running daemons, it cannot retract a line that's no
+// longer there, so the stale neighbor would keep running. `systemctl reload
+// frr` can do the equivalent of a full resync, but only when the host has
+// frr-reload.py (the frr-pythontools package) installed and working — not
+// something gravinet installs or can assume, and in practice a fair number
+// of hosts don't have it, or have a reload that silently misbehaves. A
+// restart re-reads frr.conf from scratch, so it's the one path that removes
+// stale config on every host regardless of what optional tooling is present.
+func bgpConfigRemovesSomething(prev, next config.BGPConfig) bool {
+	if prev.Enabled && prev.ASN != 0 && (!next.Enabled || next.ASN != prev.ASN) {
+		return true
+	}
+	haveNeighbor := make(map[string]bool, len(next.Neighbors))
+	for _, n := range next.Neighbors {
+		haveNeighbor[n.Peer] = true
+	}
+	for _, n := range prev.Neighbors {
+		if !haveNeighbor[n.Peer] {
+			return true
+		}
+	}
+	haveNetwork := make(map[string]bool, len(next.Networks))
+	for _, n := range next.Networks {
+		haveNetwork[n] = true
+	}
+	for _, n := range prev.Networks {
+		if !haveNetwork[n] {
+			return true
+		}
+	}
+	return false
+}
+
 // syncDaemonsContent rewrites the body of /etc/frr/daemons so every daemon in
 // frrManagedDaemons is =yes when wanted and =no otherwise, leaving all other
 // lines untouched. Pure string transform (returns the new body and whether it
@@ -357,7 +401,12 @@ func writeAtomicFile(path, body string) error {
 // it — after the config has been written synchronously (so the save is durable
 // and the API can return success immediately). Ported from parapet's
 // apply_routing.
-func applyBGP(b config.BGPConfig, log *logx.Logger) (string, error) {
+//
+// prev is the BGP config this one is replacing (the zero value if there
+// wasn't one, e.g. the first-ever save) — used solely to detect whether this
+// save removes a neighbor, network, or the whole BGP stanza, which forces a
+// real restart instead of a reload (see bgpConfigRemovesSomething).
+func applyBGP(b, prev config.BGPConfig, log *logx.Logger) (string, error) {
 	if !frrInstalled() {
 		return "FRR is not installed; BGP config saved but not applied", nil
 	}
@@ -382,7 +431,13 @@ func applyBGP(b config.BGPConfig, log *logx.Logger) (string, error) {
 			break
 		}
 	}
-	daemonsChanged := daemonsFileChanged || needsStart
+	// A removed neighbor/network (or BGP being turned off, or the ASN
+	// changing) needs the same real restart: neither `systemctl reload frr`
+	// (not guaranteed to have frr-reload.py behind it) nor the vtysh -b
+	// fallback below can retract config that's no longer in the file, only
+	// add to what's running. See bgpConfigRemovesSomething.
+	removed := bgpConfigRemovesSomething(prev, b)
+	daemonsChanged := daemonsFileChanged || needsStart || removed
 	daemonCount := len(wanted)
 
 	go func() {
@@ -595,7 +650,11 @@ func importBGPFromFRR(log *logx.Logger) (cfg config.BGPConfig, hasPasswords bool
 	//    didn't carry them explicitly, and — if we still have nothing — use the
 	//    summary as a last-resort source (a running speaker with no readable
 	//    config file).
-	if sum, ran := runVtysh("show ip bgp summary json"); ran {
+	// "show bgp summary json", not "show ip bgp summary json" — the "ip"
+	// keyword restricts FRR to IPv4 unicast only, which would silently drop an
+	// IPv6-only speaker's AS/router-id from this enrichment (see the identical
+	// fix in handleBGP).
+	if sum, ran := runVtysh("show bgp summary json"); ran {
 		if scfg, _, sok := summaryToBGPConfig(sum); sok {
 			if !ok {
 				cfg, ok, reason = scfg, true, "read from live BGP summary"
@@ -626,7 +685,7 @@ func importBGPFromFRR(log *logx.Logger) (cfg config.BGPConfig, hasPasswords bool
 	return cfg, hasPasswords, ok, reason
 }
 
-// summaryToBGPConfig builds a config.BGPConfig from `show ip bgp summary json`
+// summaryToBGPConfig builds a config.BGPConfig from `show bgp summary json`
 // output: local AS, router id, and the neighbor list (peer + remote AS),
 // deduped by address across families. Pure and unit-tested. ok is false when
 // there's no BGP speaker (no AS and no peers). The returned index maps peer

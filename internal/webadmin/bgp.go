@@ -77,9 +77,16 @@ func (s *Server) handleBGP(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	// FRR emits JSON when the command ends in "json". runVtysh bounds this hard,
-	// so a wedged FRR socket can never hang the request.
-	out, ran := runVtysh("show ip bgp summary json")
+	// FRR emits JSON when the command ends in "json". Deliberately "show bgp
+	// summary json", not "show ip bgp summary json": the "ip" keyword
+	// restricts FRR to the IPv4-unicast address family only, so an IPv6
+	// session would never appear in the output no matter how parseBGPSummary
+	// below walks it — this is what silently dropped IPv6 neighbors from the
+	// table before. Dropping "ip" gets every configured AFI (ipv4Unicast and
+	// ipv6Unicast) in one call, matching what parseBGPSummary already expects.
+	// runVtysh bounds this hard, so a wedged FRR socket can never hang the
+	// request.
+	out, ran := runVtysh("show bgp summary json")
 	if !ran {
 		// vtysh exists but couldn't answer in time: FRR/bgpd isn't running, or
 		// the call timed out (e.g. sockets not up yet just after boot).
@@ -133,6 +140,41 @@ func (s *Server) handleBFD(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleBGPTable returns the raw text of FRR's `show bgp` command — the full
+// BGP table (prefixes, next hops, AS paths, and per-route status codes), as
+// opposed to handleBGP's per-peer summary. It backs the Monitor > BGP Peers
+// "BGP Table" card. Unlike handleBGP/handleBFD this isn't reshaped into a
+// struct: `show bgp` has no JSON form, and its fixed-width columns are more
+// legible left exactly as FRR renders them than reparsed into a table, so the
+// response is the command's own text verbatim. Same availability shape as
+// every other BGP/BFD endpoint (gated on bgpSupported, degrading to
+// available=false with a human reason rather than an error) so the card
+// behaves identically to its neighbors when vtysh is absent or FRR isn't
+// answering.
+func (s *Server) handleBGPTable(w http.ResponseWriter, r *http.Request) {
+	if !bgpSupported() {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"available": false,
+			"reason":    "FRR/vtysh is not installed",
+			"text":      "",
+		})
+		return
+	}
+	out, ran := runVtysh("show bgp")
+	if !ran {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"available": false,
+			"reason":    "FRR is not running (no routing daemons active)",
+			"text":      "",
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"available": true,
+		"text":      string(out),
+	})
+}
+
 // handleBGPConfig is the read/write side: gravinet owns the BGP/BFD
 // configuration and drives the FRR daemon from it. GET returns the stored BGP
 // config plus whether FRR is installed. It deliberately does NOT touch vtysh —
@@ -174,8 +216,13 @@ func (s *Server) handleBGPConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Persist first (mutateConfig validates + saves + fires the daemon's reload
-	// hook), so the durable record is updated before we touch FRR.
+	// hook), so the durable record is updated before we touch FRR. Captured
+	// inside the mutation so it's exactly what was persisted before this save
+	// overwrote it — applyBGP diffs against it to tell a removal (which needs a
+	// real restart) from a pure addition/edit (safe to just reload).
+	var prev config.BGPConfig
 	if err := s.mutateConfig(func(cfg *config.Config) error {
+		prev = cfg.BGP
 		cfg.BGP = req
 		return nil
 	}); err != nil {
@@ -184,7 +231,7 @@ func (s *Server) handleBGPConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	// Then reconcile FRR with the freshly-saved config. A no-op (with a note)
 	// when FRR isn't installed — never fatal to the save.
-	note, err := applyBGP(req, s.log)
+	note, err := applyBGP(req, prev, s.log)
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "applied": false, "note": err.Error()})
 		return
@@ -284,7 +331,7 @@ type bgpPeer struct {
 	AFI      string `json:"afi"`
 }
 
-// parseBGPSummary reshapes FRR's `show ip bgp summary json` into a flat,
+// parseBGPSummary reshapes FRR's `show bgp summary json` into a flat,
 // sorted peer list, plus the router id and local AS when present. FRR nests
 // per-AFI: { "ipv4Unicast": { "routerId":..., "as":..., "peers": { "<ip>":
 // {...} } }, "ipv6Unicast": {...} }. We walk both address families, exactly as
@@ -373,7 +420,7 @@ type bfdPeer struct {
 }
 
 // parseBFDPeers reshapes FRR's `show bfd peers json` — a flat array of
-// session objects, unlike show ip bgp summary json's per-AFI nesting — into
+// session objects, unlike show bgp summary json's per-AFI nesting — into
 // the bfdPeer rows the card needs. Field names (peer, local, interface,
 // status, uptime, downtime, diagnostic) match bfdd_vty.c's
 // __display_peer_json verbatim. Sorted by peer address for a stable display

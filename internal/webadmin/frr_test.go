@@ -229,6 +229,60 @@ func TestFRRNetworksAndRedistribute(t *testing.T) {
 	frrHas(t, c, " exit-address-family\n")
 }
 
+// bgpConfigRemovesSomething is the fix for a deleted neighbor not actually
+// disappearing from FRR: it must report true whenever next drops a neighbor
+// or network prev had, or tears down the whole BGP stanza, so applyBGP knows
+// to force a restart rather than trust a reload (or the additive-only
+// vtysh -b fallback) to notice the removal.
+func TestBGPConfigRemovesSomething(t *testing.T) {
+	base := config.BGPConfig{
+		Enabled: true, ASN: 65001,
+		Neighbors: []config.BGPNeighbor{{Peer: "10.0.0.2", RemoteAS: 65002}, {Peer: "10.0.0.3", RemoteAS: 65003}},
+		Networks:  []string{"10.0.0.0/24", "192.168.1.0/24"},
+	}
+
+	cases := []struct {
+		name string
+		next config.BGPConfig
+		want bool
+	}{
+		{"identical config", base, false},
+		{"neighbor removed", config.BGPConfig{
+			Enabled: true, ASN: 65001,
+			Neighbors: []config.BGPNeighbor{{Peer: "10.0.0.2", RemoteAS: 65002}},
+			Networks:  base.Networks,
+		}, true},
+		{"neighbor added, none removed", config.BGPConfig{
+			Enabled: true, ASN: 65001,
+			Neighbors: append(append([]config.BGPNeighbor{}, base.Neighbors...), config.BGPNeighbor{Peer: "10.0.0.4", RemoteAS: 65004}),
+			Networks:  base.Networks,
+		}, false},
+		{"network removed", config.BGPConfig{
+			Enabled: true, ASN: 65001,
+			Neighbors: base.Neighbors,
+			Networks:  []string{"10.0.0.0/24"},
+		}, true},
+		{"neighbor field edited, none removed/added", config.BGPConfig{
+			Enabled: true, ASN: 65001,
+			Neighbors: []config.BGPNeighbor{{Peer: "10.0.0.2", RemoteAS: 65002, Description: "edited"}, {Peer: "10.0.0.3", RemoteAS: 65003}},
+			Networks:  base.Networks,
+		}, false},
+		{"BGP disabled entirely", config.BGPConfig{Enabled: false, ASN: 65001, Neighbors: base.Neighbors, Networks: base.Networks}, true},
+		{"ASN changed", config.BGPConfig{Enabled: true, ASN: 65099, Neighbors: base.Neighbors, Networks: base.Networks}, true},
+		{"first-ever save (zero prev)", base, false}, // prev is the zero value below, not base
+	}
+
+	for _, c := range cases {
+		prev := base
+		if c.name == "first-ever save (zero prev)" {
+			prev = config.BGPConfig{}
+		}
+		if got := bgpConfigRemovesSomething(prev, c.next); got != c.want {
+			t.Errorf("%s: bgpConfigRemovesSomething = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
 // syncDaemonsContent flips the managed daemons to match the wanted set and
 // leaves unmanaged lines untouched. Ported from parapet's sync_daemons logic.
 func TestSyncDaemonsContent(t *testing.T) {

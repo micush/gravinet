@@ -5867,6 +5867,17 @@ function secBgpPeers(c){
   const bfdBody = $('<div id="bfd-live-body"></div>'); bfdBody.innerHTML = '<div class="hint">loading\u2026</div>'; bfdCard.appendChild(bfdBody);
   c.appendChild(bfdCard);
   bfdLiveStatus(bfdBody);
+
+  // The full BGP table (every prefix, next hop, AS path, and status code FRR
+  // holds) — a level below the per-peer summary above. Its own card, same
+  // reasoning as BFD Neighbors: a different FRR command ('show bgp', plain
+  // text, no JSON form) and a different shape (a route dump, not a session
+  // list), so it doesn't fold into the peers table.
+  const tableCard = $('<div class="card"></div>');
+  tableCard.appendChild($('<h3>BGP Table</h3>'));
+  const tableBody = $('<div id="bgp-table-live-body"></div>'); tableBody.innerHTML = '<div class="hint">loading\u2026</div>'; tableCard.appendChild(tableBody);
+  c.appendChild(tableCard);
+  bgpTableLiveStatus(tableBody);
 }
 
 // bfdLiveStatus fills the BFD Neighbors card body with FRR's live BFD
@@ -5951,6 +5962,26 @@ async function bgpLiveStatus(meta, body){
   tbl.querySelectorAll('.peer-link').forEach(el => {
     el.onclick = (e) => { e.stopPropagation(); gotoBgpNeighbor(el.dataset.peer); };
   });
+}
+
+// bgpTableLiveStatus fills the BGP Table card with the raw text of FRR's
+// 'show bgp' (GET /api/bgp/table) — the full prefix/next-hop/AS-path table,
+// not just the per-peer summary bgpLiveStatus shows. 'show bgp' has no JSON
+// form, so this is rendered verbatim in a <pre> (same mono-block pattern as
+// infoHosts' raw hosts-file view) rather than reparsed into columns, with the
+// same line-filter box for finding a prefix in a large table.
+async function bgpTableLiveStatus(body){
+  const r = await api('/api/bgp/table');
+  if (!r.ok || !r.body){ body.innerHTML = '<div class="hint">could not read the BGP table.</div>'; return; }
+  if (r.body.available === false){
+    body.innerHTML = '<div class="empty">'+esc(r.body.reason || 'BGP table is unavailable.')+'</div>';
+    return;
+  }
+  const text = r.body.text || '';
+  if (!text.trim()){ body.innerHTML = '<div class="empty">BGP table is empty.</div>'; return; }
+  body.innerHTML = '';
+  const pre = $('<pre class="mono-block"></pre>'); pre.textContent = text; body.appendChild(pre);
+  addLineFilter(body, pre, text);
 }
 
 // renderBgpEditor builds the editable BGP/BFD form into host from the stored
