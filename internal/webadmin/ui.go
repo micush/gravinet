@@ -5813,7 +5813,7 @@ function secBgp(c){
     // leave the "loading…" placeholder up with no hint why, which looked exactly
     // like a hung request. Now the actual error is shown.
     try {
-      renderBgpEditor(editWrap, r.body.bgp || {}, !!r.body.installed, false, false);
+      renderBgpEditor(editWrap, r.body.bgp || {}, !!r.body.installed, false);
     } catch (e){
       fail('editor error \u2014 ' + ((e && e.message) || e)); return;
     }
@@ -5825,16 +5825,15 @@ function secBgp(c){
         const im = await api('/api/bgp/import');
         if (state.section !== 'bgp') return; // navigated away while it ran
         if (im.ok && im.body && im.body.imported && im.body.bgp){
-          renderBgpEditor(editWrap, im.body.bgp, true, true, !!im.body.imported_has_passwords);
+          renderBgpEditor(editWrap, im.body.bgp, true, true);
         } else if (im.ok && im.body && !im.body.imported){
           // FRR is present but no existing BGP config could be read. Say why, so an
           // empty editor isn't indistinguishable from a broken import — the reason
           // (permissions, no stanza, bgpd not answering, …) is what to act on.
           const card = editWrap.querySelector('.card');
-          const h3 = card && card.querySelector('h3');
-          if (h3){
+          if (card){
             const why = im.body.reason ? (': ' + esc(im.body.reason)) : '.';
-            card.insertBefore($('<div class="empty" style="margin-bottom:10px;border-left:3px solid var(--acc)">No existing FRR BGP configuration was imported'+why+'</div>'), h3.nextSibling);
+            card.insertBefore($('<div class="empty" style="margin-bottom:10px;border-left:3px solid var(--acc)">No existing FRR BGP configuration was imported'+why+'</div>'), card.firstChild);
           }
         }
       }
@@ -5989,10 +5988,10 @@ async function bgpTableLiveStatus(body){
 // their input fields, so Save gathers a clean object to POST. installed=false
 // (FRR absent) still lets the operator author config — it just warns it won't
 // be applied until FRR is present. imported=true means b was read from FRR's
-// running config (gravinet isn't managing BGP yet); the editor shows that and,
-// if importedHasPasswords, warns that neighbor passwords weren't imported and
-// must be re-entered before saving or those sessions may drop.
-function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
+// running config (gravinet isn't managing BGP yet) rather than gravinet's own
+// stored config — see isNewCfg below, which uses it to tell "freshly imported"
+// from "genuinely never configured" so the debounce timing feels right either way.
+function renderBgpEditor(host, b, installed, imported){
   const neighbors = (b.neighbors || []).map(n => ({
     peer: n.peer||'', remote_as: n.remote_as||0, description: n.description||'',
     password: n.password||'', bfd: !!n.bfd, shutdown: !!n.shutdown,
@@ -6000,14 +5999,6 @@ function renderBgpEditor(host, b, installed, imported, importedHasPasswords){
   const networks = (b.networks || []).slice();
 
   const card = $('<div class="card"></div>');
-  card.appendChild($('<h3>BGP configuration</h3>'));
-  if (imported){
-    let msg = 'These settings were read from FRR\u2019s running configuration \u2014 gravinet is not managing BGP on this host yet. Save to adopt them into gravinet\u2019s management.';
-    if (importedHasPasswords){
-      msg += ' Neighbor MD5 passwords are not shown for security and were not imported; re-enter any before saving, or those sessions may drop when the config is re-applied.';
-    }
-    card.appendChild($('<div class="empty" style="margin-bottom:10px;border-left:3px solid var(--acc)">'+msg+'</div>'));
-  }
   if (!installed){
     card.appendChild($('<div class="empty" style="margin-bottom:10px">FRR is not installed on this host, so a saved configuration is stored but not applied to a running daemon. Install FRR to have gravinet bring these sessions up.</div>'));
   }

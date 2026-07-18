@@ -37,6 +37,55 @@ assuming it didn't happen.
 
 ---
 
+## v498 — 2026-07-17
+
+**Confirmed: removing an advertised network under Traffic › BGP is already
+fixed.**
+
+This was reported as a separate bug from the neighbor-deletion one below,
+but it's the same underlying fix, already shipped in v497:
+`bgpConfigRemovesSomething` (used by `applyBGP` to decide restart vs.
+reload) diffs both `Neighbors` and `Networks` between the previous and new
+config, so a dropped network forces the same real `systemctl restart frr`
+a dropped neighbor does — see `TestBGPConfigRemovesSomething`'s "network
+removed" case. No code change was needed; noting it here since it was
+asked about as if it were still open.
+
+**Removed the redundant "BGP configuration" heading and imported-config
+banner from the Traffic › BGP editor card.**
+
+The page already opens with a description paragraph (via `secHint`)
+explaining what the section does and how to use it; the card immediately
+below it repeated an "BGP configuration" heading and, when a config had
+been reflected from FRR's running state, a banner explaining that and
+warning that neighbor MD5 passwords weren't imported. Removed both — the
+card now starts directly with the "FRR is not installed" banner (when
+applicable) or the settings rows. The background import-reflection code
+that used to insert a "no existing FRR config was found" notice right
+after the card's `<h3>` now inserts it at the top of the card instead,
+since there's no longer an `<h3>` to anchor on. `renderBgpEditor` dropped
+its now-unused `importedHasPasswords` parameter accordingly.
+
+**The Linux installer now installs FRR automatically if it isn't already
+present.**
+
+Previously the installer never touched FRR at all — Traffic › BGP would
+render and let you author a config, but bgpd/vtysh simply weren't there
+until an operator separately discovered and installed FRR themselves.
+`install-linux.sh` now has an `ensure_frr` step (same best-effort shape as
+the existing `ensure_resolved` for systemd-resolved): checks for `vtysh`
+first — the same check gravinet's own webadmin uses to decide whether the
+BGP pages have anything to show — and if it's missing, installs the `frr`
+package through whichever package manager the host has. This just works on
+Debian/Ubuntu, Fedora, openSUSE, and Arch, where `frr` ships in the
+distro's own repos; RHEL/Rocky/Alma/CentOS don't carry it in their base
+repos at all (it needs FRR's own repo, rpm.frrouting.org), so there it
+prints a clear pointer instead of guessing at a repo URL/GPG key per EL
+version. New `--no-frr` flag to opt out, matching the existing
+`--no-firewall` / `--no-systemd-resolved` pattern.
+
+---
+
 ## v497 — 2026-07-17
 
 **Fixed IPv6 BGP neighbors not appearing under Monitor › BGP Peers.**

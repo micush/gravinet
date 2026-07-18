@@ -34,6 +34,16 @@
 #                  (that's D-Bus saying org.freedesktop.resolve1 has nothing to
 #                  activate). Pass this if you don't use DNS forwarding and don't want
 #                  this host's DNS stack changed.
+#   --no-frr       don't install FRR. By default, if vtysh isn't already on the host,
+#                  this installs FRR (zebra/bgpd/vtysh, the BGP/BFD speaker gravinet's
+#                  Traffic > BGP page configures) via the distro's package manager.
+#                  Without FRR that page still lets you author a config, but nothing
+#                  actually runs until FRR shows up some other way. On Debian/Ubuntu,
+#                  Fedora, openSUSE, and Arch this just works; RHEL/Rocky/Alma/CentOS
+#                  don't carry FRR in their default repos at all, so there this only
+#                  prints a pointer to FRR's own repo instead of installing anything.
+#                  Pass this if you don't use BGP/BFD and don't want this host's
+#                  package set changed.
 set -euo pipefail
 
 PREFIX=/usr/local
@@ -44,6 +54,7 @@ START=1
 ACTION=install
 FIREWALL=1
 ENABLE_RESOLVED=1
+INSTALL_FRR=1
 UNDERLAY_PORT_DEFAULT=65432 # config.DefaultUDPPort
 WEB_PORT_DEFAULT=8443       # config.Default()'s web_admin.listen
 REPO="$(cd "$(dirname "$0")/.." && pwd)" # repo root (parent of install/)
@@ -75,6 +86,8 @@ while [ $# -gt 0 ]; do
     --firewall) FIREWALL=1 ;;                     # now the default; kept as a harmless no-op for anyone already scripting it
     --no-systemd-resolved) ENABLE_RESOLVED=0 ;;
     --enable-systemd-resolved) ENABLE_RESOLVED=1 ;; # ditto
+    --no-frr) INSTALL_FRR=0 ;;
+    --frr) INSTALL_FRR=1 ;;
     -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
@@ -301,6 +314,52 @@ ensure_resolved() {
   else
     echo "    warning: could not enable systemd-resolved; DNS forwarding will not work" >&2
   fi
+}
+
+# frr_installed reports whether FRR (specifically vtysh) is already on this
+# host. This is deliberately the same check gravinet's own webadmin does to
+# decide whether Traffic > BGP / Monitor > BGP Peers have anything to show
+# (vtyshPath() in internal/webadmin/bgp.go checks the same handful of paths),
+# so "installed" here means exactly what it means there.
+frr_installed() {
+  command -v vtysh >/dev/null 2>&1 && return 0
+  local p
+  for p in /usr/sbin/vtysh /usr/bin/vtysh /usr/local/sbin/vtysh /usr/local/bin/vtysh; do
+    [ -x "$p" ] && return 0
+  done
+  return 1
+}
+
+# ensure_frr installs FRR (zebra/bgpd/vtysh, the suite gravinet's BGP/BFD
+# pages drive) if it isn't already present, so that page works out of the box
+# instead of quietly doing nothing until an operator separately discovers and
+# installs FRR themselves. Best-effort, same shape as ensure_resolved: "frr" is
+# a package in the distro's own repos on Debian/Ubuntu, Fedora, openSUSE, and
+# Arch, so pkg_install just works there. RHEL/Rocky/Alma/CentOS are the known
+# gap — their base repos don't carry FRR at all, only its own project repo
+# (rpm.frrouting.org) does — and adding a third-party repo unattended is more
+# than an installer should do without being asked, so there this only warns
+# with a pointer instead of guessing at a repo URL/GPG key per EL version.
+ensure_frr() {
+  if frr_installed; then
+    echo "    FRR is already installed"
+    return 0
+  fi
+  echo "    FRR is not installed; installing it"
+  if pkg_install frr && frr_installed; then
+    echo "    installed FRR"
+    return 0
+  fi
+  cat <<'NOTE' >&2
+    warning: could not install FRR automatically on this host. gravinet's
+             Traffic > BGP page will still let you author a config, but
+             nothing will actually run until FRR is installed some other way.
+             On RHEL/Rocky/Alma/CentOS the base repos don't carry it — add
+             FRR's own repo first (https://rpm.frrouting.org/), then:
+                 <dnf|yum> install frr
+             Elsewhere, check that this host's package manager can reach its
+             repos and that a package named "frr" exists for this release.
+NOTE
 }
 
 
@@ -690,6 +749,14 @@ else
               ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
           Skip this if you don't use gravinet's DNS-forwarding feature.
 NOTE
+fi
+
+echo "==> FRR (BGP/BFD)"
+if [ "$INSTALL_FRR" = 1 ]; then
+  ensure_frr
+else
+  echo "    --no-frr passed; leaving FRR alone. gravinet's Traffic > BGP page will still"
+  echo "    let you author a config, but nothing runs until FRR is installed yourself."
 fi
 
 echo "==> writing systemd unit"
