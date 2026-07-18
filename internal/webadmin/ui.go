@@ -185,11 +185,15 @@ const indexHTML = `<!doctype html>
      checkbox and no 4th column, so it fills those slots with blank
      <th>/<td> using the same rt-sel/rt-col3 widths, rather than a
      differently-shaped table that just happens to render the same. */
-  table.routes-table { table-layout:fixed; }
+  table.routes-table { table-layout:fixed; width:auto; }
   table.routes-table col.rt-sel { width:32px; }
-  table.routes-table col.rt-state { width:15%; }
-  table.routes-table col.rt-col2 { width:55%; }
-  table.routes-table col.rt-col3 { width:30%; }
+  table.routes-table col.rt-state { width:90px; }
+  table.routes-table col.rt-col2 { width:160px; }
+  table.routes-table col.rt-col3 { width:90px; }
+  /* CIDRs have no spaces for the browser to wrap on, so a long one (a full
+     IPv6 prefix) would rather overflow rt-col2's fixed 160px than shrink to
+     fit; wrap it on any character instead once it doesn't. */
+  table.routes-table td.cidr-cell { overflow-wrap:anywhere; }
   /* The general td.selcol/th.selcol width:1% (below) is a shrink-to-content
      hack that only means anything under auto layout; under routes-table's
      fixed layout the column width comes entirely from col.rt-sel above. */

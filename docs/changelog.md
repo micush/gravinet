@@ -37,6 +37,25 @@ assuming it didn't happen.
 
 ---
 
+## v521 — 2026-07-18
+
+**Fixed: Mesh Routes' shared column grid (v520) still left a wide gap
+between a CIDR and its metric/inclusive value — percentage widths made
+the table stretch across the full card, and rt-col2's 55% share was far
+more than a typical CIDR string needs.**
+
+`table.routes-table` (`ui.go`) now uses fixed pixel widths instead of
+percentages — `rt-sel` 32px, `rt-state` 90px, `rt-col2` 160px, `rt-col3`
+90px — and the table itself is `width:auto` rather than 100%, so it sizes
+to that ~370px total instead of stretching edge-to-edge of the card. All
+three subcards still share the exact same colgroup, so the alignment
+v520 added is unaffected — this only changes how much of the card's
+width the whole table (and the dead space inside it) actually claims. A
+CIDR long enough to not fit rt-col2's 160px (a full IPv6 prefix) wraps
+via `overflow-wrap:anywhere` rather than overflowing the column.
+
+---
+
 ## v520 — 2026-07-18
 
 **Fixed: Mesh Routes' three per-network subcards (Advertise, Redistribute
