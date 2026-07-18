@@ -185,13 +185,18 @@ const indexHTML = `<!doctype html>
      checkbox and no 4th column, so it fills those slots with blank
      <th>/<td> using the same rt-sel/rt-col3 widths, rather than a
      differently-shaped table that just happens to render the same. */
-  table.routes-table { table-layout:fixed; width:auto; }
+  /* 508px = the Advertise/Reject toolbar's own width (.tfilter's 440px +
+     two 6px flex gaps + two 28px .tbar-btn buttons) — so the table's right
+     edge lands exactly under the end of the remove button above it,
+     instead of either stretching past it (100%) or stopping short of it
+     (an arbitrary shrink-to-content width). */
+  table.routes-table { table-layout:fixed; width:508px; max-width:100%; }
   table.routes-table col.rt-sel { width:32px; }
   table.routes-table col.rt-state { width:90px; }
-  table.routes-table col.rt-col2 { width:160px; }
+  table.routes-table col.rt-col2 { width:296px; }
   table.routes-table col.rt-col3 { width:90px; }
   /* CIDRs have no spaces for the browser to wrap on, so a long one (a full
-     IPv6 prefix) would rather overflow rt-col2's fixed 160px than shrink to
+     IPv6 prefix) would rather overflow rt-col2's fixed 296px than shrink to
      fit; wrap it on any character instead once it doesn't. */
   table.routes-table td.cidr-cell { overflow-wrap:anywhere; }
   /* The general td.selcol/th.selcol width:1% (below) is a shrink-to-content

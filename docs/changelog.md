@@ -37,6 +37,24 @@ assuming it didn't happen.
 
 ---
 
+## v522 — 2026-07-18
+
+**Fixed: v521's routes-table width (~370px, shrink-to-content) now sat
+visibly narrower than the Advertise/Reject toolbar above it (filter box
++ add/remove buttons), instead of matching it.**
+
+`table.routes-table` is now a fixed `508px` — exactly the toolbar's own
+width (`.tfilter`'s 440px, plus two 6px flex gaps and two 28px
+`.tbar-btn` buttons) — so the table's right edge lands under the end of
+the remove button rather than stopping short of it. The extra width
+over v521 goes entirely to `rt-col2` (296px, up from 160px), the column
+holding the most variable-length content (CIDRs); `rt-sel`/`rt-state`/
+`rt-col3` are unchanged. Redistribute from BGP has no toolbar to match,
+but shares the same colgroup, so it comes along to the same width and
+stays aligned with the other two subcards.
+
+---
+
 ## v521 — 2026-07-18
 
 **Fixed: Mesh Routes' shared column grid (v520) still left a wide gap
