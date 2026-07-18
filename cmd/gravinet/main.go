@@ -9,6 +9,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -41,12 +42,13 @@ import (
 	"gravinet/internal/transport"
 	"gravinet/internal/tun"
 	"gravinet/internal/upgrade"
+	"gravinet/internal/upnp"
 	"gravinet/internal/webadmin"
 )
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "507"
+	version = "510"
 	commit  = "none"
 )
 
@@ -586,6 +588,50 @@ func cmdRun(args []string) {
 			}
 		}
 		engine.Attach(transport.Dual{UDP: tr, TLS: tlsTr})
+
+		// upnpMgr, when non-nil, owns the background UPnP IGD mapping for
+		// every port this node actually listens on — see internal/upnp and
+		// config.Config.EnableUPnP's doc comment for the full picture. Only
+		// ever started once, here at startup — not re-evaluated by reloadFn
+		// on a later config change or a live port change (see webadmin's
+		// handleUPnPSetting) — and best-effort torn down in shutdown()
+		// below.
+		//
+		// The two primary ports are mapped using the port that actually
+		// bound (tr.Port()/tlsTr.Port()), not just what was configured: the
+		// UDP primary in particular can silently fall back to a different
+		// port than cfg.PrimaryPort (see transport.Open's doc comment and
+		// config.FallbackUDPPorts) — mapping the configured-but-unbound
+		// port would forward WAN traffic to a port nothing is listening on.
+		// Extra listen ports don't have an equivalent "what actually bound"
+		// accessor, so those are mapped straight from config the same
+		// best-effort way their own local bind already is (see
+		// Config.ExtraListenPorts/ExtraTCPListenPorts' doc comments): one
+		// that never actually bound locally just wastes a WAN mapping
+		// nothing answers, not a hazard.
+		var upnpMgr *upnp.Manager
+		if cfg.EnableUPnP {
+			var mappings []upnp.PortMapping
+			if tr != nil {
+				mappings = append(mappings, upnp.PortMapping{Port: tr.Port(), Protocol: "UDP"})
+			}
+			if tlsTr != nil && tlsTr.HasPrimary() {
+				mappings = append(mappings, upnp.PortMapping{Port: tlsTr.Port(), Protocol: "TCP"})
+			}
+			for _, p := range cfg.ExtraListenPorts {
+				mappings = append(mappings, upnp.PortMapping{Port: p, Protocol: "UDP"})
+			}
+			for _, p := range cfg.ExtraTCPListenPorts {
+				mappings = append(mappings, upnp.PortMapping{Port: p, Protocol: "TCP"})
+			}
+			// NewManager drops non-positive/duplicate entries and no-ops if
+			// the resulting set is empty (e.g. UDP off and no TCP fallback
+			// bound — Config.Validate wouldn't allow that combination, but
+			// this stays inert either way rather than assuming it can't
+			// happen), so it's always safe to construct unconditionally.
+			upnpMgr = upnp.NewManager(mappings, "gravinet")
+			upnpMgr.Start()
+		}
 
 		// curTr tracks the live underlay transport. The primary UDP port can be
 		// changed at runtime (Settings): we open a fresh socket on the new port,
@@ -1494,6 +1540,16 @@ func cmdRun(args []string) {
 			natMu.Unlock()
 			if mgr != nil {
 				mgr.Clear() // remove the gravinet NAT ruleset
+			}
+			if upnpMgr != nil {
+				// Bounded well under shutdownGrace: this is one of several
+				// steps sharing that budget, and a router that's gone
+				// unreachable must not be able to hang process exit — the
+				// mapping just lingers until its own lease expires in that
+				// case (see internal/upnp's lease/renewal doc comments).
+				upnpCtx, upnpCancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+				upnpMgr.Stop(upnpCtx)
+				upnpCancel()
 			}
 			var rx, tx uint64
 			if t := getTr(); t != nil {

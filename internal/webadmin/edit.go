@@ -602,6 +602,27 @@ func (s *Server) handleGeoIPSetting(w http.ResponseWriter, r *http.Request) {
 	s.editResult(w, err, true) // needs a restart — see doc comment above
 }
 
+// handleUPnPSetting toggles gravinet's own best-effort UPnP IGD port-
+// mapping helper (config.Config.EnableUPnP's doc comment has the full
+// picture) — off by default. This needs a restart to take effect for a
+// different reason than handleGeoIPSetting just above: it's not that the
+// value is read from a startup-frozen copy, it's that the upnp.Manager
+// mapping this node's listen ports is itself only ever built and started
+// once, alongside those ports' own transports, at daemon startup (see
+// cmd/gravinet/main.go) — there's no live "start/stop the manager, or
+// change what it maps" hook wired into reloadFn.
+func (s *Server) handleUPnPSetting(w http.ResponseWriter, r *http.Request) {
+	var req struct{ On bool }
+	if !decode(w, r, &req) {
+		return
+	}
+	err := s.mutateConfig(func(cfg *config.Config) error {
+		cfg.EnableUPnP = req.On
+		return nil
+	})
+	s.editResult(w, err, true) // needs a restart — see doc comment above
+}
+
 // handlePort sets the UDP underlay port(s): the first in the list becomes
 // the primary (used for outbound and advertised to peers), any rest become
 // extra listen-only ports (config extra_listen_ports) — one field for both,

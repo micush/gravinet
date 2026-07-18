@@ -74,9 +74,33 @@ type Config struct {
 	// (a port that can't bind is skipped with a warning, not fatal). Empty by
 	// default.
 	ExtraTCPListenPorts []int `json:"extra_tcp_listen_ports,omitempty"`
-	EnableIPv4          bool  `json:"enable_ipv4"`    // underlay v4
-	EnableIPv6          bool  `json:"enable_ipv6"`    // underlay v6
-	WorkerThreads       int   `json:"worker_threads"` // 0 => runtime.NumCPU()-1, min 1
+
+	// EnableUPnP turns on gravinet's own best-effort UPnP IGD port-forwarding
+	// helper: on startup, gravinet asks the LAN gateway (via UPnP, if it
+	// supports it and has UPnP enabled) to forward every port this node
+	// actually listens on — the primary UDP port, the TCP/TLS fallback port,
+	// and any configured extra listen ports — from its WAN side to this
+	// host. This is the same "auto-configure my router" convenience many
+	// P2P/VPN tools offer, so a node behind a home/office router with no
+	// manual port forward configured can still be reached directly by
+	// peers. See internal/upnp for the client/lifecycle implementation.
+	//
+	// Off by default: unlike the firewall/NAT settings elsewhere in this
+	// struct (this host's own kernel), turning this on reaches out and asks
+	// a *different* device — the LAN gateway — to reconfigure itself, which
+	// not every operator wants happening automatically. Plenty of routers
+	// have UPnP disabled or entirely absent anyway; that's a silent no-op
+	// here, not an error, and each port is mapped independently (one being
+	// rejected doesn't stop the rest — every discovery/mapping failure is
+	// logged and retried in the background, never fatal to startup). Every
+	// mapping is best-effort removed again on a clean shutdown. Takes
+	// effect on the next restart, not live — see webadmin's
+	// handleUPnPSetting.
+	EnableUPnP bool `json:"enable_upnp,omitempty"`
+
+	EnableIPv4    bool `json:"enable_ipv4"`    // underlay v4
+	EnableIPv6    bool `json:"enable_ipv6"`    // underlay v6
+	WorkerThreads int  `json:"worker_threads"` // 0 => runtime.NumCPU()-1, min 1
 
 	// IPForwarding controls whether the daemon turns on host IPv4/IPv6 forwarding
 	// at startup (the on-ramp for redistributed routes and NAT). nil means the

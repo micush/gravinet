@@ -37,6 +37,160 @@ assuming it didn't happen.
 
 ---
 
+## v510 — 2026-07-18
+
+**Fixed a flaky test in v509's multi-port UPnP suite** —
+`TestManagerPartialFailureStillMapsTheRest` (and, latently, a couple of
+its neighbors) could fail under load with a spurious "context canceled"
+on an otherwise-successful mapping. The test itself, not `Manager`, was
+at fault: it waited for `Manager` to finish processing a mapping by
+polling the *fake server's* request counter, but that counter increments
+the instant the server receives a request — strictly before the client
+finishes reading the response and `mapAll` records success in
+`m.mapped`. A `Stop` call landing in that narrow window can cancel the
+still-in-flight response read, so the mapping legitimately never gets
+recorded as live even though the server had already handled it
+correctly — and `Stop` then rightly skips deleting a mapping it never
+believed existed. `Manager`'s own behavior here is correct and desired
+for a real shutdown race (the mapping just expires via its own lease);
+only the test's synchronization was wrong.
+
+New test helper `Manager.mappedSnapshot()` returns the mapping set under
+`m`'s own mutex — the same state and lock `Stop` itself reads — so tests
+can wait on "`Manager` has durably recorded this result" instead of a
+proxy that can observe an in-flight, not-yet-fully-processed request.
+Applied to `TestManagerMapsMultiplePortsOnStartAndRemovesOnStop`,
+`TestManagerPartialFailureStillMapsTheRest`, and
+`TestManagerStopIsIdempotent`. Confirmed with 15 consecutive full-suite
+runs under `-race` plus a `-cpu=1,2,4` sweep, all clean, after previously
+reproducing the failure once under full-suite load.
+
+---
+
+## v509 — 2026-07-18
+
+**UPnP (v508) now covers every port this node listens on, not just the
+primary UDP port: the TCP/TLS fallback port and any configured extra UDP
+or TCP listen ports are mapped too.**
+
+`internal/upnp.Manager` was rearchitected around a *set* of port mappings
+sharing one discovered gateway, rather than one Manager per port: `New`
+`Manager` now takes `[]PortMapping{Port, Protocol}` instead of a single
+port/protocol pair. One shared SSDP discovery for the whole set is both
+more polite to the router than a discovery burst per port and means a
+single `Manager` instance is still the one thing `cmd/gravinet/main.go`
+drives. Mappings are independent of one another — if the router rejects
+one (a conflicting entry, say), the rest still proceed and stay mapped;
+only a cycle where *none* of them succeed backs off and rediscovers from
+scratch. `Manager.Stop` only issues `DeletePortMapping` for whichever
+mappings actually went live, never for ones that were only ever attempted
+and rejected.
+
+`cmd/gravinet/main.go` now builds that set from four sources: the primary
+UDP port and the TCP/TLS fallback port use the port that *actually bound*
+(`tr.Port()`/`tlsTr.Port()`, gated on `tlsTr.HasPrimary()`) rather than
+the configured value — the UDP primary in particular can silently fall
+back to a different port than `cfg.PrimaryPort` (see `transport.Open`'s
+doc comment and `config.FallbackUDPPorts`), and mapping a
+configured-but-never-bound port would forward WAN traffic at a port
+nothing is listening on. `cfg.ExtraListenPorts`/`cfg.ExtraTCPListenPorts`
+don't have an equivalent "what actually bound" accessor exposed by
+`internal/transport`, so those are mapped straight from config — the same
+best-effort spirit their own local bind already has (see those fields'
+doc comments): a port that never actually bound locally just wastes a WAN
+mapping nothing answers, not a hazard.
+
+Settings > NAT > UPnP's description and the settings-search index entry
+were reworded to reflect the wider coverage; `config.Config.EnableUPnP`
+and `handleUPnPSetting`'s doc comments updated the same way.
+
+New/changed tests in `internal/upnp/manager_test.go` (rewritten for the
+new `[]PortMapping` API): `TestNewManagerDropsInvalidAndDuplicateMappings`,
+`TestManagerMapsMultiplePortsOnStartAndRemovesOnStop` (same port mapped
+under both UDP and TCP counts as two independent mappings, not a
+duplicate), `TestManagerPartialFailureStillMapsTheRest` (one rejected
+port doesn't block the others, and `Stop` deletes only what actually
+mapped), `TestManagerRetriesWhenEveryMappingFails` (renamed/generalized
+from v508's single-port failure test), and `TestManagerWithNoMappingsIsInert`
+(UPnP on but nothing to map — e.g. UDP off with no extra ports — is a
+safe, prompt no-op, not a hang). All race-clean under `-race`.
+
+---
+
+## v508 — 2026-07-18
+
+**Added UPnP support: a Settings toggle (Traffic-adjacent Settings > NAT
+> UPnP) that asks the LAN router to auto-forward the primary UDP port to
+this node.** Off by default. This is the standard "auto-configure my
+router" NAT-traversal convenience — a node behind a home/office router
+with no manual port forward can still be reached directly by peers,
+without the operator ever opening the router's own admin UI.
+
+New package **internal/upnp** (no third-party dependencies):
+
+- `client.go` — a minimal UPnP Internet Gateway Device client:
+  `Discover` does SSDP multicast discovery (M-SEARCH to
+  239.255.255.250:1900) and resolves the router's port-mapping control URL
+  from its device description document, checking for a WANIPConnection
+  service first and falling back to the older WANPPPConnection (DSL/PPPoE
+  routers). `Gateway.AddPortMapping`/`DeletePortMapping`/
+  `GetExternalIPAddress` are the three SOAP actions gravinet needs,
+  hand-built over `net/http` — a SOAP Fault (which arrives as an HTTP 500,
+  per SOAP 1.1) is parsed for the UPnP error code/description rather than
+  treated as an opaque HTTP failure.
+- `manager.go` — `Manager` owns a mapping's background lifecycle: discover
+  once, map, renew every 25 minutes (well under the 1-hour lease — plenty
+  of consumer routers mishandle a "forever" lease request, so a finite
+  lease with renewal is safer than relying on 0), and best-effort remove
+  the mapping on `Stop`. Every discovery/mapping failure is logged and
+  retried in the background (a router with UPnP off, or absent entirely,
+  is an expected, silent no-op — never fatal to startup).
+
+Wired into **config.Config** as `EnableUPnP` (`enable_upnp`, `omitempty` —
+absent from a saved file decodes to the off default) and into
+**cmd/gravinet/main.go**: a `Manager` is created and started once at
+startup, right after the primary UDP transport is attached, when
+`cfg.EnableUPnP && cfg.PrimaryPort > 0`. Deliberately *not* wired into
+`reloadFn`'s live-config-diff logic — like `handleGeoIPSetting`'s
+GeoIP-lookup toggle, this is a "takes effect on next restart" setting;
+unlike GeoIP's reason (a startup-frozen `s.cfg` copy), here it's that the
+`Manager` itself is only ever started once, not something a live reload
+currently knows how to start/stop mid-run. On shutdown, `Manager.Stop` is
+called with a 1.5s bound (one of several steps sharing the 5s
+`shutdownGrace` budget) so a router that's gone unreachable can't hang
+process exit; the mapping just lingers until its own lease expires in
+that case.
+
+**webadmin**: new `handleUPnPSetting` (`POST /api/upnp`, restart-required
+response, same shape as `handleGeoIPSetting`), `enable_upnp` added to the
+`/api/config` response (read fresh from disk, like the port fields
+alongside it — not from the startup-frozen `s.cfg`, since `EnableUPnP`
+isn't a `WebAdmin`-scoped field), and a new toggle row in Settings > NAT,
+right below NAT state timeout, with the same restart-triggering UX as the
+Geo-IP toggle in Settings > Privacy.
+
+**Scope note:** only the primary UDP port is mapped — the TCP/TLS
+fallback port and any configured extra listen ports are not (yet)
+auto-mapped by this first version. Happy to extend `Manager` to cover
+those too if wanted.
+
+New tests: `internal/upnp/client_test.go` (SSDP LOCATION parsing across
+header casings, device-description parsing including realistic
+multi-level `deviceList` nesting and the WANIPConnection-preferred-over-
+WANPPPConnection case, control-URL resolution, and SOAP call/response
+handling — including a SOAP Fault surfacing its UPnP error code — against
+real `httptest` servers rather than hand-rolled stubs);
+`internal/upnp/manager_test.go` (start/map/renew/stop lifecycle, retry
+behavior on both discovery and mapping failure, idempotent `Stop`, and
+`Stop`-before-`Start` as a safe no-op, all exercised through an injectable
+`discover` seam — same pattern as this codebase's existing `statFile` seam
+— against a fake IGD HTTP server, all race-clean under `-race`); and
+`internal/webadmin/upnp_handler_test.go` (mirrors the existing
+`TestHandleGeoIPSetting`, adjusted for `enable_upnp` being read fresh
+from disk rather than from a frozen `s.cfg`).
+
+---
+
 ## v507 — 2026-07-18
 
 **Added an `address-family ipv6 unicast` block, so a deactivated-in-ipv4

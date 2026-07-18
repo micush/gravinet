@@ -267,7 +267,7 @@ const indexHTML = `<!doctype html>
 <script>
 const $ = (h) => { const d=document.createElement('div'); d.innerHTML=h.trim(); return d.firstChild; };
 const app = document.getElementById('app');
-const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, geoipLookup:false, allowRemoteShell:false, shellSupported:true, bgpSupported:false, selfId:null, selfHostname:'', targetSeq:0, pendingBgpHighlight:null };
+const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, geoipLookup:false, enableUpnp:false, allowRemoteShell:false, shellSupported:true, bgpSupported:false, selfId:null, selfHostname:'', targetSeq:0, pendingBgpHighlight:null };
 // setTarget is the only place state.target is ever assigned — bumping
 // targetSeq alongside it, once, exactly when the *selection itself* actually
 // changes. load()/startPolling()/refreshCluster() each capture targetSeq
@@ -809,6 +809,7 @@ async function load() {
   state.extraTCPPorts = (c.body && c.body.extra_tcp_listen_ports) || [];
   state.natStateTimeout = (c.body && c.body.nat_state_timeout) || 0;
   state.geoipLookup = !!(c.body && c.body.geoip_lookup);
+  state.enableUpnp = !!(c.body && c.body.enable_upnp);
   state.allowRemoteShell = !!(c.body && c.body.allow_remote_shell);
   state.shellSupported = c.body ? !!c.body.shell_supported : true;
   // Whether this host can serve dynamic-routing (BGP) status — true only when
@@ -881,6 +882,7 @@ function buildSearchIndex(){
     ['udpport-row', 'UDP port', 'The UDP port(s) this node listens on; comma-separated for more than one, so a peer behind a restrictive firewall can reach it on a well-known port too.'],
     ['tcpport-row', 'TCP port', 'The TCP port(s) this node listens on for the TLS fallback; comma-separated for more than one.'],
     ['natstate-row', 'NAT state timeout', 'How long an idle translated NAT connection is remembered before its mapping is reclaimed.'],
+    ['upnp-row', 'UPnP', 'Ask the LAN router to forward every port this node listens on \u2014 UDP, TCP fallback, and any extra ports \u2014 from its WAN side to this host automatically, so peers can reach it without a manual port forward. Off by default. upnp port forwarding nat traversal'],
     ['geoip-row', 'Geo-IP lookups', 'Show an approximate location on a peer or seed\u2019s info panel, looked up from a third-party service (ipapi.co). geoip'],
   ];
   for (const [id, lbl, desc] of settingsRows) {
@@ -2493,6 +2495,20 @@ function secSettings(c) {
   };
   ntInput.onblur = saveNatState;
   ntInput.onkeydown = (e) => { if (e.key === 'Enter') { ntInput.blur(); } };
+
+  const up = $('<div class="settings-row" id="upnp-row"></div>');
+  const upLabel = $('<div><div class="settings-label">UPnP</div><div class="settings-desc">Ask this node\u2019s LAN router, via UPnP, to forward every port this node listens on \u2014 the UDP port, the TCP fallback port, and any extra ports configured above \u2014 from its WAN side to this host, so a node behind a home/office router with no manual port forward configured can still be reached directly by peers. Off by default: unlike the settings above (this host\u2019s own kernel), this reaches out and asks a different device \u2014 the router \u2014 to reconfigure itself. Best-effort per port: a router with UPnP off, or without it at all, is a silent no-op, not an error, and one port being rejected doesn\u2019t stop the others from mapping. This node restarts to apply a change here.</div></div>');
+  const upSw = $('<label class="sw"><input type="checkbox" id="upnp-toggle-cb"><span class="sw-slider"></span></label>');
+  const upCb = upSw.querySelector('input');
+  upCb.checked = state.enableUpnp;
+  upCb.onchange = async () => {
+    const want = upCb.checked;
+    const ok = await edit('/api/upnp', { on: want }, true); // restarts automatically once saved
+    if (ok) { state.enableUpnp = want; }
+    else { upCb.checked = !want; }
+  };
+  up.appendChild(upLabel); up.appendChild(upSw);
+  card.appendChild(up);
 
   c.appendChild(card); card = $('<div class="card"></div>');
   card.appendChild($('<h3>Privacy</h3>'));
