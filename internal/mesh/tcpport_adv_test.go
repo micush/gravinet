@@ -26,15 +26,22 @@ func TestHSPayloadCarriesTCPPort(t *testing.T) {
 	if out.TCPPort != 443 || out.WebPort != 8443 || !out.Managed {
 		t.Fatalf("round-trip wrong: tcp=%d web=%d managed=%v", out.TCPPort, out.WebPort, out.Managed)
 	}
-	// Simulate an older peer that doesn't send the TCP port (strip the trailing
-	// 2 bytes for TCPPort itself, plus the two 1-byte zero-counts that now
-	// unconditionally follow it for ExtraTCPPorts/ExtraUDPPorts — ExtraPorts
-	// wasn't nested this deep when this test was first written, but the
-	// nested-optional-field chain means those two bytes are only ever present
-	// at all when TCPPort itself is, so an older peer that lacks TCPPort lacks
-	// them too): it must still decode, with TCPPort defaulting to 0 and the web
-	// port intact.
-	old, err := decodeHSPayload(enc[:len(enc)-4])
+	// Simulate an older peer that doesn't send the TCP port: truncate right
+	// after WebPort, dropping everything the nested-optional-field chain adds
+	// after it (see decodeHSPayload) — TCPPort itself, the two extra-port
+	// lists, LocalEndpoints, and BGPASN — computed from each field's own
+	// exact encoded size rather than a magic byte count, which is what let
+	// this test silently stop testing what it claimed to (see
+	// bgpASNFieldLen's sibling comment below) the last time a field was
+	// added after TCPPort without this being updated to match.
+	const tcpPortFieldLen = 2
+	const bgpASNFieldLen = 4
+	trailingLen := tcpPortFieldLen +
+		portListEncodedLen(in.ExtraTCPPorts) +
+		portListEncodedLen(in.ExtraUDPPorts) +
+		endpointListEncodedLen(in.LocalEndpoints) +
+		bgpASNFieldLen
+	old, err := decodeHSPayload(enc[:len(enc)-trailingLen])
 	if err != nil {
 		t.Fatalf("backward-compat decode failed: %v", err)
 	}

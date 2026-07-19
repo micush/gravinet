@@ -292,7 +292,12 @@ type Engine struct {
 
 	managed atomic.Bool // advertised "managed" mode; toggled live
 	manager atomic.Bool // advertised "manager" mode (can manage other managed peers); toggled live
-	webPort uint16      // advertised web-admin port
+	// bgpASN is this node's current effective BGP AS number, advertised in
+	// every handshake and pushed live to already-connected peers exactly the
+	// way managed/manager are — see SetBGPASN and hsPayload.BGPASN's doc
+	// comment for what it's for and why it's scoped to direct peers only.
+	bgpASN  atomic.Uint32
+	webPort uint16 // advertised web-admin port
 
 	routeAdvNs    atomic.Int64 // route re-advertisement interval (ns); tuned live
 	keepaliveNs   atomic.Int64 // NAT keepalive interval (ns); tuned live
@@ -898,8 +903,15 @@ type nodeInfo struct {
 	endpoint netip.AddrPort
 	managed  bool
 	manager  bool // node advertised Manager mode (see config.Config.Manager)
-	webPort  uint16
-	tcpPort  uint16
+	// bgpASN mirrors peerSession's field of the same name — the
+	// gossip/handshake-learned copy for a node that isn't (or isn't
+	// currently) a direct peer. Not itself propagated through the wider
+	// peer-list gossip (see hsPayload.BGPASN's doc comment); kept here
+	// purely for consistency with managed/manager rather than as something
+	// anything currently reads back out.
+	bgpASN  uint32
+	webPort uint16
+	tcpPort uint16
 	// extraTCPPorts/extraUDPPorts mirror peerSession's fields of the same
 	// name — this is the gossip/handshake-learned copy for a node that
 	// isn't (or isn't currently) a direct peer.
@@ -944,8 +956,15 @@ type peerSession struct {
 	keyID    crypto.KeyID // which PSK authenticated this session (for live key retirement)
 	managed  bool         // peer advertised itself as remotely manageable
 	manager  bool         // peer advertised Manager mode (can manage other Managed peers)
-	webPort  uint16       // peer's web-admin port (for management over the overlay)
-	tcpPort  uint16       // peer's advertised TCP/TLS fallback port (0 = none/unknown)
+	// bgpASN is the peer's current effective BGP AS number, as advertised in
+	// its handshake and kept fresh by ctrlClusterNotify — see
+	// hsPayload.BGPASN's doc comment. 0 means "no BGP configured there" (or
+	// a peer too old to advertise it at all — the two are indistinguishable,
+	// same as any other value this struct learns only from a handshake
+	// field that didn't always exist).
+	bgpASN  uint32
+	webPort uint16 // peer's web-admin port (for management over the overlay)
+	tcpPort uint16 // peer's advertised TCP/TLS fallback port (0 = none/unknown)
 	// extraTCPPorts/extraUDPPorts are the peer's additional advertised listen
 	// ports (config extra_tcp_listen_ports/extra_listen_ports on their end),
 	// tried alongside tcpPort/endpoint when the primary doesn't get through —

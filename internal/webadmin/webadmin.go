@@ -53,6 +53,14 @@ type Backend interface {
 	// BGP RIB. Called by bgpMeshRedistributor, never directly by an HTTP
 	// handler.
 	SetBGPRoutes(networkID uint64, routes []netip.Prefix, metric int) bool
+	// SetBGPASN advertises this node's current effective BGP AS number to
+	// every connected peer (see mesh.Engine.SetBGPASN / hsPayload.BGPASN's
+	// doc comment) — 0 when BGP isn't enabled here at all. Called by
+	// autoBGPReconciler on every reconcile pass, whether or not AutoBGP
+	// itself produced the value, so a peer wanting to build a BGP neighbor
+	// for this node — via AutoBGP or otherwise — always has this node's
+	// real current ASN to use, never a guess reconstructed from an address.
+	SetBGPASN(asn uint32)
 	BanNode(networkID uint64, target, notes string) error
 	UnbanNode(networkID uint64, target string) error
 	EditBanNotes(networkID uint64, target, notes string) error
@@ -138,6 +146,7 @@ type Server struct {
 	metrics  *metricsCollector     // CPU/mem/interface time series for the Metrics tab
 	capture  *captureState         // live packet capture for the Capture tab
 	bgpRedis *bgpMeshRedistributor // polls FRR's RIB, pushes BGP routes into the mesh (config.Network.RedistributeBGP)
+	autoBGP  *autoBGPReconciler    // derives ASN/router-id and maintains one Neighbor per online mesh peer (config.BGPConfig.AutoBGP)
 }
 
 // SetVersion records the build version/commit for the Info → About tab.
@@ -432,6 +441,8 @@ func (s *Server) Start() error {
 	go s.metrics.run()
 	s.bgpRedis = newBGPMeshRedistributor(s)
 	go s.bgpRedis.run()
+	s.autoBGP = newAutoBGPReconciler(s)
+	go s.autoBGP.run()
 	// If FRR is on this host, make sure the daemons BGP/BFD need are enabled
 	// and actually running (Linux: bgpd/bfdd in /etc/frr/daemons; FreeBSD:
 	// rc.conf's frr_enable/frr_daemons plus the /var/lib/frr bootstrap its
@@ -488,6 +499,9 @@ func (s *Server) Close() error {
 	}
 	if s.bgpRedis != nil {
 		s.bgpRedis.close()
+	}
+	if s.autoBGP != nil {
+		s.autoBGP.close()
 	}
 	if s.httpSrv != nil {
 		return s.httpSrv.Close()

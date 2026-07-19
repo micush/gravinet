@@ -67,6 +67,22 @@ type hsPayload struct {
 	// nodes that have never spoken discover each other's LAN address through
 	// a mutual peer.
 	LocalEndpoints []netip.AddrPort
+	// BGPASN is this node's current effective BGP AS number — whatever
+	// config.BGPConfig.ASN actually is right now, AutoBGP-derived or
+	// hand-typed, and only if BGP itself is enabled (0 otherwise). Advertised
+	// so a peer wanting to build a BGP neighbor for this node — AutoBGP
+	// (internal/webadmin/autobgp.go) or otherwise — uses the AS this node
+	// actually runs, rather than trying to reconstruct one from an observed
+	// tunnel address, which two nodes with different partial views of each
+	// other's network memberships could each compute differently for the
+	// same node. Unlike LocalEndpoints, deliberately NOT propagated through
+	// the multi-hop peer-list gossip (buildPeerList) — a BGP neighbor is only
+	// ever built for a peer already in ListPeers (a direct or relayed live
+	// session), so there is no need for third-hop visibility, the same
+	// direct-peers-only scope Managed/Manager already have (see
+	// announceClusterState). Kept fresh on an already-connected session by
+	// the same ctrlClusterNotify push that keeps those two current.
+	BGPASN uint32
 }
 
 const ephemeralLen = 32
@@ -214,6 +230,13 @@ func encodeHSPayload(p hsPayload) []byte {
 	// Local (host) endpoint candidates — a further optional trailing field,
 	// count-prefixed like the port lists above. See hsPayload.LocalEndpoints.
 	b = appendEndpointList(b, p.LocalEndpoints)
+	// This node's current effective BGP ASN — a further optional trailing
+	// field, fixed-width (no presence flag needed: 0 is itself a meaningful
+	// "no BGP here" value, not a sentinel to distinguish from absent). See
+	// hsPayload.BGPASN.
+	var asnB [4]byte
+	binary.BigEndian.PutUint32(asnB[:], p.BGPASN)
+	b = append(b, asnB[:]...)
 	return b
 }
 
@@ -406,6 +429,13 @@ func decodeHSPayload(b []byte) (hsPayload, error) {
 					// an older peer's payload, which just leaves this nil.
 					if local, ok := readEndpointList(&r); ok {
 						p.LocalEndpoints = local
+						// This node's current effective BGP ASN, same nesting
+						// rule: absent on an older peer's payload, which just
+						// leaves this 0 ("no BGP configured there" — the same
+						// value a peer with BGP genuinely off would send).
+						if asnB, ok := r.take(4); ok {
+							p.BGPASN = binary.BigEndian.Uint32(asnB)
+						}
 					}
 				}
 			}

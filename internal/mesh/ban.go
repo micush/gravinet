@@ -28,6 +28,13 @@ type PeerInfo struct {
 	Overlay6 string `json:"overlay6,omitempty"`
 	Endpoint string `json:"endpoint"` // observed underlay source — a NAT'd peer's public mapping
 	Relayed  bool   `json:"relayed"`  // reached via a relay (couldn't connect directly → restrictive NAT/firewall)
+	// BGPASN is this peer's current effective BGP AS number, as gossiped in
+	// its handshake and kept fresh live thereafter — see hsPayload.BGPASN's
+	// doc comment. 0 means it has no BGP configured (or predates this
+	// field). Consumed by AutoBGP (internal/webadmin/autobgp.go) to build a
+	// Neighbor for this peer using the AS it actually runs, rather than
+	// guessing one from its tunnel address.
+	BGPASN uint32 `json:"bgp_asn,omitempty"`
 
 	// RelayVia is the relay's hostname (falling back to its node id if no
 	// hostname is known) when Relayed is true, empty otherwise. A relayed
@@ -425,6 +432,22 @@ func (e *Engine) SetManager(on bool) {
 }
 func (e *Engine) Manager() bool { return e.manager.Load() }
 
+// SetBGPASN updates this node's advertised effective BGP ASN live — see
+// hsPayload.BGPASN's doc comment for what it's for. Unlike SetManaged/
+// SetManager (each only ever called on an actual UI toggle), this is called
+// on every AutoBGP reconcile poll (internal/webadmin/autobgp.go) regardless
+// of whether anything changed, so it skips the announce — and the resulting
+// ctrlClusterNotify round trip to every connected peer on every network —
+// when the value is exactly what it already was. BGPASN reports the current
+// value.
+func (e *Engine) SetBGPASN(asn uint32) {
+	if e.bgpASN.Swap(asn) == asn {
+		return
+	}
+	e.announceClusterStateAll()
+}
+func (e *Engine) BGPASN() uint32 { return e.bgpASN.Load() }
+
 // announceClusterStateAll pushes this node's current Managed/Manager/WebPort/
 // TCPPort state to every currently connected peer, across every network, via
 // ctrlClusterNotify. Called from SetManaged/SetManager so a live toggle is
@@ -443,12 +466,13 @@ func (e *Engine) announceClusterStateAll() {
 
 // announceClusterState sends one ctrlClusterNotify to every peer currently
 // connected on ns, carrying this node's current Managed/Manager/WebPort/
-// TCPPort/ExtraTCPPorts/ExtraUDPPorts. Wire shape mirrors the handshake's own
-// "Managed-cluster advertisement" trailing field exactly ([mflag:1][webPort:2]
-// [tcpPort:2], mflag bit 0 Managed / bit 1 Manager — see hsPayload's
-// encode/decode) so there's only one bit-packing convention for this data in
-// the whole package, then the same appendPortList format the handshake uses
-// for the two extra-port lists.
+// TCPPort/ExtraTCPPorts/ExtraUDPPorts/BGPASN. Wire shape mirrors the
+// handshake's own "Managed-cluster advertisement" trailing field exactly
+// ([mflag:1][webPort:2][tcpPort:2], mflag bit 0 Managed / bit 1 Manager —
+// see hsPayload's encode/decode) so there's only one bit-packing convention
+// for this data in the whole package, then the same appendPortList format
+// the handshake uses for the two extra-port lists, then BGPASN as a further
+// fixed 4-byte trailing field (see hsPayload.BGPASN).
 func (e *Engine) announceClusterState(ns *netState) {
 	var mflag byte
 	if e.managed.Load() {
@@ -466,6 +490,15 @@ func (e *Engine) announceClusterState(ns *netState) {
 	body = append(body, tp[:]...)
 	body = appendPortList(body, loadPortList(&e.extraTCPPorts))
 	body = appendPortList(body, loadPortList(&e.extraUDPPorts))
+	// This node's current effective BGP ASN — a further trailing field,
+	// fixed-width like its handshake counterpart (hsPayload.BGPASN). Present
+	// unconditionally (not gated behind the port lists being present) since
+	// this is always freshly written by this exact build, unlike a
+	// backward-compat decode which has to tolerate an older *peer's*
+	// shorter payload.
+	var asnB [4]byte
+	binary.BigEndian.PutUint32(asnB[:], e.bgpASN.Load())
+	body = append(body, asnB[:]...)
 	e.broadcastControl(ns, body)
 }
 
@@ -484,6 +517,7 @@ func (e *Engine) onClusterNotify(ps *peerSession, body []byte) {
 	managed := mflag&1 != 0
 	manager := mflag&2 != 0
 	var webPort, tcpPort uint16
+	var bgpASN uint32
 	if len(body) >= 3 {
 		webPort = binary.BigEndian.Uint16(body[1:3])
 	}
@@ -499,6 +533,12 @@ func (e *Engine) onClusterNotify(ps *peerSession, body []byte) {
 			extraTCP = ports
 			if ports2, ok := readPortList(&r); ok {
 				extraUDP = ports2
+				// This node's current effective BGP ASN, same nesting rule:
+				// absent on an older peer's shorter notify, which just
+				// leaves this 0.
+				if asnB, ok := r.take(4); ok {
+					bgpASN = binary.BigEndian.Uint32(asnB)
+				}
 			}
 		}
 	}
@@ -511,6 +551,7 @@ func (e *Engine) onClusterNotify(ps *peerSession, body []byte) {
 	ps.tcpPort = tcpPort
 	ps.extraTCPPorts = extraTCP
 	ps.extraUDPPorts = extraUDP
+	ps.bgpASN = bgpASN
 	if ni := ns.nodes[ps.nodeID]; ni != nil {
 		ni.managed = managed
 		ni.manager = manager
@@ -518,9 +559,10 @@ func (e *Engine) onClusterNotify(ps *peerSession, body []byte) {
 		ni.tcpPort = tcpPort
 		ni.extraTCPPorts = extraTCP
 		ni.extraUDPPorts = extraUDP
+		ni.bgpASN = bgpASN
 	}
 	ns.mu.Unlock()
-	e.log.Debugf("mesh: peer %q updated managed=%v manager=%v webPort=%d", ps.nodeID, managed, manager, webPort)
+	e.log.Debugf("mesh: peer %q updated managed=%v manager=%v webPort=%d bgpASN=%d", ps.nodeID, managed, manager, webPort, bgpASN)
 }
 
 // routeAdvInterval is the live route re-advertisement cadence.
@@ -741,6 +783,7 @@ func (e *Engine) ListPeers(networkID uint64) []PeerInfo {
 			ReasmOK:       ps.reasmOK.Load(),
 			ReasmDrop:     ps.reasmDrop.Load(),
 			SpoofDrop:     ps.spoofDrop.Load(),
+			BGPASN:        ps.bgpASN,
 		}
 		if r := ps.getRelay(); r != nil {
 			if r.hostname != "" {
@@ -817,7 +860,7 @@ func (e *Engine) SelfPeer(networkID uint64) (pi PeerInfo, ok bool) {
 		return PeerInfo{}, false
 	}
 	s4, s6 := ns.selfAddrs()
-	pi = PeerInfo{NodeID: e.nodeID, Hostname: e.hostname}
+	pi = PeerInfo{NodeID: e.nodeID, Hostname: e.hostname, BGPASN: e.bgpASN.Load()}
 	if s4.IsValid() {
 		pi.Overlay4 = s4.String()
 	}

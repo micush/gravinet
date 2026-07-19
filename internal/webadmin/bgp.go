@@ -344,6 +344,13 @@ func (s *Server) handleBGPConfig(w http.ResponseWriter, r *http.Request) {
 	if s.bgpRedis != nil {
 		go s.bgpRedis.sync()
 	}
+	// Same reasoning: AutoBGP turning on/off, or this save changing something
+	// it would otherwise derive itself (ASN, router-id), is worth reconciling
+	// immediately rather than waiting up to autoBGPPollInterval. A no-op call
+	// when AutoBGP is off (sync()'s own first check).
+	if s.autoBGP != nil {
+		go s.autoBGP.sync()
+	}
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "applied": false, "note": err.Error()})
 		return

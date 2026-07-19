@@ -344,6 +344,34 @@ type BGPConfig struct {
 	// "unset" — the timers line is omitted and FRR uses its own defaults.
 	KeepaliveTime uint32 `json:"keepalive_time,omitempty"`
 	HoldTime      uint32 `json:"hold_time,omitempty"`
+
+	// AutoBGP turns this node's BGP speaker into a self-numbering,
+	// self-peering one for every other node on its mesh networks, instead of
+	// a hand-maintained one. When on (see internal/webadmin/autobgp.go):
+	//   - ASN is derived from this node's own first tunnel IPv4 address (across
+	//     its networks, in NetworkIDs order) if not already set — a
+	//     predictable mapping into the 4-byte private ASN range
+	//     (4200000000-4294967294, RFC 6996), not a real public AS.
+	//   - RouterID is set to that same tunnel IPv4 address if not already set.
+	//   - Enabled is forced on — AutoBGP numbering a speaker that never runs
+	//     would be pointless.
+	//   - one Neighbor per currently-connected mesh peer is kept in sync: its
+	//     first tunnel IPv4 and/or IPv6 address (whichever it has — v4-only,
+	//     v6-only, and dual-stack peers are all managed), under the same
+	//     predictable remote AS — derived from the tunnel IPv4 address the
+	//     same way as this node's own ASN when the peer has one, or from its
+	//     tunnel IPv6 address (a different, address-family-appropriate
+	//     derivation — see deriveASNFromIPv6) when it doesn't — Description
+	//     set to the peer's name, Password "autobgp", BFD on, not shut down.
+	//     Appears and disappears within one poll of the peer actually
+	//     connecting/disconnecting — see autoBGPPollInterval.
+	// AutoBGP only ever touches a Neighbor entry whose Password is exactly
+	// "autobgp" (its own marker for "I created this"); anything else in
+	// Neighbors — a real external peer, or one added by hand that happens to
+	// share an address with a mesh peer — is never added, edited, or removed
+	// by it. Turning AutoBGP back off freezes whatever it last left in place;
+	// it does not retroactively remove those neighbors or turn BGP back off.
+	AutoBGP bool `json:"auto_bgp,omitempty"`
 }
 
 // BGPNeighbor is one BGP peer: its address, the AS it belongs to, an optional

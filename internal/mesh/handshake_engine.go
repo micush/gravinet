@@ -76,6 +76,7 @@ func (e *Engine) install(ns *netState, ps *peerSession) {
 	ni.endpoint = ps.endpoint
 	ni.managed = ps.managed
 	ni.manager = ps.manager
+	ni.bgpASN = ps.bgpASN
 	ni.webPort = ps.webPort
 	ni.tcpPort = ps.tcpPort
 	ni.extraTCPPorts = ps.extraTCPPorts
@@ -337,6 +338,7 @@ func (e *Engine) onHSInit(payload []byte, from netip.AddrPort, via *peerSession)
 		tcpPort:        pl.TCPPort,
 		extraTCPPorts:  pl.ExtraTCPPorts,
 		extraUDPPorts:  pl.ExtraUDPPorts,
+		bgpASN:         pl.BGPASN,
 		lastRx:         time.Now(),
 		established:    time.Now(),
 	}
@@ -366,6 +368,7 @@ func (e *Engine) onHSInit(payload []byte, from netip.AddrPort, via *peerSession)
 		TCPPort:        uint16(e.fallbackPort.Load()),
 		ExtraTCPPorts:  loadPortList(&e.extraTCPPorts),
 		ExtraUDPPorts:  loadPortList(&e.extraUDPPorts),
+		BGPASN:         e.bgpASN.Load(),
 	}
 	hrespHdr := make([]byte, protocol.HSRespHeaderLen)
 	protocol.EncodeHSResp(hrespHdr, protocol.HSRespHeader{Network: hdr.Network, RecvSession: pl.Index})
@@ -467,6 +470,7 @@ func (e *Engine) onHSResp(payload []byte, from netip.AddrPort, via *peerSession)
 		tcpPort:        pl.TCPPort,
 		extraTCPPorts:  pl.ExtraTCPPorts,
 		extraUDPPorts:  pl.ExtraUDPPorts,
+		bgpASN:         pl.BGPASN,
 		lastRx:         time.Now(),
 		established:    time.Now(),
 	}
@@ -733,6 +737,7 @@ func (e *Engine) buildHSInit(ns *netState, p *pendingHS) []byte {
 		TCPPort:        uint16(e.fallbackPort.Load()),
 		ExtraTCPPorts:  loadPortList(&e.extraTCPPorts),
 		ExtraUDPPorts:  loadPortList(&e.extraUDPPorts),
+		BGPASN:         e.bgpASN.Load(),
 	}
 	hdr := make([]byte, protocol.HSInitHeaderLen)
 	protocol.EncodeHSInit(hdr, protocol.HSInitHeader{Network: ns.spec.ID, KeyID: keyID})

@@ -152,3 +152,25 @@ func portListEncodedLen(ports []uint16) int {
 	}
 	return 1 + 2*n
 }
+
+// endpointListEncodedLen returns how many bytes appendEndpointList would
+// produce for a given list — appendEndpoint's own per-entry shape
+// (1 family byte + 4 or 16 address bytes + 2 port bytes), same reasoning as
+// portListEncodedLen: an exact field boundary for truncation tests, not a
+// magic offset that silently drifts wrong the next time a trailing field is
+// added after it (see TestHSPayloadCarriesTCPPort).
+func endpointListEncodedLen(eps []netip.AddrPort) int {
+	n := len(eps)
+	if n > maxLocalEndpoints {
+		n = maxLocalEndpoints
+	}
+	total := 1
+	for _, ep := range eps[:n] {
+		if ep.Addr().Unmap().Is6() {
+			total += 1 + 16 + 2
+		} else {
+			total += 1 + 4 + 2
+		}
+	}
+	return total
+}

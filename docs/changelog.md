@@ -37,6 +37,127 @@ assuming it didn't happen.
 
 ---
 
+## v525 — 2026-07-19
+
+**Redesigned AutoBGP's remote AS: gossiped, not derived — and routine
+neighbor churn now applies via incremental vtysh commands instead of a
+full FRR restart.**
+
+v524's AutoBGP derived a peer's remote AS from its tunnel address, the
+same predictable formula it uses for its own local AS. That has two real
+problems, not just a style preference:
+
+- **Ambiguity across multi-network topologies.** A node only ever
+  observes a peer's tunnel address on the networks *it* shares with that
+  peer — not on every network the peer itself belongs to. If peer B
+  picks its own "first tunnel address" from a network A isn't part of,
+  A has no way to ever learn that address, and would derive a different
+  (wrong) AS for B than B derived for itself. The session just never
+  comes up, for a reason that isn't obvious from either side.
+- **Wrong for a peer with a real, manually-configured AS.** AutoBGP would
+  derive some unrelated fabricated AS for it regardless, rather than
+  using the AS that peer actually runs — again, a session that silently
+  never establishes.
+
+Both are fixed the same way: each node's current effective BGP AS number
+— AutoBGP-derived or hand-typed, whichever it actually is — is now
+gossiped directly, the same way `Managed`/`Manager`/ports already are.
+New `hsPayload.BGPASN` (handshake, `internal/mesh/handshake.go`) and the
+matching `mesh.Engine.SetBGPASN`/`ctrlClusterNotify` live-push path (for
+an already-connected peer, not just a fresh handshake) carry it;
+`mesh.PeerInfo.BGPASN` surfaces it. AutoBGP now reads a peer's ASN
+straight off this — no derivation, no address involved — and skips a
+peer entirely only if its gossiped ASN is 0 (no BGP there, or a peer too
+old to gossip it at all). This also finishes something v524 got only
+half right: a **v6-only peer is now fully managed** (gossiped ASN
+doesn't care which address family it came with), and a **dual-stack
+peer's v4 and v6 neighbors correctly share the one AS its owner actually
+reports**, not two independently-derived guesses.
+`deriveASNFromIPv6` — v524's address-based fallback for a v6-only peer —
+is gone; a peer's AS is never derived at all anymore, only this node's
+own (still v4-tunnel-address-derived, still entirely local — no
+ambiguity there, since it's about what *this* node calls itself, not
+reconstructing a belief about someone else).
+
+Separately: v524's `sync()` reused `applyBGP` unconditionally, which
+restarts FRR — tearing down *every* BGP session on the box, including
+any unrelated manually-configured one — whenever a neighbor was
+removed. For a feature whose entire job is reacting to routine peer
+churn every `autoBGPPollInterval` (10s), that's the exact instability
+AutoBGP exists to avoid. New `applyBGPIncremental` writes frr.conf as
+before (so a future real restart still starts from the correct state)
+but, for a poll that only added or removed neighbors — not a change to
+the ASN/router-id/Enabled state itself — issues the precise `vtysh`
+commands an operator would type by hand (`neighbor ... remote-as ...`
+/ `description` / `password` / `bfd` / `activate`, or `no neighbor ...`
+to retract) instead, live, on the already-running daemon, disturbing
+nothing else. `mergeAutoBGPNeighbors` now returns exactly what was
+added/removed, not just whether anything changed, to drive this. The
+rare case — ASN, router-id, or Enabled actually changing — still goes
+through `applyBGP`'s normal restart/reload path, since that's what
+establishes the `router bgp` block in the first place. A `vtysh` command
+that fails there is logged and left alone rather than escalated to a
+forced restart — frr.conf is already correct, so the next real
+restart/reload (whenever one happens, for any reason) reconciles it
+regardless.
+
+("If a peer disappears for some time, is its neighbor removed?" — yes,
+but nothing new was added for this: removal already follows the mesh's
+existing dead-session timeout, `peerTimeoutDuration`, default 20s of
+silence before `pruneDead` drops it from `ListPeers` — plus up to one
+more `autoBGPPollInterval` for AutoBGP to notice. Reusing that instead
+of a second bespoke timer means there's only one place that decides
+peer liveness, not two that could disagree.)
+
+---
+
+## v524 — 2026-07-18
+
+**Added: AutoBGP — a Traffic → BGP toggle that turns this node's BGP
+speaker into a self-numbering, self-peering one for every other node on
+its mesh networks, instead of a hand-maintained one.**
+
+When on:
+- This node's AS number is derived from its own first tunnel IPv4 address
+  (across its networks, in NetworkIDs order) if not already configured —
+  a predictable mapping into the 4-byte private ASN range
+  (4200000000-4294967294, RFC 6996), not a real public AS.
+- Its router-id is set to that same tunnel IPv4 address if not already
+  configured.
+- BGP itself is switched on — AutoBGP numbering a speaker that never runs
+  would be pointless.
+- One Neighbor is kept in sync per currently-connected mesh peer: its
+  first tunnel IPv4 and/or IPv6 address (v4-only, v6-only, and dual-stack
+  peers are all managed), under one predictable remote AS — derived from
+  the peer's tunnel IPv4 the same way as this node's own when it has one,
+  or from its tunnel IPv6 address (a separate, address-family-appropriate
+  derivation) when it doesn't, so a v6-only peer is never left unmanaged
+  just because it has no v4 address to anchor the usual scheme on —
+  Description set to the peer's name, MD5 password ‘autobgp’, BFD on,
+  administratively enabled.
+- A peer's neighbor(s) disappear within about ten seconds of it
+  disconnecting, and reappear within about ten seconds of it reconnecting
+  (`autoBGPPollInterval`, `internal/webadmin/autobgp.go`) — polled, like
+  its sibling `bgpMeshRedistributor`, because a peer connecting or
+  disconnecting isn't a config edit gravinet gets told about.
+
+AutoBGP only ever touches a Neighbor entry whose Password is exactly
+‘autobgp’ — its own marker, doubling as the fixed password, for "I
+created this" — so a real external peer, or anything added by hand that
+happens to share an address with a mesh peer, is never added, edited, or
+removed by it; if a manual entry occupies the exact same address AutoBGP
+would otherwise use, the manual entry wins and AutoBGP simply doesn't
+create its own there. Turning AutoBGP back off freezes whatever it last
+left in place — it does not retroactively remove those neighbors or turn
+BGP back off.
+
+New `BGPConfig.AutoBGP` field (`internal/config/config.go`). New "AutoBGP"
+toggle on the Traffic → BGP editor, above Enable BGP (`ui.go`); the
+existing "enter an AS number" client-side save guard now only fires when
+AutoBGP is off, since AutoBGP supplies one itself moments after the save.
+
+---
+
 ## v523 — 2026-07-18
 
 **Fixed: clicking + on the Advertise or Reject table (Mesh Routes) now

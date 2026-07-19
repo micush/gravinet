@@ -94,6 +94,21 @@ type stubBackend struct {
 	// against, since a plain bool return can't show what was actually
 	// pushed.
 	bgpRoutesCalls []bgpRoutesCall
+	// bgpASNCalls records every SetBGPASN call, in order — autobgp_test.go
+	// asserts against the last one to confirm this node's effective ASN was
+	// gossiped, and against the full slice where "was it announced at all
+	// this pass" matters (e.g. an unchanged value shouldn't re-announce).
+	bgpASNCalls []uint32
+
+	// netIDs/peersByNet/selfByNet let a test control exactly which
+	// networks/peers this backend reports, instead of the fixed
+	// single-network single-peer defaults every other test relies on —
+	// autobgp_test.go needs to simulate several networks and peers coming
+	// and going. Nil means "use the default", so no existing test needs to
+	// change.
+	netIDs     []uint64
+	peersByNet map[uint64][]mesh.PeerInfo
+	selfByNet  map[uint64]mesh.PeerInfo
 }
 
 type bgpRoutesCall struct {
@@ -102,7 +117,12 @@ type bgpRoutesCall struct {
 	metric    int
 }
 
-func (s *stubBackend) NetworkIDs() []uint64 { return []uint64{0x1234} }
+func (s *stubBackend) NetworkIDs() []uint64 {
+	if s.netIDs != nil {
+		return s.netIDs
+	}
+	return []uint64{0x1234}
+}
 func (s *stubBackend) Interfaces() []mesh.IfaceInfo {
 	return []mesh.IfaceInfo{{NetworkID: 0x1234, Name: "lan", Iface: "mesh0"}}
 }
@@ -116,7 +136,10 @@ func (s *stubBackend) NATStatusStrings() (string, string) {
 	}
 	return class, public
 }
-func (s *stubBackend) ListPeers(uint64) []mesh.PeerInfo {
+func (s *stubBackend) ListPeers(id uint64) []mesh.PeerInfo {
+	if s.peersByNet != nil {
+		return s.peersByNet[id]
+	}
 	return []mesh.PeerInfo{{NodeID: "peerX", Hostname: "hostx", Overlay4: "10.0.0.9"}}
 }
 func (s *stubBackend) ListBans(uint64) []mesh.BanInfo { return nil }
@@ -127,6 +150,9 @@ func (s *stubBackend) Routes(uint64) []mesh.RouteInfo { return nil }
 func (s *stubBackend) SetBGPRoutes(id uint64, routes []netip.Prefix, metric int) bool {
 	s.bgpRoutesCalls = append(s.bgpRoutesCalls, bgpRoutesCall{networkID: id, routes: routes, metric: metric})
 	return true
+}
+func (s *stubBackend) SetBGPASN(asn uint32) {
+	s.bgpASNCalls = append(s.bgpASNCalls, asn)
 }
 func (s *stubBackend) BanNode(_ uint64, t, _ string) error {
 	s.banned = append(s.banned, t)
@@ -198,7 +224,11 @@ func (s *stubBackend) IsManagerAddr(ip netip.Addr) bool {
 func (s *stubBackend) Hostname() string        { return s.hostname }
 func (s *stubBackend) SelfID() string          { return "self-node-id" }
 func (s *stubBackend) SelfOverlay() netip.Addr { return netip.MustParseAddr("10.99.0.1") }
-func (s *stubBackend) SelfPeer(uint64) (mesh.PeerInfo, bool) {
+func (s *stubBackend) SelfPeer(id uint64) (mesh.PeerInfo, bool) {
+	if s.selfByNet != nil {
+		pi, ok := s.selfByNet[id]
+		return pi, ok
+	}
 	return mesh.PeerInfo{NodeID: "self-node-id", Hostname: s.hostname, Overlay4: "10.99.0.1"}, true
 }
 func (s *stubBackend) OverlayContains(ip netip.Addr) bool {
