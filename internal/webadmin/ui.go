@@ -6184,10 +6184,10 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes){
     return inp;
   };
 
-  const autoCb = rowTog('AutoBGP', 'Automatically number and peer with every mesh neighbor, no manual AS/router-id/neighbor bookkeeping needed: derives this node\u2019s AS number (4-byte private range) and router-id from its first tunnel IPv4 address if either is still blank below, turns on Enable BGP, and keeps one Neighbor per currently-connected mesh peer in sync \u2014 by their tunnel IPv4 and/or IPv6 address (v4-only, v6-only, and dual-stack peers all get one), a matching predictable remote AS, MD5 password \u2018autobgp\u2019, BFD on \u2014 appearing within moments of a peer connecting and disappearing within moments of it disconnecting. Never touches a Neighbor it didn\u2019t create (anything without that exact password is left alone).', !!b.auto_bgp);
   const enableCb = rowTog('Enable BGP', 'Render and run a <code>router bgp</code> speaker on this host. Off leaves no BGP block in FRR\u2019s config and switches bgpd off.', !!b.enabled);
-  const asnInp = rowInput('Local AS number', 'This node\u2019s autonomous-system number, e.g. 65001. Required to enable BGP \u2014 unless AutoBGP is on above and this is left blank, in which case it derives and fills one in.', b.asn||'', 'e.g. 65001', 180);
-  const ridInp = rowInput('Router-id', 'BGP router-id (an IPv4-style id), e.g. 10.0.0.1. Optional \u2014 FRR picks one if left blank, or AutoBGP derives one if it\u2019s on above.', b.router_id||'', 'e.g. 10.0.0.1', 180);
+  const asnInp = rowInput('Local AS number', 'This node\u2019s autonomous-system number, e.g. 65001. Required to enable BGP \u2014 unless AutoBGP is on below and this is left blank, in which case it derives and fills one in.', b.asn||'', 'e.g. 65001', 180);
+  const ridInp = rowInput('Router-id', 'BGP router-id (an IPv4-style id), e.g. 10.0.0.1. Optional \u2014 FRR picks one if left blank, or AutoBGP derives one if it\u2019s on below.', b.router_id||'', 'e.g. 10.0.0.1', 180);
+  const autoCb = rowTog('AutoBGP', 'Auto-fills the AS number and router-id above from this node\u2019s tunnel IPv4 if blank, enables BGP, and keeps one Neighbor per connected mesh peer in sync (remote AS, password \u2018autobgp\u2019, BFD on) as peers come and go. Never touches a Neighbor it didn\u2019t create.', !!b.auto_bgp);
   // isNewCfg still drives the session-timer defaults below; BFD itself has no
   // global toggle (see nbrAddRow's own default for how a brand-new neighbor
   // row gets BFD on).

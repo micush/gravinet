@@ -37,6 +37,21 @@ assuming it didn't happen.
 
 ---
 
+## v526 — 2026-07-19
+
+**Moved the AutoBGP toggle to after Router-id on the Traffic \u2192 BGP
+editor (was above Enable BGP), and shortened its description.**
+
+Order is now Enable BGP, Local AS number, Router-id, AutoBGP — the
+fields AutoBGP can fill in appear first, with AutoBGP itself last as the
+"or let this do it" option, rather than leading with it above fields it
+refers to as "below". The Local AS number/Router-id descriptions'
+own AutoBGP references flip from "above" to "below" to match. No
+behavior change — same field, same `auto_bgp` payload key, just
+repositioned and reworded (`ui.go`).
+
+---
+
 ## v525 — 2026-07-19
 
 **Redesigned AutoBGP's remote AS: gossiped, not derived — and routine
