@@ -37,6 +37,30 @@ assuming it didn't happen.
 
 ---
 
+## v527 — 2026-07-19
+
+**Fixed: turning on AutoBGP (Traffic \u2192 BGP), then navigating away
+without touching anything else, silently lost the change — it showed
+off again on return.**
+
+The BGP editor autosaves on change rather than needing an explicit Save
+click, but that only works for a checkbox whose `.onchange` is actually
+wired to trigger it. AutoBGP's was never wired at all — added in v524
+with its `.checked` read into the save payload (`doSave`) like every
+other toggle, but without the matching `autoCb.onchange = () =>
+scheduleSave(true)` line the others have (`ui.go`). So toggling it alone
+saved nothing; it only ever got persisted as an incidental side effect
+of some *other* field on the page also changing in the same sitting.
+Same bug, same fix, on "Redistribute mesh routes" (`rmCb`) — present
+since that toggle was added, unrelated to AutoBGP, just never
+noticed until this prompted a look at every toggle on the page.
+
+Added `TestBGPEditorTogglesSaveOnChange` (`ui_dom_helper_test.go`) so a
+future toggle added to this editor without its `.onchange` wired up
+fails a test instead of shipping silently, the same way this one did.
+
+---
+
 ## v526 — 2026-07-19
 
 **Moved the AutoBGP toggle to after Router-id on the Traffic \u2192 BGP

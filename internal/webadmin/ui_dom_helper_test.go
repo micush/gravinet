@@ -159,7 +159,23 @@ func TestSubnetChangeWarnsOfSilentPeerMismatch(t *testing.T) {
 	}
 }
 
-// TestRedistributeFromBGPSubcard guards the Mesh Routes page's
+// TestBGPEditorTogglesSaveOnChange guards against a checkbox that's read
+// into doSave's payload but never actually wired to *trigger* a save: it
+// would then only ever get saved as a side effect of some other field also
+// changing in the same sitting, so toggling it alone — then navigating
+// away, which is exactly how this shipped unnoticed for AutoBGP — silently
+// loses the change. Every rowTog(...) checkbox on the BGP editor whose
+// .checked is read into the payload must have a matching .onchange
+// assignment.
+func TestBGPEditorTogglesSaveOnChange(t *testing.T) {
+	for _, cb := range []string{"enableCb", "rcCb", "rsCb", "rmCb", "autoCb"} {
+		if !strings.Contains(indexHTML, cb+".onchange") {
+			t.Errorf("%s has no .onchange handler — toggling it alone (touching nothing else) would never trigger a save", cb)
+		}
+	}
+}
+
+
 // "Redistribute from BGP" subcard (config.Network.RedistributeBGP/
 // RedistributeBGPMetric — BGP-into-mesh redistribution, the reverse of BGP's
 // own "Redistribute mesh routes" toggle): that it exists, that its state

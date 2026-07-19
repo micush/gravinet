@@ -6483,6 +6483,8 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes){
   enableCb.onchange = () => scheduleSave(true);
   rcCb.onchange = () => scheduleSave(true);
   rsCb.onchange = () => scheduleSave(true);
+  rmCb.onchange = () => scheduleSave(true);
+  autoCb.onchange = () => scheduleSave(true);
   [asnInp, ridInp, kaInp, holdInp].forEach(inp => { inp.oninput = () => scheduleSave(false); });
 
   // Attach the finished editor, replacing the "loading…" placeholder. This is
