@@ -37,6 +37,33 @@ assuming it didn't happen.
 
 ---
 
+## v530 — 2026-07-19
+
+**Rebuilt the redistribute connected/static/mesh pickers (v529): a
+checkbox per available route didn't scale — a host with thousands of
+connected/static routes meant thousands of DOM nodes on page load — and
+didn't look or behave like anything else in the app.**
+
+Replaced with a search-to-add widget built on the same `.ss-input`/
+`.ss-list`/`.ss-opt` component `buildListPicker` (node pickers) and
+`fwCatalogCombobox` (firewall rule object/service fields) already use —
+one dropdown look across the app instead of a fourth one-off. Type to
+narrow; matches are capped at 200 rendered at a time (`fwCatalogCombobox`'s
+own precedent) regardless of how many thousands are available, so the
+DOM cost is bounded by what's actually selected — usually a handful —
+not by what's offered. Selected routes render as their own compact,
+removable chip list below the search box; a chip for a route that's no
+longer actually available (gone, or un-advertised) stays visible,
+marked, rather than disappearing along with the ability to deliberately
+remove it — same non-auto-pruning behavior as before, just presented as
+a chip instead of a dimmed checkbox row.
+
+`rowRouteList` (`ui.go`) is a full rewrite; `TestBGPEditorTogglesSaveOnChange`
+updated to check the new add/remove save wiring instead of the retired
+per-checkbox one.
+
+---
+
 ## v529 — 2026-07-19
 
 **Redistribute connected/static/mesh routes (Traffic → BGP) are now

@@ -176,11 +176,15 @@ func TestBGPEditorTogglesSaveOnChange(t *testing.T) {
 			t.Errorf("%s has no .onchange handler — toggling it alone (touching nothing else) would never trigger a save", cb)
 		}
 	}
-	// rowRouteList's per-item checkbox must trigger a save itself — the
-	// exact class of bug this test exists for, just inside a picker with
-	// many checkboxes instead of a single toggle with one.
-	if !strings.Contains(indexHTML, "selSet.delete(cidr); scheduleSave(true);") {
-		t.Error("rowRouteList's checkbox has no scheduleSave call — toggling a route in the redistribute connected/static/mesh pickers alone would never trigger a save")
+	// rowRouteList's add (picking a search result) and remove (the chip's ×
+	// button) must each trigger a save themselves — the exact class of bug
+	// this test exists for, just inside a search-to-add picker instead of a
+	// single toggle.
+	if !strings.Contains(indexHTML, "selSet.add(cidr); searchInp.value = ''; drawOpts(); drawChips(); scheduleSave(true);") {
+		t.Error("rowRouteList's add-a-route action has no scheduleSave call — adding a route in the redistribute connected/static/mesh pickers alone would never trigger a save")
+	}
+	if !strings.Contains(indexHTML, "selSet.delete(cidr); drawChips(); drawOpts(); scheduleSave(true);") {
+		t.Error("rowRouteList's remove-a-route action has no scheduleSave call — removing a route in the redistribute connected/static/mesh pickers alone would never trigger a save")
 	}
 }
 

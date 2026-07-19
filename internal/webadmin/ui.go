@@ -85,18 +85,26 @@ const indexHTML = `<!doctype html>
   .rail-divider { height:1px; background:var(--line); margin:0 0 8px; }
   .rail-logout:hover { color:var(--danger); background:var(--hover); }
   .settings-row { display:flex; align-items:center; justify-content:space-between; padding:12px 0; border-bottom:1px solid var(--line); }
-  .settings-row:has(.route-pick) { align-items:flex-start; }
+  .settings-row:has(.route-picker) { align-items:flex-start; }
   .settings-row:last-child { border-bottom:0; }
   .local-only-disabled { opacity:.5; }
   .settings-label { font-size:14px; }
   .settings-desc { font-size:12px; color:var(--mut); margin-top:2px; }
-  /* route-pick: the checklist behind Redistribute connected/static/mesh
-     routes (rowRouteList) — a bordered, scrollable box of checkboxes
-     replacing what used to be a single on/off switch, so it needs its own
-     width/height bounds rather than the switch's fixed 40x22px. */
-  .route-pick { max-width:420px; max-height:160px; overflow-y:auto; border:1px solid var(--line); border-radius:6px; padding:6px 10px; flex-shrink:0; }
-  .route-pick-item { display:block; font-size:13px; padding:2px 0; cursor:pointer; white-space:nowrap; }
-  .route-pick-item input { margin-right:6px; }
+  /* route-picker: the search-to-add widget behind Redistribute
+     connected/static/mesh routes (rowRouteList) — a .search-select reusing
+     the same .ss-input/.ss-list/.ss-opt styling every other picker in this
+     file already uses, plus its own chip list for what's currently
+     selected, stacked below rather than beside it (settings-row:has above),
+     since the chip list's height is unbounded in principle (as many routes
+     as are selected) the way a single switch or text input never was. */
+  .route-picker { display:flex; flex-direction:column; gap:8px; max-width:420px; flex-shrink:0; }
+  .route-search { width:280px; }
+  .route-search .ss-input { width:100%; }
+  .route-chips { display:flex; flex-wrap:wrap; gap:6px; }
+  .route-chip { display:inline-flex; align-items:center; gap:6px; background:var(--panel); border:1px solid var(--line); border-radius:999px; padding:3px 6px 3px 10px; font-size:12px; }
+  .route-chip.stale { opacity:.6; border-style:dashed; }
+  .route-chip-x { background:transparent; border:0; color:var(--mut); font-size:14px; line-height:1; cursor:pointer; padding:2px 4px; border-radius:999px; }
+  .route-chip-x:hover { color:var(--danger); background:var(--hover); }
   .sw { position:relative; display:inline-block; width:40px; height:22px; flex-shrink:0; }
   .sw input { opacity:0; width:0; height:0; }
   .sw-slider { position:absolute; cursor:pointer; inset:0; background:var(--line); border-radius:22px; transition:.2s; }
@@ -6210,54 +6218,94 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
     row.appendChild(inp); card.appendChild(row);
     return inp;
   };
-  // rowRouteList replaces a blanket on/off toggle with a checklist of
-  // specific CIDRs to select — the picker behind Redistribute
-  // connected/static/mesh routes below. available is what's currently
-  // offered (a live FRR/zebra query for connected/static, the Mesh Routes
-  // page's own Advertise list for mesh); selected is what's already chosen
-  // (loaded from config). A selected CIDR no longer in available (a
-  // connected/static route that's gone, or a mesh route since deleted or
-  // un-advertised) still shows, dimmed and marked, so it stays visible and
-  // un-selectable rather than silently vanishing along with the ability to
-  // deliberately drop it — see config.BGPConfig's own doc comment for why
-  // it isn't auto-pruned. Every checkbox saves immediately on change, same
-  // as every other toggle on this page. setAvailable lets the caller refresh
-  // what's offered later without losing the current selection or rebuilding
-  // the row — used once /api/bgp/redistribute-options' live query (which,
-  // unlike the rest of this editor, has to touch FRR and so can't block the
-  // page's first paint) comes back.
+  // rowRouteList replaces a blanket on/off toggle with a search-to-add
+  // picker — the widget behind Redistribute connected/static/mesh routes
+  // below. Reuses the .ss-input/.ss-list/.ss-opt/.ss-empty styling
+  // buildListPicker and fwCatalogCombobox already established, rather than
+  // a fourth dropdown look — narrowed by typing exactly like those, and,
+  // like fwCatalogCombobox, caps rendered matches at 200 so a host with
+  // thousands of routes never means thousands of DOM nodes; keep typing to
+  // narrow further. available is what's currently offered (a live
+  // FRR/zebra query for connected/static, the Mesh Routes page's own
+  // Advertise list for mesh); selected is what's already chosen (loaded
+  // from config), rendered as its own compact, removable-chip list below
+  // the search box — bounded by how many routes are actually selected, not
+  // by how many are available, which is the number that actually gets
+  // large. A selected CIDR no longer in available (a connected/static
+  // route that's gone, or a mesh route since deleted or un-advertised)
+  // still shows as a chip, marked, so it stays visible and removable
+  // rather than silently vanishing along with the ability to deliberately
+  // drop it — see config.BGPConfig's own doc comment for why it isn't
+  // auto-pruned. Every add/remove saves immediately, same as every other
+  // toggle on this page. setAvailable lets the caller refresh what's
+  // offered later without losing the current selection or rebuilding the
+  // row — used once /api/bgp/redistribute-options' live query (which,
+  // unlike the rest of this editor, has to touch FRR and so can't block
+  // the page's first paint) comes back.
   const rowRouteList = (labelText, desc, available, selected) => {
     const row = $('<div class="settings-row"></div>');
     row.appendChild($('<div><div class="settings-label">'+esc(labelText)+'</div><div class="settings-desc">'+desc+'</div></div>'));
-    const box = $('<div class="route-pick"></div>');
+    const wrap = $('<div class="route-picker"></div>');
+    const searchWrap = $('<div class="search-select route-search"></div>');
+    const searchInp = $('<input class="ss-input" type="text" autocomplete="off" spellcheck="false" placeholder="search to add\u2026">');
+    const optList = $('<div class="ss-list" role="listbox"></div>');
+    searchWrap.appendChild(searchInp); searchWrap.appendChild(optList);
+    const chipBox = $('<div class="route-chips"></div>');
+    wrap.appendChild(searchWrap); wrap.appendChild(chipBox);
+
+    let items; // undefined until setAvailable/available first arrives; [] is a real "nothing available"
     const selSet = new Set(selected||[]);
-    function draw(items){
-      box.innerHTML = '';
-      if (items === undefined){
-        box.appendChild($('<div class="hint" style="padding:2px 0">loading available routes\u2026</div>'));
+
+    const drawChips = () => {
+      chipBox.innerHTML = '';
+      if (!selSet.size){
+        chipBox.appendChild($('<div class="hint" style="padding:2px 0">none selected</div>'));
         return;
       }
-      const all = items.slice();
-      selSet.forEach(cidr => { if (all.indexOf(cidr)===-1) all.push(cidr); });
-      if (!all.length){
-        box.appendChild($('<div class="hint" style="padding:2px 0">none available</div>'));
-        return;
-      }
-      all.forEach(cidr => {
-        const stale = items.indexOf(cidr)===-1;
-        const label = $('<label class="route-pick-item"></label>');
-        if (stale) label.title = 'not currently present';
-        const cb = $('<input type="checkbox">');
-        cb.checked = selSet.has(cidr);
-        cb.onchange = () => { if (cb.checked) selSet.add(cidr); else selSet.delete(cidr); scheduleSave(true); };
-        label.appendChild(cb);
-        label.appendChild(document.createTextNode(' ' + cidr + (stale ? ' (not currently present)' : '')));
-        box.appendChild(label);
+      Array.from(selSet).sort().forEach(cidr => {
+        const stale = items !== undefined && items.indexOf(cidr) === -1;
+        const chip = $('<span class="route-chip'+(stale ? ' stale' : '')+'"></span>');
+        if (stale) chip.title = 'not currently present';
+        chip.appendChild(document.createTextNode(cidr));
+        const x = $('<button type="button" class="route-chip-x" aria-label="remove '+esc(cidr)+'">\u00d7</button>');
+        x.onclick = () => { selSet.delete(cidr); drawChips(); drawOpts(); scheduleSave(true); };
+        chip.appendChild(x);
+        chipBox.appendChild(chip);
       });
-    }
-    draw(available);
-    row.appendChild(box); card.appendChild(row);
-    return { get: () => Array.from(selSet), setAvailable: draw };
+    };
+    const drawOpts = () => {
+      optList.innerHTML = '';
+      if (items === undefined){
+        optList.appendChild($('<div class="ss-empty">loading available routes\u2026</div>'));
+        return;
+      }
+      const q = searchInp.value.trim().toLowerCase();
+      const pool = items.filter(cidr => !selSet.has(cidr) && (!q || cidr.toLowerCase().indexOf(q) >= 0));
+      if (!pool.length){
+        optList.appendChild($('<div class="ss-empty">'+(items.length ? 'no matches' : 'none available') +'</div>'));
+        return;
+      }
+      pool.slice(0, 200).forEach(cidr => {
+        const o = $('<div class="ss-opt" role="option"></div>');
+        o.textContent = cidr;
+        // mousedown, not click: fires before the blur that closes the list
+        // would otherwise swallow it (same reason as the other .ss-* pickers).
+        o.onmousedown = (e) => { e.preventDefault(); selSet.add(cidr); searchInp.value = ''; drawOpts(); drawChips(); scheduleSave(true); };
+        optList.appendChild(o);
+      });
+      if (pool.length > 200) optList.appendChild($('<div class="ss-empty">+'+(pool.length-200)+' more \u2014 keep typing to narrow</div>'));
+    };
+    searchInp.oninput = () => { drawOpts(); optList.classList.add('show'); };
+    searchInp.onfocus = () => { drawOpts(); optList.classList.add('show'); };
+    searchInp.onblur = () => setTimeout(() => optList.classList.remove('show'), 150);
+
+    items = available;
+    drawOpts(); drawChips();
+    row.appendChild(wrap); card.appendChild(row);
+    return {
+      get: () => Array.from(selSet),
+      setAvailable: (list) => { items = list; drawOpts(); drawChips(); },
+    };
   };
 
   const enableCb = rowTog('Enable BGP', 'Render and run a <code>router bgp</code> speaker on this host. Off leaves no BGP block in FRR\u2019s config and switches bgpd off.', !!b.enabled);
