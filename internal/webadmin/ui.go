@@ -85,18 +85,22 @@ const indexHTML = `<!doctype html>
   .rail-divider { height:1px; background:var(--line); margin:0 0 8px; }
   .rail-logout:hover { color:var(--danger); background:var(--hover); }
   .settings-row { display:flex; align-items:center; justify-content:space-between; padding:12px 0; border-bottom:1px solid var(--line); }
-  .settings-row:has(.route-picker) { align-items:flex-start; }
+  .settings-row:has(.route-picker) { flex-direction:column; align-items:stretch; justify-content:flex-start; gap:10px; }
   .settings-row:last-child { border-bottom:0; }
   .local-only-disabled { opacity:.5; }
   .settings-label { font-size:14px; }
   .settings-desc { font-size:12px; color:var(--mut); margin-top:2px; }
-  /* route-picker: the search-to-add widget behind Redistribute
-     connected/static/mesh routes (rowRouteList) — a .search-select reusing
-     the same .ss-input/.ss-list/.ss-opt styling every other picker in this
+  /* route-picker: the search-to-add widget behind every redistribute
+     picker (Redistribute connected/static/mesh routes on the BGP editor,
+     Redistribute from BGP on Mesh Routes) — a .search-select reusing the
+     same .ss-input/.ss-list/.ss-opt styling every other picker in this
      file already uses, plus its own chip list for what's currently
-     selected, stacked below rather than beside it (settings-row:has above),
-     since the chip list's height is unbounded in principle (as many routes
-     as are selected) the way a single switch or text input never was. */
+     selected below the search box. The row it sits in stacks vertically
+     (settings-row:has above) — label and description on top, full width,
+     picker underneath — rather than beside them the way a switch or short
+     text input sits, since the chip list's width and height are both
+     unbounded in principle (as many routes, and as long each one's CIDR
+     text, as are selected) in a way neither of those ever was. */
   .route-picker { display:flex; flex-direction:column; gap:8px; max-width:420px; flex-shrink:0; }
   .route-search { width:280px; }
   .route-search .ss-input { width:100%; }

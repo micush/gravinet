@@ -37,6 +37,25 @@ assuming it didn't happen.
 
 ---
 
+## v532 — 2026-07-19
+
+**Moved every redistribute picker (Redistribute connected/static/mesh
+routes on the BGP editor, Redistribute from BGP on Mesh Routes) below
+its label and description instead of beside it.**
+
+`settings-row` normally lays its label/description and its control out
+side by side (a switch, a short text input), which is fine when the
+control is a fixed, small size — a `.route-picker`'s chip list isn't:
+its width and height are both unbounded in principle, as many routes
+(and as long each CIDR) as are selected. `settings-row:has(.route-picker)`
+now stacks that row vertically instead — full-width label and
+description on top, the picker underneath — rather than fighting it for
+horizontal room next to a text column. One CSS rule, so all four
+picker instances (they share `buildRouteChipPicker`/`.route-picker`
+from v530/v531) picked it up at once.
+
+---
+
 ## v531 — 2026-07-19
 
 **Redistribute from BGP (Mesh Routes' reverse-direction subcard) is now a
