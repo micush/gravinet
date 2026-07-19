@@ -76,20 +76,21 @@ func TestRouteAppliesLive(t *testing.T) {
 }
 
 // TestRouteEditReconcilesMeshRedistribute is the end-to-end path for
-// reconcileMeshRedistribute: with BGP enabled and RedistributeMesh on,
-// adding/removing a route through /api/route must still succeed (and still
-// report restart:false — the mesh-redistribute reconcile runs after the HTTP
-// response is already decided, same as applyBGP's own background service
-// call) even though FRR/vtysh isn't installed in this test environment. This
-// mainly guards against the reconcile hook panicking or blocking the route
-// edit itself; frr.go's own tests cover what actually gets rendered.
+// reconcileMeshRedistribute: with BGP enabled and RedistributeMeshRoutes
+// selecting something, adding/removing a route through /api/route must
+// still succeed (and still report restart:false — the mesh-redistribute
+// reconcile runs after the HTTP response is already decided, same as
+// applyBGP's own background service call) even though FRR/vtysh isn't
+// installed in this test environment. This mainly guards against the
+// reconcile hook panicking or blocking the route edit itself; frr.go's own
+// tests cover what actually gets rendered.
 func TestRouteEditReconcilesMeshRedistribute(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := dir + "/config.json"
 	cfg := &config.Config{
 		PrimaryPort: 51820, EnableIPv4: true,
 		Networks: []config.Network{{ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24"}},
-		BGP:      config.BGPConfig{Enabled: true, ASN: 65001, RedistributeMesh: true},
+		BGP:      config.BGPConfig{Enabled: true, ASN: 65001, RedistributeMeshRoutes: []string{"192.168.50.0/24"}},
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("config invalid: %v", err)

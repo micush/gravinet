@@ -37,9 +37,88 @@ assuming it didn't happen.
 
 ---
 
+## v529 — 2026-07-19
+
+**Redistribute connected/static/mesh routes (Traffic → BGP) are now
+pickers, not blanket on/off toggles — choose exactly which routes get
+redistributed into BGP instead of all-or-nothing.**
+
+`BGPConfig.RedistributeConnected`/`RedistributeStatic`/`RedistributeMesh`
+(three booleans) are replaced by `RedistributeConnectedRoutes`/
+`RedistributeStaticRoutes`/`RedistributeMeshRoutes` — three CIDR lists;
+empty means nothing redistributed from that source, non-empty is exactly
+which routes to carry.
+
+- **Connected/static**: FRR's own `redistribute connected`/`redistribute
+  static` have no keyword-only "just these prefixes" mode, so selecting a
+  subset needs a route-map matched against a prefix-list — the only way
+  FRR itself supports this. `renderFRR` now emits `ip prefix-list`/`ipv6
+  prefix-list` + a route-map per selection (`internal/webadmin/frr.go`),
+  referenced from whichever address-family block(s) actually have a
+  selection in that family.
+- **Mesh routes**: simpler — still just filtered `network` statements
+  (never FRR's `redistribute kernel`, which would sweep in every other
+  kernel-table route on the box, not just the mesh's own), now
+  intersected against the selection rather than emitting all of them.
+- New `/api/bgp/redistribute-options` endpoint + `showIPRouteConnected`/
+  `showIPRouteStatic` (`show ip/ipv6 route connected|static json` via
+  vtysh) enumerate this host's actual current connected/static routes for
+  the picker to offer — its own endpoint, not folded into the existing
+  config GET, since that GET is deliberately FRR-free so the editor
+  always loads instantly; this one unavoidably touches FRR, so the UI
+  fetches it in the background without blocking the page's first paint,
+  same treatment `/api/bgp/import` already gets.
+- A selected CIDR no longer actually available (a connected/static route
+  that's gone, or a mesh route since deleted/un-advertised) stays visible
+  in its picker, dimmed and marked "not currently present", instead of
+  silently disappearing along with the ability to deliberately un-select
+  it — not auto-pruned from the stored selection either, so it comes
+  back correctly if the same route reappears later.
+- The restart-vs-reload classifiers (`bgpConfigRemovesSomething`,
+  `meshRedistributeRemovesSomething`) now also catch a route dropping out
+  of either selection, forcing the same real restart a removed neighbor
+  or network already required — neither a reload nor `vtysh -b` can
+  retract a prefix-list entry that's no longer in the file.
+- A bare external `redistribute connected`/`redistribute static` (no
+  route-map) has no specific CIDRs to import into the new selective
+  fields, so — like mesh routes already didn't — it simply doesn't
+  round-trip through FRR-config import; left empty, not guessed at.
+
+---
+
+## v528 — 2026-07-19
+
+**Fixed: a v6 mesh peer's neighbor, when added via AutoBGP's incremental
+vtysh path (the common case — any peer added after the first
+activation), was left active in `ipv4 unicast` as well as `ipv6
+unicast`, instead of only the latter.**
+
+FRR defaults every neighbor active in `ipv4 unicast` regardless of its
+actual address family; a v6 peer needs an explicit `no neighbor <peer>
+activate` under `ipv4 unicast` to undo that, alongside its `neighbor
+<peer> activate` under `ipv6 unicast`. `renderFRR`'s full config write
+already did this correctly; `autoBGPAddNeighborCmds`
+(`internal/webadmin/autobgp.go`) — the live `vtysh` equivalent used for
+routine peer churn — only issued the `ipv6 unicast` half, so the live
+daemon and the persisted `frr.conf` disagreed about a v6 neighbor's
+activation until the next full restart/reload happened to resync them.
+Added `TestAutoBGPAddNeighborCmdsMatchesRenderFRRActivation` to keep the
+two in lockstep going forward.
+
+Found while looking into a report of AutoBGP producing a populated
+neighbor list with nothing established — this wasn't sufficient on its
+own to explain that (address-family activation affects route exchange
+after a session comes up, not the session establishing in the first
+place), so if neighbors still aren't reaching Established after this,
+the next things worth checking are whether `bgpd` is actually running,
+what state `show bgp summary` reports for the stuck neighbors, and
+whether TCP port 179 reaches the peer's tunnel address at all.
+
+---
+
 ## v527 — 2026-07-19
 
-**Fixed: turning on AutoBGP (Traffic \u2192 BGP), then navigating away
+**Fixed: turning on AutoBGP (Traffic → BGP), then navigating away
 without touching anything else, silently lost the change — it showed
 off again on return.**
 
@@ -63,7 +142,7 @@ fails a test instead of shipping silently, the same way this one did.
 
 ## v526 — 2026-07-19
 
-**Moved the AutoBGP toggle to after Router-id on the Traffic \u2192 BGP
+**Moved the AutoBGP toggle to after Router-id on the Traffic → BGP
 editor (was above Enable BGP), and shortened its description.**
 
 Order is now Enable BGP, Local AS number, Router-id, AutoBGP — the

@@ -378,11 +378,18 @@ func autoBGPAddNeighborCmds(asn uint32, n config.BGPNeighbor) []string {
 	if n.Shutdown {
 		cmds = append(cmds, fmt.Sprintf("neighbor %s shutdown", n.Peer))
 	}
-	af := "ipv4 unicast"
 	if isIPv6Peer(n.Peer) {
-		af = "ipv6 unicast"
+		// FRR defaults every neighbor active in ipv4 unicast, v6 peers
+		// included; explicitly deactivate a v6 peer there so it isn't left
+		// running an IPv4 unicast exchange over its v6 session, then
+		// activate it in ipv6 unicast instead — exactly what renderFRR does
+		// for a full config write (frr.go), just issued as two live
+		// address-family blocks instead of one written to file.
+		cmds = append(cmds, "address-family ipv4 unicast", fmt.Sprintf("no neighbor %s activate", n.Peer), "exit-address-family")
+		cmds = append(cmds, "address-family ipv6 unicast", fmt.Sprintf("neighbor %s activate", n.Peer), "exit-address-family")
+	} else {
+		cmds = append(cmds, "address-family ipv4 unicast", fmt.Sprintf("neighbor %s activate", n.Peer), "exit-address-family")
 	}
-	cmds = append(cmds, fmt.Sprintf("address-family %s", af), fmt.Sprintf("neighbor %s activate", n.Peer), "exit-address-family")
 	return cmds
 }
 

@@ -166,15 +166,23 @@ func TestSubnetChangeWarnsOfSilentPeerMismatch(t *testing.T) {
 // away, which is exactly how this shipped unnoticed for AutoBGP — silently
 // loses the change. Every rowTog(...) checkbox on the BGP editor whose
 // .checked is read into the payload must have a matching .onchange
-// assignment.
+// assignment. Redistribute connected/static/mesh routes moved from a single
+// rowTog checkbox to a rowRouteList picker (many checkboxes, one per CIDR)
+// — checked separately below, since a single "rcList.onchange" wouldn't
+// exist for it the same way.
 func TestBGPEditorTogglesSaveOnChange(t *testing.T) {
-	for _, cb := range []string{"enableCb", "rcCb", "rsCb", "rmCb", "autoCb"} {
+	for _, cb := range []string{"enableCb", "autoCb"} {
 		if !strings.Contains(indexHTML, cb+".onchange") {
 			t.Errorf("%s has no .onchange handler — toggling it alone (touching nothing else) would never trigger a save", cb)
 		}
 	}
+	// rowRouteList's per-item checkbox must trigger a save itself — the
+	// exact class of bug this test exists for, just inside a picker with
+	// many checkboxes instead of a single toggle with one.
+	if !strings.Contains(indexHTML, "selSet.delete(cidr); scheduleSave(true);") {
+		t.Error("rowRouteList's checkbox has no scheduleSave call — toggling a route in the redistribute connected/static/mesh pickers alone would never trigger a save")
+	}
 }
-
 
 // "Redistribute from BGP" subcard (config.Network.RedistributeBGP/
 // RedistributeBGPMetric — BGP-into-mesh redistribution, the reverse of BGP's

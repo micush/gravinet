@@ -135,11 +135,40 @@ func filterInline(s string, max int, dropAllWhitespace bool) string {
 	return b.String()
 }
 
+// selectedMeshRoutes intersects selected (BGPConfig.RedistributeMeshRoutes)
+// against available (meshRouteCIDRs' current output), preserving available's
+// order — a CIDR that's selected but no longer actually advertised on the
+// Mesh Routes page contributes nothing, without needing to be explicitly
+// un-selected first. Shared by effectiveBGPNetworks (what to render right
+// now) and meshRedistributeRemovesSomething (whether a route that was being
+// redistributed a moment ago has since dropped out), so the two can never
+// disagree about what "currently redistributed from the mesh" means.
+func selectedMeshRoutes(selected, available []string) []string {
+	if len(selected) == 0 {
+		return nil
+	}
+	want := make(map[string]bool, len(selected))
+	for _, s := range selected {
+		want[s] = true
+	}
+	var out []string
+	for _, a := range available {
+		if want[a] {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 // effectiveBGPNetworks returns every prefix renderFRR will emit as a
-// `network` statement: the manually-configured Networks list plus, when
-// RedistributeMesh is on, meshRoutes — the CIDRs currently on the Mesh Routes
-// page (see meshRouteCIDRs in bgp.go), deduplicated. This is the single place
-// that combines the two lists, so renderFRR (what's actually emitted) and
+// `network` statement: the manually-configured Networks list plus whichever
+// of b.RedistributeMeshRoutes are still actually present in meshRoutes — the
+// CIDRs currently on the Mesh Routes page (see meshRouteCIDRs in bgp.go) —
+// deduplicated. Intersecting rather than trusting RedistributeMeshRoutes
+// outright means a route that's since stopped being advertised there
+// (deleted, disabled, its network disabled) drops out here too without
+// needing to be un-selected first. This is the single place that combines
+// the two lists, so renderFRR (what's actually emitted) and
 // meshRedistributeRemovesSomething (whether losing one requires a restart —
 // see its doc comment) can never disagree about what the combined set is.
 func effectiveBGPNetworks(b config.BGPConfig, meshRoutes []string) []string {
@@ -151,15 +180,72 @@ func effectiveBGPNetworks(b config.BGPConfig, meshRoutes []string) []string {
 			out = append(out, n)
 		}
 	}
-	if b.RedistributeMesh {
-		for _, n := range meshRoutes {
-			if !seen[n] {
-				seen[n] = true
-				out = append(out, n)
-			}
+	for _, n := range selectedMeshRoutes(b.RedistributeMeshRoutes, meshRoutes) {
+		if !seen[n] {
+			seen[n] = true
+			out = append(out, n)
 		}
 	}
 	return out
+}
+
+// renderRedistributeRouteMap emits the top-level `ip prefix-list`/`ipv6
+// prefix-list`/`route-map` stanzas FRR needs to redistribute connected/static
+// routes selectively: FRR's own `redistribute connected`/`redistribute
+// static` are blanket — every route of that kind on the box, no keyword-only
+// way to filter — so scoping to exactly cidrs needs a route-map matched
+// against a prefix-list built from them.
+//
+// name is the shared route-map/prefix-list name stem (e.g.
+// "GRAVINET-REDIST-CONNECTED"). cidrs is split by address family into two
+// prefix-lists — `ip prefix-list` and `ipv6 prefix-list` are separate FRR
+// keywords, neither accepts a mixed list — combined into one route-map with
+// up to two sequence entries (one `match ip address prefix-list ...`, one
+// `match ipv6 address prefix-list ...`). That's safe to reference from both
+// the ipv4 and ipv6 unicast address-family blocks' redistribute lines
+// unchanged: a v4 route is only ever evaluated against the v4 sequence
+// (nothing about it can match an `ipv6 address` match type), and vice versa,
+// so one route-map serves both families correctly rather than needing two.
+//
+// Returns the rendered stanza (empty if cidrs is empty) and whether each
+// family actually has any entries — hasV4/hasV6 — which the caller uses to
+// decide whether to reference the route-map under that address-family's own
+// redistribute line at all (referencing it when that family has nothing
+// selected would still be correct — an empty prefix-list matches nothing,
+// so redistribution would just be an expensive no-op — but omitting it
+// keeps frr.conf from claiming a redistribution that can never fire).
+func renderRedistributeRouteMap(name string, cidrs []string) (stanza string, hasV4, hasV6 bool) {
+	var v4, v6 []string
+	for _, c := range cidrs {
+		if !safeToken(c) {
+			continue
+		}
+		if isIPv6Network(c) {
+			v6 = append(v6, c)
+		} else {
+			v4 = append(v4, c)
+		}
+	}
+	if len(v4) == 0 && len(v6) == 0 {
+		return "", false, false
+	}
+	var out strings.Builder
+	for i, c := range v4 {
+		fmt.Fprintf(&out, "ip prefix-list %s-V4 seq %d permit %s\n", name, (i+1)*5, c)
+	}
+	for i, c := range v6 {
+		fmt.Fprintf(&out, "ipv6 prefix-list %s-V6 seq %d permit %s\n", name, (i+1)*5, c)
+	}
+	seq := 10
+	if len(v4) > 0 {
+		fmt.Fprintf(&out, "route-map %s permit %d\n match ip address prefix-list %s-V4\n", name, seq, name)
+		seq += 10
+	}
+	if len(v6) > 0 {
+		fmt.Fprintf(&out, "route-map %s permit %d\n match ipv6 address prefix-list %s-V6\n", name, seq, name)
+	}
+	out.WriteString("!\n")
+	return out.String(), len(v4) > 0, len(v6) > 0
 }
 
 // renderFRR renders the integrated frr.conf for this node's BGP config. Pure
@@ -168,9 +254,10 @@ func effectiveBGPNetworks(b config.BGPConfig, meshRoutes []string) []string {
 // gravinet's port covers BGP and its attached BFD, not OSPF/policy routing.
 //
 // meshRoutes is the CIDR list from meshRouteCIDRs (the Mesh Routes page's
-// enabled Advertise entries); it's only actually used when b.RedistributeMesh
-// is on (see effectiveBGPNetworks) — pass nil when the caller doesn't need it
-// (RedistributeMesh off, or the caller is a test not exercising this path).
+// enabled Advertise entries); it's only actually used when
+// b.RedistributeMeshRoutes has anything selected (see effectiveBGPNetworks) —
+// pass nil when the caller doesn't need it (nothing selected, or the caller
+// is a test not exercising this path).
 func renderFRR(b config.BGPConfig, meshRoutes ...string) string {
 	var out strings.Builder
 	out.WriteString("! gravinet-managed FRR configuration. Do not edit by hand.\n")
@@ -180,13 +267,22 @@ func renderFRR(b config.BGPConfig, meshRoutes ...string) string {
 		return out.String()
 	}
 
+	// Top-level stanzas (siblings of `router bgp`, not nested inside it) —
+	// see renderRedistributeRouteMap's own doc comment.
+	connStanza, connV4, connV6 := renderRedistributeRouteMap("GRAVINET-REDIST-CONNECTED", b.RedistributeConnectedRoutes)
+	staticStanza, staticV4, staticV6 := renderRedistributeRouteMap("GRAVINET-REDIST-STATIC", b.RedistributeStaticRoutes)
+	out.WriteString(connStanza)
+	out.WriteString(staticStanza)
+
 	fmt.Fprintf(&out, "router bgp %d\n", b.ASN)
 	// Global session-level knobs gravinet always applies, regardless of what's
 	// configured above: log-neighbor-changes (visibility into session
 	// state transitions in the log), no ebgp-requires-policy (modern FRR
 	// defaults to rejecting eBGP routes with no inbound/outbound route-map
-	// attached; gravinet doesn't manage route-maps, so a neighbor configured
-	// here would otherwise exchange no routes at all), deterministic-med
+	// attached on the *neighbor* itself; gravinet doesn't manage that kind of
+	// policy — only the separate redistribute route-maps above, which are
+	// unrelated — so a neighbor configured here would otherwise exchange no
+	// routes at all), deterministic-med
 	// (consistent best-path selection across peers from the same AS,
 	// independent of the order routes arrived in), bestpath as-path
 	// multipath-relax (allows ECMP across paths with equal-length but
@@ -232,8 +328,8 @@ func renderFRR(b config.BGPConfig, meshRoutes ...string) string {
 			fmt.Fprintf(&out, " neighbor %s shutdown\n", n.Peer)
 		}
 	}
-	// nets is the manually-configured Networks list plus, when
-	// RedistributeMesh is on, the CIDRs currently on the Mesh Routes page —
+	// nets is the manually-configured Networks list plus whichever of
+	// RedistributeMeshRoutes are still actually on the Mesh Routes page —
 	// see effectiveBGPNetworks. Rendered as plain `network` statements, the
 	// same scoped mechanism as a manually-typed network: no `redistribute
 	// kernel` involved, so nothing else in the OS kernel routing table gets
@@ -247,11 +343,11 @@ func renderFRR(b config.BGPConfig, meshRoutes ...string) string {
 			fmt.Fprintf(&out, "  network %s\n", pfx)
 		}
 	}
-	if b.RedistributeConnected {
-		out.WriteString("  redistribute connected\n")
+	if connV4 {
+		fmt.Fprintf(&out, "  redistribute connected route-map GRAVINET-REDIST-CONNECTED\n")
 	}
-	if b.RedistributeStatic {
-		out.WriteString("  redistribute static\n")
+	if staticV4 {
+		fmt.Fprintf(&out, "  redistribute static route-map GRAVINET-REDIST-STATIC\n")
 	}
 	var v6Neighbors, v4Neighbors []config.BGPNeighbor
 	for _, n := range b.Neighbors {
@@ -279,14 +375,15 @@ func renderFRR(b config.BGPConfig, meshRoutes ...string) string {
 
 	// A v6 neighbor with nothing activated anywhere would come up but
 	// exchange no routes at all, so only bother with this block — and only
-	// emit it — when there's an actual v6 peer or v6 prefix to carry.
+	// emit it — when there's an actual v6 peer, v6 prefix, or v6
+	// redistribute selection to carry.
 	var v6Networks []string
 	for _, pfx := range nets {
 		if safeToken(pfx) && isIPv6Network(pfx) {
 			v6Networks = append(v6Networks, pfx)
 		}
 	}
-	if len(v6Neighbors) > 0 || len(v6Networks) > 0 {
+	if len(v6Neighbors) > 0 || len(v6Networks) > 0 || connV6 || staticV6 {
 		// A real FRR running-config uses an indented `!` between sub-blocks
 		// that are still inside the same stanza; only a column-0 `!` ends
 		// the stanza (see parseRunningConfigBGP's stanza-end check, and
@@ -298,14 +395,16 @@ func renderFRR(b config.BGPConfig, meshRoutes ...string) string {
 		for _, pfx := range v6Networks {
 			fmt.Fprintf(&out, "  network %s\n", pfx)
 		}
-		// Mirrors the ipv4 unicast block: gravinet's redistribute toggles
-		// aren't family-specific, so "on" means both — FRR still requires
-		// the directive under each address-family that should carry it.
-		if b.RedistributeConnected {
-			out.WriteString("  redistribute connected\n")
+		// Mirrors the ipv4 unicast block: each redistribute route-map is
+		// referenced under whichever address-family(s) actually have a
+		// selection in that family — see renderRedistributeRouteMap's own
+		// doc comment for why the same route-map name is safe to reference
+		// from both.
+		if connV6 {
+			fmt.Fprintf(&out, "  redistribute connected route-map GRAVINET-REDIST-CONNECTED\n")
 		}
-		if b.RedistributeStatic {
-			out.WriteString("  redistribute static\n")
+		if staticV6 {
+			fmt.Fprintf(&out, "  redistribute static route-map GRAVINET-REDIST-STATIC\n")
 		}
 		for _, n := range v6Neighbors {
 			fmt.Fprintf(&out, "  neighbor %s activate\n", n.Peer)
@@ -366,6 +465,24 @@ func daemonWanted(want []string, name string) bool {
 // of hosts don't have it, or have a reload that silently misbehaves. A
 // restart re-reads frr.conf from scratch, so it's the one path that removes
 // stale config on every host regardless of what optional tooling is present.
+// stringSetShrank reports whether any element of prev is missing from next —
+// the same "used to be in the rendered file, isn't anymore, and neither a
+// reload nor vtysh -b can retract it" trigger every removal check in this
+// file applies to its own kind of list (neighbors, networks, redistribute
+// selections, mesh routes).
+func stringSetShrank(prev, next []string) bool {
+	have := make(map[string]bool, len(next))
+	for _, n := range next {
+		have[n] = true
+	}
+	for _, p := range prev {
+		if !have[p] {
+			return true
+		}
+	}
+	return false
+}
+
 func bgpConfigRemovesSomething(prev, next config.BGPConfig) bool {
 	if prev.Enabled && prev.ASN != 0 && (!next.Enabled || next.ASN != prev.ASN) {
 		return true
@@ -379,31 +496,36 @@ func bgpConfigRemovesSomething(prev, next config.BGPConfig) bool {
 			return true
 		}
 	}
-	haveNetwork := make(map[string]bool, len(next.Networks))
-	for _, n := range next.Networks {
-		haveNetwork[n] = true
+	if stringSetShrank(prev.Networks, next.Networks) {
+		return true
 	}
-	for _, n := range prev.Networks {
-		if !haveNetwork[n] {
-			return true
-		}
+	// A CIDR dropping out of either selection means its prefix-list entry
+	// (renderRedistributeRouteMap) — and therefore the route it let through
+	// `redistribute connected`/`redistribute static` — needs to be
+	// retracted from the live daemon too, the same reload/vtysh -b
+	// limitation as everything else here.
+	if stringSetShrank(prev.RedistributeConnectedRoutes, next.RedistributeConnectedRoutes) {
+		return true
+	}
+	if stringSetShrank(prev.RedistributeStaticRoutes, next.RedistributeStaticRoutes) {
+		return true
 	}
 	return false
 }
 
 // meshRedistributeRemovesSomething is bgpConfigRemovesSomething's counterpart
-// for the mesh-derived `network` statements RedistributeMesh adds (see
+// for the mesh-derived `network` statements RedistributeMeshRoutes adds (see
 // effectiveBGPNetworks): it reports whether a route that was being
-// redistributed a moment ago — because it was on the Mesh Routes page and
-// RedistributeMesh was on — has since dropped off (route deleted, disabled,
-// its network disabled, or RedistributeMesh itself toggled off). Kept
-// separate from bgpConfigRemovesSomething, and called alongside it, rather
-// than folded in: bgpConfigRemovesSomething's prev/next are both BGPConfig
-// values with a manually-typed Networks list to compare directly, whereas the
-// mesh route lists here are computed live from the rest of the config (by
-// meshRouteCIDRs) and passed in separately by the caller — reconcileMeshRoutes
-// resyncs FRR on a route edit where the stored BGPConfig itself (prev==next)
-// never changed at all.
+// redistributed a moment ago — selected in RedistributeMeshRoutes and
+// actually on the Mesh Routes page at the time — has since dropped off
+// (route deleted, disabled, its network disabled, un-selected, or BGP itself
+// turned off). Kept separate from bgpConfigRemovesSomething, and called
+// alongside it, rather than folded in: bgpConfigRemovesSomething's prev/next
+// are both BGPConfig values with a manually-typed Networks list to compare
+// directly, whereas the mesh route lists here are computed live from the
+// rest of the config (by meshRouteCIDRs) and passed in separately by the
+// caller — reconcileMeshRoutes resyncs FRR on a route edit where the stored
+// BGPConfig itself (prev==next) never changed at all.
 //
 // Same reasoning as bgpConfigRemovesSomething for why this forces a restart
 // rather than trusting a reload: renderFRR fully regenerates frr.conf from
@@ -411,22 +533,17 @@ func bgpConfigRemovesSomething(prev, next config.BGPConfig) bool {
 // in the new file — but a reload only ever integrates what a file *has*, it
 // can't retract a `network` line that used to be there and isn't anymore.
 func meshRedistributeRemovesSomething(prev, next config.BGPConfig, prevMesh, nextMesh []string) bool {
-	if !prev.RedistributeMesh || !prev.Enabled || prev.ASN == 0 {
+	if !prev.Enabled || prev.ASN == 0 {
 		return false // nothing was being redistributed from the mesh before
 	}
-	if !next.RedistributeMesh || !next.Enabled || next.ASN == 0 {
-		return len(prevMesh) > 0 // redistribution turned off while routes were live
+	prevSet := selectedMeshRoutes(prev.RedistributeMeshRoutes, prevMesh)
+	if len(prevSet) == 0 {
+		return false
 	}
-	have := make(map[string]bool, len(nextMesh))
-	for _, m := range nextMesh {
-		have[m] = true
+	if !next.Enabled || next.ASN == 0 {
+		return true // BGP itself turned off while routes were live
 	}
-	for _, m := range prevMesh {
-		if !have[m] {
-			return true
-		}
-	}
-	return false
+	return stringSetShrank(prevSet, selectedMeshRoutes(next.RedistributeMeshRoutes, nextMesh))
 }
 
 // syncDaemonsContent rewrites the body of /etc/frr/daemons so every daemon in
@@ -528,7 +645,7 @@ func writeAtomicFile(path, body string) error {
 //
 // meshRoutes/prevMeshRoutes are the meshRouteCIDRs snapshots (Mesh Routes
 // page) from after and before this apply, respectively — only relevant when
-// RedistributeMesh is in play; a caller reconciling a pure BGP-config save
+// RedistributeMeshRoutes has anything selected; a caller reconciling a pure BGP-config save
 // (where the mesh route list itself didn't change) passes the same list for
 // both. See meshRedistributeRemovesSomething for why both are needed.
 //
@@ -565,8 +682,8 @@ func applyBGP(b, prev config.BGPConfig, meshRoutes, prevMeshRoutes []string, log
 	// implementations for why) nor the vtysh -b fallback below can retract
 	// config that's no longer in the file, only add to what's running. See
 	// bgpConfigRemovesSomething. A mesh route that dropped off the Mesh
-	// Routes page while RedistributeMesh is on needs the identical treatment
-	// — see meshRedistributeRemovesSomething.
+	// Routes page (or out of the selection) while it was being redistributed
+	// needs the identical treatment — see meshRedistributeRemovesSomething.
 	removed := bgpConfigRemovesSomething(prev, b) || meshRedistributeRemovesSomething(prev, b, prevMeshRoutes, meshRoutes)
 	daemonsChanged := daemonSetChanged || needsStart || removed
 	daemonCount := len(wanted)
@@ -863,14 +980,17 @@ func summaryToBGPConfig(sum []byte) (cfg config.BGPConfig, at map[string]int, ok
 // (first appearance). hasPasswords is set if any neighbor carried a
 // `password` line, though the secret itself is not captured.
 //
-// RedistributeMesh never round-trips: it has no FRR keyword of its own, only
-// the `network` lines it causes renderFRR to add (see effectiveBGPNetworks),
-// which are indistinguishable here from manually-typed ones and so import
-// straight into Networks, same as any other `network` line. cfg.
-// RedistributeMesh is always false on an imported config — harmless in
-// practice, since import only ever runs when gravinet isn't already managing
-// BGP (see handleBGPImport), i.e. before this function could have rendered
-// any mesh-derived lines in the first place.
+// RedistributeMeshRoutes never round-trips: it has no FRR keyword of its
+// own, only the `network` lines it causes renderFRR to add (see
+// effectiveBGPNetworks), which are indistinguishable here from
+// manually-typed ones and so import straight into Networks, same as any
+// other `network` line. cfg.RedistributeMeshRoutes is always empty on an
+// imported config — harmless in practice, since import only ever runs when
+// gravinet isn't already managing BGP (see handleBGPImport), i.e. before
+// this function could have rendered any mesh-derived lines in the first
+// place. RedistributeConnectedRoutes/RedistributeStaticRoutes don't
+// round-trip either, for a related but distinct reason — see the case
+// statement below.
 func parseRunningConfigBGP(text string) (cfg config.BGPConfig, hasPasswords bool, ok bool) {
 	// Normalize line endings first: a config that ever passed through a CRLF
 	// editor would otherwise leave a trailing \r on the ASN token (`65001\r`),
@@ -962,10 +1082,16 @@ func parseRunningConfigBGP(text string) (cfg config.BGPConfig, hasPasswords bool
 			}
 		case strings.HasPrefix(line, "network "):
 			cfg.Networks = append(cfg.Networks, strings.TrimSpace(strings.TrimPrefix(line, "network ")))
-		case line == "redistribute connected":
-			cfg.RedistributeConnected = true
-		case line == "redistribute static":
-			cfg.RedistributeStatic = true
+			// A bare "redistribute connected"/"redistribute static" (no
+			// route-map) is an externally-authored blanket directive — every
+			// connected/static route on the box, unconditionally. There's no
+			// specific CIDR list in that to import into
+			// RedistributeConnectedRoutes/RedistributeStaticRoutes (which
+			// select particular routes, not "all of them, ever"), so, like
+			// RedistributeMeshRoutes below, these simply don't round-trip:
+			// left empty on an imported config, same "harmless in practice,
+			// since import only ever runs before gravinet has rendered
+			// anything of its own" reasoning.
 		}
 	}
 	return cfg, hasPasswords, ok

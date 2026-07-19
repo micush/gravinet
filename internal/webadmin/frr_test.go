@@ -270,16 +270,19 @@ func TestFRRIPv6AFBlockFromNetworkAlone(t *testing.T) {
 
 // Advertised networks are split by address family — a v6 prefix goes under
 // ipv6 unicast only (FRR rejects a mismatched-family prefix), and vice
-// versa. The redistribute toggles aren't family-specific, so both are
-// mirrored into the v6 block once it exists, alongside the v4 block.
+// versa. A redistribute selection with both v4 and v6 CIDRs produces a
+// route-map reference under both address-family blocks (see
+// renderRedistributeRouteMap) — the actual prefix-list/route-map contents
+// are TestFRRRedistributeConnectedRouteMap's job; this test only checks
+// which address-family blocks reference them.
 func TestFRRNetworksSplitByFamily(t *testing.T) {
 	b := config.BGPConfig{
-		Enabled:               true,
-		ASN:                   65001,
-		Neighbors:             []config.BGPNeighbor{{Peer: "fd00::2", RemoteAS: 65002}},
-		Networks:              []string{"10.0.0.0/24", "fd00:1::/64"},
-		RedistributeConnected: true,
-		RedistributeStatic:    true,
+		Enabled:                     true,
+		ASN:                         65001,
+		Neighbors:                   []config.BGPNeighbor{{Peer: "fd00::2", RemoteAS: 65002}},
+		Networks:                    []string{"10.0.0.0/24", "fd00:1::/64"},
+		RedistributeConnectedRoutes: []string{"172.16.0.0/24", "fd00:9::/64"},
+		RedistributeStaticRoutes:    []string{"172.16.1.0/24", "fd00:10::/64"},
 	}
 	c := renderFRR(b)
 	v4Block, v6Block, found := strings.Cut(c, " address-family ipv6 unicast\n")
@@ -290,25 +293,73 @@ func TestFRRNetworksSplitByFamily(t *testing.T) {
 	frrLacks(t, v4Block, "fd00:1::/64")
 	frrHas(t, v6Block, "  network fd00:1::/64\n")
 	frrLacks(t, v6Block, "10.0.0.0/24")
-	frrHas(t, v4Block, "  redistribute connected\n")
-	frrHas(t, v4Block, "  redistribute static\n")
-	frrHas(t, v6Block, "  redistribute connected\n")
-	frrHas(t, v6Block, "  redistribute static\n")
+	frrHas(t, v4Block, "  redistribute connected route-map GRAVINET-REDIST-CONNECTED\n")
+	frrHas(t, v4Block, "  redistribute static route-map GRAVINET-REDIST-STATIC\n")
+	frrHas(t, v6Block, "  redistribute connected route-map GRAVINET-REDIST-CONNECTED\n")
+	frrHas(t, v6Block, "  redistribute static route-map GRAVINET-REDIST-STATIC\n")
 }
 
 func TestFRRNetworksAndRedistribute(t *testing.T) {
 	b := config.BGPConfig{
 		Enabled: true, ASN: 65001,
-		Networks:              []string{"10.0.0.0/24", "192.168.1.0/24"},
-		RedistributeConnected: true, RedistributeStatic: true,
+		Networks:                    []string{"10.0.0.0/24", "192.168.1.0/24"},
+		RedistributeConnectedRoutes: []string{"172.16.0.0/24"},
+		RedistributeStaticRoutes:    []string{"172.16.1.0/24"},
 	}
 	c := renderFRR(b)
 	frrHas(t, c, "  network 10.0.0.0/24\n")
 	frrHas(t, c, "  network 192.168.1.0/24\n")
-	frrHas(t, c, "  redistribute connected\n")
-	frrHas(t, c, "  redistribute static\n")
+	frrHas(t, c, "  redistribute connected route-map GRAVINET-REDIST-CONNECTED\n")
+	frrHas(t, c, "  redistribute static route-map GRAVINET-REDIST-STATIC\n")
 	frrHas(t, c, " address-family ipv4 unicast\n")
 	frrHas(t, c, " exit-address-family\n")
+}
+
+// TestFRRRedistributeConnectedRouteMap covers renderRedistributeRouteMap's
+// actual output: a permit prefix-list entry per selected CIDR (split into
+// an `ip prefix-list` for v4 and an `ipv6 prefix-list` for v6 — FRR has no
+// single keyword that accepts both), and a route-map with one sequence per
+// family that's actually populated, each matching its own prefix-list.
+// Rendered as top-level stanzas — siblings of `router bgp`, not nested
+// inside it.
+func TestFRRRedistributeConnectedRouteMap(t *testing.T) {
+	b := config.BGPConfig{
+		Enabled:                     true,
+		ASN:                         65001,
+		RedistributeConnectedRoutes: []string{"10.1.0.0/24", "10.2.0.0/24", "fd00:1::/64"},
+	}
+	c := renderFRR(b)
+	frrHas(t, c, "ip prefix-list GRAVINET-REDIST-CONNECTED-V4 seq 5 permit 10.1.0.0/24\n")
+	frrHas(t, c, "ip prefix-list GRAVINET-REDIST-CONNECTED-V4 seq 10 permit 10.2.0.0/24\n")
+	frrHas(t, c, "ipv6 prefix-list GRAVINET-REDIST-CONNECTED-V6 seq 5 permit fd00:1::/64\n")
+	frrHas(t, c, "route-map GRAVINET-REDIST-CONNECTED permit 10\n match ip address prefix-list GRAVINET-REDIST-CONNECTED-V4\n")
+	frrHas(t, c, "route-map GRAVINET-REDIST-CONNECTED permit 20\n match ipv6 address prefix-list GRAVINET-REDIST-CONNECTED-V6\n")
+	// The route-map stanza must appear before `router bgp` — it's a
+	// top-level FRR construct, not something valid nested inside the BGP
+	// stanza.
+	if strings.Index(c, "route-map GRAVINET-REDIST-CONNECTED") > strings.Index(c, "router bgp 65001") {
+		t.Error("route-map stanza appears after `router bgp` — it must be a sibling stanza, rendered before it")
+	}
+	// A v4-only selection must not touch the v6 prefix-list/route-map
+	// sequence at all — no empty `ipv6 prefix-list` line, no seq 20.
+	v4Only := renderFRR(config.BGPConfig{Enabled: true, ASN: 65001, RedistributeConnectedRoutes: []string{"10.1.0.0/24"}})
+	frrLacks(t, v4Only, "ipv6 prefix-list GRAVINET-REDIST-CONNECTED-V6")
+	frrLacks(t, v4Only, "permit 20")
+}
+
+// A CIDR selected for redistribution but not currently a real
+// connected/static route on the host isn't gravinet's concern to detect or
+// prune here — renderFRR only ever renders what's selected; whether FRR's
+// own zebra actually has a matching connected/static route to redistribute
+// is between FRR and the kernel routing table, not something a prefix-list
+// entry can be wrong about.
+func TestFRRRedistributeEmptySelectionOmitsEverything(t *testing.T) {
+	b := config.BGPConfig{Enabled: true, ASN: 65001}
+	c := renderFRR(b)
+	frrLacks(t, c, "redistribute connected")
+	frrLacks(t, c, "redistribute static")
+	frrLacks(t, c, "prefix-list")
+	frrLacks(t, c, "route-map")
 }
 
 // bgpConfigRemovesSomething is the fix for a deleted neighbor not actually
@@ -365,13 +416,14 @@ func TestBGPConfigRemovesSomething(t *testing.T) {
 	}
 }
 
-// RedistributeMesh renders one `network` statement per CIDR passed in, same
-// mechanism as a manually-typed Networks entry — never FRR's `redistribute
-// kernel`, which this feature exists specifically to avoid (see BGPConfig's
-// doc comment): a mesh-learned route is just another kernel-table entry, so
-// `redistribute kernel` would sweep in everything else on the host too.
+// RedistributeMeshRoutes renders one `network` statement per selected CIDR
+// that's also currently in meshRoutes, same mechanism as a manually-typed
+// Networks entry — never FRR's `redistribute kernel`, which this feature
+// exists specifically to avoid (see BGPConfig's doc comment): a mesh-learned
+// route is just another kernel-table entry, so `redistribute kernel` would
+// sweep in everything else on the host too.
 func TestFRRRedistributeMesh(t *testing.T) {
-	b := config.BGPConfig{Enabled: true, ASN: 65001, RedistributeMesh: true}
+	b := config.BGPConfig{Enabled: true, ASN: 65001, RedistributeMeshRoutes: []string{"10.10.0.0/24", "fd00:10::/64"}}
 	c := renderFRR(b, "10.10.0.0/24", "fd00:10::/64")
 	frrHas(t, c, "  network 10.10.0.0/24\n")
 	frrLacks(t, c, "redistribute kernel")
@@ -383,18 +435,32 @@ func TestFRRRedistributeMesh(t *testing.T) {
 	}
 	frrHas(t, c, "  network fd00:10::/64\n")
 
-	// Off entirely when the toggle is off, even with routes passed in — the
+	// Off entirely when nothing is selected, even with routes passed in — the
 	// caller (reconcileMeshRedistribute) always has a list handy, but it must
-	// only be used when the operator actually turned this on.
-	off := renderFRR(config.BGPConfig{Enabled: true, ASN: 65001, RedistributeMesh: false}, "10.10.0.0/24")
+	// only be used for whatever the operator actually selected.
+	off := renderFRR(config.BGPConfig{Enabled: true, ASN: 65001}, "10.10.0.0/24")
 	frrLacks(t, off, "10.10.0.0/24")
+
+	// A partial selection — the whole point of this being a list rather than
+	// a blanket toggle — must include only the selected CIDR, not every
+	// route currently on the Mesh Routes page.
+	partial := renderFRR(config.BGPConfig{Enabled: true, ASN: 65001, RedistributeMeshRoutes: []string{"10.10.0.0/24"}}, "10.10.0.0/24", "10.20.0.0/24")
+	frrHas(t, partial, "  network 10.10.0.0/24\n")
+	frrLacks(t, partial, "10.20.0.0/24")
+
+	// A selected CIDR that isn't (or is no longer) actually on the Mesh
+	// Routes page contributes nothing — effectiveBGPNetworks intersects
+	// against meshRoutes rather than trusting the selection outright.
+	stale := renderFRR(config.BGPConfig{Enabled: true, ASN: 65001, RedistributeMeshRoutes: []string{"10.30.0.0/24"}}, "10.10.0.0/24")
+	frrLacks(t, stale, "10.30.0.0/24")
+	frrLacks(t, stale, "10.10.0.0/24") // and the selection is empty of it, so nothing at all renders
 }
 
-// A CIDR that's both manually typed into Networks and on the Mesh Routes page
-// must not be emitted twice.
+// A CIDR that's both manually typed into Networks and selected via
+// RedistributeMeshRoutes must not be emitted twice.
 func TestFRRRedistributeMeshDedup(t *testing.T) {
 	b := config.BGPConfig{
-		Enabled: true, ASN: 65001, RedistributeMesh: true,
+		Enabled: true, ASN: 65001, RedistributeMeshRoutes: []string{"10.10.0.0/24", "10.20.0.0/24"},
 		Networks: []string{"10.10.0.0/24"},
 	}
 	c := renderFRR(b, "10.10.0.0/24", "10.20.0.0/24")
@@ -406,11 +472,11 @@ func TestFRRRedistributeMeshDedup(t *testing.T) {
 
 // meshRedistributeRemovesSomething mirrors bgpConfigRemovesSomething for the
 // mesh-derived side: it must catch a mesh route dropping off the Mesh Routes
-// page, or the toggle itself turning off, while leaving ordinary
-// additions/no-ops alone.
+// page or out of the selection, or BGP itself turning off, while leaving
+// ordinary additions/no-ops alone.
 func TestMeshRedistributeRemovesSomething(t *testing.T) {
-	on := config.BGPConfig{Enabled: true, ASN: 65001, RedistributeMesh: true}
-	off := config.BGPConfig{Enabled: true, ASN: 65001, RedistributeMesh: false}
+	on := config.BGPConfig{Enabled: true, ASN: 65001, RedistributeMeshRoutes: []string{"10.0.0.0/24", "10.1.0.0/24"}}
+	off := config.BGPConfig{Enabled: true, ASN: 65001}
 
 	cases := []struct {
 		name               string
@@ -425,7 +491,7 @@ func TestMeshRedistributeRemovesSomething(t *testing.T) {
 		{"toggle turned off, nothing was ever live", on, off, nil, nil, false},
 		{"toggle was never on", off, off, nil, []string{"10.0.0.0/24"}, false},
 		{"toggle just turned on", off, on, nil, []string{"10.0.0.0/24"}, false},
-		{"BGP disabled entirely while routes were live", on, config.BGPConfig{Enabled: false, ASN: 65001, RedistributeMesh: true}, []string{"10.0.0.0/24"}, nil, true},
+		{"BGP disabled entirely while routes were live", on, config.BGPConfig{Enabled: false, ASN: 65001, RedistributeMeshRoutes: on.RedistributeMeshRoutes}, []string{"10.0.0.0/24"}, nil, true},
 	}
 	for _, c := range cases {
 		if got := meshRedistributeRemovesSomething(c.prev, c.next, c.prevMesh, c.nextMesh); got != c.want {
@@ -575,8 +641,12 @@ func TestParseRunningConfigBGP(t *testing.T) {
 	if cfg.RouterID != "10.0.0.1" {
 		t.Errorf("router-id = %q, want 10.0.0.1", cfg.RouterID)
 	}
-	if !cfg.RedistributeConnected || cfg.RedistributeStatic {
-		t.Errorf("redistribute flags wrong: conn=%v static=%v", cfg.RedistributeConnected, cfg.RedistributeStatic)
+	// A bare "redistribute connected" (no route-map — an externally-authored
+	// blanket directive) has no specific CIDRs to import into the new
+	// selective fields, so it simply doesn't round-trip — see
+	// parseRunningConfigBGP's doc comment.
+	if len(cfg.RedistributeConnectedRoutes) != 0 || len(cfg.RedistributeStaticRoutes) != 0 {
+		t.Errorf("redistribute selections should be empty on import: %+v / %+v", cfg.RedistributeConnectedRoutes, cfg.RedistributeStaticRoutes)
 	}
 	if len(cfg.Networks) != 2 || cfg.Networks[0] != "10.0.0.0/24" || cfg.Networks[1] != "192.168.5.0/24" {
 		t.Errorf("networks wrong: %+v", cfg.Networks)

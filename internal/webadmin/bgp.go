@@ -263,6 +263,100 @@ func parseBGPLearnedRoutes(raw []byte) []netip.Prefix {
 	return out
 }
 
+// showIPRouteConnected queries FRR/zebra for this host's currently
+// connected routes — the ones a blanket `redistribute connected` would
+// sweep in wholesale — across both address families. Feeds the Traffic >
+// BGP editor's "pick which connected routes to redistribute" list
+// (BGPConfig.RedistributeConnectedRoutes): asking zebra directly, via
+// "show ip/ipv6 route connected json" (its RIB, filtered server-side to
+// just this route type), rather than reading the OS routing table some
+// other way, means the list shown can't disagree with what zebra itself
+// would actually redistribute.
+func showIPRouteConnected() []string { return showIPRouteOfType("connected") }
+
+// showIPRouteStatic is showIPRouteConnected's twin for static routes
+// (BGPConfig.RedistributeStaticRoutes) — see its doc comment.
+func showIPRouteStatic() []string { return showIPRouteOfType("static") }
+
+func showIPRouteOfType(kind string) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, cmd := range []string{"show ip route " + kind + " json", "show ipv6 route " + kind + " json"} {
+		raw, ran := runVtysh(cmd)
+		if !ran {
+			continue
+		}
+		for _, cidr := range parseIPRouteList(raw) {
+			if !seen[cidr] {
+				seen[cidr] = true
+				out = append(out, cidr)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// parseIPRouteList reshapes "show ip/ipv6 route <type> json"'s output — an
+// object keyed by prefix, each holding every route FRR/zebra has for it —
+// into the CIDR strings themselves. Same "silent best-effort" shape as
+// parseBGPLearnedRoutes: invalid JSON, or a prefix string that doesn't
+// parse, is skipped rather than erroring the whole call, since this only
+// ever feeds a picker list, never a routing decision. FRR already filters
+// server-side to the requested type; selected/installed is still checked so
+// a route that matched the type but isn't actually zebra's live choice for
+// its prefix (an alternate/backup path) doesn't show up as pickable.
+func parseIPRouteList(raw []byte) []string {
+	var top map[string][]struct {
+		Selected  bool `json:"selected"`
+		Installed bool `json:"installed"`
+	}
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return nil
+	}
+	var out []string
+	for cidr, paths := range top {
+		if _, err := netip.ParsePrefix(cidr); err != nil {
+			continue
+		}
+		for _, p := range paths {
+			if p.Selected || p.Installed {
+				out = append(out, cidr)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// handleBGPRedistributeOptions returns the CIDRs currently available to pick
+// from for RedistributeConnectedRoutes/RedistributeStaticRoutes — this
+// host's actual connected/static routes right now, per FRR/zebra (see
+// showIPRouteConnected/showIPRouteStatic). Its own endpoint, separate from
+// the config GET, for the same reason handleBGPImport is: handleBGPConfig's
+// GET deliberately never touches vtysh so the editor always loads instantly,
+// and this does, unavoidably, since the whole point is asking FRR what it
+// currently sees. The UI fetches this in the background after the editor's
+// already on screen and treats a degraded response the same way it already
+// treats the BGP peers/table cards being unavailable — a picker with nothing
+// to pick from (yet), not an error blocking the rest of the page.
+func (s *Server) handleBGPRedistributeOptions(w http.ResponseWriter, r *http.Request) {
+	if !bgpSupported() {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"available":        false,
+			"reason":           "FRR/vtysh is not installed",
+			"connected_routes": []string{},
+			"static_routes":    []string{},
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"available":        true,
+		"connected_routes": showIPRouteConnected(),
+		"static_routes":    showIPRouteStatic(),
+	})
+}
+
 // handleBGPConfig is the read/write side: gravinet owns the BGP/BFD
 // configuration and drives the FRR daemon from it. GET returns the stored BGP
 // config plus whether FRR is installed. It deliberately does NOT touch vtysh —
@@ -402,18 +496,18 @@ func meshRouteCIDRs(cfg *config.Config) []string {
 // the diff applyBGP/meshRedistributeRemovesSomething sees is exact).
 //
 // A no-op — one extra config.Load, nothing more — unless BGP is enabled with
-// RedistributeMesh on, which keeps every ordinary route edit on a node that
-// doesn't use this feature cheap. Errors are logged, not returned: this runs
-// after the HTTP response for the route edit itself has already been decided
-// (that edit succeeded regardless of whether FRR could be reached), the same
-// "never let a routing reconcile block or fail an unrelated save" shape
-// mutateConfig's own reload hook already uses.
+// something selected in RedistributeMeshRoutes, which keeps every ordinary
+// route edit on a node that doesn't use this feature cheap. Errors are
+// logged, not returned: this runs after the HTTP response for the route edit
+// itself has already been decided (that edit succeeded regardless of whether
+// FRR could be reached), the same "never let a routing reconcile block or
+// fail an unrelated save" shape mutateConfig's own reload hook already uses.
 func (s *Server) reconcileMeshRedistribute(prevRoutes []string) {
 	if s.configPath == "" {
 		return
 	}
 	cfg, err := config.Load(s.configPath)
-	if err != nil || !cfg.BGP.Enabled || cfg.BGP.ASN == 0 || !cfg.BGP.RedistributeMesh {
+	if err != nil || !cfg.BGP.Enabled || cfg.BGP.ASN == 0 || len(cfg.BGP.RedistributeMeshRoutes) == 0 {
 		return
 	}
 	nextRoutes := meshRouteCIDRs(cfg)

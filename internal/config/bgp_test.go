@@ -64,9 +64,9 @@ func TestBGPRoundTrip(t *testing.T) {
 			{Peer: "10.0.0.2", RemoteAS: 65002, Description: "core", Password: "s3cr3t", BFD: false},
 			{Peer: "fd00::2", RemoteAS: 65010, BFD: true},
 		},
-		Networks:              []string{"10.0.0.0/24"},
-		RedistributeConnected: true,
-		RedistributeMesh:      true,
+		Networks:                    []string{"10.0.0.0/24"},
+		RedistributeConnectedRoutes: []string{"10.0.0.0/24"},
+		RedistributeMeshRoutes:      []string{"10.1.0.0/24"},
 	}
 	raw, err := json.Marshal(in)
 	if err != nil {
@@ -76,7 +76,7 @@ func TestBGPRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(raw, &out); err != nil {
 		t.Fatal(err)
 	}
-	if out.ASN != 65001 || out.RouterID != "10.0.0.1" || !out.RedistributeConnected || !out.RedistributeMesh {
+	if out.ASN != 65001 || out.RouterID != "10.0.0.1" || len(out.RedistributeConnectedRoutes) != 1 || out.RedistributeConnectedRoutes[0] != "10.0.0.0/24" || len(out.RedistributeMeshRoutes) != 1 || out.RedistributeMeshRoutes[0] != "10.1.0.0/24" {
 		t.Errorf("scalar round-trip mismatch: %+v", out)
 	}
 	if len(out.Neighbors) != 2 || out.Neighbors[0].Password != "s3cr3t" || !out.Neighbors[1].BFD {

@@ -1,7 +1,7 @@
 package webadmin
 
 // bgpMeshRedistributor is the BGP-into-mesh half of route redistribution —
-// config.Network.RedistributeBGP's counterpart to BGPConfig.RedistributeMesh
+// config.Network.RedistributeBGP's counterpart to BGPConfig.RedistributeMeshRoutes
 // (mesh-into-BGP, see bgp.go's meshRouteCIDRs/reconcileMeshRedistribute). It
 // periodically pulls FRR's current best-path routes (bgpLearnedRoutes) and
 // pushes them into the mesh via Backend.SetBGPRoutes, for every network that
@@ -121,7 +121,7 @@ func (r *bgpMeshRedistributor) sync() {
 	// Never redistribute a route this node already originates into the mesh
 	// itself — the immediate, single-node case of the mutual-redistribution
 	// loop any bidirectional BGP<->IGP redistribution has to guard against:
-	// with BGPConfig.RedistributeMesh also on, this node's own Advertise
+	// with BGPConfig.RedistributeMeshRoutes also on, this node's own Advertise
 	// routes appear right back in its own BGP RIB, and without this check
 	// they would bounce straight back into the mesh looking like genuinely
 	// external routes. meshRouteCIDRs covers every network's Advertise

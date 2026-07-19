@@ -85,10 +85,18 @@ const indexHTML = `<!doctype html>
   .rail-divider { height:1px; background:var(--line); margin:0 0 8px; }
   .rail-logout:hover { color:var(--danger); background:var(--hover); }
   .settings-row { display:flex; align-items:center; justify-content:space-between; padding:12px 0; border-bottom:1px solid var(--line); }
+  .settings-row:has(.route-pick) { align-items:flex-start; }
   .settings-row:last-child { border-bottom:0; }
   .local-only-disabled { opacity:.5; }
   .settings-label { font-size:14px; }
   .settings-desc { font-size:12px; color:var(--mut); margin-top:2px; }
+  /* route-pick: the checklist behind Redistribute connected/static/mesh
+     routes (rowRouteList) — a bordered, scrollable box of checkboxes
+     replacing what used to be a single on/off switch, so it needs its own
+     width/height bounds rather than the switch's fixed 40x22px. */
+  .route-pick { max-width:420px; max-height:160px; overflow-y:auto; border:1px solid var(--line); border-radius:6px; padding:6px 10px; flex-shrink:0; }
+  .route-pick-item { display:block; font-size:13px; padding:2px 0; cursor:pointer; white-space:nowrap; }
+  .route-pick-item input { margin-right:6px; }
   .sw { position:relative; display:inline-block; width:40px; height:22px; flex-shrink:0; }
   .sw input { opacity:0; width:0; height:0; }
   .sw-slider { position:absolute; cursor:pointer; inset:0; background:var(--line); border-radius:22px; transition:.2s; }
@@ -5979,11 +5987,25 @@ function secBgp(c){
     // leave the "loading…" placeholder up with no hint why, which looked exactly
     // like a hung request. Now the actual error is shown.
     const meshRoutes = r.body.mesh_routes || [];
+    // The redistribute-connected/static pickers' available lists come from a
+    // separate endpoint that, unlike the config GET above, does touch FRR
+    // (handleBGPRedistributeOptions) — kicked off now but deliberately not
+    // awaited before the first render, so a slow/wedged FRR can't hold up
+    // the rest of the page the same way the config GET never does. The
+    // pickers show "loading available routes…" until this resolves, then
+    // refresh in place via editor.setRedistOptions, with no full re-render
+    // and no loss of whatever the operator's already selected/typed.
+    const redistPromise = api('/api/bgp/redistribute-options').catch(() => null);
+    let editor;
     try {
-      renderBgpEditor(editWrap, r.body.bgp || {}, !!r.body.installed, false, meshRoutes);
+      editor = renderBgpEditor(editWrap, r.body.bgp || {}, !!r.body.installed, false, meshRoutes);
     } catch (e){
       fail('editor error \u2014 ' + ((e && e.message) || e)); return;
     }
+    redistPromise.then(ro => {
+      if (state.section !== 'bgp' || !editor) return; // navigated away, or a later render superseded this one
+      if (ro && ro.ok && ro.body) editor.setRedistOptions(ro.body);
+    });
     // If gravinet isn't managing BGP yet but FRR is reachable, reflect the live
     // FRR config by importing it in the background. Best-effort: the editor is
     // already on screen, so any failure here must never take it back down.
@@ -5995,7 +6017,11 @@ function secBgp(c){
           // meshRoutes still comes from the earlier /api/bgp/config GET — an
           // import only ever replaces the neighbor/network editor state, not
           // what's on the Mesh Routes page.
-          renderBgpEditor(editWrap, im.body.bgp, true, true, meshRoutes);
+          editor = renderBgpEditor(editWrap, im.body.bgp, true, true, meshRoutes);
+          redistPromise.then(ro => {
+            if (state.section !== 'bgp' || !editor) return;
+            if (ro && ro.ok && ro.body) editor.setRedistOptions(ro.body);
+          });
         }
         // Nothing to reflect otherwise (no existing FRR BGP config found, or
         // the import itself failed) — the editor already rendered from the
@@ -6155,7 +6181,8 @@ async function bgpTableLiveStatus(body){
 // running config (gravinet isn't managing BGP yet) rather than gravinet's own
 // stored config — see isNewCfg below, which uses it to tell "freshly imported"
 // from "genuinely never configured" so the debounce timing feels right either way.
-function renderBgpEditor(host, b, installed, imported, meshRoutes){
+function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
+  redistOpts = redistOpts || {};
   const neighbors = (b.neighbors || []).map(n => ({
     peer: n.peer||'', remote_as: n.remote_as||0, description: n.description||'',
     password: n.password||'', bfd: !!n.bfd, shutdown: !!n.shutdown,
@@ -6183,6 +6210,55 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes){
     row.appendChild(inp); card.appendChild(row);
     return inp;
   };
+  // rowRouteList replaces a blanket on/off toggle with a checklist of
+  // specific CIDRs to select — the picker behind Redistribute
+  // connected/static/mesh routes below. available is what's currently
+  // offered (a live FRR/zebra query for connected/static, the Mesh Routes
+  // page's own Advertise list for mesh); selected is what's already chosen
+  // (loaded from config). A selected CIDR no longer in available (a
+  // connected/static route that's gone, or a mesh route since deleted or
+  // un-advertised) still shows, dimmed and marked, so it stays visible and
+  // un-selectable rather than silently vanishing along with the ability to
+  // deliberately drop it — see config.BGPConfig's own doc comment for why
+  // it isn't auto-pruned. Every checkbox saves immediately on change, same
+  // as every other toggle on this page. setAvailable lets the caller refresh
+  // what's offered later without losing the current selection or rebuilding
+  // the row — used once /api/bgp/redistribute-options' live query (which,
+  // unlike the rest of this editor, has to touch FRR and so can't block the
+  // page's first paint) comes back.
+  const rowRouteList = (labelText, desc, available, selected) => {
+    const row = $('<div class="settings-row"></div>');
+    row.appendChild($('<div><div class="settings-label">'+esc(labelText)+'</div><div class="settings-desc">'+desc+'</div></div>'));
+    const box = $('<div class="route-pick"></div>');
+    const selSet = new Set(selected||[]);
+    function draw(items){
+      box.innerHTML = '';
+      if (items === undefined){
+        box.appendChild($('<div class="hint" style="padding:2px 0">loading available routes\u2026</div>'));
+        return;
+      }
+      const all = items.slice();
+      selSet.forEach(cidr => { if (all.indexOf(cidr)===-1) all.push(cidr); });
+      if (!all.length){
+        box.appendChild($('<div class="hint" style="padding:2px 0">none available</div>'));
+        return;
+      }
+      all.forEach(cidr => {
+        const stale = items.indexOf(cidr)===-1;
+        const label = $('<label class="route-pick-item"></label>');
+        if (stale) label.title = 'not currently present';
+        const cb = $('<input type="checkbox">');
+        cb.checked = selSet.has(cidr);
+        cb.onchange = () => { if (cb.checked) selSet.add(cidr); else selSet.delete(cidr); scheduleSave(true); };
+        label.appendChild(cb);
+        label.appendChild(document.createTextNode(' ' + cidr + (stale ? ' (not currently present)' : '')));
+        box.appendChild(label);
+      });
+    }
+    draw(available);
+    row.appendChild(box); card.appendChild(row);
+    return { get: () => Array.from(selSet), setAvailable: draw };
+  };
 
   const enableCb = rowTog('Enable BGP', 'Render and run a <code>router bgp</code> speaker on this host. Off leaves no BGP block in FRR\u2019s config and switches bgpd off.', !!b.enabled);
   const asnInp = rowInput('Local AS number', 'This node\u2019s autonomous-system number, e.g. 65001. Required to enable BGP \u2014 unless AutoBGP is on below and this is left blank, in which case it derives and fills one in.', b.asn||'', 'e.g. 65001', 180);
@@ -6192,17 +6268,16 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes){
   // global toggle (see nbrAddRow's own default for how a brand-new neighbor
   // row gets BFD on).
   const isNewCfg = !imported && !b.enabled && !b.asn && !(b.neighbors && b.neighbors.length);
-  const rcCb = rowTog('Redistribute connected', 'Advertise directly-connected routes into BGP.', !!b.redistribute_connected);
-  const rsCb = rowTog('Redistribute static', 'Advertise static routes into BGP.', !!b.redistribute_static);
-  // Scoped to exactly the CIDRs on the Mesh Routes page — not FRR's plain
-  // "redistribute kernel", which would also pull in every other kernel-table
-  // route on the box (mesh-learned routes are installed as ordinary kernel
-  // routes, indistinguishable from anything else there). The count updates
-  // live as routes are added/removed/enabled on that page, independent of
+  const rcList = rowRouteList('Redistribute connected', 'Advertise this host\u2019s currently-connected routes into BGP \u2014 pick which ones.', redistOpts.connected_routes, b.redistribute_connected_routes);
+  const rsList = rowRouteList('Redistribute static', 'Advertise this host\u2019s static routes into BGP \u2014 pick which ones.', redistOpts.static_routes, b.redistribute_static_routes);
+  // Scoped to exactly the CIDRs the operator picks from the Mesh Routes
+  // page's Advertise table — not FRR's plain "redistribute kernel", which
+  // would also pull in every other kernel-table route on the box (mesh-
+  // learned routes are installed as ordinary kernel routes, indistinguishable
+  // from anything else there). available refreshes live as routes are
+  // added/removed/enabled on that page (see secBgp's load()), independent of
   // this form's own save.
-  const meshCount = (meshRoutes && meshRoutes.length) || 0;
-  const meshDesc = 'Advertise only the CIDRs currently on the Mesh Routes page\u2019s Advertise table (' + meshCount + ')';
-  const rmCb = rowTog('Redistribute mesh routes', meshDesc, !!b.redistribute_mesh);
+  const rmList = rowRouteList('Redistribute mesh routes', 'Advertise CIDRs from the Mesh Routes page\u2019s Advertise table into BGP \u2014 pick which ones.', meshRoutes, b.redistribute_mesh_routes);
   // Session timers. A new config defaults to a fast 4s/12s (FRR's own default is
   // a sluggish 60s/180s); an existing/imported config shows its actual values,
   // blank meaning "FRR default".
@@ -6452,9 +6527,9 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes){
       asn: asn,
       router_id: ridInp.value.trim(),
       auto_bgp: autoCb.checked,
-      redistribute_connected: rcCb.checked,
-      redistribute_static: rsCb.checked,
-      redistribute_mesh: rmCb.checked,
+      redistribute_connected_routes: rcList.get(),
+      redistribute_static_routes: rsList.get(),
+      redistribute_mesh_routes: rmList.get(),
       keepalive_time: ka,
       hold_time: hold,
       // Drop blank rows so what's stored matches what FRR would accept.
@@ -6478,12 +6553,11 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes){
     status.textContent = 'Saved.';
   }
 
-  // Toggles and structural changes apply at once; the four text fields debounce.
+  // Toggles and structural changes apply at once; the four text fields
+  // debounce. The three route pickers above wire their own per-checkbox
+  // save trigger (rowRouteList) since each holds many checkboxes, not one.
 
   enableCb.onchange = () => scheduleSave(true);
-  rcCb.onchange = () => scheduleSave(true);
-  rsCb.onchange = () => scheduleSave(true);
-  rmCb.onchange = () => scheduleSave(true);
   autoCb.onchange = () => scheduleSave(true);
   [asnInp, ridInp, kaInp, holdInp].forEach(inp => { inp.oninput = () => scheduleSave(false); });
 
@@ -6492,6 +6566,16 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes){
   // configuration…" — the whole form was built but never inserted.
   host.innerHTML = ''; host.appendChild(card);
   applyPendingBgpHighlight(card);
+
+  // Lets the caller (secBgp's load()) feed in /api/bgp/redistribute-options'
+  // result once it resolves — separate from the rest of this editor's data
+  // because, unlike everything else here, that endpoint has to touch FRR and
+  // so can't be waited on before the first paint (see load()'s own comment).
+  return { setRedistOptions: (opts) => {
+    opts = opts || {};
+    rcList.setAvailable(opts.connected_routes || []);
+    rsList.setAvailable(opts.static_routes || []);
+  } };
 }
 
 // infoHosts shows the local hosts file contents, read live from disk.

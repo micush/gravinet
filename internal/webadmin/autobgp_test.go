@@ -2,6 +2,7 @@ package webadmin
 
 import (
 	"net/netip"
+	"strings"
 	"testing"
 
 	"gravinet/internal/config"
@@ -400,5 +401,35 @@ func TestAutoBGPReconcilerSyncGossipsZeroWhenBGPDisabled(t *testing.T) {
 
 	if len(be.bgpASNCalls) != 1 || be.bgpASNCalls[0] != 0 {
 		t.Errorf("SetBGPASN calls = %v, want exactly one call with 0 (BGP not enabled here)", be.bgpASNCalls)
+	}
+}
+
+// TestAutoBGPAddNeighborCmdsMatchesRenderFRRActivation guards a real bug: a
+// v6 neighbor added via the incremental vtysh path (applyBGPIncremental)
+// must get exactly the same address-family activation renderFRR (frr.go)
+// gives it in a full config write — deactivated in ipv4 unicast (FRR's
+// default for every neighbor, v6 ones included) and activated in ipv6
+// unicast instead — or the live daemon and the persisted frr.conf disagree
+// about what a "correctly configured" neighbor looks like. A v4 neighbor
+// only needs the one ipv4 unicast activation.
+func TestAutoBGPAddNeighborCmdsMatchesRenderFRRActivation(t *testing.T) {
+	v6 := config.BGPNeighbor{Peer: "fd00::9", RemoteAS: 4200000001, Description: "alpha", Password: autoBGPPassword, BFD: true}
+	cmds := autoBGPAddNeighborCmds(4200000000, v6)
+	joined := strings.Join(cmds, "\n")
+	if !strings.Contains(joined, "address-family ipv4 unicast\nno neighbor fd00::9 activate") {
+		t.Errorf("v6 neighbor commands don't deactivate it in ipv4 unicast (FRR's default): %v", cmds)
+	}
+	if !strings.Contains(joined, "address-family ipv6 unicast\nneighbor fd00::9 activate") {
+		t.Errorf("v6 neighbor commands don't activate it in ipv6 unicast: %v", cmds)
+	}
+
+	v4 := config.BGPNeighbor{Peer: "10.0.0.9", RemoteAS: 4200000001, Description: "alpha", Password: autoBGPPassword, BFD: true}
+	cmds4 := autoBGPAddNeighborCmds(4200000000, v4)
+	joined4 := strings.Join(cmds4, "\n")
+	if !strings.Contains(joined4, "address-family ipv4 unicast\nneighbor 10.0.0.9 activate") {
+		t.Errorf("v4 neighbor commands don't activate it in ipv4 unicast: %v", cmds4)
+	}
+	if strings.Contains(joined4, "ipv6 unicast") {
+		t.Errorf("v4 neighbor commands shouldn't touch ipv6 unicast at all: %v", cmds4)
 	}
 }

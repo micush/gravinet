@@ -314,27 +314,50 @@ type Config struct {
 // toggle; a fresh neighbor defaults to BFD on (see the web UI's isNewCfg
 // handling), but each one is its own setting from then on.
 type BGPConfig struct {
-	Enabled               bool          `json:"enabled"`
-	ASN                   uint32        `json:"asn"`
-	RouterID              string        `json:"router_id,omitempty"`
-	Neighbors             []BGPNeighbor `json:"neighbors,omitempty"`
-	Networks              []string      `json:"networks,omitempty"`
-	RedistributeConnected bool          `json:"redistribute_connected,omitempty"`
-	RedistributeStatic    bool          `json:"redistribute_static,omitempty"`
-	// RedistributeMesh advertises into BGP exactly the CIDRs currently listed
-	// on the Mesh Routes page (Traffic > Mesh Routes' "Advertise" table, i.e.
-	// each enabled Route on an enabled Network) — and only those. This is
-	// deliberately not FRR's `redistribute kernel`: a mesh-learned route is
-	// installed into the OS routing table like any other kernel route (see
-	// internal/mesh's syncRoute/AddRoute), so a blanket `redistribute kernel`
-	// would sweep in every other kernel-table entry on the box too (a manual
-	// static route, another VPN's routes, whatever else is there) — not just
-	// the mesh's own. gravinet instead renders one explicit `network`
-	// statement per mesh route (see renderFRR/meshRouteCIDRs), scoping
-	// redistribution to precisely what the Mesh Routes page shows, and keeps
-	// it live as routes are added, removed, or enabled/disabled there — not
-	// only when this BGP config itself is next saved.
-	RedistributeMesh bool `json:"redistribute_mesh,omitempty"`
+	Enabled   bool          `json:"enabled"`
+	ASN       uint32        `json:"asn"`
+	RouterID  string        `json:"router_id,omitempty"`
+	Neighbors []BGPNeighbor `json:"neighbors,omitempty"`
+	Networks  []string      `json:"networks,omitempty"`
+	// RedistributeConnectedRoutes/RedistributeStaticRoutes select exactly
+	// which of this host's currently-connected/static routes (as FRR/zebra
+	// see them right now — see showIPRouteConnected/showIPRouteStatic) get
+	// redistributed into BGP; empty means none. This replaced a blanket
+	// on/off toggle (FRR's own `redistribute connected`/`redistribute
+	// static` with no filter) because that swept in every such route on the
+	// box indiscriminately — there was no way to advertise just one LAN
+	// subnet without also advertising every other connected/static route
+	// gravinet had no opinion on. Rendered as an FRR route-map matched
+	// against a prefix-list built from this list (see renderFRR), the same
+	// selective-redistribution shape RedistributeMeshRoutes already used
+	// for mesh routes, just needing FRR's route-map machinery here since —
+	// unlike a mesh route — a connected/static route has no `network`
+	// statement equivalent to render directly. A CIDR here that's since
+	// stopped being an actual connected/static route (interface went away,
+	// route was removed) simply matches nothing; it isn't pruned from this
+	// list automatically, so re-adding the same route later doesn't lose
+	// the earlier selection.
+	RedistributeConnectedRoutes []string `json:"redistribute_connected_routes,omitempty"`
+	RedistributeStaticRoutes    []string `json:"redistribute_static_routes,omitempty"`
+	// RedistributeMeshRoutes selects exactly which of the CIDRs currently
+	// listed on the Mesh Routes page (Traffic > Mesh Routes' "Advertise"
+	// table, i.e. each enabled Route on an enabled Network) get advertised
+	// into BGP; empty means none. This is deliberately not FRR's
+	// `redistribute kernel`: a mesh-learned route is installed into the OS
+	// routing table like any other kernel route (see internal/mesh's
+	// syncRoute/AddRoute), so a blanket `redistribute kernel` would sweep in
+	// every other kernel-table entry on the box too (a manual static route,
+	// another VPN's routes, whatever else is there) — not just the mesh's
+	// own, and not just the subset actually wanted here. gravinet instead
+	// renders one explicit `network` statement per selected mesh route (see
+	// renderFRR/meshRouteCIDRs), keeping it live as routes are added,
+	// removed, or enabled/disabled on the Mesh Routes page — not only when
+	// this BGP config itself is next saved. A CIDR selected here that's
+	// since stopped being advertised on the Mesh Routes page is simply
+	// never rendered (effectiveBGPNetworks intersects this list against
+	// meshRoutes' current contents); same non-pruning reasoning as the two
+	// fields above.
+	RedistributeMeshRoutes []string `json:"redistribute_mesh_routes,omitempty"`
 	// KeepaliveTime and HoldTime are the BGP session timers, in seconds,
 	// rendered as FRR's `timers bgp <keepalive> <hold>`. Keepalive is how often
 	// a peer sends keepalive messages; hold is how long without any message
@@ -534,8 +557,8 @@ type Network struct {
 	// RedistributeBGP, when on, gossips this node's current BGP-learned
 	// routes (FRR's RIB) to this network's mesh peers alongside its own
 	// Route entries above — the reverse direction from BGPConfig's own
-	// RedistributeMesh (mesh routes into BGP): this is BGP routes into the
-	// mesh. Each redistributed route is tagged with RedistributeBGPMetric so
+	// RedistributeMeshRoutes (mesh routes into BGP): this is BGP routes into
+	// the mesh. Each redistributed route is tagged with RedistributeBGPMetric so
 	// peers can rank it against any other path to the same prefix the normal
 	// way a route's metric already works (lower wins) — see webadmin's
 	// bgpMeshRedistributor, which polls FRR and calls mesh's SetBGPRoutes;
