@@ -135,30 +135,30 @@ func TestNetworkSetSubnets(t *testing.T) {
 	}
 }
 
-func TestNetworkSetRedistributeBGP(t *testing.T) {
+func TestNetworkSetRedistributeBGPRoutes(t *testing.T) {
 	c := &Config{Networks: []Network{
 		{Name: "corp", ID: "0000000000000001", Subnet4: "10.1.0.0/16"},
 	}}
 	n := &c.Networks[0]
 
-	if n.RedistributeBGP {
-		t.Fatal("expected RedistributeBGP off by default")
+	if len(n.RedistributeBGPRoutes) != 0 {
+		t.Fatal("expected RedistributeBGPRoutes empty by default")
 	}
-	if err := c.NetworkSetRedistributeBGP("corp", true, 42); err != nil {
-		t.Fatalf("enable: %v", err)
+	if err := c.NetworkSetRedistributeBGPRoutes("corp", []string{"172.16.0.0/24", "172.16.1.0/24"}, 42); err != nil {
+		t.Fatalf("set: %v", err)
 	}
-	if !n.RedistributeBGP || n.RedistributeBGPMetric != 42 {
-		t.Fatalf("got enabled=%v metric=%d, want enabled=true metric=42", n.RedistributeBGP, n.RedistributeBGPMetric)
+	if len(n.RedistributeBGPRoutes) != 2 || n.RedistributeBGPMetric != 42 {
+		t.Fatalf("got routes=%v metric=%d, want 2 routes metric=42", n.RedistributeBGPRoutes, n.RedistributeBGPMetric)
 	}
-	// Turning it off still updates the metric in the same call — the UI
-	// posts both together (see ui.go's redistribute-bgp toggle/metric cells).
-	if err := c.NetworkSetRedistributeBGP("corp", false, 7); err != nil {
-		t.Fatalf("disable: %v", err)
+	// Clearing the selection still updates the metric in the same call — the
+	// UI posts both together (see ui.go's redistribute-bgp picker/metric input).
+	if err := c.NetworkSetRedistributeBGPRoutes("corp", nil, 7); err != nil {
+		t.Fatalf("clear: %v", err)
 	}
-	if n.RedistributeBGP || n.RedistributeBGPMetric != 7 {
-		t.Fatalf("got enabled=%v metric=%d, want enabled=false metric=7", n.RedistributeBGP, n.RedistributeBGPMetric)
+	if len(n.RedistributeBGPRoutes) != 0 || n.RedistributeBGPMetric != 7 {
+		t.Fatalf("got routes=%v metric=%d, want empty metric=7", n.RedistributeBGPRoutes, n.RedistributeBGPMetric)
 	}
-	if err := c.NetworkSetRedistributeBGP("nope", true, 0); err == nil {
+	if err := c.NetworkSetRedistributeBGPRoutes("nope", []string{"10.0.0.0/24"}, 0); err == nil {
 		t.Fatal("expected error for unknown network")
 	}
 }

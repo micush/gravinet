@@ -49,6 +49,7 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 		Op, Net, Id, NewName, Subnet4, Subnet6, Address4, Address6, Key, Peer, Token, Notes string
 		Enabled                                                                             bool
 		Metric                                                                              int
+		Routes                                                                              []string // redistribute-bgp: selected BGP-learned CIDRs (see NetworkSetRedistributeBGPRoutes)
 	}
 	if !decode(w, r, &req) {
 		return
@@ -91,7 +92,7 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 			_, _, e := cfg.NetworkJoinToken(req.Token)
 			return e
 		case "redistribute-bgp":
-			return cfg.NetworkSetRedistributeBGP(req.Net, req.Enabled, req.Metric)
+			return cfg.NetworkSetRedistributeBGPRoutes(req.Net, req.Routes, req.Metric)
 		default:
 			return fmt.Errorf("unknown op %q", req.Op)
 		}

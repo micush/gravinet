@@ -179,16 +179,21 @@ func TestBGPEditorTogglesSaveOnChange(t *testing.T) {
 	// rowRouteList's add (picking a search result) and remove (the chip's ×
 	// button) must each trigger a save themselves — the exact class of bug
 	// this test exists for, just inside a search-to-add picker instead of a
-	// single toggle.
-	if !strings.Contains(indexHTML, "selSet.add(cidr); searchInp.value = ''; drawOpts(); drawChips(); scheduleSave(true);") {
-		t.Error("rowRouteList's add-a-route action has no scheduleSave call — adding a route in the redistribute connected/static/mesh pickers alone would never trigger a save")
+	// single toggle. buildRouteChipPicker (the shared widget) calls its
+	// onChange callback on both; rowRouteList must wire that callback to
+	// scheduleSave, or the callback existing is meaningless.
+	if !strings.Contains(indexHTML, "selSet.add(cidr); searchInp.value = ''; drawOpts(); drawChips(); onChange(Array.from(selSet));") {
+		t.Error("buildRouteChipPicker's add-a-route action has no onChange call — nothing would ever be told a route was added")
 	}
-	if !strings.Contains(indexHTML, "selSet.delete(cidr); drawChips(); drawOpts(); scheduleSave(true);") {
-		t.Error("rowRouteList's remove-a-route action has no scheduleSave call — removing a route in the redistribute connected/static/mesh pickers alone would never trigger a save")
+	if !strings.Contains(indexHTML, "selSet.delete(cidr); drawChips(); drawOpts(); onChange(Array.from(selSet));") {
+		t.Error("buildRouteChipPicker's remove-a-route action has no onChange call — nothing would ever be told a route was removed")
+	}
+	if !strings.Contains(indexHTML, "buildRouteChipPicker(available, selected, () => scheduleSave(true));") {
+		t.Error("rowRouteList doesn't wire buildRouteChipPicker's onChange to scheduleSave — adding/removing a route in the redistribute connected/static/mesh pickers alone would never trigger a save")
 	}
 }
 
-// "Redistribute from BGP" subcard (config.Network.RedistributeBGP/
+// "Redistribute from BGP" subcard (config.Network.RedistributeBGPRoutes/
 // RedistributeBGPMetric — BGP-into-mesh redistribution, the reverse of BGP's
 // own "Redistribute mesh routes" toggle): that it exists, that its state
 // toggle and metric cell both post to /api/network's redistribute-bgp op
@@ -198,16 +203,21 @@ func TestRedistributeFromBGPSubcard(t *testing.T) {
 	if !strings.Contains(indexHTML, "Redistribute from BGP") {
 		t.Fatal("secRoutes is missing the \"Redistribute from BGP\" subcard heading")
 	}
-	if !strings.Contains(indexHTML, "cf.redistribute_bgp") || !strings.Contains(indexHTML, "cf.redistribute_bgp_metric") {
-		t.Error("the subcard no longer reads cf.redistribute_bgp/cf.redistribute_bgp_metric from the loaded config")
+	if !strings.Contains(indexHTML, "cf.redistribute_bgp_routes") || !strings.Contains(indexHTML, "cf.redistribute_bgp_metric") {
+		t.Error("the subcard no longer reads cf.redistribute_bgp_routes/cf.redistribute_bgp_metric from the loaded config")
 	}
-	if n := strings.Count(indexHTML, "op:'redistribute-bgp'"); n < 2 {
-		t.Errorf("op:'redistribute-bgp' appears %d times, want at least 2 (the state-toggle and metric-cell edits)", n)
+	if !strings.Contains(indexHTML, "op:'redistribute-bgp'") {
+		t.Error("the subcard no longer posts op:'redistribute-bgp'")
 	}
-	// The state toggle must read the metric back out of the row's own data
-	// attribute (not hardcode 0), or double-clicking the state tag would
-	// silently reset a nonzero metric every time it's flipped.
-	if !strings.Contains(indexHTML, "metric: parseInt(tag.closest('tr').dataset.metric,10)||0") {
-		t.Error("the state-toggle no longer preserves the row's current metric when posting redistribute-bgp")
+	// Both the picker (add/remove) and the metric input must post the OTHER
+	// one's current value alongside their own change — rbPostUpdate always
+	// takes (routes, metric) together, since NetworkSetRedistributeBGPRoutes
+	// takes both at once. A regression here would mean editing one silently
+	// resets the other back to empty/0.
+	if !strings.Contains(indexHTML, "rbPostUpdate(routes, rbMetric)") {
+		t.Error("the route picker no longer sends the current metric alongside a route add/remove")
+	}
+	if !strings.Contains(indexHTML, "rbPostUpdate(rbPicker.get(), rbMetric)") {
+		t.Error("the metric input no longer sends the current route selection alongside a metric edit")
 	}
 }

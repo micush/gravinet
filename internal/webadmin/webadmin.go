@@ -47,7 +47,7 @@ type Backend interface {
 	DisabledPeers(networkID uint64) []mesh.DisabledPeerInfo
 	Routes(networkID uint64) []mesh.RouteInfo
 	// SetBGPRoutes updates networkID's BGP-into-mesh redistribution set (see
-	// config.Network.RedistributeBGP and mesh's SetBGPRoutes) — the reverse
+	// config.Network.RedistributeBGPRoutes and mesh's SetBGPRoutes) — the reverse
 	// direction from Routes above, which reports what this node has *learned*
 	// from peers; this pushes what it's currently *originating* from its own
 	// BGP RIB. Called by bgpMeshRedistributor, never directly by an HTTP
@@ -145,7 +145,7 @@ type Server struct {
 
 	metrics  *metricsCollector     // CPU/mem/interface time series for the Metrics tab
 	capture  *captureState         // live packet capture for the Capture tab
-	bgpRedis *bgpMeshRedistributor // polls FRR's RIB, pushes BGP routes into the mesh (config.Network.RedistributeBGP)
+	bgpRedis *bgpMeshRedistributor // polls FRR's RIB, pushes BGP routes into the mesh (config.Network.RedistributeBGPRoutes)
 	autoBGP  *autoBGPReconciler    // derives ASN/router-id and maintains one Neighbor per online mesh peer (config.BGPConfig.AutoBGP)
 }
 
@@ -835,11 +835,11 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		Seeds    config.SeedList      `json:"seeds"`
 		Routes   []config.Route       `json:"routes"`
 		RouteRej []config.RejectRoute `json:"route_reject"`
-		// RedistributeBGP/RedistributeBGPMetric mirror config.Network's own
-		// fields verbatim — see its doc comment. Surfaced here (not folded
-		// into Routes above) because they're a single per-network toggle +
-		// metric, not another entry in that list.
-		RedistributeBGP       bool                `json:"redistribute_bgp"`
+		// RedistributeBGPRoutes/RedistributeBGPMetric mirror config.Network's
+		// own fields verbatim — see its doc comment. Surfaced here (not
+		// folded into Routes above) because they're a single per-network
+		// selection + metric, not another entry in that list.
+		RedistributeBGPRoutes []string            `json:"redistribute_bgp_routes"`
 		RedistributeBGPMetric int                 `json:"redistribute_bgp_metric"`
 		NAT                   config.NAT          `json:"nat"`
 		QoS                   config.QoS          `json:"qos"`
@@ -868,7 +868,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			ID: id, Name: n.Name, Enabled: n.Enabled, Notes: n.Notes,
 			Subnet4: n.Subnet4, Subnet6: n.Subnet6, Address4: n.Address4, Address6: n.Address6, Seeds: n.Seeds,
 			Routes: n.Routes, RouteRej: n.RouteRej,
-			RedistributeBGP: n.RedistributeBGP, RedistributeBGPMetric: n.RedistributeBGPMetric,
+			RedistributeBGPRoutes: n.RedistributeBGPRoutes, RedistributeBGPMetric: n.RedistributeBGPMetric,
 			NAT: n.NAT, QoS: n.QoS, Throttle: n.Throttle, Firewall: n.Firewall, Hosts: n.HostsAdvertise, HostsRej: n.HostsReject,
 			DNS: n.DNSAdvertise, DNSRej: n.DNSReject, Keys: keys,
 		})

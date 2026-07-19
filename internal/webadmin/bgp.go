@@ -191,7 +191,7 @@ func (s *Server) handleBGPTable(w http.ResponseWriter, r *http.Request) {
 // bgpLearnedRoutes queries FRR for the CIDRs currently installed as this
 // node's best BGP path, across both address families — what
 // bgpMeshRedistributor actually gossips into the mesh when
-// config.Network.RedistributeBGP is on. "show bgp ipv4/ipv6 unicast json"
+// config.Network.RedistributeBGPRoutes is on. "show bgp ipv4/ipv6 unicast json"
 // (not "show bgp summary json" — that's peers, not routes; not plain "show
 // bgp ipv4 unicast" — no JSON form) returns an object keyed by prefix, each
 // holding every path FRR knows for it — see parseBGPLearnedRoutes, which
@@ -330,30 +330,45 @@ func parseIPRouteList(raw []byte) []string {
 }
 
 // handleBGPRedistributeOptions returns the CIDRs currently available to pick
-// from for RedistributeConnectedRoutes/RedistributeStaticRoutes — this
-// host's actual connected/static routes right now, per FRR/zebra (see
-// showIPRouteConnected/showIPRouteStatic). Its own endpoint, separate from
-// the config GET, for the same reason handleBGPImport is: handleBGPConfig's
-// GET deliberately never touches vtysh so the editor always loads instantly,
-// and this does, unavoidably, since the whole point is asking FRR what it
-// currently sees. The UI fetches this in the background after the editor's
-// already on screen and treats a degraded response the same way it already
-// treats the BGP peers/table cards being unavailable — a picker with nothing
-// to pick from (yet), not an error blocking the rest of the page.
+// from for RedistributeConnectedRoutes/RedistributeStaticRoutes (this host's
+// actual connected/static routes right now, per FRR/zebra — see
+// showIPRouteConnected/showIPRouteStatic) and for
+// config.Network.RedistributeBGPRoutes (this node's current BGP-learned
+// routes — see bgpLearnedRoutes). The BGP editor (Traffic > BGP) uses the
+// first two; Mesh Routes' "Redistribute from BGP" subcard uses the third —
+// shared here rather than a second near-identical endpoint, since all three
+// answer the same underlying question ("what does this node currently see
+// via FRR that a redistribute picker could offer") and none of them are
+// specific to one particular network. Its own endpoint, separate from the
+// config GETs both pages otherwise use, for the same reason handleBGPImport
+// is: those GETs deliberately never touch vtysh so their editors always load
+// instantly, and this does, unavoidably, since the whole point is asking FRR
+// what it currently sees. Both pages fetch this in the background after
+// their own editor is already on screen and treat a degraded response the
+// same way they already treat other BGP/BFD cards being unavailable — a
+// picker with nothing to pick from (yet), not an error blocking the rest of
+// the page.
 func (s *Server) handleBGPRedistributeOptions(w http.ResponseWriter, r *http.Request) {
 	if !bgpSupported() {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"available":        false,
-			"reason":           "FRR/vtysh is not installed",
-			"connected_routes": []string{},
-			"static_routes":    []string{},
+			"available":          false,
+			"reason":             "FRR/vtysh is not installed",
+			"connected_routes":   []string{},
+			"static_routes":      []string{},
+			"bgp_learned_routes": []string{},
 		})
 		return
 	}
+	learned := bgpLearnedRoutes()
+	learnedStrs := make([]string, len(learned))
+	for i, p := range learned {
+		learnedStrs[i] = p.String()
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"available":        true,
-		"connected_routes": showIPRouteConnected(),
-		"static_routes":    showIPRouteStatic(),
+		"available":          true,
+		"connected_routes":   showIPRouteConnected(),
+		"static_routes":      showIPRouteStatic(),
+		"bgp_learned_routes": learnedStrs,
 	})
 }
 

@@ -188,19 +188,17 @@ const indexHTML = `<!doctype html>
      actually needs it (never mid-IPv4-octet or mid-word), so a short value
      still renders on one line and only a genuinely long one wraps. */
   table.peers-table td.ov-cell, table.peers-table td.ep-cell { overflow:visible; text-overflow:clip; white-space:normal; overflow-wrap:anywhere; }
-  /* routes-table: shared column grid for Mesh Routes' three per-network
-     subcards (Advertise, Redistribute from BGP, Reject) — they're separate
-     <table>s, each sized from its own content under the default auto
-     layout, so their columns drift out of alignment with each other (most
-     visibly Redistribute from BGP's, which has only 2 real columns and no
-     list to grow, versus the other two's 3-4 and open-ended row count).
-     Fixed layout + a shared colgroup forces identical column widths across
-     all three, so "state" lines up under "state", and the CIDR/metric and
-     metric/inclusive columns line up the same way even though what's
-     actually in them differs per table. Redistribute from BGP has no
-     checkbox and no 4th column, so it fills those slots with blank
-     <th>/<td> using the same rt-sel/rt-col3 widths, rather than a
-     differently-shaped table that just happens to render the same. */
+  /* routes-table: shared column grid for Mesh Routes' Advertise and Reject
+     subcards — they're separate <table>s, each sized from its own content
+     under the default auto layout, so their columns used to drift out of
+     alignment with each other. Fixed layout + a shared colgroup forces
+     identical column widths across both, so "state" lines up under
+     "state", and the cidr/metric and cidr/inclusive columns line up the
+     same way even though what's actually in them differs per table.
+     (Redistribute from BGP, the third subcard here, used to share this
+     grid too — a single-row two-column table with blank filler
+     cells/columns to line up with these — but it's a search-to-add picker
+     now, not a table, and no longer participates.) */
   /* 508px = the Advertise/Reject toolbar's own width (.tfilter's 440px +
      two 6px flex gaps + two 28px .tbar-btn buttons) — so the table's right
      edge lands exactly under the end of the remove button above it,
@@ -3506,6 +3504,21 @@ function secRoutes(c) {
   secHint(c, 'CIDRs advertised into the mesh from this node. Double-click a cidr or metric to edit it (lower metric wins); double-click the state tag to toggle the route.');
   secHint(c, 'This node\u2019s current BGP-learned routes (FRR\u2019s RIB), gossiped to this network\u2019s peers alongside the Advertise table above \u2014 the reverse of the "Redistribute mesh routes" toggle on the BGP page. Every route redistributed this way carries the one metric set here (lower wins, same as an Advertise route\u2019s own). Needs FRR/bgpd actually running; a route this node already advertises above is never redistributed back to avoid a loop.');
   secHint(c, 'CIDRs rejected when advertised by other nodes. A reject matches only that exact CIDR; tick inclusive to also reject every more-specific network inside it. Double-click a cidr to edit it, the inclusive cell to toggle it, or the state tag to toggle the entry.');
+  // The "Redistribute from BGP" subcard's picker needs this node's current
+  // BGP-learned routes — node-global, not per-network, but the subcard
+  // below is built once per network in the loop that follows. Fetched once
+  // here rather than once per network, and not awaited before the rest of
+  // the page renders (this touches FRR via vtysh, unlike everything else
+  // secRoutes reads — which all comes from the already-loaded state.cfg —
+  // so it can't be allowed to hold up a page that's otherwise instant; same
+  // reasoning as the BGP editor's own redistribute-options fetch). Each
+  // network's picker is collected below and refreshed once this resolves.
+  const rbPickers = [];
+  api('/api/bgp/redistribute-options').then(ro => {
+    if (state.section !== 'routes') return; // navigated away while it ran
+    const learned = (ro && ro.ok && ro.body && ro.body.bgp_learned_routes) || [];
+    rbPickers.forEach(p => p.setAvailable(learned));
+  }).catch(() => { /* pickers just keep showing "loading…"; not fatal */ });
   for (const cf of state.cfg) {
     const card = $('<div class="card"></div>');
     card.appendChild($('<h3><span class="net-name">'+esc(cf.name)+'</span> <span class="net-id">'+esc(cf.id)+'</span></h3>'));
@@ -3561,48 +3574,38 @@ function secRoutes(c) {
     card.appendChild(rsub);
 
     // --- Redistribute from BGP sub-card ---
-    // Unlike Advertise/Reject above, this isn't a list — one toggle and one
-    // metric per network, so it gets a single-row table rather than an
-    // add/remove-rows one (_rowAdd/_rowRemove are deliberately not set).
+    // Unlike Advertise/Reject above, this doesn't map onto a per-row table:
+    // it's one picker (see buildRouteChipPicker) plus one shared metric,
+    // not a list of independently-editable rows.
     const bsub = $('<div class="subcard"></div>');
     bsub.appendChild($('<h4>Redistribute from BGP</h4>'));
-    const rbEnabled = !!cf.redistribute_bgp;
-    const rbMetric = cf.redistribute_bgp_metric || 0;
-    const rbTag = '<span class="tag-toggle '+(rbEnabled?'on':'off')+'" data-rbstate="1" title="double-click to '+(rbEnabled?'disable':'enable')+'">'+(rbEnabled?'enabled':'disabled')+'</span>';
-    let bh = '<table class="routes-table"><colgroup><col class="rt-sel"><col class="rt-state"><col class="rt-col2"><col class="rt-col3"></colgroup><tr><th></th><th>state</th><th>metric</th><th></th></tr>'
-      + '<tr data-enabled="'+(rbEnabled?1:0)+'" data-metric="'+esc(rbMetric)+'">'
-      + '<td></td><td class="rb-state">'+rbTag+'</td><td class="metric-cell">'+esc(rbMetric)+'</td><td></td></tr>';
-    const bt = $('<div></div>'); bt.innerHTML = bh+'</table>'; bsub.appendChild(bt);
-    // One row, one value — no cross-column filter box needed here.
-    bt.querySelector('table')._noFilter = true;
-    // Double-click the state tag to toggle redistribution on/off (live),
-    // preserving whatever metric is currently set — same shape as the
-    // Advertise/Reject state toggles above, just posting to /api/network's
-    // redistribute-bgp op instead of /api/route.
-    bt.querySelectorAll('[data-rbstate]').forEach(tag => {
-      tag.ondblclick = (e) => {
-        e.stopPropagation();
-        toggleTagState(tag, '/api/network', on => ({op:'redistribute-bgp', net:cf.name, enabled:on, metric: parseInt(tag.closest('tr').dataset.metric,10)||0}));
-      };
-    });
-    // Double-click the metric cell to edit it in place — same pattern as the
-    // Advertise table's own metric cell, preserving the current enabled state.
-    bt.querySelectorAll('tr .metric-cell').forEach(cell => {
-      const tr = cell.closest('tr');
-      cell.title = 'double-click to edit metric';
-      cell.ondblclick = () => {
-        const cur = cell.textContent.trim();
-        cell.innerHTML = '<input type="text" inputmode="numeric" value="'+esc(cur)+'" style="width:60px">';
-        const inp = cell.querySelector('input'); inp.focus(); inp.select();
-        let done = false;
-        const commit = async () => { if(done) return; done=true; const m=Math.max(0,parseInt(inp.value,10)||0);
-          const ar = await api('/api/network',{method:'POST',body:JSON.stringify({op:'redistribute-bgp', net:cf.name, enabled: tr.dataset.enabled==='1', metric:m})});
-          if (!ar.ok){ alert((ar.body&&ar.body.error)||'edit failed'); refresh(); return; }
-          refresh(); };
-        inp.onkeydown = (e) => { if(e.key==='Enter'){ commit(); } else if(e.key==='Escape'){ done=true; refresh(); } };
-        inp.onblur = commit;
-      };
-    });
+    let rbMetric = cf.redistribute_bgp_metric || 0;
+    // Posts the full current state (both the picker's selection and the
+    // metric) together on every add/remove/metric edit — NetworkSetRedistributeBGPRoutes
+    // takes both at once, so either changing alone still needs to send the
+    // other's current value along with it.
+    const rbPostUpdate = async (routes, metric) => {
+      const ar = await api('/api/network', {method:'POST', body:JSON.stringify({op:'redistribute-bgp', net:cf.name, routes:routes, metric:metric})});
+      if (!ar.ok){ alert((ar.body&&ar.body.error)||'edit failed'); refresh(); }
+    };
+    const rbRow = $('<div class="settings-row"></div>');
+    rbRow.appendChild($('<div><div class="settings-label">BGP-learned routes</div><div class="settings-desc">Pick which of this node\u2019s current BGP-learned routes to gossip into this network\u2019s mesh. Needs FRR/bgpd actually running; a route this node already advertises above is never redistributed back, to avoid a loop.</div></div>'));
+    // available starts undefined (picker shows "loading…") — filled in once
+    // the shared fetch at the top of secRoutes resolves; rbPickers is that
+    // fetch's list of every network's picker to refresh.
+    const rbPicker = buildRouteChipPicker(undefined, cf.redistribute_bgp_routes || [], (routes) => rbPostUpdate(routes, rbMetric));
+    rbPickers.push(rbPicker);
+    rbRow.appendChild(rbPicker.wrap);
+    bsub.appendChild(rbRow);
+    const rbMetricRow = $('<div class="settings-row"></div>');
+    rbMetricRow.appendChild($('<div><div class="settings-label">Metric</div><div class="settings-desc">Metric every route selected above carries into the mesh (lower wins, same as an Advertise route\u2019s own).</div></div>'));
+    const rbMetricInp = $('<input type="text" inputmode="numeric" style="width:80px">');
+    rbMetricInp.value = rbMetric;
+    const commitMetric = () => { rbMetric = Math.max(0, parseInt(rbMetricInp.value,10)||0); rbMetricInp.value = rbMetric; rbPostUpdate(rbPicker.get(), rbMetric); };
+    rbMetricInp.onblur = commitMetric;
+    rbMetricInp.onkeydown = (e) => { if (e.key==='Enter') rbMetricInp.blur(); };
+    rbMetricRow.appendChild(rbMetricInp);
+    bsub.appendChild(rbMetricRow);
     card.appendChild(bsub);
 
     // --- Reject sub-card ---
@@ -4496,6 +4499,91 @@ function fwCatalogCombobox(input, getNames){
     else if (e.key === 'Enter'){ if (selIdx>=0 && shown[selIdx]){ e.preventDefault(); pick(shown[selIdx]); } }
     else if (e.key === 'Escape'){ close(); }
   });
+}
+
+// buildRouteChipPicker is the search-to-add widget shared by every "pick
+// some CIDRs out of a possibly huge list" spot in this file: BGP's own
+// Redistribute connected/static/mesh pickers (renderBgpEditor's
+// rowRouteList) and Mesh Routes' Redistribute from BGP subcard
+// (secRoutes). Reuses the .ss-input/.ss-list/.ss-opt/.ss-empty styling
+// buildListPicker and fwCatalogCombobox already established, rather than
+// yet another dropdown look — narrowed by typing exactly like those, and,
+// like fwCatalogCombobox, caps rendered matches at 200 so a host with
+// thousands of routes never means thousands of DOM nodes; keep typing to
+// narrow further. available is what's currently offered (undefined until
+// the caller's own live query resolves — see setAvailable below — []
+// once it has and genuinely found nothing); selected is what's already
+// chosen. Selected routes render as their own compact, removable chip
+// list below the search box — bounded by how many are actually selected,
+// not by how many are available, which is the number that actually gets
+// large. A selected CIDR no longer in available (a route that's gone, or
+// no longer advertised/redistributed on the source side) still shows as
+// a chip, marked, so it stays visible and removable rather than silently
+// vanishing along with the ability to deliberately drop it. onChange(get())
+// fires after every add/remove — a debounced form save for the BGP
+// editor, an immediate POST for Mesh Routes' subcard; this widget itself
+// has no opinion on how persistence happens, only that something changed.
+function buildRouteChipPicker(available, selected, onChange){
+  const wrap = $('<div class="route-picker"></div>');
+  const searchWrap = $('<div class="search-select route-search"></div>');
+  const searchInp = $('<input class="ss-input" type="text" autocomplete="off" spellcheck="false" placeholder="search to add\u2026">');
+  const optList = $('<div class="ss-list" role="listbox"></div>');
+  searchWrap.appendChild(searchInp); searchWrap.appendChild(optList);
+  const chipBox = $('<div class="route-chips"></div>');
+  wrap.appendChild(searchWrap); wrap.appendChild(chipBox);
+
+  let items = available; // undefined until setAvailable's first call; [] is a real "nothing available"
+  const selSet = new Set(selected||[]);
+
+  const drawChips = () => {
+    chipBox.innerHTML = '';
+    if (!selSet.size){
+      chipBox.appendChild($('<div class="hint" style="padding:2px 0">none selected</div>'));
+      return;
+    }
+    Array.from(selSet).sort().forEach(cidr => {
+      const stale = items !== undefined && items.indexOf(cidr) === -1;
+      const chip = $('<span class="route-chip'+(stale ? ' stale' : '')+'"></span>');
+      if (stale) chip.title = 'not currently present';
+      chip.appendChild(document.createTextNode(cidr));
+      const x = $('<button type="button" class="route-chip-x" aria-label="remove '+esc(cidr)+'">\u00d7</button>');
+      x.onclick = () => { selSet.delete(cidr); drawChips(); drawOpts(); onChange(Array.from(selSet)); };
+      chip.appendChild(x);
+      chipBox.appendChild(chip);
+    });
+  };
+  const drawOpts = () => {
+    optList.innerHTML = '';
+    if (items === undefined){
+      optList.appendChild($('<div class="ss-empty">loading available routes\u2026</div>'));
+      return;
+    }
+    const q = searchInp.value.trim().toLowerCase();
+    const pool = items.filter(cidr => !selSet.has(cidr) && (!q || cidr.toLowerCase().indexOf(q) >= 0));
+    if (!pool.length){
+      optList.appendChild($('<div class="ss-empty">'+(items.length ? 'no matches' : 'none available') +'</div>'));
+      return;
+    }
+    pool.slice(0, 200).forEach(cidr => {
+      const o = $('<div class="ss-opt" role="option"></div>');
+      o.textContent = cidr;
+      // mousedown, not click: fires before the blur that closes the list
+      // would otherwise swallow it (same reason as the other .ss-* pickers).
+      o.onmousedown = (e) => { e.preventDefault(); selSet.add(cidr); searchInp.value = ''; drawOpts(); drawChips(); onChange(Array.from(selSet)); };
+      optList.appendChild(o);
+    });
+    if (pool.length > 200) optList.appendChild($('<div class="ss-empty">+'+(pool.length-200)+' more \u2014 keep typing to narrow</div>'));
+  };
+  searchInp.oninput = () => { drawOpts(); optList.classList.add('show'); };
+  searchInp.onfocus = () => { drawOpts(); optList.classList.add('show'); };
+  searchInp.onblur = () => setTimeout(() => optList.classList.remove('show'), 150);
+
+  drawOpts(); drawChips();
+  return {
+    wrap,
+    get: () => Array.from(selSet),
+    setAvailable: (list) => { items = list; drawOpts(); drawChips(); },
+  };
 }
 
 function fwAddRow(table, net){
@@ -6218,94 +6306,15 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
     row.appendChild(inp); card.appendChild(row);
     return inp;
   };
-  // rowRouteList replaces a blanket on/off toggle with a search-to-add
-  // picker — the widget behind Redistribute connected/static/mesh routes
-  // below. Reuses the .ss-input/.ss-list/.ss-opt/.ss-empty styling
-  // buildListPicker and fwCatalogCombobox already established, rather than
-  // a fourth dropdown look — narrowed by typing exactly like those, and,
-  // like fwCatalogCombobox, caps rendered matches at 200 so a host with
-  // thousands of routes never means thousands of DOM nodes; keep typing to
-  // narrow further. available is what's currently offered (a live
-  // FRR/zebra query for connected/static, the Mesh Routes page's own
-  // Advertise list for mesh); selected is what's already chosen (loaded
-  // from config), rendered as its own compact, removable-chip list below
-  // the search box — bounded by how many routes are actually selected, not
-  // by how many are available, which is the number that actually gets
-  // large. A selected CIDR no longer in available (a connected/static
-  // route that's gone, or a mesh route since deleted or un-advertised)
-  // still shows as a chip, marked, so it stays visible and removable
-  // rather than silently vanishing along with the ability to deliberately
-  // drop it — see config.BGPConfig's own doc comment for why it isn't
-  // auto-pruned. Every add/remove saves immediately, same as every other
-  // toggle on this page. setAvailable lets the caller refresh what's
-  // offered later without losing the current selection or rebuilding the
-  // row — used once /api/bgp/redistribute-options' live query (which,
-  // unlike the rest of this editor, has to touch FRR and so can't block
-  // the page's first paint) comes back.
+  // rowRouteList wraps buildRouteChipPicker (see its own doc comment) in a
+  // settings-row, wired to this form's debounced-save (every add/remove
+  // saves immediately, same as every other toggle on this page).
   const rowRouteList = (labelText, desc, available, selected) => {
     const row = $('<div class="settings-row"></div>');
     row.appendChild($('<div><div class="settings-label">'+esc(labelText)+'</div><div class="settings-desc">'+desc+'</div></div>'));
-    const wrap = $('<div class="route-picker"></div>');
-    const searchWrap = $('<div class="search-select route-search"></div>');
-    const searchInp = $('<input class="ss-input" type="text" autocomplete="off" spellcheck="false" placeholder="search to add\u2026">');
-    const optList = $('<div class="ss-list" role="listbox"></div>');
-    searchWrap.appendChild(searchInp); searchWrap.appendChild(optList);
-    const chipBox = $('<div class="route-chips"></div>');
-    wrap.appendChild(searchWrap); wrap.appendChild(chipBox);
-
-    let items; // undefined until setAvailable/available first arrives; [] is a real "nothing available"
-    const selSet = new Set(selected||[]);
-
-    const drawChips = () => {
-      chipBox.innerHTML = '';
-      if (!selSet.size){
-        chipBox.appendChild($('<div class="hint" style="padding:2px 0">none selected</div>'));
-        return;
-      }
-      Array.from(selSet).sort().forEach(cidr => {
-        const stale = items !== undefined && items.indexOf(cidr) === -1;
-        const chip = $('<span class="route-chip'+(stale ? ' stale' : '')+'"></span>');
-        if (stale) chip.title = 'not currently present';
-        chip.appendChild(document.createTextNode(cidr));
-        const x = $('<button type="button" class="route-chip-x" aria-label="remove '+esc(cidr)+'">\u00d7</button>');
-        x.onclick = () => { selSet.delete(cidr); drawChips(); drawOpts(); scheduleSave(true); };
-        chip.appendChild(x);
-        chipBox.appendChild(chip);
-      });
-    };
-    const drawOpts = () => {
-      optList.innerHTML = '';
-      if (items === undefined){
-        optList.appendChild($('<div class="ss-empty">loading available routes\u2026</div>'));
-        return;
-      }
-      const q = searchInp.value.trim().toLowerCase();
-      const pool = items.filter(cidr => !selSet.has(cidr) && (!q || cidr.toLowerCase().indexOf(q) >= 0));
-      if (!pool.length){
-        optList.appendChild($('<div class="ss-empty">'+(items.length ? 'no matches' : 'none available') +'</div>'));
-        return;
-      }
-      pool.slice(0, 200).forEach(cidr => {
-        const o = $('<div class="ss-opt" role="option"></div>');
-        o.textContent = cidr;
-        // mousedown, not click: fires before the blur that closes the list
-        // would otherwise swallow it (same reason as the other .ss-* pickers).
-        o.onmousedown = (e) => { e.preventDefault(); selSet.add(cidr); searchInp.value = ''; drawOpts(); drawChips(); scheduleSave(true); };
-        optList.appendChild(o);
-      });
-      if (pool.length > 200) optList.appendChild($('<div class="ss-empty">+'+(pool.length-200)+' more \u2014 keep typing to narrow</div>'));
-    };
-    searchInp.oninput = () => { drawOpts(); optList.classList.add('show'); };
-    searchInp.onfocus = () => { drawOpts(); optList.classList.add('show'); };
-    searchInp.onblur = () => setTimeout(() => optList.classList.remove('show'), 150);
-
-    items = available;
-    drawOpts(); drawChips();
-    row.appendChild(wrap); card.appendChild(row);
-    return {
-      get: () => Array.from(selSet),
-      setAvailable: (list) => { items = list; drawOpts(); drawChips(); },
-    };
+    const picker = buildRouteChipPicker(available, selected, () => scheduleSave(true));
+    row.appendChild(picker.wrap); card.appendChild(row);
+    return picker;
   };
 
   const enableCb = rowTog('Enable BGP', 'Render and run a <code>router bgp</code> speaker on this host. Off leaves no BGP block in FRR\u2019s config and switches bgpd off.', !!b.enabled);

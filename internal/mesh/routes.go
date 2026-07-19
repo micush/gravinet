@@ -262,13 +262,13 @@ func (e *Engine) reloadBGPRoutes(ns *netState, newRoutes []netip.Prefix, metric 
 }
 
 // SetBGPRoutes updates the CIDRs this node is currently redistributing from
-// its BGP RIB into networkID's mesh gossip (config.Network.RedistributeBGP),
+// its BGP RIB into networkID's mesh gossip (config.Network.RedistributeBGPRoutes),
 // tagged with metric. It's webadmin's bgpMeshRedistributor that calls this —
 // gravinet's mesh engine never talks to FRR itself, it just accepts whatever
 // route set the caller currently has and reconciles the mesh side (see
 // reloadBGPRoutes). Passing an empty routes slice clears redistribution for
 // this network (withdrawing anything previously sent), which is exactly what
-// the poller does the moment RedistributeBGP turns off, BGP itself goes
+// the poller does the moment RedistributeBGPRoutes empties out, BGP itself goes
 // down, or the network is disabled — this function has no opinion on why the
 // set is empty, only that it now is.
 //

@@ -800,7 +800,7 @@ type netState struct {
 	advMetric atomic.Pointer[map[netip.Prefix]int] // metric for each advertised route
 
 	// bgpRoutes is this node's current BGP-into-mesh redistribution set (see
-	// config.Network.RedistributeBGP) — the CIDRs pulled from FRR's RIB and
+	// config.Network.RedistributeBGPRoutes) — the CIDRs pulled from FRR's RIB and
 	// gossiped to this network's peers, each carrying the single metric the
 	// whole batch shares. Deliberately separate state from advRoutes/
 	// advMetric above rather than merged into them: advRoutes is swapped

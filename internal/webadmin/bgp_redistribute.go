@@ -1,11 +1,11 @@
 package webadmin
 
 // bgpMeshRedistributor is the BGP-into-mesh half of route redistribution —
-// config.Network.RedistributeBGP's counterpart to BGPConfig.RedistributeMeshRoutes
-// (mesh-into-BGP, see bgp.go's meshRouteCIDRs/reconcileMeshRedistribute). It
-// periodically pulls FRR's current best-path routes (bgpLearnedRoutes) and
-// pushes them into the mesh via Backend.SetBGPRoutes, for every network that
-// wants them.
+// config.Network.RedistributeBGPRoutes's counterpart to BGPConfig.
+// RedistributeMeshRoutes (mesh-into-BGP, see bgp.go's meshRouteCIDRs/
+// reconcileMeshRedistribute). It periodically pulls FRR's current best-path
+// routes (bgpLearnedRoutes) and pushes each network's own selection from
+// among them into the mesh via Backend.SetBGPRoutes.
 //
 // The two directions can't share a mechanism. reconcileMeshRedistribute
 // reacts to a config edit because its source — the Mesh Routes page's
@@ -36,7 +36,7 @@ const bgpRedistributePollInterval = 15 * time.Second
 
 // bgpMeshRedistributor's mu guards active: the set of networkIDs it's
 // currently redistributing into, so a network that just stopped wanting this
-// (RedistributeBGP toggled off, the network disabled/deleted, or BGP itself
+// (RedistributeBGPRoutes emptied out, the network disabled/deleted, or BGP itself
 // going down) gets one final clearing SetBGPRoutes call instead of being left
 // with stale routes gossiped into the mesh forever — sync() has no other way
 // to know "this used to be active" without remembering it itself.
@@ -100,7 +100,7 @@ func (r *bgpMeshRedistributor) sync() {
 
 	wantsAny := false
 	for i := range cfg.Networks {
-		if cfg.Networks[i].Enabled && cfg.Networks[i].RedistributeBGP {
+		if cfg.Networks[i].Enabled && len(cfg.Networks[i].RedistributeBGPRoutes) > 0 {
 			wantsAny = true
 			break
 		}
@@ -137,24 +137,34 @@ func (r *bgpMeshRedistributor) sync() {
 	for _, c := range meshRouteCIDRs(cfg) {
 		exclude[c] = true
 	}
-	var candidate []netip.Prefix
+	// candidateByPrefix is every currently-learned, not-self-originated route,
+	// keyed by its own CIDR string — the pool each network's own selection
+	// (RedistributeBGPRoutes) gets intersected against below, since two
+	// networks can select different subsets of the very same BGP RIB.
+	candidateByPrefix := make(map[string]netip.Prefix, len(learned))
 	for _, p := range learned {
-		if !exclude[p.String()] {
-			candidate = append(candidate, p)
+		if s := p.String(); !exclude[s] {
+			candidateByPrefix[s] = p
 		}
 	}
 
 	next := make(map[uint64]bool)
 	for i := range cfg.Networks {
 		n := &cfg.Networks[i]
-		if !n.Enabled || !n.RedistributeBGP || !bgpUp {
+		if !n.Enabled || len(n.RedistributeBGPRoutes) == 0 || !bgpUp {
 			continue
 		}
 		id, err := strconv.ParseUint(n.ID, 16, 64)
 		if err != nil {
 			continue
 		}
-		if r.s.be.SetBGPRoutes(id, candidate, n.RedistributeBGPMetric) {
+		var selected []netip.Prefix
+		for _, c := range n.RedistributeBGPRoutes {
+			if p, ok := candidateByPrefix[c]; ok {
+				selected = append(selected, p)
+			}
+		}
+		if r.s.be.SetBGPRoutes(id, selected, n.RedistributeBGPMetric) {
 			next[id] = true
 		}
 	}

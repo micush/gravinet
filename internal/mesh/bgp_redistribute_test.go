@@ -21,7 +21,7 @@ func routeMetric(n *testNode, netID uint64, cidr string) (int, bool) {
 }
 
 // TestSetBGPRoutesLive proves BGP-into-mesh redistribution (SetBGPRoutes,
-// config.Network.RedistributeBGP's engine-side counterpart) applies live and
+// config.Network.RedistributeBGPRoutes's engine-side counterpart) applies live and
 // propagates over the same gossip path a config-driven Advertise route
 // already uses — a peer can't tell the two sources apart, by design (see
 // bgpRedistSet's doc comment on netState): withdrawal, and a same-batch
@@ -75,7 +75,7 @@ func TestSetBGPRoutesLive(t *testing.T) {
 	}
 
 	// Withdrawing (an empty set — what the poller sends the moment
-	// RedistributeBGP turns off, or BGP itself goes down) drops it on B.
+	// RedistributeBGPRoutes is emptied out, or BGP itself goes down) drops it on B.
 	if ok := A.eng.SetBGPRoutes(netID, nil, 0); !ok {
 		t.Fatal("SetBGPRoutes (withdraw) reported networkID not found")
 	}

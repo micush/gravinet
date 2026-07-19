@@ -37,6 +37,48 @@ assuming it didn't happen.
 
 ---
 
+## v531 — 2026-07-19
+
+**Redistribute from BGP (Mesh Routes' reverse-direction subcard) is now a
+picker too, same treatment as v529/v530's three BGP-side redistribute
+selections — and the picker widget itself is now one shared component
+instead of four copies of it.**
+
+`config.Network.RedistributeBGP` (bool) is replaced by
+`RedistributeBGPRoutes` ([]string): a per-network selection of which of
+this node's current BGP-learned routes get gossiped into that network's
+mesh, instead of all-or-nothing. Two networks can now redistribute
+different subsets of the very same BGP RIB — previously impossible,
+since the one blanket toggle fed every wanting network the identical
+set. `bgpMeshRedistributor.sync()` (`bgp_redistribute.go`) now
+intersects each network's own selection against the live RIB
+independently rather than computing one shared candidate list for
+everyone; the self-origination loop guard (never redistribute a route
+this node already advertises into the mesh itself) still applies even
+to a route explicitly named in the selection.
+
+The picker's available options — this node's current BGP-learned
+routes — come from the same `/api/bgp/redistribute-options` endpoint
+v529 added for the BGP editor's connected/static pickers, now also
+returning `bgp_learned_routes`; reused rather than standing up a
+near-duplicate endpoint, since all of them answer the same underlying
+"what does this node currently see via FRR" question. Mesh Routes'
+`secRoutes` fetches it once (not once per network) in the background,
+without blocking the page's normal instant load, and refreshes every
+network's picker on the page once it resolves.
+
+**Also extracted `buildRouteChipPicker`** as a standalone, reusable
+component (`ui.go`) — the search-to-add-with-chips widget v530 built
+for the BGP editor is now shared verbatim by this new picker instead of
+being copy-pasted a fourth time; `rowRouteList` (the BGP editor's own
+wrapper) is now a thin shim over it.
+
+`config.Network.RedistributeBGPMetric` is unchanged — still one shared
+metric for the whole selection, not per-route, the same design choice
+BGPConfig's three fields already made.
+
+---
+
 ## v530 — 2026-07-19
 
 **Rebuilt the redistribute connected/static/mesh pickers (v529): a
