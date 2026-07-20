@@ -98,6 +98,105 @@ func TestFRRDistanceBGPSharesMeshMetricFloor(t *testing.T) {
 	}
 }
 
+// TestMergeFRRConfigPreservesForeignInterfaceStanza is the actual bug report:
+// an operator adds an interface address through vtysh directly (persisted to
+// frr.conf via FRR's own "write memory", or however it got there) — the next
+// time gravinet applies any BGP change, that stanza must survive, not vanish
+// along with everything else that isn't gravinet's own router bgp block.
+func TestMergeFRRConfigPreservesForeignInterfaceStanza(t *testing.T) {
+	existing := `! gravinet manages the BGP configuration below — other config in this file is preserved across gravinet's own rewrites, not overwritten.
+frr defaults traditional
+!
+router bgp 65001
+ bgp router-id 10.0.0.1
+!
+interface ens18
+ ip address 192.168.5.115/24
+!
+`
+	rendered := "! gravinet manages the BGP configuration below — other config in this file is preserved across gravinet's own rewrites, not overwritten.\nfrr defaults traditional\n!\nrouter bgp 65002\n bgp router-id 10.0.0.2\n!\n"
+
+	got := mergeFRRConfig(existing, rendered)
+	frrHas(t, got, "interface ens18\n ip address 192.168.5.115/24")
+	frrHas(t, got, "router bgp 65002")
+	// The OLD router bgp block (superseded by the fresh render) must not
+	// survive — only the new one.
+	frrLacks(t, got, "65001")
+	// Fresh content leads; the header line appears exactly once, not
+	// duplicated by also being preserved as "foreign".
+	if n := strings.Count(got, "gravinet manages the BGP configuration"); n != 1 {
+		t.Errorf("gravinet header appears %d times, want exactly 1:\n%s", n, got)
+	}
+}
+
+// TestMergeFRRConfigNoForeignContent covers the common case — nothing else
+// in the file, so the merge is a no-op and returns rendered completely
+// unchanged (no trailing separator added, nothing appended).
+func TestMergeFRRConfigNoForeignContent(t *testing.T) {
+	rendered := "! gravinet manages the BGP configuration below — other config in this file is preserved across gravinet's own rewrites, not overwritten.\nfrr defaults traditional\n!\nrouter bgp 65001\n!\n"
+	for _, existing := range []string{
+		"",       // no file yet
+		rendered, // a previous gravinet-only write, nothing foreign ever added
+	} {
+		if got := mergeFRRConfig(existing, rendered); got != rendered {
+			t.Errorf("mergeFRRConfig(%q, rendered) = %q, want rendered unchanged", existing, got)
+		}
+	}
+}
+
+// TestMergeFRRConfigDropsAllGravinetOwnedKinds covers every stanza type
+// frrGravinetOwnedStanza recognizes, not just router bgp — a redistribute or
+// AS-prepend prefix-list/route-map from a previous render must not survive
+// as "foreign" either, or gravinet would accumulate stale duplicates of its
+// own config forever instead of replacing them.
+func TestMergeFRRConfigDropsAllGravinetOwnedKinds(t *testing.T) {
+	existing := `! gravinet manages the BGP configuration below — other config in this file is preserved across gravinet's own rewrites, not overwritten.
+frr defaults traditional
+!
+ip prefix-list GRAVINET-REDIST-CONNECTED-V4 seq 5 permit 10.1.0.0/24
+route-map GRAVINET-REDIST-CONNECTED permit 10
+ match ip address prefix-list GRAVINET-REDIST-CONNECTED-V4
+!
+route-map GRAVINET-AS-PREPEND permit 10
+ set as-path prepend 65001 65001
+!
+router bgp 65001
+!
+hostname somebox
+!
+`
+	rendered := "REPLACED\n"
+	got := mergeFRRConfig(existing, rendered)
+	frrHas(t, got, "REPLACED")
+	frrHas(t, got, "hostname somebox") // the one genuinely foreign line
+	for _, gone := range []string{"GRAVINET-REDIST-CONNECTED", "GRAVINET-AS-PREPEND", "router bgp 65001", "frr defaults traditional"} {
+		frrLacks(t, got, gone)
+	}
+}
+
+// TestMergeFRRConfigIdempotentAcrossRepeatedApplies proves applying twice in
+// a row — merge, then merge again against the *result* of the first merge —
+// doesn't accumulate duplicate copies of the foreign stanza, and correctly
+// replaces the previous render with the new one each time. This is the
+// realistic case: AutoBGP polls and can call this repeatedly with no user
+// action between calls at all.
+func TestMergeFRRConfigIdempotentAcrossRepeatedApplies(t *testing.T) {
+	foreignStanza := "interface ens18\n ip address 192.168.5.115/24\n"
+	existing := "! gravinet manages the BGP configuration below — other config in this file is preserved across gravinet's own rewrites, not overwritten.\nfrr defaults traditional\n!\nrouter bgp 65001\n!\n" + foreignStanza + "!\n"
+
+	rendered1 := "! gravinet manages the BGP configuration below — other config in this file is preserved across gravinet's own rewrites, not overwritten.\nfrr defaults traditional\n!\nrouter bgp 65001\n neighbor 10.0.0.2 remote-as 65002\n!\n"
+	after1 := mergeFRRConfig(existing, rendered1)
+
+	rendered2 := "! gravinet manages the BGP configuration below — other config in this file is preserved across gravinet's own rewrites, not overwritten.\nfrr defaults traditional\n!\nrouter bgp 65001\n neighbor 10.0.0.2 remote-as 65002\n neighbor 10.0.0.3 remote-as 65003\n!\n"
+	after2 := mergeFRRConfig(after1, rendered2)
+
+	if n := strings.Count(after2, "interface ens18"); n != 1 {
+		t.Fatalf("foreign interface stanza appears %d times after two applies, want exactly 1:\n%s", n, after2)
+	}
+	frrHas(t, after2, "192.168.5.115/24")
+	frrHas(t, after2, "neighbor 10.0.0.3 remote-as 65003")
+}
+
 // A minimal enabled BGP config must still emit a runnable `router bgp <asn>`
 // block and request bgpd, even with nothing else filled in. Ported from
 // parapet's bgp_minimal_block test.

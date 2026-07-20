@@ -273,7 +273,7 @@ func renderASPrependRouteMap(asn uint32) string {
 // is a test not exercising this path).
 func renderFRR(b config.BGPConfig, meshRoutes ...string) string {
 	var out strings.Builder
-	out.WriteString("! gravinet-managed FRR configuration. Do not edit by hand.\n")
+	out.WriteString("! gravinet manages the BGP configuration below — other config in this file is preserved across gravinet's own rewrites, not overwritten.\n")
 	out.WriteString("frr defaults traditional\n!\n")
 
 	if !b.Enabled || b.ASN == 0 {
@@ -453,6 +453,133 @@ func renderFRR(b config.BGPConfig, meshRoutes ...string) string {
 	}
 	out.WriteString("!\n")
 	return out.String()
+}
+
+// frrGravinetOwnedStanza reports whether a stanza (its first line already
+// isolated by splitFRRStanzas) is one gravinet renders itself — the header
+// comment and "frr defaults traditional" it always emits, the `router bgp`
+// block, and any GRAVINET-prefixed prefix-list/route-map (the redistribute
+// and AS-prepend machinery renderRedistributeRouteMap/
+// renderASPrependRouteMap add). Matched by prefix/exact-line rather than by
+// literally re-rendering and diffing, since the point is recognizing gravinet's
+// own stanzas in whatever shape they were last written in, not requiring
+// them to already match this build's exact output.
+func frrGravinetOwnedStanza(firstLine string) bool {
+	firstLine = strings.TrimSpace(firstLine)
+	switch {
+	case firstLine == "! gravinet manages the BGP configuration below — other config in this file is preserved across gravinet's own rewrites, not overwritten.":
+		return true
+	case firstLine == "frr defaults traditional":
+		return true
+	case strings.HasPrefix(firstLine, "router bgp "):
+		return true
+	case strings.HasPrefix(firstLine, "ip prefix-list GRAVINET-"):
+		return true
+	case strings.HasPrefix(firstLine, "ipv6 prefix-list GRAVINET-"):
+		return true
+	case strings.HasPrefix(firstLine, "route-map GRAVINET-"):
+		return true
+	}
+	return false
+}
+
+// splitFRRStanzas splits an existing frr.conf into top-level stanzas — a
+// top-level (column-0, non-blank) line plus every line after it up to (not
+// including) the next top-level line, the same "indented lines belong to
+// whatever's above them" convention parseRunningConfigBGP already uses to
+// find where a `router bgp` block ends. A bare `!` separator line is its own
+// trivial one-line stanza here (nothing indented ever follows one in valid
+// FRR config) and is dropped by the caller rather than preserved — mergeFRRConfig
+// inserts its own separators when reassembling, so keeping the original ones
+// around too would just be visual noise, not anything FRR needs.
+func splitFRRStanzas(text string) []string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	lines := strings.Split(text, "\n")
+	var stanzas []string
+	var cur []string
+	flush := func() {
+		if len(cur) == 0 {
+			return
+		}
+		// A chunk made up entirely of blank lines isn't a stanza — most
+		// notably, splitting an empty (or nonexistent) existing file
+		// produces exactly one such chunk (strings.Split("", "\n") is
+		// []string{""}, not an empty slice), and treating that as a real
+		// "foreign" stanza would make mergeFRRConfig append a spurious
+		// trailing separator even when there was nothing to preserve at all.
+		for _, l := range cur {
+			if strings.TrimSpace(l) != "" {
+				stanzas = append(stanzas, strings.Join(cur, "\n"))
+				break
+			}
+		}
+		cur = nil
+	}
+	for _, line := range lines {
+		if line != "" && !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
+			flush()
+		}
+		cur = append(cur, line)
+	}
+	flush()
+	return stanzas
+}
+
+// mergeFRRConfig is what actually gets written to frr.conf, in place of
+// renderFRR's output alone: rendered (renderFRR's fresh output — gravinet's
+// own header, `router bgp` block, and redistribute/AS-prepend prefix-lists
+// and route-maps) followed by whatever's in existing that gravinet doesn't
+// own — an `interface` block with a manually-configured address, a
+// hand-added static route or ACL, anything at all — preserved verbatim, in
+// its original relative order.
+//
+// Before this, applying any BGP change rewrote frr.conf from nothing but
+// renderFRR's output, silently discarding anything else in the file:
+// harmless for a config gravinet had never touched, but a real problem for
+// one where an operator had also configured something through vtysh
+// directly (an interface address, say) — the *next* time gravinet reconciled
+// anything (AutoBGP polls every autoBGPPollInterval and can rewrite the file
+// on its own, with no user action at all), that edit would vanish, because
+// it existed only in FRR's running config, never in the file gravinet was
+// about to overwrite.
+//
+// existing is best-effort: read once by the caller right before writing,
+// tolerant of not existing yet (the very first write) or of any read error
+// (treated the same as "empty" — this is a preservation nicety, not
+// something that should ever block gravinet's own config from applying).
+func mergeFRRConfig(existing, rendered string) string {
+	var foreign []string
+	for _, stanza := range splitFRRStanzas(existing) {
+		first, _, _ := strings.Cut(stanza, "\n")
+		if strings.TrimSpace(first) == "!" || frrGravinetOwnedStanza(first) {
+			continue
+		}
+		foreign = append(foreign, stanza)
+	}
+	if len(foreign) == 0 {
+		return rendered
+	}
+	var out strings.Builder
+	out.WriteString(rendered)
+	if !strings.HasSuffix(rendered, "\n") {
+		out.WriteString("\n")
+	}
+	for _, stanza := range foreign {
+		out.WriteString(stanza)
+		out.WriteString("\n!\n")
+	}
+	return out.String()
+}
+
+// readExistingFRRConf is mergeFRRConfig's input — see its own doc comment on
+// why any read failure (the file not existing yet, most commonly) is folded
+// into "nothing to preserve" rather than surfaced as an error.
+func readExistingFRRConf() string {
+	b, err := os.ReadFile(frrConf)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 // neededDaemons is which FRR daemons this config requires. staticd is always
@@ -704,7 +831,7 @@ func applyBGP(b, prev config.BGPConfig, meshRoutes, prevMeshRoutes []string, log
 	if !frrInstalled() {
 		return "FRR is not installed; BGP config saved but not applied", nil
 	}
-	if err := writeAtomicFile(frrConf, renderFRR(b, meshRoutes...)); err != nil {
+	if err := writeAtomicFile(frrConf, mergeFRRConfig(readExistingFRRConf(), renderFRR(b, meshRoutes...))); err != nil {
 		return "", err
 	}
 	wanted := managedDaemonSet(b)

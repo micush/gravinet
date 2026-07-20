@@ -37,6 +37,46 @@ assuming it didn't happen.
 
 ---
 
+## v541 — 2026-07-20
+
+**Fixed: anything added to `frr.conf` outside gravinet — an interface
+address set through `vtysh` directly, most concretely — could vanish the
+next time gravinet applied any BGP change, with no action from the
+operator at all.**
+
+`renderFRR` only ever renders gravinet's own BGP/BFD stanza, and every
+apply wrote its output as the *entire* file — a full overwrite, not a
+patch. That was always true, but AutoBGP made the practical impact much
+worse than it sounds: it polls every `autoBGPPollInterval` and can
+rewrite `frr.conf` autonomously the moment a peer connects or
+disconnects, with zero user action — so a manually-added interface
+stanza (which lives only in FRR's running config until something
+persists it, and is never in the file gravinet is about to overwrite)
+could disappear within seconds of being added, not just "the next time
+someone saves something in the web UI."
+
+New `mergeFRRConfig` (`frr.go`), used everywhere gravinet writes
+`frr.conf` (`applyBGP`, and AutoBGP's own `applyBGPIncremental`): reads
+the existing file first, splits it into top-level stanzas
+(`splitFRRStanzas`, generalizing the same column-0-vs-indented
+convention `parseRunningConfigBGP` already used just for finding where
+a `router bgp` block ends), and keeps anything gravinet doesn't
+recognize as its own (`frrGravinetOwnedStanza`: its header line, `frr
+defaults traditional`, the `router bgp` block, and any
+`GRAVINET-`-prefixed prefix-list/route-map) — appended after gravinet's
+freshly-rendered content, in its original relative order. Verified
+idempotent across repeated applies with nothing in between (the
+realistic AutoBGP case): a foreign stanza survives any number of
+reapplies without ever being duplicated, and gravinet's own previous
+content is still correctly replaced, not accumulated alongside the new
+render.
+
+The file's own header comment changed to match: no longer "do not edit
+by hand" (no longer true for anything outside gravinet's own stanzas),
+now describing what's actually preserved.
+
+---
+
 ## v540 — 2026-07-19
 
 **Closed the other path a remote-learned route could use to outrank a

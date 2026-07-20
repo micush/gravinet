@@ -430,7 +430,7 @@ func applyBGPIncremental(next config.BGPConfig, added []config.BGPNeighbor, remo
 	if !frrInstalled() {
 		return
 	}
-	if err := writeAtomicFile(frrConf, renderFRR(next, meshRoutes...)); err != nil {
+	if err := writeAtomicFile(frrConf, mergeFRRConfig(readExistingFRRConf(), renderFRR(next, meshRoutes...))); err != nil {
 		if log != nil {
 			log.Warnf("autobgp: writing frr.conf: %v", err)
 		}
