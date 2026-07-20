@@ -6339,6 +6339,7 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
   // added/removed/enabled on that page (see secBgp's load()), independent of
   // this form's own save.
   const rmList = rowRouteList('Redistribute mesh routes', 'Advertise CIDRs from the Mesh Routes page\u2019s Advertise table into BGP \u2014 pick which ones.', meshRoutes, b.redistribute_mesh_routes);
+  const asPrependCb = rowTog('AS Prepend', 'Prepend this node\u2019s own AS number 2 times to every route it advertises outbound, to every neighbor \u2014 makes those routes look less preferred (a longer AS-path) to peers, a common way to steer inbound traffic away from this link without touching what it accepts.', !!b.as_prepend);
   // Session timers. A new config defaults to a fast 4s/12s (FRR's own default is
   // a sluggish 60s/180s); an existing/imported config shows its actual values,
   // blank meaning "FRR default".
@@ -6591,6 +6592,7 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
       redistribute_connected_routes: rcList.get(),
       redistribute_static_routes: rsList.get(),
       redistribute_mesh_routes: rmList.get(),
+      as_prepend: asPrependCb.checked,
       keepalive_time: ka,
       hold_time: hold,
       // Drop blank rows so what's stored matches what FRR would accept.
@@ -6620,6 +6622,7 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
 
   enableCb.onchange = () => scheduleSave(true);
   autoCb.onchange = () => scheduleSave(true);
+  asPrependCb.onchange = () => scheduleSave(true);
   [asnInp, ridInp, kaInp, holdInp].forEach(inp => { inp.oninput = () => scheduleSave(false); });
 
   // Attach the finished editor, replacing the "loading…" placeholder. This is

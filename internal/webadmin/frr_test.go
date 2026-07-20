@@ -362,6 +362,62 @@ func TestFRRRedistributeEmptySelectionOmitsEverything(t *testing.T) {
 	frrLacks(t, c, "route-map")
 }
 
+// TestFRRASPrepend covers ASPrepend's actual output: the GRAVINET-AS-PREPEND
+// route-map prepending this node's own ASN 2 times, referenced as an
+// outbound route-map on every activated neighbor in both address families,
+// and entirely absent when it's off.
+func TestFRRASPrepend(t *testing.T) {
+	b := config.BGPConfig{
+		Enabled: true, ASN: 65001, ASPrepend: true,
+		Neighbors: []config.BGPNeighbor{
+			{Peer: "10.0.0.2", RemoteAS: 65002},
+			{Peer: "fd00::2", RemoteAS: 65003},
+		},
+	}
+	c := renderFRR(b)
+	frrHas(t, c, "route-map GRAVINET-AS-PREPEND permit 10\n set as-path prepend 65001 65001\n")
+	// The route-map stanza is a sibling of `router bgp`, not nested inside
+	// it — same requirement as the redistribute route-maps.
+	if strings.Index(c, "route-map GRAVINET-AS-PREPEND") > strings.Index(c, "router bgp 65001") {
+		t.Error("AS-prepend route-map appears after `router bgp` — it must be a sibling stanza, rendered before it")
+	}
+	frrHas(t, c, "  neighbor 10.0.0.2 route-map GRAVINET-AS-PREPEND out\n")
+	frrHas(t, c, "  neighbor fd00::2 route-map GRAVINET-AS-PREPEND out\n")
+	// The v4 neighbor's attachment belongs in the v4 unicast block, not v6,
+	// and vice versa — each only activated (and therefore only outbound-
+	// route-mapped) in its own family's block.
+	v4Block, v6Block, found := strings.Cut(c, " address-family ipv6 unicast\n")
+	if !found {
+		t.Fatalf("expected an address-family ipv6 unicast block\n--- got ---\n%s", c)
+	}
+	frrHas(t, v4Block, "neighbor 10.0.0.2 route-map GRAVINET-AS-PREPEND out")
+	frrLacks(t, v4Block, "neighbor fd00::2 route-map")
+	frrHas(t, v6Block, "neighbor fd00::2 route-map GRAVINET-AS-PREPEND out")
+	frrLacks(t, v6Block, "neighbor 10.0.0.2 route-map")
+
+	off := renderFRR(config.BGPConfig{Enabled: true, ASN: 65001, ASPrepend: false, Neighbors: b.Neighbors})
+	frrLacks(t, off, "GRAVINET-AS-PREPEND")
+	frrLacks(t, off, "route-map")
+}
+
+// TestASPrependRemovesSomething proves turning ASPrepend off forces a
+// restart (its outbound attachment on every neighbor can't be retracted by
+// a reload or vtysh -b), while turning it on — a pure addition — doesn't
+// need one.
+func TestASPrependRemovesSomething(t *testing.T) {
+	on := config.BGPConfig{Enabled: true, ASN: 65001, ASPrepend: true}
+	off := config.BGPConfig{Enabled: true, ASN: 65001, ASPrepend: false}
+	if !bgpConfigRemovesSomething(on, off) {
+		t.Error("turning ASPrepend off should force a restart")
+	}
+	if bgpConfigRemovesSomething(off, on) {
+		t.Error("turning ASPrepend on is a pure addition and shouldn't force a restart")
+	}
+	if bgpConfigRemovesSomething(on, on) {
+		t.Error("ASPrepend unchanged shouldn't force a restart")
+	}
+}
+
 // bgpConfigRemovesSomething is the fix for a deleted neighbor not actually
 // disappearing from FRR: it must report true whenever next drops a neighbor
 // or network prev had, or tears down the whole BGP stanza, so applyBGP knows

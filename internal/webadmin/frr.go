@@ -248,6 +248,18 @@ func renderRedistributeRouteMap(name string, cidrs []string) (stanza string, has
 	return out.String(), len(v4) > 0, len(v6) > 0
 }
 
+// renderASPrependRouteMap emits the GRAVINET-AS-PREPEND route-map — a
+// single "set as-path prepend <asn> x2" entry, referenced as an outbound
+// route-map on every neighbor when BGPConfig.ASPrepend is on (see its own
+// doc comment). One shared route-map for every neighbor and both address
+// families, the same "one stanza, many attachment points" shape
+// renderRedistributeRouteMap's route-maps already use, since the action
+// itself never varies by neighbor or family — it's always "prepend this
+// node's own ASN 2 times", nothing else.
+func renderASPrependRouteMap(asn uint32) string {
+	return fmt.Sprintf("route-map GRAVINET-AS-PREPEND permit 10\n set as-path prepend %d %d\n!\n", asn, asn)
+}
+
 // renderFRR renders the integrated frr.conf for this node's BGP config. Pure
 // function — no I/O — so it's exhaustively unit-testable, exactly as parapet's
 // render() is. Only the BGP block is emitted (plus FRR's boilerplate header);
@@ -273,16 +285,19 @@ func renderFRR(b config.BGPConfig, meshRoutes ...string) string {
 	staticStanza, staticV4, staticV6 := renderRedistributeRouteMap("GRAVINET-REDIST-STATIC", b.RedistributeStaticRoutes)
 	out.WriteString(connStanza)
 	out.WriteString(staticStanza)
+	if b.ASPrepend {
+		out.WriteString(renderASPrependRouteMap(b.ASN))
+	}
 
 	fmt.Fprintf(&out, "router bgp %d\n", b.ASN)
 	// Global session-level knobs gravinet always applies, regardless of what's
 	// configured above: log-neighbor-changes (visibility into session
 	// state transitions in the log), no ebgp-requires-policy (modern FRR
 	// defaults to rejecting eBGP routes with no inbound/outbound route-map
-	// attached on the *neighbor* itself; gravinet doesn't manage that kind of
-	// policy — only the separate redistribute route-maps above, which are
-	// unrelated — so a neighbor configured here would otherwise exchange no
-	// routes at all), deterministic-med
+	// attached on the *neighbor* itself; gravinet only ever attaches one
+	// there — GRAVINET-AS-PREPEND, outbound, and only when ASPrepend is on —
+	// so without this override, a neighbor configured here while ASPrepend
+	// is off would otherwise exchange no routes at all), deterministic-med
 	// (consistent best-path selection across peers from the same AS,
 	// independent of the order routes arrived in), bestpath as-path
 	// multipath-relax (allows ECMP across paths with equal-length but
@@ -362,6 +377,9 @@ func renderFRR(b config.BGPConfig, meshRoutes ...string) string {
 	}
 	for _, n := range v4Neighbors {
 		fmt.Fprintf(&out, "  neighbor %s activate\n", n.Peer)
+		if b.ASPrepend {
+			fmt.Fprintf(&out, "  neighbor %s route-map GRAVINET-AS-PREPEND out\n", n.Peer)
+		}
 	}
 	for _, n := range v6Neighbors {
 		// FRR defaults every neighbor active in ipv4 unicast, v6 peers
@@ -408,6 +426,9 @@ func renderFRR(b config.BGPConfig, meshRoutes ...string) string {
 		}
 		for _, n := range v6Neighbors {
 			fmt.Fprintf(&out, "  neighbor %s activate\n", n.Peer)
+			if b.ASPrepend {
+				fmt.Fprintf(&out, "  neighbor %s route-map GRAVINET-AS-PREPEND out\n", n.Peer)
+			}
 		}
 		out.WriteString(" exit-address-family\n")
 	}
@@ -508,6 +529,14 @@ func bgpConfigRemovesSomething(prev, next config.BGPConfig) bool {
 		return true
 	}
 	if stringSetShrank(prev.RedistributeStaticRoutes, next.RedistributeStaticRoutes) {
+		return true
+	}
+	// Turning ASPrepend off removes GRAVINET-AS-PREPEND's outbound
+	// attachment from every neighbor — the same reload/vtysh -b limitation
+	// as everything else here; an ASN change (which the route-map's own
+	// content depends on) already forces a restart via the check at the top
+	// of this function, so there's nothing further to catch for that case.
+	if prev.ASPrepend && !next.ASPrepend {
 		return true
 	}
 	return false

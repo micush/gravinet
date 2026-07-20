@@ -358,6 +358,23 @@ type BGPConfig struct {
 	// meshRoutes' current contents); same non-pruning reasoning as the two
 	// fields above.
 	RedistributeMeshRoutes []string `json:"redistribute_mesh_routes,omitempty"`
+	// ASPrepend, when on, prepends this node's own ASN 2 times to the
+	// AS-PATH of every route it advertises outbound to every BGP neighbor —
+	// a route it originates (a Networks entry or a selected
+	// RedistributeConnectedRoutes/RedistributeStaticRoutes/
+	// RedistributeMeshRoutes prefix) or one it's re-advertising after
+	// learning it from elsewhere, all the same, since it's applied as an
+	// outbound route-map rather than at any one specific origination point
+	// (see renderFRR). The classic inbound-traffic-engineering trick: a
+	// longer AS-PATH is less preferred by a peer's best-path selection (all
+	// else equal), so this makes every route this node advertises less
+	// attractive without touching what it actually accepts or how it
+	// selects its own best path — it only ever changes what gets sent out.
+	// The prepend count is fixed at 2, not configurable — enough to
+	// meaningfully lengthen the path in a typical multi-homed comparison
+	// without a per-prepend-count UI for what's fundamentally a blunt,
+	// binary policy ("make me less preferred" vs not).
+	ASPrepend bool `json:"as_prepend,omitempty"`
 	// KeepaliveTime and HoldTime are the BGP session timers, in seconds,
 	// rendered as FRR's `timers bgp <keepalive> <hold>`. Keepalive is how often
 	// a peer sends keepalive messages; hold is how long without any message

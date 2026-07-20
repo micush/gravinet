@@ -37,6 +37,51 @@ assuming it didn't happen.
 
 ---
 
+## v534 — 2026-07-19
+
+**AS Prepend (v533) now prepends 2 times instead of 4.**
+
+`set as-path prepend <asn> <asn>` instead of `<asn> <asn> <asn> <asn>`
+in the rendered `GRAVINET-AS-PREPEND` route-map (`renderASPrependRouteMap`,
+`frr.go`); the UI description and doc comments updated to match. Still a
+fixed count, not user-configurable — same reasoning as v533, just a
+lighter touch.
+
+---
+
+## v533 — 2026-07-19
+
+**Added: AS Prepend, a Traffic → BGP toggle that prepends this node's
+own AS number 4 times to every route it advertises outbound, to every
+neighbor — the classic inbound-traffic-engineering trick for making
+this link look less attractive to peers without touching what it
+actually accepts or how it picks its own best path.**
+
+Rendered as a single shared `GRAVINET-AS-PREPEND` route-map (`set
+as-path prepend <asn> <asn> <asn> <asn>`, the local ASN four times) —
+a top-level stanza, sibling to `router bgp` — referenced as `neighbor
+<peer> route-map GRAVINET-AS-PREPEND out` on every activated neighbor in
+both address families (`renderFRR`, `frr.go`). One route-map for every
+neighbor and both families, the same shape the redistribute
+connected/static route-maps already use, since the prepend action never
+varies by neighbor or family — always this node's own ASN, always 4
+times. Applies to everything a neighbor is sent outbound — originated
+routes and redistributed ones alike — rather than needing a separate
+attachment point per route source.
+
+New `BGPConfig.ASPrepend` field (`internal/config/config.go`); the
+prepend count is fixed at 4, not user-configurable — this is a blunt,
+binary policy ("make me less preferred" or not), not something that
+needed a per-count UI. Turning it off forces the same real restart a
+removed neighbor or redistribute selection already does, since retracting
+an outbound route-map attachment from a running daemon isn't something a
+reload or `vtysh -b` can do; turning it on is a pure addition and doesn't.
+An ASN change while it's already on doesn't need special handling either
+— that already forces a restart on its own, which correctly re-renders
+the route-map with the new ASN.
+
+---
+
 ## v532 — 2026-07-19
 
 **Moved every redistribute picker (Redistribute connected/static/mesh

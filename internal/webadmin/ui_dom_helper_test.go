@@ -171,7 +171,7 @@ func TestSubnetChangeWarnsOfSilentPeerMismatch(t *testing.T) {
 // — checked separately below, since a single "rcList.onchange" wouldn't
 // exist for it the same way.
 func TestBGPEditorTogglesSaveOnChange(t *testing.T) {
-	for _, cb := range []string{"enableCb", "autoCb"} {
+	for _, cb := range []string{"enableCb", "autoCb", "asPrependCb"} {
 		if !strings.Contains(indexHTML, cb+".onchange") {
 			t.Errorf("%s has no .onchange handler — toggling it alone (touching nothing else) would never trigger a save", cb)
 		}
