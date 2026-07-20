@@ -434,6 +434,35 @@ func (ns *netState) bestRedistMetric(p netip.Prefix) (int, bool) {
 	return best, found
 }
 
+// meshRouteMetricFloor is added to every advertised metric before it's
+// programmed into the OS routing table by syncRoute (not
+// syncFullTunnelRoute — a full-tunnel default route is a deliberate
+// "route everything through the mesh" opt-in and needs to be able to
+// compete with a local default route on its own terms, the opposite of
+// what this is for).
+//
+// Without it, a route this node learned from a mesh peer and one it
+// already has locally (a directly-connected interface, or one DHCP/RA
+// handed it) can end up as two entries for the very same prefix in the
+// kernel's own table, and the kernel picks between same-prefix entries by
+// metric alone — it has no notion of "connected beats mesh-learned" the
+// way a routing daemon's RIB does. A peer that happens to advertise a low
+// metric (0 is the Advertise table's own default) could then win over a
+// route this host would otherwise use directly, silently detouring locally
+// deliverable traffic out through the mesh tunnel instead. 9000 is
+// comfortably above any metric a normal connected/DHCP/static route is
+// likely to carry (DHCP-assigned metrics in the low thousands aren't
+// unusual, but nowhere near this) without needing this node to actually
+// enumerate what those routes currently are — it's cheap insurance, not a
+// promise those routes are ordered by name.
+//
+// Applied uniformly to whatever bestRedistMetric already picked as the
+// lowest-advertised value, so relative preference *among* mesh peers
+// advertising the same prefix — lower advertised metric still wins — is
+// unaffected; only where the result lands relative to this node's own
+// non-mesh routes changes.
+const meshRouteMetricFloor = 9000
+
 // syncRoute reconciles the host routing-table entry for prefix p with the
 // current best advertised metric: it installs the route if missing, re-programs
 // it if the best metric changed, or removes it once no origin advertises p any
@@ -455,6 +484,7 @@ func (e *Engine) syncRoute(ns *netState, p netip.Prefix) {
 		return
 	}
 	metric, advertised := ns.bestRedistMetric(p)
+	metric += meshRouteMetricFloor
 	ns.osMu.Lock()
 	defer ns.osMu.Unlock()
 	old, installed := ns.osMetric[p]

@@ -54,10 +54,16 @@ func TestRouteMetricPropagatesAndUpdates(t *testing.T) {
 		t.Fatalf("B should learn metric 7; got %d ok=%v", m, ok)
 	}
 	// And the metric must reach B's OS route table (the device) — this is what
-	// shows up in `ip route`, and is the whole point of installing it.
-	if !waitUntil(5*time.Second, func() bool { return B.dev.hasRoute(route) && B.dev.metricOf(route) == 7 }) {
-		t.Fatalf("B's device should hold route with metric 7; got metric %d hasRoute=%v",
-			B.dev.metricOf(route), B.dev.hasRoute(route))
+	// shows up in `ip route`, and is the whole point of installing it. It's
+	// installed at the advertised value plus meshRouteMetricFloor (see its own
+	// doc comment) — a mesh-learned route must never outrank a locally-sourced
+	// one for the same prefix — while the gossip-layer value above (what
+	// Routes() reports, and what a peer re-advertising it forwards on) stays
+	// the raw advertised metric; the floor is only ever added at the point a
+	// route is actually programmed into this host's own OS table.
+	if !waitUntil(5*time.Second, func() bool { return B.dev.hasRoute(route) && B.dev.metricOf(route) == 7+meshRouteMetricFloor }) {
+		t.Fatalf("B's device should hold route with metric %d; got metric %d hasRoute=%v",
+			7+meshRouteMetricFloor, B.dev.metricOf(route), B.dev.hasRoute(route))
 	}
 	// A changes the metric to 3 live; B must update.
 	if err := A.eng.ReloadRuntime(netID, NetSpec{ID: netID, Routes: []netip.Prefix{route}, RouteMetric: map[netip.Prefix]int{route: 3}}); err != nil {
@@ -68,7 +74,7 @@ func TestRouteMetricPropagatesAndUpdates(t *testing.T) {
 		t.Fatalf("B should update to metric 3 live; got %d", m)
 	}
 	// The OS route on B must be re-programmed to the new metric too.
-	if !waitUntil(5*time.Second, func() bool { return B.dev.metricOf(route) == 3 }) {
-		t.Fatalf("B's device metric should update to 3; got %d", B.dev.metricOf(route))
+	if !waitUntil(5*time.Second, func() bool { return B.dev.metricOf(route) == 3+meshRouteMetricFloor }) {
+		t.Fatalf("B's device metric should update to %d; got %d", 3+meshRouteMetricFloor, B.dev.metricOf(route))
 	}
 }

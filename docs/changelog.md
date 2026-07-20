@@ -37,6 +37,43 @@ assuming it didn't happen.
 
 ---
 
+## v539 — 2026-07-19
+
+**Fixed: a route learned from a mesh peer could outrank a locally-sourced
+route (a directly-connected interface, or one DHCP/RA handed this host)
+for the exact same prefix in the OS routing table — silently detouring
+locally-deliverable traffic out through the mesh tunnel instead.**
+
+v538 stopped a mesh interface's own overlay subnet from being offered in
+the Redistribute connected/static pickers, but that's a different case
+from this one: a peer can legitimately advertise a Route (Mesh Routes'
+Advertise table) for a prefix this host *also* already reaches directly
+— e.g. two sites both using `192.168.5.0/24`, or simply a mesh route
+that happens to match a locally DHCP-assigned subnet. The kernel doesn't
+know "connected/DHCP beats mesh-learned" the way a routing daemon's RIB
+does; for two entries at the same prefix in the same table, it just
+picks whichever has the lower metric — and the Advertise table's own
+default metric is 0, which comfortably beats most local routes.
+
+New `meshRouteMetricFloor` (9000, `internal/mesh/routes.go`), added to
+whatever `bestRedistMetric` picked as the lowest-advertised value before
+`syncRoute` programs it into the OS table — applied only there, not to
+the full-tunnel default-route path (`syncFullTunnelRoute`, a deliberate
+"route everything through the mesh" opt-in that still needs to be able
+to compete with a local default route on its own terms) and not to the
+gossip-layer value itself (what `Routes()` reports, and what a peer
+re-advertising it forwards on, both still the raw advertised metric —
+relative preference *among* mesh peers advertising the same prefix is
+unaffected, only where the result lands relative to this host's own
+non-mesh routes changes).
+
+`TestRouteMetricPropagatesAndUpdates` and
+`TestRouteFailoverBetweenTwoOrigins` updated for the new OS-installed
+values (their gossip-layer assertions were already correct and needed
+no change) — the full `internal/mesh` suite otherwise passes unmodified.
+
+---
+
 ## v538 — 2026-07-19
 
 **Fixed: a mesh overlay subnet colliding with a real interface (e.g. a
