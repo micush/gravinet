@@ -6325,10 +6325,18 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
   const asnInp = rowInput('Local AS number', 'This node\u2019s autonomous-system number, e.g. 65001. Required to enable BGP \u2014 unless AutoBGP is on below and this is left blank, in which case it derives and fills one in.', b.asn||'', 'e.g. 65001', 180);
   const ridInp = rowInput('Router-id', 'BGP router-id (an IPv4-style id), e.g. 10.0.0.1. Optional \u2014 FRR picks one if left blank, or AutoBGP derives one if it\u2019s on below.', b.router_id||'', 'e.g. 10.0.0.1', 180);
   const autoCb = rowTog('AutoBGP', 'Auto-fills the AS number and router-id above from this node\u2019s tunnel IPv4 if blank, enables BGP, and keeps one Neighbor per connected mesh peer in sync (remote AS, password \u2018autobgp\u2019, BFD on) as peers come and go. Never touches a Neighbor it didn\u2019t create.', !!b.auto_bgp);
+  const asPrependCb = rowTog('AS Prepend', 'Prepend this node\u2019s own AS number 2 times to every route it advertises outbound, to every neighbor \u2014 makes those routes look less preferred (a longer AS-path) to peers, a common way to steer inbound traffic away from this link without touching what it accepts.', !!b.as_prepend);
   // isNewCfg still drives the session-timer defaults below; BFD itself has no
   // global toggle (see nbrAddRow's own default for how a brand-new neighbor
   // row gets BFD on).
   const isNewCfg = !imported && !b.enabled && !b.asn && !(b.neighbors && b.neighbors.length);
+  // Session timers. A new config defaults to a fast 4s/12s (FRR's own default is
+  // a sluggish 60s/180s); an existing/imported config shows its actual values,
+  // blank meaning "FRR default".
+  const kaDefault = isNewCfg ? 4 : (b.keepalive_time || '');
+  const holdDefault = isNewCfg ? 12 : (b.hold_time || '');
+  const kaInp = rowInput('Keepalive timer (seconds)', 'How often to send BGP keepalives. Default 4s.', kaDefault, 'e.g. 4', 100);
+  const holdInp = rowInput('Hold timer (seconds)', 'Silence before a session is declared down; must exceed keepalive (3\u00d7 is conventional). Default 12s.', holdDefault, 'e.g. 12', 100);
   const rcList = rowRouteList('Redistribute connected', 'Advertise this host\u2019s currently-connected routes into BGP \u2014 pick which ones.', redistOpts.connected_routes, b.redistribute_connected_routes);
   const rsList = rowRouteList('Redistribute static', 'Advertise this host\u2019s static routes into BGP \u2014 pick which ones.', redistOpts.static_routes, b.redistribute_static_routes);
   // Scoped to exactly the CIDRs the operator picks from the Mesh Routes
@@ -6339,15 +6347,6 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
   // added/removed/enabled on that page (see secBgp's load()), independent of
   // this form's own save.
   const rmList = rowRouteList('Redistribute mesh routes', 'Advertise CIDRs from the Mesh Routes page\u2019s Advertise table into BGP \u2014 pick which ones.', meshRoutes, b.redistribute_mesh_routes);
-  const asPrependCb = rowTog('AS Prepend', 'Prepend this node\u2019s own AS number 2 times to every route it advertises outbound, to every neighbor \u2014 makes those routes look less preferred (a longer AS-path) to peers, a common way to steer inbound traffic away from this link without touching what it accepts.', !!b.as_prepend);
-  // Session timers. A new config defaults to a fast 4s/12s (FRR's own default is
-  // a sluggish 60s/180s); an existing/imported config shows its actual values,
-  // blank meaning "FRR default".
-  const kaDefault = isNewCfg ? 4 : (b.keepalive_time || '');
-  const holdDefault = isNewCfg ? 12 : (b.hold_time || '');
-  const kaInp = rowInput('Keepalive timer (seconds)', 'How often to send BGP keepalives. Default 4s.', kaDefault, 'e.g. 4', 100);
-  const holdInp = rowInput('Hold timer (seconds)', 'Silence before a session is declared down; must exceed keepalive (3\u00d7 is conventional). Default 12s.', holdDefault, 'e.g. 12', 100);
-
 
   // ---- neighbors ----
   // Table styling matches every other list-editing section in the app

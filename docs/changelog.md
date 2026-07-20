@@ -37,6 +37,20 @@ assuming it didn't happen.
 
 ---
 
+## v535 — 2026-07-19
+
+**Moved Redistribute connected/static/mesh routes to after the session
+timers (Traffic → BGP editor), instead of between AutoBGP and AS
+Prepend.**
+
+Order is now Enable BGP, Local AS number, Router-id, AutoBGP, AS
+Prepend, Keepalive timer, Hold timer, Redistribute connected,
+Redistribute static, Redistribute mesh routes — the session-level
+settings grouped together before the three route pickers rather than
+split around them. No behavior change, purely field order (`ui.go`).
+
+---
+
 ## v534 — 2026-07-19
 
 **AS Prepend (v533) now prepends 2 times instead of 4.**
