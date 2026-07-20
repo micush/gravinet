@@ -40,6 +40,7 @@ import (
 
 	"gravinet/internal/config"
 	"gravinet/internal/logx"
+	"gravinet/internal/mesh"
 )
 
 // frrManagedDaemons is the set of FRR daemons this module owns the on/off state
@@ -302,8 +303,25 @@ func renderFRR(b config.BGPConfig, meshRoutes ...string) string {
 	// independent of the order routes arrived in), bestpath as-path
 	// multipath-relax (allows ECMP across paths with equal-length but
 	// different AS-paths — otherwise multipath is limited to
-	// literally-identical AS-paths), and a 10s conditional-advertisement
-	// timer (how often conditionally-advertised routes are re-evaluated).
+	// literally-identical AS-paths), a 10s conditional-advertisement timer
+	// (how often conditionally-advertised routes are re-evaluated), and
+	// distance bgp — FRR's own stock eBGP/iBGP/redistributed-local
+	// administrative distances (20/200/200) each raised by
+	// mesh.MeshRouteMetricFloor, the exact same floor and the exact same
+	// reason: zebra installs a BGP-learned route into the kernel at its
+	// distance, which the kernel then treats as that route's priority
+	// against anything else sharing its prefix — a locally-connected
+	// interface's route or one DHCP/RA handed this host included. FRR's
+	// distance is a single number, not a duplicable "am I mesh or not"
+	// property the way the Advertise table's own per-route metric is —
+	// there's nothing narrower to raise than the whole distance triplet,
+	// so every route this speaker learns via BGP gets the same treatment,
+	// mirroring MeshRouteMetricFloor's own reasoning that a route learned
+	// from elsewhere shouldn't be able to silently outrank one this host
+	// already has directly. Relative order is preserved (eBGP still
+	// numerically ahead of iBGP, matching FRR's own convention) — only
+	// where the result lands relative to this node's non-BGP routes
+	// changes.
 	// Since this function fully regenerates frr.conf from scratch on every
 	// apply rather than patching an existing file, "add if not present"
 	// means unconditionally emitting them here.
@@ -312,6 +330,7 @@ func renderFRR(b config.BGPConfig, meshRoutes ...string) string {
 	out.WriteString(" bgp deterministic-med\n")
 	out.WriteString(" bgp bestpath as-path multipath-relax\n")
 	out.WriteString(" bgp conditional-advertisement timer 10\n")
+	fmt.Fprintf(&out, " distance bgp %d %d %d\n", 20+mesh.MeshRouteMetricFloor, 200+mesh.MeshRouteMetricFloor, 200+mesh.MeshRouteMetricFloor)
 	if safeToken(b.RouterID) {
 		fmt.Fprintf(&out, " bgp router-id %s\n", b.RouterID)
 	}

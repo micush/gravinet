@@ -83,11 +83,11 @@ func TestRouteFailoverBetweenTwoOrigins(t *testing.T) {
 		m, ok := metricOnC()
 		t.Fatalf("C should learn route at metric 10 (A, the lower metric); got %d ok=%v", m, ok)
 	}
-	// The OS-installed metric carries meshRouteMetricFloor on top of the
+	// The OS-installed metric carries MeshRouteMetricFloor on top of the
 	// gossip-layer value above (see its own doc comment) — a mesh-learned
 	// route must never outrank a locally-sourced one for the same prefix.
-	if !waitUntil(5*time.Second, func() bool { return C.dev.hasRoute(route) && C.dev.metricOf(route) == 10+meshRouteMetricFloor }) {
-		t.Fatalf("C's OS route table should show metric %d; got %d", 10+meshRouteMetricFloor, C.dev.metricOf(route))
+	if !waitUntil(5*time.Second, func() bool { return C.dev.hasRoute(route) && C.dev.metricOf(route) == 10+MeshRouteMetricFloor }) {
+		t.Fatalf("C's OS route table should show metric %d; got %d", 10+MeshRouteMetricFloor, C.dev.metricOf(route))
 	}
 
 	// Sanity: C can actually reach D before A goes away — establishes the
@@ -134,8 +134,8 @@ func TestRouteFailoverBetweenTwoOrigins(t *testing.T) {
 	if !failedOver {
 		t.Errorf("route did not fail over to B (metric 20) after A went silent; last seen metric=%d ok=%v", lastMetric, lastOK)
 	}
-	if !waitUntil(10*time.Second, func() bool { return C.dev.hasRoute(route) && C.dev.metricOf(route) == 20+meshRouteMetricFloor }) {
-		t.Errorf("C's OS route table did not update to B's metric %d; got %d, hasRoute=%v", 20+meshRouteMetricFloor, C.dev.metricOf(route), C.dev.hasRoute(route))
+	if !waitUntil(10*time.Second, func() bool { return C.dev.hasRoute(route) && C.dev.metricOf(route) == 20+MeshRouteMetricFloor }) {
+		t.Errorf("C's OS route table did not update to B's metric %d; got %d, hasRoute=%v", 20+MeshRouteMetricFloor, C.dev.metricOf(route), C.dev.hasRoute(route))
 	}
 
 	// A must no longer appear connected — this needs real time past

@@ -434,7 +434,7 @@ func (ns *netState) bestRedistMetric(p netip.Prefix) (int, bool) {
 	return best, found
 }
 
-// meshRouteMetricFloor is added to every advertised metric before it's
+// MeshRouteMetricFloor is added to every advertised metric before it's
 // programmed into the OS routing table by syncRoute (not
 // syncFullTunnelRoute — a full-tunnel default route is a deliberate
 // "route everything through the mesh" opt-in and needs to be able to
@@ -461,7 +461,14 @@ func (ns *netState) bestRedistMetric(p netip.Prefix) (int, bool) {
 // advertising the same prefix — lower advertised metric still wins — is
 // unaffected; only where the result lands relative to this node's own
 // non-mesh routes changes.
-const meshRouteMetricFloor = 9000
+//
+// Exported and reused as-is by internal/webadmin's own distance-bgp
+// rendering (see frr.go's renderFRR) — a BGP-learned route risks the exact
+// same collision with a local route, just installed by FRR/zebra instead
+// of gravinet's own syncRoute, and deserves the same numeric floor rather
+// than an independently-chosen one that could drift from this one over
+// time for no real reason.
+const MeshRouteMetricFloor = 9000
 
 // syncRoute reconciles the host routing-table entry for prefix p with the
 // current best advertised metric: it installs the route if missing, re-programs
@@ -484,7 +491,7 @@ func (e *Engine) syncRoute(ns *netState, p netip.Prefix) {
 		return
 	}
 	metric, advertised := ns.bestRedistMetric(p)
-	metric += meshRouteMetricFloor
+	metric += MeshRouteMetricFloor
 	ns.osMu.Lock()
 	defer ns.osMu.Unlock()
 	old, installed := ns.osMetric[p]

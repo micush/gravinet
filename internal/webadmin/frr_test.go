@@ -1,6 +1,7 @@
 package webadmin
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"gravinet/internal/config"
+	"gravinet/internal/mesh"
 )
 
 func frrHas(t *testing.T, hay, needle string) {
@@ -45,6 +47,7 @@ func TestFRRGlobalBGPDirectives(t *testing.T) {
 		" bgp deterministic-med\n",
 		" bgp bestpath as-path multipath-relax\n",
 		" bgp conditional-advertisement timer 10\n",
+		fmt.Sprintf(" distance bgp %d %d %d\n", 20+mesh.MeshRouteMetricFloor, 200+mesh.MeshRouteMetricFloor, 200+mesh.MeshRouteMetricFloor),
 	}
 	// Present on a minimal config...
 	c := renderFRR(config.BGPConfig{Enabled: true, ASN: 65001})
@@ -66,6 +69,32 @@ func TestFRRGlobalBGPDirectives(t *testing.T) {
 	d := renderFRR(config.BGPConfig{Enabled: false, ASN: 65001})
 	for _, line := range always {
 		frrLacks(t, d, line)
+	}
+}
+
+// TestFRRDistanceBGPSharesMeshMetricFloor pins the actual reasoning behind
+// distance bgp, not just its presence (TestFRRGlobalBGPDirectives already
+// covers that): FRR installs a BGP-learned route into the kernel at its
+// administrative distance, which the kernel then compares directly against
+// any other route sharing that prefix — a local interface's, or one
+// DHCP/RA handed this host — with no notion that "BGP-learned" should ever
+// lose that comparison on its own. Raising FRR's stock eBGP/iBGP/local
+// distances (20/200/200) by exactly mesh.MeshRouteMetricFloor is the
+// same fix, and the same number, syncRoute already applies to a
+// mesh-gossiped route for the identical reason — this just closes the
+// other path a remote-learned route can take into this host's kernel
+// table.
+func TestFRRDistanceBGPSharesMeshMetricFloor(t *testing.T) {
+	c := renderFRR(config.BGPConfig{Enabled: true, ASN: 65001})
+	want := fmt.Sprintf(" distance bgp %d %d %d\n", 20+mesh.MeshRouteMetricFloor, 200+mesh.MeshRouteMetricFloor, 200+mesh.MeshRouteMetricFloor)
+	frrHas(t, c, want)
+	// Concretely: with today's floor (9000), that's eBGP at distance 9020 —
+	// this pins the actual number an operator would see in `ip route`, not
+	// just that some distance line exists, so a future change to either
+	// FRR's stock defaults above or the floor's value has to touch this
+	// test deliberately, not slip through unnoticed.
+	if mesh.MeshRouteMetricFloor == 9000 {
+		frrHas(t, c, " distance bgp 9020 9200 9200\n")
 	}
 }
 

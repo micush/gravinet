@@ -37,6 +37,39 @@ assuming it didn't happen.
 
 ---
 
+## v540 — 2026-07-19
+
+**Closed the other path a remote-learned route could use to outrank a
+local one: FRR's own BGP-learned routes, not just gravinet's mesh-gossip
+ones.**
+
+v539 fixed this for routes gravinet installs itself from mesh gossip
+(`syncRoute`), but a route learned over an actual BGP session (an
+AutoBGP neighbor, or any other) is installed by FRR/zebra directly, at
+FRR's own default administrative distance — 20 for eBGP — which zebra
+passes straight through as the route's kernel priority. `20` is *more*
+aggressive than the raw mesh-gossip default (`100`) v539 addressed, so
+the identical risk was still open: a BGP peer advertising a prefix that
+collides with a local connected/DHCP route would win, for the same
+reason — the kernel has no notion of "local beats BGP-learned", it just
+compares metrics.
+
+`renderFRR` (`frr.go`) now emits `distance bgp <ext> <int> <local>`
+using FRR's own stock defaults (20/200/200) each raised by exactly
+`mesh.MeshRouteMetricFloor` — the same floor, same number,
+`syncRoute` already uses, exported from `internal/mesh` specifically so
+the two can't drift apart. Relative order between eBGP and iBGP is
+preserved; only where the result lands relative to this node's own
+non-BGP routes changes. Unconditionally emitted whenever BGP is enabled,
+like every other global BGP knob this renderer already applies.
+
+New `TestFRRDistanceBGPSharesMeshMetricFloor` pins the actual reasoning
+(not just that a distance line exists, but that it's derived from the
+same shared constant) and the concrete number an operator would
+currently see (eBGP at distance 9020).
+
+---
+
 ## v539 — 2026-07-19
 
 **Fixed: a route learned from a mesh peer could outrank a locally-sourced
