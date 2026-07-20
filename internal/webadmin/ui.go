@@ -6254,11 +6254,12 @@ async function bgpLiveStatus(meta, body){
 }
 
 // bgpTableLiveStatus fills the BGP Table card with the raw text of FRR's
-// 'show bgp' (GET /api/bgp/table) — the full prefix/next-hop/AS-path table,
-// not just the per-peer summary bgpLiveStatus shows. 'show bgp' has no JSON
-// form, so this is rendered verbatim in a <pre> (same mono-block pattern as
-// infoHosts' raw hosts-file view) rather than reparsed into columns, with the
-// same line-filter box for finding a prefix in a large table.
+// 'show bgp all' (GET /api/bgp/table) — the full prefix/next-hop/AS-path
+// table across every AFI/SAFI, not just the per-peer summary bgpLiveStatus
+// shows. 'show bgp all' has no JSON form, so this is rendered verbatim in a
+// <pre> (same mono-block pattern as infoHosts' raw hosts-file view) rather
+// than reparsed into columns, with the same line-filter box for finding a
+// prefix in a large table.
 async function bgpTableLiveStatus(body){
   const r = await api('/api/bgp/table');
   if (!r.ok || !r.body){ body.innerHTML = '<div class="hint">could not read the BGP table.</div>'; return; }

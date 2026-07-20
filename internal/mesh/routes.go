@@ -241,6 +241,15 @@ func (e *Engine) reloadBGPRoutes(ns *netState, newRoutes []netip.Prefix, metric 
 	for _, p := range added {
 		e.floodControl(ns, encodeRouteAdd(e.nodeID, p, metric), nil)
 		e.log.Infof("mesh: advertising BGP-redistributed route %s on net %x", p, ns.spec.ID)
+		// bestRedistMetric now treats p as self-redistributed (ns.bgpRoutes
+		// was already updated above), so this drops any mesh-sourced kernel
+		// route a sibling's gossiped copy had installed for it before this
+		// node started redistributing p itself — see bestRedistMetric's own
+		// doc comment. Without this call nothing re-evaluates p until some
+		// unrelated event touches its ns.redist entry (a peer re-advertising,
+		// a metric change, a stale sweep), which could be an arbitrarily long
+		// wait; this makes the switch to the node's own BGP path immediate.
+		e.syncRoute(ns, p)
 	}
 	// Unlike reloadRoutes, this is a single metric for the whole batch, so a
 	// metric change re-advertises every currently-held prefix at once (no
@@ -258,6 +267,16 @@ func (e *Engine) reloadBGPRoutes(ns *netState, newRoutes []netip.Prefix, metric 
 	}
 	if len(removed) > 0 {
 		e.withdrawRoutes(ns, removed)
+		// The mirror of the added-side call above: p just left ns.bgpRoutes
+		// (this node stopped redistributing it — BGP went down, the operator
+		// unchecked it, whatever the cause), so bestRedistMetric will now
+		// fall through to ns.redist again. If a sibling exit node is still
+		// gossiping p, this is what actually installs its route as this
+		// node's fallback — immediately, rather than only after that
+		// sibling's next unrelated re-advertisement.
+		for _, p := range removed {
+			e.syncRoute(ns, p)
+		}
 	}
 }
 
@@ -420,7 +439,36 @@ func (e *Engine) onRouteDel(ps *peerSession, body []byte) {
 // entries for this exact prefix, and whether any advertiser exists. That lowest
 // value is the metric we program into the OS route (consistent with the
 // lowest-metric-wins forwarding choice in redistRoute).
+//
+// A prefix this node is itself currently redistributing from its own BGP RIB
+// (ns.bgpRoutes — see reloadBGPRoutes/SetBGPRoutes) is always reported as not
+// advertised here, regardless of what ns.redist holds for it — even if a
+// peer is advertising it at a numerically better metric. This node already
+// has a direct, authoritative path to that prefix via FRR's own BGP-learned
+// route; a peer's gossiped copy exists so *other* nodes can reach the prefix
+// through one of possibly several redistributing exit nodes, not so an exit
+// node can second-guess its own live BGP session. Without this check, a pair
+// of redundant exit nodes each redistributing the same external prefix (the
+// intended, ordinary multi-exit setup — see docs/changelog.md v542) would
+// each treat the other's gossiped copy as just another route, install it as
+// a plain kernel route via syncRoute, and since FRR treats any pre-existing
+// kernel route as distance 0 — unconditionally ahead of any BGP-learned
+// route, no matter its distance — silently loop that node's own transit
+// traffic for the prefix back out over the mesh to its sibling instead of
+// out its own working BGP session. bestRedistMetric can't see ns.redist's
+// own self-origin exclusion (onRouteAdd already refuses to record this
+// node's own advertisements there) helping here: the colliding entry
+// legitimately belongs to a *different* origin, so that filter doesn't
+// apply. This is the same failure mode, just via a sibling's advertisement
+// rather than this node's own looped-back one.
 func (ns *netState) bestRedistMetric(p netip.Prefix) (int, bool) {
+	if br := ns.bgpRoutes.Load(); br != nil {
+		for _, q := range br.routes {
+			if q == p {
+				return 0, false
+			}
+		}
+	}
 	ns.mu.RLock()
 	defer ns.mu.RUnlock()
 	best, found := 0, false

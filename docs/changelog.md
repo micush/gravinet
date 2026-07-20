@@ -37,6 +37,63 @@ assuming it didn't happen.
 
 ---
 
+## v543 — 2026-07-20
+
+**Fixed: a node redistributing a prefix from its own BGP RIB into mesh
+gossip could loop its own transit traffic for that prefix back out over
+the mesh, if a sibling node was redistributing the same prefix too — the
+ordinary shape of a redundant pair of exit nodes.**
+
+Each exit node in such a pair is expected to redistribute the same
+external prefix at a different metric so *other* mesh nodes can pick the
+better of the two — that part already worked. The problem was what each
+exit node did with its *sibling's* copy of the same advertisement:
+`bestRedistMetric` had no way to know this node already had a direct,
+authoritative path to the prefix via its own live BGP session, so it
+treated the sibling's gossiped copy like any other route and installed
+it as a plain kernel route via `syncRoute`. Since FRR treats any
+pre-existing kernel route as distance 0 — unconditionally ahead of a
+BGP-learned route, no matter its distance (v541's `distance bgp` bump
+included, though that had its own bug — see v542) — that kernel route
+always won, silently routing the exit node's own transit traffic for the
+prefix back onto the mesh toward its sibling instead of out its own
+working BGP session.
+
+`bestRedistMetric` (`routes.go`) now checks this node's own current
+`bgpRoutes` set first: a prefix it's redistributing from its own BGP RIB
+is always reported as not mesh-advertised, regardless of what a peer is
+gossiping about it. `reloadBGPRoutes` reconciles the affected prefix's OS
+route immediately on both sides of that transition — dropping a
+sibling's shadowed route the moment this node starts redistributing the
+same prefix itself, and picking a surviving sibling's copy back up as an
+immediate fallback the moment this node stops (BGP session drop, or the
+operator un-checking it) — rather than leaving either change to wait on
+some unrelated gossip event to reconcile it.
+
+New `TestSelfBGPRedistributionShadowsSiblingGossip` reproduces the
+reported topology directly (two nodes, same prefix, different
+redistribute metrics) and fails against the old code with the exact
+metric (9250) seen in the field.
+
+---
+
+## v542 — 2026-07-20
+
+**Fixed: the Monitor > BGP Peers "BGP Table" card only ever showed IPv6
+routes, even on nodes with IPv4 BGP peers and IPv4 routes in the table.**
+
+`handleBGPTable` (`bgp.go`) ran plain `show bgp` against vtysh. With no
+AFI/SAFI given, FRR doesn't show every address family — it shows whichever
+one the vty is currently in, which for a fresh vtysh session is IPv6
+unicast, so the card's IPv4 rows were silently dropped every time.
+
+Changed the command to `show bgp all`, which walks every configured
+AFI/SAFI and prints each as its own labeled section, so the card now
+covers both families. Response handling is unchanged — still forwarded to
+the client as FRR's own verbatim text, same as before.
+
+---
+
 ## v541 — 2026-07-20
 
 **Fixed: anything added to `frr.conf` outside gravinet — an interface

@@ -153,17 +153,22 @@ func (s *Server) handleBFD(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleBGPTable returns the raw text of FRR's `show bgp` command — the full
-// BGP table (prefixes, next hops, AS paths, and per-route status codes), as
-// opposed to handleBGP's per-peer summary. It backs the Monitor > BGP Peers
-// "BGP Table" card. Unlike handleBGP/handleBFD this isn't reshaped into a
-// struct: `show bgp` has no JSON form, and its fixed-width columns are more
+// handleBGPTable returns the raw text of FRR's `show bgp all` command — the
+// full BGP table (prefixes, next hops, AS paths, and per-route status codes),
+// as opposed to handleBGP's per-peer summary. It backs the Monitor > BGP
+// Peers "BGP Table" card. Unlike handleBGP/handleBFD this isn't reshaped into
+// a struct: `show bgp` has no JSON form, and its fixed-width columns are more
 // legible left exactly as FRR renders them than reparsed into a table, so the
-// response is the command's own text verbatim. Same availability shape as
-// every other BGP/BFD endpoint (gated on bgpSupported, degrading to
-// available=false with a human reason rather than an error) so the card
-// behaves identically to its neighbors when vtysh is absent or FRR isn't
-// answering.
+// response is the command's own text verbatim. Deliberately "show bgp all",
+// not plain "show bgp": with no AFI/SAFI given, FRR defaults to whichever
+// address-family the vty is currently in — IPv6 unicast for a fresh vtysh
+// session — so plain "show bgp" silently dropped every IPv4 route from this
+// card. "all" walks every configured AFI/SAFI and prints each as its own
+// labeled section, which is what the card actually needs to show both
+// families. Same availability shape as every other BGP/BFD endpoint (gated
+// on bgpSupported, degrading to available=false with a human reason rather
+// than an error) so the card behaves identically to its neighbors when
+// vtysh is absent or FRR isn't answering.
 func (s *Server) handleBGPTable(w http.ResponseWriter, r *http.Request) {
 	if !bgpSupported() {
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -173,7 +178,7 @@ func (s *Server) handleBGPTable(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	out, ran := runVtysh("show bgp")
+	out, ran := runVtysh("show bgp all")
 	if !ran {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"available": false,
