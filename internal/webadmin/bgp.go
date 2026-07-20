@@ -263,6 +263,17 @@ func parseBGPLearnedRoutes(raw []byte) []netip.Prefix {
 	return out
 }
 
+// ipRouteEntry is one connected/static route as reported by FRR/zebra — its
+// prefix, and the interface its winning nexthop actually goes out. The
+// interface is what lets handleBGPRedistributeOptions recognize and exclude
+// a route that's actually gravinet's own mesh interface (e.g. mesh0) rather
+// than a genuine external LAN/static route — see its own doc comment for
+// why that distinction matters.
+type ipRouteEntry struct {
+	CIDR  string
+	Iface string
+}
+
 // showIPRouteConnected queries FRR/zebra for this host's currently
 // connected routes — the ones a blanket `redistribute connected` would
 // sweep in wholesale — across both address families. Feeds the Traffic >
@@ -272,56 +283,66 @@ func parseBGPLearnedRoutes(raw []byte) []netip.Prefix {
 // just this route type), rather than reading the OS routing table some
 // other way, means the list shown can't disagree with what zebra itself
 // would actually redistribute.
-func showIPRouteConnected() []string { return showIPRouteOfType("connected") }
+func showIPRouteConnected() []ipRouteEntry { return showIPRouteOfType("connected") }
 
 // showIPRouteStatic is showIPRouteConnected's twin for static routes
 // (BGPConfig.RedistributeStaticRoutes) — see its doc comment.
-func showIPRouteStatic() []string { return showIPRouteOfType("static") }
+func showIPRouteStatic() []ipRouteEntry { return showIPRouteOfType("static") }
 
-func showIPRouteOfType(kind string) []string {
+func showIPRouteOfType(kind string) []ipRouteEntry {
 	seen := make(map[string]bool)
-	var out []string
+	var out []ipRouteEntry
 	for _, cmd := range []string{"show ip route " + kind + " json", "show ipv6 route " + kind + " json"} {
 		raw, ran := runVtysh(cmd)
 		if !ran {
 			continue
 		}
-		for _, cidr := range parseIPRouteList(raw) {
-			if !seen[cidr] {
-				seen[cidr] = true
-				out = append(out, cidr)
+		for _, e := range parseIPRouteList(raw) {
+			if !seen[e.CIDR] {
+				seen[e.CIDR] = true
+				out = append(out, e)
 			}
 		}
 	}
-	sort.Strings(out)
+	sort.Slice(out, func(i, j int) bool { return out[i].CIDR < out[j].CIDR })
 	return out
 }
 
 // parseIPRouteList reshapes "show ip/ipv6 route <type> json"'s output — an
 // object keyed by prefix, each holding every route FRR/zebra has for it —
-// into the CIDR strings themselves. Same "silent best-effort" shape as
+// into (prefix, interface) pairs. Same "silent best-effort" shape as
 // parseBGPLearnedRoutes: invalid JSON, or a prefix string that doesn't
 // parse, is skipped rather than erroring the whole call, since this only
 // ever feeds a picker list, never a routing decision. FRR already filters
 // server-side to the requested type; selected/installed is still checked so
 // a route that matched the type but isn't actually zebra's live choice for
-// its prefix (an alternate/backup path) doesn't show up as pickable.
-func parseIPRouteList(raw []byte) []string {
+// its prefix (an alternate/backup path) doesn't show up as pickable. The
+// interface comes from the winning route's first nexthop — a connected or
+// static route has exactly one in practice (no ECMP for either type), so
+// there's nothing to pick among.
+func parseIPRouteList(raw []byte) []ipRouteEntry {
 	var top map[string][]struct {
 		Selected  bool `json:"selected"`
 		Installed bool `json:"installed"`
+		Nexthops  []struct {
+			InterfaceName string `json:"interfaceName"`
+		} `json:"nexthops"`
 	}
 	if err := json.Unmarshal(raw, &top); err != nil {
 		return nil
 	}
-	var out []string
+	var out []ipRouteEntry
 	for cidr, paths := range top {
 		if _, err := netip.ParsePrefix(cidr); err != nil {
 			continue
 		}
 		for _, p := range paths {
 			if p.Selected || p.Installed {
-				out = append(out, cidr)
+				var iface string
+				if len(p.Nexthops) > 0 {
+					iface = p.Nexthops[0].InterfaceName
+				}
+				out = append(out, ipRouteEntry{CIDR: cidr, Iface: iface})
 				break
 			}
 		}
@@ -359,6 +380,28 @@ func (s *Server) handleBGPRedistributeOptions(w http.ResponseWriter, r *http.Req
 		})
 		return
 	}
+	// Exclude a connected/static route whose winning nexthop is actually one
+	// of gravinet's own mesh interfaces (e.g. mesh0), not a genuine external
+	// LAN/static route: a network's overlay address is installed as a
+	// point-to-point pair that makes the OS derive a directly-connected
+	// route to the *whole* subnet on that interface (see
+	// config.Network.NetworkSetAddress's own doc comment on why), so the
+	// mesh's own overlay subnet routinely shows up in zebra's "connected"
+	// RIB right alongside genuine LAN routes. Picking one here would
+	// redistribute the mesh's own internal addressing into BGP as if it
+	// were a real external network — RedistributeMeshRoutes (the Mesh
+	// Routes page's own Advertise table) is the deliberate, correct way to
+	// advertise mesh routes into BGP instead, and exists specifically so
+	// this feature doesn't have to also cover that case (see its own doc
+	// comment for why "just use redistribute connected" was rejected there
+	// too, for a related reason — sweeping in every kernel-table route
+	// indiscriminately).
+	meshIfaces := make(map[string]bool)
+	for _, ifc := range s.be.Interfaces() {
+		if ifc.Iface != "" {
+			meshIfaces[ifc.Iface] = true
+		}
+	}
 	learned := bgpLearnedRoutes()
 	learnedStrs := make([]string, len(learned))
 	for i, p := range learned {
@@ -366,10 +409,25 @@ func (s *Server) handleBGPRedistributeOptions(w http.ResponseWriter, r *http.Req
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"available":          true,
-		"connected_routes":   showIPRouteConnected(),
-		"static_routes":      showIPRouteStatic(),
+		"connected_routes":   excludeMeshInterfaceRoutes(showIPRouteConnected(), meshIfaces),
+		"static_routes":      excludeMeshInterfaceRoutes(showIPRouteStatic(), meshIfaces),
 		"bgp_learned_routes": learnedStrs,
 	})
+}
+
+// excludeMeshInterfaceRoutes drops any entry whose interface is one of
+// gravinet's own mesh interfaces — see handleBGPRedistributeOptions' own
+// doc comment for why — and reduces what's left to plain CIDR strings, the
+// shape the picker actually wants.
+func excludeMeshInterfaceRoutes(entries []ipRouteEntry, meshIfaces map[string]bool) []string {
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if meshIfaces[e.Iface] {
+			continue
+		}
+		out = append(out, e.CIDR)
+	}
+	return out
 }
 
 // handleBGPConfig is the read/write side: gravinet owns the BGP/BFD

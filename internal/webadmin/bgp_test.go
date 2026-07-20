@@ -294,3 +294,67 @@ func TestParseBFDPeersEmptyOrGarbage(t *testing.T) {
 		}
 	}
 }
+
+// TestParseIPRouteList covers the exact scenario a mesh overlay subnet
+// colliding with a real LAN interface produces: two candidate routes for
+// the same prefix, one via each interface, only one of them selected —
+// parseIPRouteList must return only the selected one, with its own
+// interface, not both and not the wrong one.
+func TestParseIPRouteList(t *testing.T) {
+	raw := []byte(`{
+	  "192.168.5.0/24": [
+	    {"selected": false, "installed": false, "nexthops": [{"interfaceName": "mesh0"}]},
+	    {"selected": true, "installed": true, "nexthops": [{"interfaceName": "ens18"}]}
+	  ],
+	  "10.0.2.0/24": [
+	    {"selected": true, "installed": true, "nexthops": [{"interfaceName": "eth1"}]}
+	  ],
+	  "not-a-prefix": [
+	    {"selected": true, "installed": true, "nexthops": [{"interfaceName": "eth1"}]}
+	  ]
+	}`)
+	got := parseIPRouteList(raw)
+	want := map[string]string{"192.168.5.0/24": "ens18", "10.0.2.0/24": "eth1"}
+	if len(got) != len(want) {
+		t.Fatalf("got %+v, want exactly %v", got, want)
+	}
+	for _, e := range got {
+		if want[e.CIDR] != e.Iface {
+			t.Errorf("entry %+v: want interface %q for %s", e, want[e.CIDR], e.CIDR)
+		}
+	}
+}
+
+func TestParseIPRouteListEmptyOrGarbage(t *testing.T) {
+	for _, raw := range [][]byte{nil, []byte(""), []byte("not json"), []byte(`{}`)} {
+		if got := parseIPRouteList(raw); len(got) != 0 {
+			t.Errorf("parseIPRouteList(%q) = %v, want empty", raw, got)
+		}
+	}
+}
+
+// TestExcludeMeshInterfaceRoutes is handleBGPRedistributeOptions' own
+// reason for existing: a connected/static route whose winning nexthop is
+// gravinet's own mesh interface (its overlay subnet showing up in zebra's
+// "connected" RIB, per config.Network.NetworkSetAddress's point-to-point
+// addressing) must never be offered as a redistribute-picker option — doing
+// so would let an operator unknowingly redistribute the mesh's own internal
+// addressing into BGP as if it were a real external network.
+func TestExcludeMeshInterfaceRoutes(t *testing.T) {
+	entries := []ipRouteEntry{
+		{CIDR: "192.168.5.0/24", Iface: "mesh0"}, // this node's own overlay subnet — must be excluded
+		{CIDR: "10.0.0.0/24", Iface: "ens18"},    // a genuine LAN route — must be kept
+		{CIDR: "0.0.0.0/0", Iface: ""},           // no interface at all — must be kept (nothing to exclude on)
+	}
+	meshIfaces := map[string]bool{"mesh0": true, "mesh1": true}
+	got := excludeMeshInterfaceRoutes(entries, meshIfaces)
+	want := []string{"10.0.0.0/24", "0.0.0.0/0"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("got[%d] = %q, want %q", i, got[i], w)
+		}
+	}
+}

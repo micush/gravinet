@@ -37,6 +37,36 @@ assuming it didn't happen.
 
 ---
 
+## v538 — 2026-07-19
+
+**Fixed: a mesh overlay subnet colliding with a real interface (e.g. a
+LAN sharing its prefix with mesh0's own connected route) could show up
+in — and be picked from — the Redistribute connected/static pickers,
+which would redistribute the mesh's own internal addressing into BGP as
+if it were a real external network.**
+
+A network's overlay address is installed as a point-to-point pair that
+makes the OS derive a directly-connected route to the *whole* subnet on
+that interface (`config.Network.NetworkSetAddress`'s own doc comment
+explains why) — so gravinet's own mesh interfaces routinely show up
+right alongside genuine LAN/static routes in zebra's "connected"/"static"
+RIB, indistinguishable by prefix alone. `showIPRouteConnected`/
+`showIPRouteStatic` (`bgp.go`) now also capture each route's winning
+interface (`show ip/ipv6 route <type> json`'s `nexthops[].interfaceName`),
+and `handleBGPRedistributeOptions` excludes any route whose interface is
+one of this node's own mesh interfaces (`Backend.Interfaces()`) before
+ever offering it as a pickable option — the same reasoning
+`RedistributeMeshRoutes` (the Mesh Routes page's own Advertise table,
+not a blanket `redistribute kernel`) already applies to why mesh routes
+need a deliberate, separate path into BGP rather than riding along with
+"redistribute connected/static" by accident.
+
+Added direct test coverage (`TestParseIPRouteList`,
+`TestExcludeMeshInterfaceRoutes`) — this whole vtysh-JSON-parsing path
+had none before.
+
+---
+
 ## v537 — 2026-07-19
 
 **Fixed: Redistribute connected ran straight into Advertised networks
