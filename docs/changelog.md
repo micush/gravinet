@@ -37,6 +37,21 @@ assuming it didn't happen.
 
 ---
 
+## v537 — 2026-07-19
+
+**Fixed: Redistribute connected ran straight into Advertised networks
+above it (v536) with no visual break — just a settings-row's own thin
+border-bottom, which reads as still part of the same section rather
+than a new one starting.**
+
+`rowRouteList` now takes an optional `sectionBreak` flag, applied to
+Redistribute connected (the first of the three): the same
+margin-top/border-top/padding-top Advertised networks itself already
+uses to set apart from whatever's above *it*. Same visual language on
+both sides of that boundary now, not just one.
+
+---
+
 ## v536 — 2026-07-19
 
 **Moved Redistribute connected/static/mesh routes to after Advertised

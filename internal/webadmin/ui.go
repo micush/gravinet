@@ -6313,8 +6313,14 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
   // rowRouteList wraps buildRouteChipPicker (see its own doc comment) in a
   // settings-row, wired to this form's debounced-save (every add/remove
   // saves immediately, same as every other toggle on this page).
-  const rowRouteList = (labelText, desc, available, selected) => {
-    const row = $('<div class="settings-row"></div>');
+  // sectionBreak (true for the first of the three redistribute pickers)
+  // adds the same margin-top/border-top/padding-top Advertised networks
+  // (netSec, below) uses to set itself apart from what's above it — without
+  // it, a .settings-row's own border-bottom is the only separation, which
+  // reads as still part of whatever section came before rather than a new
+  // one starting.
+  const rowRouteList = (labelText, desc, available, selected, sectionBreak) => {
+    const row = $('<div class="settings-row"'+(sectionBreak?' style="margin-top:16px;border-top:1px solid var(--line);padding-top:12px"':'')+'></div>');
     row.appendChild($('<div><div class="settings-label">'+esc(labelText)+'</div><div class="settings-desc">'+desc+'</div></div>'));
     const picker = buildRouteChipPicker(available, selected, () => scheduleSave(true));
     row.appendChild(picker.wrap); card.appendChild(row);
@@ -6544,7 +6550,7 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
   }
   renderNets();
 
-  const rcList = rowRouteList('Redistribute connected', 'Advertise this host\u2019s currently-connected routes into BGP \u2014 pick which ones.', redistOpts.connected_routes, b.redistribute_connected_routes);
+  const rcList = rowRouteList('Redistribute connected', 'Advertise this host\u2019s currently-connected routes into BGP \u2014 pick which ones.', redistOpts.connected_routes, b.redistribute_connected_routes, true);
   const rsList = rowRouteList('Redistribute static', 'Advertise this host\u2019s static routes into BGP \u2014 pick which ones.', redistOpts.static_routes, b.redistribute_static_routes);
   // Scoped to exactly the CIDRs the operator picks from the Mesh Routes
   // page's Advertise table — not FRR's plain "redistribute kernel", which
