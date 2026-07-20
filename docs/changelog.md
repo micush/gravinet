@@ -37,6 +37,18 @@ assuming it didn't happen.
 
 ---
 
+## v536 — 2026-07-19
+
+**Moved Redistribute connected/static/mesh routes to after Advertised
+networks (Traffic → BGP editor), instead of after the session timers.**
+
+Order is now Enable BGP, Local AS number, Router-id, AutoBGP, AS
+Prepend, Keepalive timer, Hold timer, Neighbors, Advertised networks,
+Redistribute connected, Redistribute static, Redistribute mesh routes.
+No behavior change, purely field order (`ui.go`).
+
+---
+
 ## v535 — 2026-07-19
 
 **Moved Redistribute connected/static/mesh routes to after the session

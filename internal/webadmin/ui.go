@@ -6337,16 +6337,6 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
   const holdDefault = isNewCfg ? 12 : (b.hold_time || '');
   const kaInp = rowInput('Keepalive timer (seconds)', 'How often to send BGP keepalives. Default 4s.', kaDefault, 'e.g. 4', 100);
   const holdInp = rowInput('Hold timer (seconds)', 'Silence before a session is declared down; must exceed keepalive (3\u00d7 is conventional). Default 12s.', holdDefault, 'e.g. 12', 100);
-  const rcList = rowRouteList('Redistribute connected', 'Advertise this host\u2019s currently-connected routes into BGP \u2014 pick which ones.', redistOpts.connected_routes, b.redistribute_connected_routes);
-  const rsList = rowRouteList('Redistribute static', 'Advertise this host\u2019s static routes into BGP \u2014 pick which ones.', redistOpts.static_routes, b.redistribute_static_routes);
-  // Scoped to exactly the CIDRs the operator picks from the Mesh Routes
-  // page's Advertise table — not FRR's plain "redistribute kernel", which
-  // would also pull in every other kernel-table route on the box (mesh-
-  // learned routes are installed as ordinary kernel routes, indistinguishable
-  // from anything else there). available refreshes live as routes are
-  // added/removed/enabled on that page (see secBgp's load()), independent of
-  // this form's own save.
-  const rmList = rowRouteList('Redistribute mesh routes', 'Advertise CIDRs from the Mesh Routes page\u2019s Advertise table into BGP \u2014 pick which ones.', meshRoutes, b.redistribute_mesh_routes);
 
   // ---- neighbors ----
   // Table styling matches every other list-editing section in the app
@@ -6553,6 +6543,17 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
     };
   }
   renderNets();
+
+  const rcList = rowRouteList('Redistribute connected', 'Advertise this host\u2019s currently-connected routes into BGP \u2014 pick which ones.', redistOpts.connected_routes, b.redistribute_connected_routes);
+  const rsList = rowRouteList('Redistribute static', 'Advertise this host\u2019s static routes into BGP \u2014 pick which ones.', redistOpts.static_routes, b.redistribute_static_routes);
+  // Scoped to exactly the CIDRs the operator picks from the Mesh Routes
+  // page's Advertise table — not FRR's plain "redistribute kernel", which
+  // would also pull in every other kernel-table route on the box (mesh-
+  // learned routes are installed as ordinary kernel routes, indistinguishable
+  // from anything else there). available refreshes live as routes are
+  // added/removed/enabled on that page (see secBgp's load()), independent of
+  // this form's own save.
+  const rmList = rowRouteList('Redistribute mesh routes', 'Advertise CIDRs from the Mesh Routes page\u2019s Advertise table into BGP \u2014 pick which ones.', meshRoutes, b.redistribute_mesh_routes);
 
   // ---- autosave ----
   // No Save button: like every other form in the app, edits persist — and apply
