@@ -117,7 +117,7 @@ func (s *Server) handleLocalLatency(w http.ResponseWriter, r *http.Request) {
 			wg.Add(1)
 			go func(i int, addr string) {
 				defer wg.Done()
-				ms, err := pingRTT(addr)
+				ms, err := PingRTT(addr)
 				if err != nil {
 					results[i].Error = err.Error()
 					return
@@ -134,16 +134,20 @@ func (s *Server) handleLocalLatency(w http.ResponseWriter, r *http.Request) {
 
 var pingTimeRe = regexp.MustCompile(`time[=<]([0-9.]+)\s*ms`)
 
-// pingArgsForOS returns the ping(1) argv (excluding argv0) used to send two
+// PingArgsForOS returns the ping(1) argv (excluding argv0) used to send two
 // probes to addr with an approximately one-second per-probe timeout on goos.
-// Split out from pingRTT so the per-OS flag mapping can be exercised directly
+// Split out from PingRTT so the per-OS flag mapping can be exercised directly
 // by a test without depending on the test binary's own runtime.GOOS (fixed at
 // build time) or actually running ping. This exact split caught the bug:
 // openbsd fell through to the Linux/default case and got "-W 1", a flag
 // OpenBSD's ping doesn't have — the command errored out before sending a
 // packet, so Info → Latency read "no reply" for every peer on an OpenBSD
 // host, indistinguishable from a real, universal timeout.
-func pingArgsForOS(goos, addr string) []string {
+//
+// Exported so cmd/gravinet's "latency" subcommand (see cmdLatency) pings
+// peers exactly the same way this page does — one implementation, not two
+// that could quietly drift apart the way this one already did once.
+func PingArgsForOS(goos, addr string) []string {
 	switch goos {
 	case "windows":
 		return []string{"-n", "2", "-w", "1000", addr}
@@ -170,7 +174,7 @@ func pingArgsForOS(goos, addr string) []string {
 	}
 }
 
-// pingRTT shells out to the OS's native ping (2 probes, ~1s budget each) and
+// PingRTT shells out to the OS's native ping (2 probes, ~1s budget each) and
 // parses the reported round-trip time. Used instead of a raw ICMP socket
 // (golang.org/x/net/icmp) to avoid an external module dependency and the
 // platform-specific raw-socket privilege handling that comes with it — the
@@ -178,8 +182,10 @@ func pingArgsForOS(goos, addr string) []string {
 // format is stable enough to parse reliably across Linux/macOS/Windows/BSD.
 // Reports the fastest of the probes that succeeded (packet loss on one probe
 // shouldn't hide a real, working RTT reported by the other).
-func pingRTT(addr string) (float64, error) {
-	cmd := exec.Command("ping", pingArgsForOS(runtime.GOOS, addr)...)
+//
+// Exported for cmdLatency (cmd/gravinet) — see PingArgsForOS's doc comment.
+func PingRTT(addr string) (float64, error) {
+	cmd := exec.Command("ping", PingArgsForOS(runtime.GOOS, addr)...)
 	out, runErr := cmd.CombinedOutput()
 	best := -1.0
 	for _, m := range pingTimeRe.FindAllStringSubmatch(string(out), -1) {
@@ -206,6 +212,26 @@ type routeRow struct {
 	Iface   string `json:"iface"`
 	Metric  int    `json:"metric"`
 	Family  int    `json:"family"` // 4 or 6
+}
+
+// LocalRouteTableText returns the host's kernel routing table as plain text,
+// for "gravinet monitor route-table" — the CLI equivalent of
+// handleLocalRoutes, reusing the exact same data sources (readProcRoutes on
+// Linux, the OS's native route-listing command elsewhere) rather than a
+// second implementation that could read the table differently.
+func LocalRouteTableText() (string, error) {
+	if runtime.GOOS != "linux" {
+		return nativeRouteText()
+	}
+	var b strings.Builder
+	for _, row := range readProcRoutes() {
+		gw := row.Gateway
+		if gw == "" {
+			gw = "-"
+		}
+		fmt.Fprintf(&b, "%-20s via %-16s dev %-10s metric %-6d (ipv%d)\n", row.Dest, gw, row.Iface, row.Metric, row.Family)
+	}
+	return b.String(), nil
 }
 
 // handleLocalRoutes returns the host's kernel routing table. On Linux it is

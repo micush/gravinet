@@ -227,7 +227,7 @@ func TestHandleLocalLatency(t *testing.T) {
 // clean not-ok result (either "no reply" or a could-not-run error) rather
 // than hanging or panicking, regardless of whether ping is installed here.
 func TestPingRTT(t *testing.T) {
-	_, err := pingRTT("192.0.2.1")
+	_, err := PingRTT("192.0.2.1")
 	if err == nil {
 		t.Fatal("pinging a TEST-NET-1 address should not succeed")
 	}
@@ -251,14 +251,14 @@ func TestPingArgsForOS(t *testing.T) {
 		{"plan9", []string{"-c", "2", "-W", "1", "10.0.0.1"}},
 	}
 	for _, tc := range cases {
-		args := pingArgsForOS(tc.goos, "10.0.0.1")
+		args := PingArgsForOS(tc.goos, "10.0.0.1")
 		if !reflect.DeepEqual(args, tc.wantArgs) {
-			t.Errorf("pingArgsForOS(%q) = %v, want %v", tc.goos, args, tc.wantArgs)
+			t.Errorf("PingArgsForOS(%q) = %v, want %v", tc.goos, args, tc.wantArgs)
 		}
 	}
 	// The openbsd case must never use -W (capital), which is not a valid
 	// OpenBSD ping flag and is what caused the original bug.
-	for _, a := range pingArgsForOS("openbsd", "10.0.0.1") {
+	for _, a := range PingArgsForOS("openbsd", "10.0.0.1") {
 		if a == "-W" {
 			t.Fatal("openbsd ping args must not include -W; OpenBSD's ping has no such flag")
 		}

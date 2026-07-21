@@ -893,7 +893,7 @@ func TestRunVtyshAbsent(t *testing.T) {
 	withStatFile(t, func(string) (fs.FileInfo, error) { return nil, os.ErrNotExist })
 	done := make(chan struct{})
 	go func() {
-		if out, ok := runVtysh("show running-config"); ok || out != nil {
+		if out, ok := RunVtysh("show running-config"); ok || out != nil {
 			t.Errorf("runVtysh with no vtysh = (%v,%v), want (nil,false)", out, ok)
 		}
 		close(done)

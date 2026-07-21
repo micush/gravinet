@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"gravinet/internal/logx"
+	"gravinet/internal/mesh"
 )
 
 // Sampling cadence and retention for the Info -> Metrics graphs. 2s sampling
@@ -401,3 +402,80 @@ type devCounters struct{ rx, tx uint64 }
 //	readNetDev() map[string]devCounters
 //
 // See metrics_linux.go, metrics_darwin.go, metrics_windows.go.
+
+// IfaceThroughput is one overlay interface's instantaneous send/receive
+// rate, part of HostSnapshot.
+type IfaceThroughput struct {
+	Network       string
+	Iface         string
+	RxBytesPerSec float64
+	TxBytesPerSec float64
+}
+
+// HostSnapshot is a single, instantaneous read of this host's CPU/memory/
+// disk/uptime and per-overlay-interface throughput — see TakeHostSnapshot.
+type HostSnapshot struct {
+	CPUPercent    float64
+	CPUOK         bool
+	MemPercent    float64
+	MemOK         bool
+	DiskPercent   float64
+	DiskOK        bool
+	UptimeSeconds uint64
+	UptimeOK      bool
+	Ifaces        []IfaceThroughput
+}
+
+// TakeHostSnapshot reads CPU/memory/disk/uptime and per-interface
+// throughput once, right now — the same readers metricsCollector.sample()
+// uses for its rolling history (Info → Metrics' graphs), just a single
+// instantaneous read instead of an accumulated series. Exported for
+// "gravinet monitor metrics" (cmd/gravinet), which — running as a separate,
+// short-lived process — has no access to the daemon's own history buffer
+// and settles for "right now" instead of a graph.
+//
+// CPU and interface throughput are both rates, not levels — a single
+// cumulative jiffy or byte counter doesn't mean anything on its own, it
+// needs a delta — so this samples both twice, one second apart, the same
+// one-second window sample() itself uses between ticks. Memory, disk, and
+// uptime are already instantaneous values and only need one read. Blocks
+// for about a second; that's expected; ifaces is the live network ->
+// kernel-interface mapping to report throughput for (see mesh.IfaceInfo /
+// the control socket's "ifaces" command) since this function has no engine
+// of its own to ask.
+func TakeHostSnapshot(ifaces []mesh.IfaceInfo) HostSnapshot {
+	var s HostSnapshot
+	totalA, idleA, cpuOKA := readCPUTotalsFn()
+	devA := readNetDevFn()
+	time.Sleep(time.Second)
+	totalB, idleB, cpuOKB := readCPUTotalsFn()
+	devB := readNetDevFn()
+
+	if cpuOKA && cpuOKB && totalB > totalA {
+		dt := totalB - totalA
+		di := idleB - idleA
+		s.CPUPercent = clampPct(float64(dt-di) / float64(dt) * 100)
+		s.CPUOK = true
+	}
+	s.MemPercent, s.MemOK = readMemUsedPctFn()
+	s.DiskPercent, s.DiskOK = readDiskUsedPctFn()
+	s.UptimeSeconds, s.UptimeOK = readUptimeFn()
+
+	for _, ii := range ifaces {
+		if ii.Iface == "" {
+			continue
+		}
+		a, okA := devA[ii.Iface]
+		b, okB := devB[ii.Iface]
+		if !okA || !okB {
+			continue
+		}
+		s.Ifaces = append(s.Ifaces, IfaceThroughput{
+			Network:       ii.Name,
+			Iface:         ii.Iface,
+			RxBytesPerSec: rate(b.rx, a.rx, 1),
+			TxBytesPerSec: rate(b.tx, a.tx, 1),
+		})
+	}
+	return s
+}

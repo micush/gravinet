@@ -48,7 +48,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "547"
+	version = "550"
 	commit  = "none"
 )
 
@@ -108,6 +108,20 @@ func main() {
 		cmdConfigList(os.Args[2:])
 	case "status":
 		cmdList(os.Args[2:])
+	case "latency":
+		cmdLatency(os.Args[2:])
+	case "mesh":
+		dispatchGroup("mesh", meshGroup, os.Args[2:])
+	case "traffic":
+		dispatchGroup("traffic", trafficGroup, os.Args[2:])
+	case "naming":
+		dispatchGroup("naming", namingGroup, os.Args[2:])
+	case "monitor":
+		dispatchGroup("monitor", monitorGroup, os.Args[2:])
+	case "info":
+		dispatchGroup("info", infoGroup, os.Args[2:])
+	case "settings":
+		dispatchGroup("settings", settingsGroup, os.Args[2:])
 	case "network", "net":
 		cmdNetwork(os.Args[2:])
 	case "key":
@@ -141,18 +155,7 @@ func main() {
 		// run by hand, and occasionally useful for exactly the same reason.
 		cmdSelfTest(os.Args[2:])
 	case "version", "-v", "--version":
-		pam := "no"
-		if webadmin.PAMCompiledIn {
-			pam = "yes"
-		}
-		// The trailing "pam=yes|no" is deliberately stable/parseable: the
-		// install-*.sh scripts grep for it to find out whether a resolved
-		// binary actually has PAM support, rather than inferring it after
-		// the fact from ldd/otool/objdump output — a heuristic that can be
-		// fooled by static linking (see docs/changelog.md for the bug that
-		// prompted this). Only the binary itself reliably knows what it was
-		// built with.
-		fmt.Printf("gravinet %s (%s) %s/%s pam=%s\n", version, commit, runtime.GOOS, runtime.GOARCH, pam)
+		printVersion()
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -165,27 +168,36 @@ func main() {
 func usage() {
 	fmt.Fprint(os.Stderr, `[gravinet] — full-mesh encrypted overlay VPN
 
-commands:
+commands are grouped the same way the web admin's own left rail is:
+
+  mesh       networks, keys, seeds, peers, bans
+  traffic    firewall, nat, qos, shaping, routes, bgp
+  naming     dns, hosts
+  monitor    metrics, mesh-peers, capture, speedtest, latency, route-table,
+             bgp-peers, hosts-file, dns-state, logs
+  info       upgrade, readme, getting-started, license, about
+  settings   managed, manager
+
+run "gravinet <group>" alone to list what's under it, or
+"gravinet <group> <section> -h" for that command's own flags. A few
+sections — mostly Monitor's live host-state views (metrics, capture,
+route-table, logs, ...) — don't have a CLI path yet and say so rather
+than pretending to; use the web admin for those today.
+
+other commands (not tied to a web admin page):
   run        run the daemon
   genkey     generate one or more base64 AES-256 keys
   genpass    generate a web-admin user credential (PBKDF2) for the config
-  network    manage networks:    add|delete|enable|disable|rename|subnet|join|list
-  key        manage join keys:   list|show|generate|set|enable|disable|delete|distribute
-  route      manage routes:      add|delete|advertise|reject|list
-  seed       manage seed addrs:  list|add|remove ADDR [-net NAME]
-  nat        manage NAT:         add|delete|enable|disable|state|list
-  host       advertise hosts:    list|add NAME IP|remove NAME [-net NAME]
-  qos        manage QoS:         add|delete|mark|unmark|enable|disable|list
-  bandwidth  manage throttles:   up|down|both RATE [interface IF]|list
-  fw         manage firewall rules (live, via the daemon)
-  ban        ban a node:         gravinet ban <node> [-net NAME|id] [-notes N]
-  unban      unban a node:       gravinet unban <node> [-force]
-  managed    get/set managed mode (be managed): gravinet managed [on|off]
-  manager    get/set manager mode (manage others): gravinet manager [on|off]
   list       print the whole config
-  status     live peers/bans/routes (via the daemon)
+  status     live peers/bans/routes, all at once (via the daemon)
   service    install/uninstall/print the OS service definition
   version    print version
+
+the flat forms these replace — network, key, route, seed, nat, host, qos,
+bandwidth/bw, fw, ban, unban, managed, manager, upgrade, latency — still
+work exactly as before (run "gravinet <name> -h" on any of them); nothing
+already scripted against gravinet needs to change. They're just grouped
+under the sections above now too, so the shape matches the web admin.
 
 config commands edit the config file and ask a running daemon to reload;
 run "gravinet <command> -h" for command flags
@@ -1673,6 +1685,34 @@ func splitPositional(args []string) (positional string, rest []string) {
 	return "", args
 }
 
+// printPeers prints a peer table — shared by cmdList's combined view and the
+// new "gravinet mesh peers" / "gravinet monitor mesh-peers" leaves (see
+// cli_groups.go) so there's one implementation instead of several that could
+// drift.
+func printPeers(peers []mesh.PeerInfo) {
+	fmt.Printf("Peers (%d):\n", len(peers))
+	for _, p := range peers {
+		reach := "direct"
+		if p.Relayed {
+			reach = "relayed"
+		}
+		fmt.Printf("  %-18s %-20s v4=%s v6=%s  public=%s (%s)\n", p.NodeID, p.Hostname, p.Overlay4, p.Overlay6, p.Endpoint, reach)
+	}
+}
+
+// printBans prints a ban table — shared by cmdList and "gravinet mesh bans
+// list" (see cli_groups.go).
+func printBans(bans []mesh.BanInfo) {
+	fmt.Printf("Bans (%d):\n", len(bans))
+	for _, b := range bans {
+		mine := ""
+		if b.Mine {
+			mine = " (originated here)"
+		}
+		fmt.Printf("  %-18s by %-18s %q%s\n", b.Target, b.Origin, b.Notes, mine)
+	}
+}
+
 // cmdList shows peers, bans, and redistributed routes.
 func cmdList(args []string) {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
@@ -1686,14 +1726,7 @@ func cmdList(args []string) {
 	if !resp.OK {
 		fatal("%s", resp.Error)
 	}
-	fmt.Printf("Peers (%d):\n", len(resp.Peers))
-	for _, p := range resp.Peers {
-		reach := "direct"
-		if p.Relayed {
-			reach = "relayed"
-		}
-		fmt.Printf("  %-18s %-20s v4=%s v6=%s  public=%s (%s)\n", p.NodeID, p.Hostname, p.Overlay4, p.Overlay6, p.Endpoint, reach)
-	}
+	printPeers(resp.Peers)
 	if resp.NATClass != "" {
 		line := "This node: NAT=" + resp.NATClass
 		if resp.Public != "" {
@@ -1701,17 +1734,70 @@ func cmdList(args []string) {
 		}
 		fmt.Println(line)
 	}
-	fmt.Printf("Bans (%d):\n", len(resp.Bans))
-	for _, b := range resp.Bans {
-		mine := ""
-		if b.Mine {
-			mine = " (originated here)"
-		}
-		fmt.Printf("  %-18s by %-18s %q%s\n", b.Target, b.Origin, b.Notes, mine)
-	}
+	printBans(resp.Bans)
 	fmt.Printf("Routes (%d):\n", len(resp.Routes))
 	for _, r := range resp.Routes {
 		fmt.Printf("  %-20s via %s (metric %d)\n", r.CIDR, r.Via, r.Metric)
+	}
+}
+
+// cmdLatency is the CLI equivalent of the web admin's Monitor > Latency
+// page (handleLocalLatency in internal/webadmin/sysinfo.go): ping every peer
+// on one network over the overlay, concurrently, and report each RTT. Reuses
+// that same handler's exported PingRTT/PingArgsForOS rather than
+// reimplementing the ping(1) invocation here — see PingArgsForOS's doc
+// comment for why that already burned once (an OpenBSD-specific flag bug)
+// and shouldn't get a second, drifting copy.
+//
+// Unlike the web page, which loops over every up network at once, this is
+// per-network like every other "list"-family command (status/peers/bans/
+// routes/fw) — resolveNet on the daemon side picks the sole network
+// automatically if there's only one, same as -net does for those.
+func cmdLatency(args []string) {
+	fs := flag.NewFlagSet("latency", flag.ExitOnError)
+	sock := fs.String("sock", defaultControlSocket(), "control socket path")
+	netID := fs.String("net", "", "network name or hex id; optional if only one")
+	fs.Parse(args)
+	resp, err := control.Do(*sock, control.Request{Cmd: "peers", Net: *netID})
+	if err != nil {
+		fatal("control: %v%s", err, controlDialHint())
+	}
+	if !resp.OK {
+		fatal("%s", resp.Error)
+	}
+
+	type result struct {
+		peer mesh.PeerInfo
+		ms   float64
+		err  error
+	}
+	results := make([]result, len(resp.Peers))
+	var wg sync.WaitGroup
+	for i, p := range resp.Peers {
+		addr := p.Overlay4
+		if addr == "" {
+			addr = p.Overlay6
+		}
+		results[i].peer = p
+		if addr == "" {
+			results[i].err = fmt.Errorf("no overlay address yet")
+			continue
+		}
+		wg.Add(1)
+		go func(i int, addr string) {
+			defer wg.Done()
+			results[i].ms, results[i].err = webadmin.PingRTT(addr)
+		}(i, addr)
+	}
+	wg.Wait()
+
+	fmt.Printf("Latency (%d peers):\n", len(results))
+	for _, r := range results {
+		if r.err != nil {
+			fmt.Printf("  %-18s %-20s %s\n", r.peer.NodeID, r.peer.Hostname, r.err)
+			continue
+		}
+		fmt.Printf("  %-18s %-20s %.3f ms\n", r.peer.NodeID, r.peer.Hostname, r.ms)
 	}
 }
 

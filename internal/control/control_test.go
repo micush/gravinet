@@ -12,6 +12,7 @@ type stubEngine struct {
 	peers     []mesh.PeerInfo
 	bans      []mesh.BanInfo
 	fwRules   []mesh.FirewallRule
+	ifaces    []mesh.IfaceInfo
 	lastBan   string
 	lastUnban string
 	lastKey   string
@@ -22,6 +23,7 @@ func (s *stubEngine) ListPeers(uint64) []mesh.PeerInfo   { return s.peers }
 func (s *stubEngine) NATStatusStrings() (string, string) { return "open", "203.0.113.5:51820" }
 func (s *stubEngine) ListBans(uint64) []mesh.BanInfo     { return s.bans }
 func (s *stubEngine) Routes(uint64) []mesh.RouteInfo     { return nil }
+func (s *stubEngine) Interfaces() []mesh.IfaceInfo       { return s.ifaces }
 func (s *stubEngine) BanNode(_ uint64, t, _ string) error {
 	s.lastBan = t
 	return nil

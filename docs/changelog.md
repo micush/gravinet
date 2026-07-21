@@ -37,6 +37,187 @@ assuming it didn't happen.
 
 ---
 
+## v550 — 2026-07-21
+
+**Built out most of what v549 had marked "isn't available via the CLI
+yet": `monitor route-table/hosts-file/dns-state/logs/bgp-peers/metrics`,
+`traffic bgp`, and `naming dns` are all real now.**
+
+Seven of the nine previously-stubbed leaves are wired to genuine
+implementations:
+
+- `monitor route-table`, `monitor hosts-file`, `monitor bgp-peers` —
+  read local host state directly (no daemon round-trip needed at all):
+  the live kernel routing table (new `webadmin.LocalRouteTableText`,
+  reusing `handleLocalRoutes`'s exact data sources), the hosts file
+  (`hosts.DefaultPath`), and FRR peer sessions (`vtysh`, via newly
+  exported `webadmin.RunVtysh` — the same hardened, wedge-proof call
+  the web admin's own BGP pages use, not a simpler reimplementation
+  that could reintroduce the wedge it specifically guards against).
+- `monitor dns-state` — needed one genuinely new thing: which kernel
+  interface (e.g. `mesh0`) each network is actually using right now,
+  since that assignment happens at runtime and isn't derivable from
+  config alone. New `ifaces` control-socket command
+  (`Engine.Interfaces()` added to `internal/control`'s interface,
+  `Response.Ifaces`, dispatch case) fetches that, then
+  `resolver.Dump` does the rest locally — the same function
+  `handleLocalDNS` calls.
+- `monitor logs` — tails the real log file via `cfg.LogFilePath`, the
+  same resolution `cmdRun` already uses to wire this into the web
+  admin's own Logs page.
+- `monitor metrics` — new `webadmin.TakeHostSnapshot`: CPU% and
+  per-interface throughput are rates, not levels, so this samples
+  twice, one second apart (same window `metricsCollector.sample()`
+  uses between ticks), then reports memory/disk/uptime once (already
+  instantaneous). No history — a separate, short-lived CLI process
+  can't see the daemon's own rolling sample buffer — just "right now,"
+  clearly framed that way.
+- `traffic bgp` — `show`/`enable`/`disable`/`set`/`neighbor
+  add`/`neighbor del`/`advertise add`/`advertise del` against `cfg.BGP`
+  (a single global config field, not per-network). Deliberately
+  doesn't cover the three redistribute-picker lists (connected/static/
+  mesh routes into BGP) — each needs cross-referencing something live
+  the picker itself sources from, real separate scope; `show` still
+  displays whatever's already configured there.
+- `naming dns` — `list`/`add`/`remove`/`enable`/`disable`/`reject`/
+  `reject-remove`/`reject-enable`/`reject-disable`, mirroring
+  `cmdHost`'s shape exactly and reusing the existing
+  `DNSForwardAdd`/`DNSForwardDelete`/`DNSForwardSetEnabled`/
+  `DNSRejectAdd`/`DNSRejectDelete`/`DNSRejectSetEnabled` config
+  mutators the web admin's own DNS editor already uses.
+
+All of the above verified end-to-end against a real running daemon in
+this session (not just a clean build) — a from-scratch test network,
+BGP neighbor/advertise round-trips confirmed via `show`, DNS forward/
+reject round-trips confirmed via `list`, and `monitor route-table`
+correctly picking up the real `mesh0` route once the daemon brought
+the network up.
+
+**Still stubbed, but for specific, investigated reasons, not
+laziness** — `monitor capture` and `monitor speedtest` now say exactly
+why instead of a generic "not available":
+
+- `capture`: the actual packet-capture primitive
+  (`startCapture(iface, snaplen, onPacket)`) is genuinely
+  daemon-independent — one implementation per platform, no engine
+  state involved — so a CLI capture command is possible in principle.
+  What's not readily reusable is everything downstream: the pcap
+  writer and capture-handle lifecycle are unexported and coupled to
+  the web admin's own in-memory ring buffer. Reaching parity means
+  either exporting that machinery across six platform files or writing
+  a second, independent pcap encoder — real work, with the same
+  per-platform-raw-capture risk profile as this session's earlier
+  FreeBSD tun fixes, not something to rush through without the same
+  level of per-platform testing those got.
+- `speedtest`: unlike everything else under `monitor`, this isn't a
+  local read — it coordinates an active throughput test between two
+  live peers over the mesh itself, which only the running daemon can
+  initiate. A CLI equivalent needs real new control-socket protocol
+  (start a job, poll its status), not just a command reusing an
+  existing reader.
+
+`monitor mesh-peers` remains a partial case, unchanged from v549: it's
+the same peer list `mesh peers` shows, `-h` notes the web page's
+richer per-session detail (transport, tx/rx bytes, clean/dirty state)
+isn't in the control protocol yet.
+
+---
+
+## v549 — 2026-07-21
+
+**New: `gravinet mesh|traffic|naming|monitor|info|settings <section> ...` —
+the CLI restructured to mirror the web admin's own navigation.**
+
+New `cmd/gravinet/cli_groups.go` adds a nested command tree matching
+`internal/webadmin/ui.go`'s `NAV_GROUPS` exactly:
+
+- `mesh` — networks, keys, seeds, peers, bans
+- `traffic` — firewall, nat, qos, shaping, routes, bgp
+- `naming` — dns, hosts
+- `monitor` — metrics, mesh-peers, capture, speedtest, latency,
+  route-table, bgp-peers, hosts-file, dns-state, logs
+- `info` — upgrade, readme, getting-started, license, about
+- `settings` — managed, manager (not in `NAV_GROUPS`'s left rail, but a
+  real part of the web admin — reached from the gear icon)
+
+Purely additive: every existing flat command (`network`, `key`, `seed`,
+`fw`, `nat`, `qos`, `bandwidth`/`bw`, `route`, `host`, `ban`, `unban`,
+`managed`, `manager`, `upgrade`, `latency`) keeps working completely
+unchanged — install scripts and the upgrade preflight's own
+`gravinet version`/`gravinet selftest` calls don't care that this
+restructuring happened. Every leaf that has an existing command is a
+thin wrapper calling that command's function directly with the same
+args — one implementation of each command, reached two ways, not a
+fork that could drift.
+
+Genuinely new, not just aliased:
+- `mesh peers` and `mesh bans` (`list`/`add`/`del`) — bans never had a
+  standalone list before, only ever bundled into `status`'s combined
+  output. `printPeers`/`printBans` factored out of `cmdList` so both
+  forms share one implementation.
+- `info readme` / `info license` / `info getting-started` — read the
+  actual files off disk via `*config.Config`'s existing
+  `ReadmePath`/`LicensePath`/`GettingStartedPath` methods, the same
+  resolution logic `cmdRun` already uses to wire these into the web
+  admin, so the CLI and the web page can't disagree about which file
+  they mean.
+- `info about` — reuses the same `printVersion()` `gravinet version`
+  now calls (extracted, not duplicated).
+
+Sections with no control-socket command behind them at all today —
+`traffic bgp`, `naming dns`, and most of `monitor` (metrics, capture,
+speedtest, route-table, bgp-peers, hosts-file, dns-state, logs) — say
+so plainly ("isn't available via the CLI yet — use the web admin")
+rather than silently omitting the section or erroring as an unknown
+command. `monitor mesh-peers` is a partial case: it's the same peer
+list `mesh peers` shows, but `-h` notes the web page's richer
+per-session detail (transport, tx/rx bytes, clean/dirty state) isn't
+in the control protocol yet and can't be reproduced here.
+
+Verified: clean build and `go vet` on every shipped platform (linux,
+freebsd amd64/arm64, darwin amd64/arm64, openbsd, windows), existing
+`cmd/gravinet` test suite passes unchanged, and manually exercised
+end-to-end — empty/unknown-subcommand dispatch, every stub's message,
+`info readme` against the real repo README, and confirmed flat vs.
+grouped forms (`key -h` vs. `mesh keys -h`) produce byte-identical
+output.
+
+---
+
+## v548 — 2026-07-20
+
+**New: `gravinet latency` — the CLI equivalent of Monitor > Latency.**
+
+Pings every peer on a network over the overlay, concurrently, and
+prints each RTT — same measurement the web admin page shows, same
+per-OS `ping(1)` flags (including the OpenBSD-specific fix noted in
+`PingArgsForOS`'s own doc comment), just from a terminal instead of a
+browser tab:
+
+```
+$ gravinet latency
+Latency (10 peers):
+  e14aa11e13837cce  gn-cush1             0.786 ms
+  0a97d78e1a55b8f2  gn-cush2             0.867 ms
+  ...
+```
+
+Takes the same `-net NAME|id` flag as `status`/`peers`/`bans`/`routes`
+(optional if there's only one network) — per-network, like every other
+`list`-family command, not "every up network at once" the way the web
+page is.
+
+Implementation note: `internal/webadmin/sysinfo.go`'s `PingRTT` and
+`PingArgsForOS` (the actual `ping(1)` invocation and per-OS flag
+mapping behind the web page) are now exported and called directly from
+the new `cmdLatency`, rather than reimplemented in `cmd/gravinet` —
+one implementation instead of two that could quietly drift apart the
+way this exact logic already did once (the OpenBSD flag bug
+`PingArgsForOS`'s doc comment describes). No behavior change to the
+web page itself.
+
+---
+
 ## v547 — 2026-07-20
 
 **install-freebsd.sh now sets `net.link.ifqmaxlen` at install time —

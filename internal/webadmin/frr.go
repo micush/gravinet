@@ -950,7 +950,7 @@ func vtyshApplyBoot() bool {
 	return exec.Command(bin, "-b").Run() == nil
 }
 
-// runVtysh runs `vtysh -c <cmd>` and returns its stdout, with a hard wall-clock
+// RunVtysh runs `vtysh -c <cmd>` and returns its stdout, with a hard wall-clock
 // bound that holds even if vtysh — or a grandchild that inherited its stdout
 // pipe — ignores the context kill. os/exec's Output() waits for the stdout
 // copier to finish, which a lingering grandchild can stall indefinitely past
@@ -959,7 +959,12 @@ func vtyshApplyBoot() bool {
 // deadline no matter what. A truly wedged vtysh leaks at most one goroutine and
 // one (already SIGKILL-targeted) process; it can never block the HTTP handler.
 // ok is false when vtysh is absent, errored, or exceeded the bound.
-func runVtysh(cmd string) (out []byte, ok bool) {
+//
+// Exported so cmd/gravinet's "gravinet monitor bgp-peers" queries FRR the
+// same hardened way this package's own BGP pages do, rather than a second,
+// simpler implementation that could reintroduce the exact wedge this one
+// guards against.
+func RunVtysh(cmd string) (out []byte, ok bool) {
 	bin, present := vtyshPath()
 	if !present {
 		return nil, false
@@ -1070,7 +1075,7 @@ func importBGPFromFRR(log *logx.Logger) (cfg config.BGPConfig, hasPasswords bool
 	//    daemon — e.g. configured live and never `write memory`'d — or a config
 	//    path we don't know about).
 	if !ok {
-		if rc, ran := runVtysh("show running-config"); ran {
+		if rc, ran := RunVtysh("show running-config"); ran {
 			if rcCfg, pw, rok := parseRunningConfigBGP(string(rc)); rok {
 				cfg, hasPasswords, ok, reason = rcCfg, pw, true, "read from vtysh running-config"
 			} else {
@@ -1088,7 +1093,7 @@ func importBGPFromFRR(log *logx.Logger) (cfg config.BGPConfig, hasPasswords bool
 	// keyword restricts FRR to IPv4 unicast only, which would silently drop an
 	// IPv6-only speaker's AS/router-id from this enrichment (see the identical
 	// fix in handleBGP).
-	if sum, ran := runVtysh("show bgp summary json"); ran {
+	if sum, ran := RunVtysh("show bgp summary json"); ran {
 		if scfg, _, sok := summaryToBGPConfig(sum); sok {
 			if !ok {
 				cfg, ok, reason = scfg, true, "read from live BGP summary"

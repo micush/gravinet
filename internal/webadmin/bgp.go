@@ -99,7 +99,7 @@ func (s *Server) handleBGP(w http.ResponseWriter, r *http.Request) {
 	// ipv6Unicast) in one call, matching what parseBGPSummary already expects.
 	// runVtysh bounds this hard, so a wedged FRR socket can never hang the
 	// request.
-	out, ran := runVtysh("show bgp summary json")
+	out, ran := RunVtysh("show bgp summary json")
 	if !ran {
 		// vtysh exists but couldn't answer in time: FRR/bgpd isn't running, or
 		// the call timed out (e.g. sockets not up yet just after boot).
@@ -138,7 +138,7 @@ func (s *Server) handleBFD(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	out, ran := runVtysh("show bfd peers json")
+	out, ran := RunVtysh("show bfd peers json")
 	if !ran {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"available": false,
@@ -178,7 +178,7 @@ func (s *Server) handleBGPTable(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	out, ran := runVtysh("show bgp all")
+	out, ran := RunVtysh("show bgp all")
 	if !ran {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"available": false,
@@ -211,7 +211,7 @@ func bgpLearnedRoutes() []netip.Prefix {
 	seen := make(map[netip.Prefix]bool)
 	var out []netip.Prefix
 	for _, cmd := range []string{"show bgp ipv4 unicast json", "show bgp ipv6 unicast json"} {
-		raw, ran := runVtysh(cmd)
+		raw, ran := RunVtysh(cmd)
 		if !ran {
 			continue
 		}
@@ -298,7 +298,7 @@ func showIPRouteOfType(kind string) []ipRouteEntry {
 	seen := make(map[string]bool)
 	var out []ipRouteEntry
 	for _, cmd := range []string{"show ip route " + kind + " json", "show ipv6 route " + kind + " json"} {
-		raw, ran := runVtysh(cmd)
+		raw, ran := RunVtysh(cmd)
 		if !ran {
 			continue
 		}

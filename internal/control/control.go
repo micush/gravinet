@@ -30,6 +30,12 @@ type Engine interface {
 	UnbanNode(networkID uint64, target string) error
 	ForceUnban(networkID uint64, target string) error
 	DistributeKey(networkID uint64, keyB64, label string, expiresNano int64) error
+	// Interfaces reports the live network -> kernel-interface mapping (e.g.
+	// "mesh0"), needed for "gravinet monitor dns-state": which OS interface a
+	// network is actually using isn't derivable from config alone (assignment
+	// happens at runtime), so this is the one piece of live daemon state that
+	// command needs, fetched over the control socket rather than guessed at.
+	Interfaces() []mesh.IfaceInfo
 
 	FirewallRules(networkID uint64) ([]mesh.FirewallRule, error)
 	FirewallAdd(networkID uint64, r mesh.FirewallRule, at int) (mesh.FirewallRule, error)
@@ -78,6 +84,7 @@ type Response struct {
 	Bans     []mesh.BanInfo      `json:"bans,omitempty"`
 	Routes   []mesh.RouteInfo    `json:"routes,omitempty"`
 	Nets     []string            `json:"nets,omitempty"`
+	Ifaces   []mesh.IfaceInfo    `json:"ifaces,omitempty"`
 	FW       []mesh.FirewallRule `json:"fw,omitempty"`
 	Count    int                 `json:"count,omitempty"`
 	NATClass string              `json:"nat_class,omitempty"`
@@ -205,6 +212,8 @@ func (s *Server) dispatch(req Request) Response {
 			ids = append(ids, fmt.Sprintf("%016x", id))
 		}
 		return Response{OK: true, Nets: ids}
+	case "ifaces":
+		return Response{OK: true, Ifaces: s.api.Interfaces()}
 	case "peers", "bans", "routes", "list":
 		id, err := s.resolveNet(req.Net)
 		if err != nil {
