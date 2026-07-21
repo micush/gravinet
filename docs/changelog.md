@@ -37,6 +37,44 @@ assuming it didn't happen.
 
 ---
 
+## v551 — 2026-07-21
+
+**New: `/debug/pprof/*` — Go's standard runtime profiler, authenticated,
+for diagnosing exactly this kind of report: "gravinet is using more CPU
+than it should while idle."**
+
+Field report this session: htop on an 8-core box showed ~9-10 rows all
+with the same `gravinet run` command line, identical VIRT/RES, each at
+37-62% CPU — initially read as a leaked-process problem (many orphaned
+daemon instances from repeated restarts). Ruled out once clarified
+further: `service gravinet stop` cleanly kills everything with zero
+processes left, and a single fresh `start` alone reproduces the high
+CPU — meaning those htop rows are per-thread rows of one process (they
+share identical memory footprint because they *are* the same process),
+and the real question is why one idle daemon's worker threads are
+burning CPU across every core.
+
+Read through `tunLoopPooled`/`tunLoopSerial` and the worker-pool
+architecture (internal/mesh/engine.go) directly — reader blocks on
+`dev.Read()`, workers block on `range jobs`, no busy-wait found there.
+Rather than keep guessing at which of the many other goroutine sources
+(UDP read-workers, GC, ticker-driven maintenance loops, ...) is
+responsible, added the standard tool for actually answering this: a
+real CPU profile pinpoints the exact function, not another guess.
+
+`net/http/pprof`'s handlers are registered individually
+(`pprof.Index`/`Cmdline`/`Profile`/`Symbol`/`Trace`) on the same `mux`
+and behind the same `s.authed` wrapper as every other route here,
+deliberately not the usual `DefaultServeMux`-on-`:6060` convention,
+which would mean an unauthenticated port exposed by default. Not
+surfaced in the web UI navigation — reached directly by URL with a
+valid session, e.g. `/debug/pprof/profile?seconds=10` for a CPU
+profile. Verified end-to-end this session: logged in, confirmed
+unauthenticated requests are rejected, captured a real profile, and
+confirmed it opens correctly in `go tool pprof`.
+
+---
+
 ## v550 — 2026-07-21
 
 **Built out most of what v549 had marked "isn't available via the CLI

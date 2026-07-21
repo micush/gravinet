@@ -22,6 +22,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -406,6 +407,17 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/localhosts", s.authed(s.handleLocalHosts))
 	mux.HandleFunc("/api/localdns", s.authed(s.handleLocalDNS))
 	mux.HandleFunc("/api/latency", s.authed(s.handleLocalLatency))
+	// /debug/pprof/* — Go's standard runtime profiler, under the same auth as
+	// every other route here rather than the usual DefaultServeMux/:6060
+	// convention (which would mean an unauthenticated port). Not surfaced in
+	// the web UI navigation; reached directly by URL (logged-in browser tab,
+	// or the "gravinetadmin" session cookie via curl) when actually
+	// diagnosing something.
+	mux.HandleFunc("/debug/pprof/", s.authed(pprof.Index))
+	mux.HandleFunc("/debug/pprof/cmdline", s.authed(pprof.Cmdline))
+	mux.HandleFunc("/debug/pprof/profile", s.authed(pprof.Profile))
+	mux.HandleFunc("/debug/pprof/symbol", s.authed(pprof.Symbol))
+	mux.HandleFunc("/debug/pprof/trace", s.authed(pprof.Trace))
 	mux.HandleFunc("/api/proxy", s.authed(s.handleProxy))
 	return mux
 }
