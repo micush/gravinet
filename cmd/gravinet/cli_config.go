@@ -167,6 +167,7 @@ func cmdNetwork(args []string) {
 	cfg, path, rest := openCfg(args[1:])
 	noRestart, rest := hasFlag(rest, "no-restart")
 
+	sub = expandVerb(sub, v("list"), v("add"), v("delete", "del", "remove"), v("enable", "disable"), v("rename"), v("notes"), v("subnet", "set-subnet"), v("join"), v("join-token"), v("token", "invite"))
 	switch sub {
 	case "list":
 		if len(cfg.Networks) == 0 {
@@ -373,6 +374,7 @@ func cmdSeed(args []string) {
 	cfg, path, rest := openCfg(rest)
 	n := pickNetwork(cfg, netName)
 
+	sub = expandVerb(sub, v("list"), v("add"), v("remove", "delete", "del"), v("notes"))
 	switch sub {
 	case "list":
 		fmt.Printf("network %s seeds:\n", n.Name)
@@ -435,6 +437,7 @@ func cmdRoute(args []string) {
 	cfg, path, rest := openCfg(rest)
 	n := pickNetwork(cfg, netName)
 
+	sub = expandVerb(sub, v("list"), v("add", "advertise", "redistribute"), v("delete", "del", "remove"), v("reject"), v("enable", "disable"), v("reject-enable", "reject-disable"))
 	switch sub {
 	case "list":
 		fmt.Printf("network %s routes:\n", n.Name)
@@ -538,6 +541,7 @@ func cmdFWExempt(args []string) {
 	sub := args[0]
 	cfg, path, rest := openCfg(args[1:])
 
+	sub = expandVerb(sub, v("list"), v("add"), v("del", "delete", "remove"), v("reset"), v("enable", "disable"))
 	switch sub {
 	case "list":
 		exempts, isDefault := cfg.FirewallExemptList()
@@ -638,6 +642,7 @@ func cmdHost(args []string) {
 	}
 	sub, rest := rest[0], rest[1:]
 	n := pickNetwork(cfg, netName)
+	sub = expandVerb(sub, v("list"), v("add"), v("remove", "delete", "del"), v("enable", "disable"), v("reject"), v("reject-remove"), v("reject-enable", "reject-disable"))
 	switch sub {
 	case "list":
 		fmt.Printf("network %s advertised hosts:\n", n.Name)
@@ -722,6 +727,7 @@ func cmdNAT(args []string) {
 	cfg, path, rest := openCfg(rest)
 	n := pickNetwork(cfg, netName)
 
+	sub = expandVerb(sub, v("list"), v("enable", "disable"), v("enable-rule", "disable-rule"), v("state"), v("add"), v("delete", "del", "remove"))
 	switch sub {
 	case "list":
 		fmt.Printf("network %s NAT (%s)", n.Name, onOff(n.NAT.Enabled))
@@ -842,6 +848,7 @@ func cmdQoS(args []string) {
 		n.QoS.Classes = 3
 	}
 
+	sub = expandVerb(sub, v("list"), v("enable", "disable"), v("enable-rule", "disable-rule"), v("add"), v("delete", "del", "remove"), v("mark"), v("unmark"))
 	switch sub {
 	case "list":
 		fmt.Printf("network %s QoS (%s, %d classes, default class %d):\n",

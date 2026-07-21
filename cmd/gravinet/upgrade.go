@@ -86,6 +86,9 @@ func cmdUpgrade(args []string) {
 		usageUpgrade()
 		os.Exit(2)
 	}
+	if len(args) > 0 {
+		args[0] = expandVerb(args[0], v("genkey"), v("sign"), v("stage"), v("list"), v("status"), v("apply"), v("rollback"), v("help"))
+	}
 	switch args[0] {
 	case "genkey":
 		cmdUpgradeGenKey(args[1:])

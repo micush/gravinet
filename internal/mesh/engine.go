@@ -1000,9 +1000,20 @@ type peerSession struct {
 	fragsRcvd    atomic.Uint64 // fragment datagrams accepted for reassembly
 	reasmOK      atomic.Uint64 // overlay packets fully reassembled and delivered
 	reasmDrop    atomic.Uint64 // reassembly groups dropped incomplete (evicted, expired, inconsistent)
-	spoofDrop    atomic.Uint64 // inbound packets dropped: source address not owned by this peer (anti-spoofing)
-	pmtuMu       sync.Mutex    // guards pmtu
-	pmtu         *pmtuState    // path-MTU discovery state (see pmtu.go)
+	spoofDrop    atomic.Uint64
+
+	// txBytes/rxBytes count outer-datagram bytes exchanged with this peer —
+	// encrypted wire bytes at the mesh layer, counted where the session is
+	// already in hand: txBytes in deliver() at the moment of handoff to the
+	// transport (which may complete the write asynchronously — interface
+	// counters conventionally count at enqueue), rxBytes on successful
+	// decrypt. Relay-wrapped traffic counts against the relay session that
+	// actually carries it. Surfaced per peer via PeerInfo for
+	// `gravinet mesh peers` / monitor mesh-peers.
+	txBytes atomic.Uint64
+	rxBytes atomic.Uint64 // inbound packets dropped: source address not owned by this peer (anti-spoofing)
+	pmtuMu  sync.Mutex    // guards pmtu
+	pmtu    *pmtuState    // path-MTU discovery state (see pmtu.go)
 
 	// Round-trip time to this peer, derived from the existing ctrlPing/
 	// ctrlPong NAT keepalive (sendKeepalive, every keepaliveInterval) rather
@@ -1791,6 +1802,7 @@ func (e *Engine) onData(payload []byte, from netip.AddrPort, via *peerSession) {
 	if err != nil {
 		return // replay or authentication failure
 	}
+	ps.rxBytes.Add(uint64(len(payload)))
 	if roamed := ps.touch(from, via); roamed {
 		e.syncPeerBypassRoute(ps.net, ps)
 	}
@@ -1974,8 +1986,12 @@ func (e *Engine) sealAndSend(ps *peerSession, innerType byte, body []byte) error
 // envelope and sent through the relay session (which never sees the plaintext).
 func (e *Engine) deliver(ps *peerSession, outer []byte) error {
 	if r := ps.getRelay(); r != nil {
+		// The relay-wrapped bytes are counted against the relay session by the
+		// recursive sealAndSend->deliver below, which is where they actually
+		// go out; counting them here too would double-book them.
 		return e.sealAndSend(r, innerRelay, encodeRelay(e.nodeID, ps.nodeID, outer))
 	}
+	ps.txBytes.Add(uint64(len(outer)))
 	return e.send(ps.ep(), outer)
 }
 

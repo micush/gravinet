@@ -66,13 +66,23 @@ func TestRouteFailoverBetweenTwoOrigins(t *testing.T) {
 	B.eng.AddSeed(netID, netip.AddrPortFrom(lo, uint16(C.tr.Port())))
 	D.eng.AddSeed(netID, netip.AddrPortFrom(lo, uint16(C.tr.Port())))
 
+	// metricOnC reports the BEST (minimum) metric C knows for the prefix.
+	// Routes() reports every origin's entry in learn order, and both A and B
+	// advertise this prefix — returning the first match made this helper
+	// order-dependent: whenever C happened to complete B's handshake first,
+	// the first entry was B's metric 20 forever, and the "learn at metric 10"
+	// wait timed out even though A's metric-10 entry was present right behind
+	// it and the OS route (which uses bestRedistMetric) was already correct.
+	// That order race is what made this test flake roughly one run in three;
+	// the engine's own selection was never wrong.
 	metricOnC := func() (int, bool) {
+		best, found := 0, false
 		for _, ri := range C.eng.Routes(netID) {
-			if ri.CIDR == route.String() {
-				return ri.Metric, true
+			if ri.CIDR == route.String() && (!found || ri.Metric < best) {
+				best, found = ri.Metric, true
 			}
 		}
-		return 0, false
+		return best, found
 	}
 
 	// C should connect to all three and learn the route at A's (lower) metric.

@@ -36,6 +36,13 @@ type PeerInfo struct {
 	// guessing one from its tunnel address.
 	BGPASN uint32 `json:"bgp_asn,omitempty"`
 
+	// TxBytes/RxBytes are cumulative encrypted wire bytes exchanged with this
+	// peer over the life of its current session (they reset on re-handshake,
+	// like EstablishedAt). Omitted when zero so old clients and idle rows stay
+	// clean.
+	TxBytes uint64 `json:"tx_bytes,omitempty"`
+	RxBytes uint64 `json:"rx_bytes,omitempty"`
+
 	// RelayVia is the relay's hostname (falling back to its node id if no
 	// hostname is known) when Relayed is true, empty otherwise. A relayed
 	// session has no direct underlay address of its own to report in
@@ -783,6 +790,8 @@ func (e *Engine) ListPeers(networkID uint64) []PeerInfo {
 			ReasmOK:       ps.reasmOK.Load(),
 			ReasmDrop:     ps.reasmDrop.Load(),
 			SpoofDrop:     ps.spoofDrop.Load(),
+			TxBytes:       ps.txBytes.Load(),
+			RxBytes:       ps.rxBytes.Load(),
 			BGPASN:        ps.bgpASN,
 		}
 		if r := ps.getRelay(); r != nil {

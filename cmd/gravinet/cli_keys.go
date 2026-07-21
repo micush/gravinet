@@ -47,6 +47,7 @@ func cmdKey(args []string) {
 		return v
 	}
 
+	sub = expandVerb(sub, v("list"), v("show", "reveal"), v("generate", "gen"), v("set", "import"), v("notes"), v("enable", "disable"), v("delete", "del", "remove"))
 	switch sub {
 	case "list":
 		fmt.Printf("network %s keys (%d slots):\n", n.Name, config.KeySlots)

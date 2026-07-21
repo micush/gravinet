@@ -48,7 +48,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "557"
+	version = "559"
 	commit  = "none"
 )
 
@@ -93,7 +93,17 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
-	switch os.Args[1] {
+	// Resolve an unambiguous prefix to its full command before dispatching
+	// ("gravinet mon ..." => "gravinet monitor ..."); see prefix.go. The
+	// candidate list mirrors this switch's case arms — extend both together.
+	cmd := os.Args[1]
+	if m, cands := matchPrefixGroups(cmd, [][]string{{"run"}, {"genkey"}, {"genpass"}, {"ban"}, {"unban"}, {"list"}, {"status"}, {"latency"}, {"mesh"}, {"traffic"}, {"naming"}, {"monitor"}, {"info"}, {"settings"}, {"network", "net"}, {"key"}, {"route"}, {"seed"}, {"nat"}, {"host", "hosts"}, {"qos"}, {"bandwidth", "bw"}, {"fw"}, {"managed"}, {"manager"}, {"service"}, {"upgrade"}, {"selftest"}, {"version"}, {"help"}}); m != "" {
+		cmd = m
+	} else if len(cands) > 1 {
+		fmt.Fprintf(os.Stderr, "gravinet: %q is ambiguous: %s\n", cmd, strings.Join(cands, ", "))
+		os.Exit(2)
+	}
+	switch cmd {
 	case "run":
 		cmdRun(os.Args[2:])
 	case "genkey":
@@ -159,7 +169,7 @@ func main() {
 	case "help", "-h", "--help":
 		usage()
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", cmd)
 		usage()
 		os.Exit(2)
 	}
@@ -167,6 +177,10 @@ func main() {
 
 func usage() {
 	fmt.Fprint(os.Stderr, `[gravinet] — full-mesh encrypted overlay VPN
+
+any unambiguous prefix works at every level: "gravinet mon met" is
+"gravinet monitor metrics", "gravinet me ne" is "gravinet mesh networks".
+an ambiguous prefix lists its candidates instead of guessing.
 
 commands are grouped the same way the web admin's own left rail is:
 
@@ -1699,7 +1713,31 @@ func printPeers(peers []mesh.PeerInfo) {
 		if p.Relayed {
 			reach = "relayed"
 		}
-		fmt.Printf("  %-18s %-20s v4=%s v6=%s  public=%s (%s)\n", p.NodeID, p.Hostname, p.Overlay4, p.Overlay6, p.Endpoint, reach)
+		xport := p.Transport
+		if xport == "" {
+			xport = "udp" // daemon predating the field; udp was the only answer then
+		}
+		fmt.Printf("  %-18s %-20s v4=%s v6=%s  public=%s (%s/%s)  tx=%s rx=%s\n",
+			p.NodeID, p.Hostname, p.Overlay4, p.Overlay6, p.Endpoint, reach, xport,
+			humanBytes(p.TxBytes), humanBytes(p.RxBytes))
+	}
+}
+
+// humanBytes renders a byte count the way an operator scans a peer table:
+// exact under a kilobyte, one decimal above.
+func humanBytes(n uint64) string {
+	const k = 1024
+	switch {
+	case n >= k*k*k*k:
+		return fmt.Sprintf("%.1fT", float64(n)/(k*k*k*k))
+	case n >= k*k*k:
+		return fmt.Sprintf("%.1fG", float64(n)/(k*k*k))
+	case n >= k*k:
+		return fmt.Sprintf("%.1fM", float64(n)/(k*k))
+	case n >= k:
+		return fmt.Sprintf("%.1fK", float64(n)/k)
+	default:
+		return fmt.Sprintf("%dB", n)
 	}
 }
 

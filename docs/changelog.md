@@ -38,6 +38,160 @@ assuming it didn't happen.
 
 ---
 
+## v559 — 2026-07-21
+
+**Every CLI command now accepts any unambiguous prefix — `gravinet mon met`
+is `monitor metrics`, `gravinet me ne` is `mesh networks` — at all three
+levels: top-level command, group leaf, and nested verb. Plus the speedtest
+stub message is cut to one line.**
+
+**The resolution rules** (prefix.go, applied identically everywhere):
+
+- An exact match always wins, including exact aliases: `net` is still the
+  network alias, `del` is still `del`.
+- Otherwise a prefix matching exactly one *command* resolves to it — and
+  aliases of the same command count as one candidate, not several. `ho` is
+  host even though it prefixes both `host` and `hosts`; `key g` is
+  `generate` even though it prefixes both `generate` and its alias `gen`; and
+  an alias prefix canonicalizes across the arm, so `key rem` reaches the
+  `delete`/`del`/`remove` arm. Without arm-grouping all of those would have
+  been spuriously "ambiguous".
+- A prefix spanning several distinct commands is refused with the candidates
+  listed (`gravinet man` → `"man" is ambiguous: managed, manager`;
+  `gravinet s` → `status, settings, seed, service, selftest`) rather than
+  guessed at. In nested verbs the input instead falls through unchanged to
+  the switch's existing default — its usual usage output.
+- Anything starting with `-` is a flag and never treated as a command name.
+
+Exact names behave byte-for-byte as before, which is what keeps every script
+that invokes commands by full name (install-*.sh, the upgrade preflight's
+`gravinet selftest` / `gravinet version`) completely unaffected.
+
+**Wiring.** The top-level dispatch and `dispatchGroup` resolve through
+`matchPrefixGroups` and report ambiguity explicitly. The fourteen nested
+verb switches (`network add|delete|...`, `key`, `route`, `seed`, `nat`,
+`host`, `fw`, `upgrade`, mesh bans, BGP, settings, ...) each canonicalize
+through `expandVerb` immediately before the switch, with one group per case
+arm mirroring that switch's own literals — the call sites were generated
+from the case values themselves so they start exactly in sync, and each
+carries a comment telling a future maintainer to extend both together. That
+duplication is the honest cost of not rewriting fourteen working switches
+into tables; a new verb someone forgets to mirror simply won't abbreviate,
+and everything else about it works.
+
+`usage()` documents the feature. One genuine collision worth knowing:
+`gravinet na ...` is ambiguous at the top level (`naming` vs `nat`) — `nam`
+and `nat` are the shortest forms there.
+
+**speedtest stub** now says only: `monitor speedtest isn't available via the
+CLI. Use the web admin for this.` The paragraph explaining the control-
+protocol shape a future implementation needs was moved out of the user's
+error message and lives on in the code comment above the stub, where it's
+addressed to the person who'd build it.
+
+New `prefix_test.go` pins the semantics: exact-wins, alias collapse,
+alias-prefix canonicalization, ambiguity sets, flag immunity — plus the
+verb-level fallthrough contract. Behavior was additionally exercised against
+the built binary across all three levels, both ambiguity messages, and the
+scripted exact names.
+
+Verified: `go build ./...`, `go vet ./...` clean; full `cmd/gravinet` test
+suite passes; cross-compiles for darwin/amd64, darwin/arm64, windows/amd64,
+freebsd/amd64, openbsd/amd64, linux/arm, linux/386, linux/arm64.
+
+---
+
+## v558 — 2026-07-21
+
+**A sweep for anything degrading the end-user experience: key retirement no
+longer risks silently shrinking the mesh (a real product gap found behind a
+"flaky test"), per-peer traffic counters exist at last, and both remaining
+flaky tests are fixed — each of which turned out to be pointing at something.**
+
+**Key retirement could orphan gossip-learned peers.** `TestKeyDisableReconnects`
+failed only at `GOMAXPROCS=1` and had been written off as a scheduling
+artifact. Diagnosing it properly found two real problems in
+`dropRetiredKeySessions`:
+
+1. It deletes each dropped peer's session — node entry, routes, endpoint —
+   and re-arms *nothing*. A peer learned only via gossip has no configured
+   seed, so after the drop there is nothing left to dial: that peer never
+   comes back until it happens to dial us. This is precisely the
+   "terminal state" hazard `reconnectAllPeers`' own doc comment describes and
+   guards against for roams — and a key retirement is the *worst* case for it,
+   because the operator has just removed a possibly-compromised key mesh-wide
+   and every session riding it drops at once. The mesh silently shrinks to
+   "configured seeds plus whoever dials in."
+
+2. Retirement shrinks the key list, so `planHandshake` exhausts its key cursor
+   faster: with one remaining key, a single lost or delayed HS_INIT
+   (`handshakeRetry` = 2s) pushes the seed into the full 15s
+   `seedRetryBackoff`. That is what actually failed the test's 10s window on a
+   busy single core — and in production it means one lost packet after
+   retiring a key costs 15+ seconds of downtime that doesn't need to exist.
+
+The fix mirrors `reconnectAllPeers` exactly: each dropped peer's endpoint is
+re-armed as a node-tagged redial target (`AddSeedFor`) and its seed backoff is
+cleared, so the post-retirement redial starts on the next `initLoop` tick
+(~1s) with no inherited cooldown. The test now passes 5/5 at `GOMAXPROCS=1`
+(previously failing).
+
+**The route-failover flake was an order-dependent test helper.**
+`TestRouteFailoverBetweenTwoOrigins` failed ~1 run in 3. The engine was never
+wrong: `Routes()` correctly reports every origin's entry, `bestRedistMetric`
+correctly picks the minimum for forwarding and the OS table, and adverts are
+periodically re-flooded. The test's `metricOnC` helper returned the *first*
+entry matching the prefix — learn-ordered — so whenever C completed B's
+handshake before A's, it reported B's metric 20 forever, with A's metric-10
+entry sitting right behind it and the OS route already correct. The helper now
+returns the minimum across matching entries, which is what both of its
+assertions actually mean. 4/4 passes (previously ~2/3), both phases (best=10
+before A goes silent, best=20 after A's entry is swept).
+
+**Per-peer traffic counters, end to end.** For a VPN, "which peer is moving
+traffic" is table-stakes observability, and nothing carried it. The standing
+note claimed transport and tx/rx "need protocol fields first"; that was doubly
+stale — `Transport` was already on `PeerInfo`, and `PeerInfo` travels as JSON
+over the control socket, so new fields are backward-compatible with zero
+protocol work (old daemons omit them; the CLI renders zeros).
+
+Implemented: `txBytes`/`rxBytes` atomics on `peerSession`, counting encrypted
+outer-datagram bytes where the session is already in hand — TX in `deliver()`
+at handoff to the transport (interface counters conventionally count at
+enqueue; on the batched send path the write completes asynchronously), RX in
+`onData` on successful decrypt. Relay-wrapped traffic counts against the relay
+session that actually carries it, not double-booked against the wrapped peer.
+Surfaced as `PeerInfo.TxBytes`/`RxBytes` (reset on re-handshake, like
+`EstablishedAt`), rendered by `gravinet mesh peers` / `monitor mesh-peers`
+along with the transport that was already available:
+
+    node-a  host-a  v4=10.5.0.2 v6=  public=203.0.113.9:51820 (direct/udp)  tx=1.2M rx=48.3M
+
+`cmdMonitorMeshPeers`' help text no longer claims any of this is impossible.
+
+New `TestPeerByteCounters` proves the counters through a real loopback tunnel
+(4/4 under `-race`). Writing it surfaced a subtlety worth recording: seeding
+*both* directions makes the two nodes initiate simultaneously — handshake
+glare — twin session pairs form, `byNode` keeps whichever installed last on
+each side, and each side's visible counters can describe a session the other
+side isn't using until pruning converges. That is established glare behaviour,
+not new; the test forms the session one-directionally, the way most real peers
+do. Right after a glared connect, a peer's byte counts (like `EstablishedAt`)
+may briefly describe the twin; they converge with the sessions.
+
+**Still open:** `speedtest` async start/poll control op (untouched);
+"clean/dirty session state" from the old note corresponds to nothing in the
+tree and is dropped as unactionable without a definition.
+
+Verified: `go build ./...`, `go vet ./...` clean; the `-short` gate
+(`internal/mesh` + `internal/transport`) passes in 158s;
+`TestKeyDisableReconnects` 5/5 at `GOMAXPROCS=1`;
+`TestRouteFailoverBetweenTwoOrigins` 4/4; `TestPeerByteCounters` 4/4 with
+`-race`; cross-compiles for darwin/amd64, darwin/arm64, windows/amd64,
+freebsd/amd64, openbsd/amd64, linux/arm, linux/386, linux/arm64.
+
+---
+
 ## v557 — 2026-07-21
 
 **Triage of three long-standing shortfalls: one was already fixed, one is

@@ -36,6 +36,9 @@ var settingsLogLevels = []string{"error", "warn", "info", "debug"}
 // use, shared here instead of re-pasted into each toggle below.
 func settingsAction(args []string) (string, []string) {
 	if len(args) > 0 {
+		if len(args) > 0 {
+			args[0] = expandVerb(args[0], v("on", "off", "enable", "disable", "status"))
+		}
 		switch args[0] {
 		case "on", "off", "enable", "disable", "status":
 			return args[0], args[1:]

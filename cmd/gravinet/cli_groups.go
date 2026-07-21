@@ -58,13 +58,26 @@ type groupLeaf struct {
 // does in usage().
 func dispatchGroup(groupPath string, leaves []groupLeaf, args []string) {
 	if len(args) > 0 {
-		for _, l := range leaves {
-			if l.name == args[0] {
-				l.run(args[1:])
-				return
+		// Unambiguous prefixes work here too ("gravinet mon met"); exact
+		// names win over prefix matches, per prefix.go.
+		groups := make([][]string, len(leaves))
+		for i, l := range leaves {
+			groups[i] = []string{l.name}
+		}
+		m, cands := matchPrefixGroups(args[0], groups)
+		if m != "" {
+			for _, l := range leaves {
+				if l.name == m {
+					l.run(args[1:])
+					return
+				}
 			}
 		}
-		fmt.Fprintf(os.Stderr, "gravinet %s: unknown subcommand %q\n\n", groupPath, args[0])
+		if len(cands) > 1 {
+			fmt.Fprintf(os.Stderr, "gravinet %s: %q is ambiguous: %s\n\n", groupPath, args[0], strings.Join(cands, ", "))
+		} else {
+			fmt.Fprintf(os.Stderr, "gravinet %s: unknown subcommand %q\n\n", groupPath, args[0])
+		}
 	}
 	fmt.Fprintf(os.Stderr, "gravinet %s <subcommand>:\n", groupPath)
 	for _, l := range leaves {
@@ -116,13 +129,7 @@ func notYetInCLI(what string) func([]string) {
 // like everything else here), not just a new command reusing an existing
 // local reader.
 func speedtestNotYetInCLI(args []string) {
-	fatal(`monitor speedtest isn't available via the CLI yet.
-
-Unlike everything else under "monitor", this isn't a local read — it
-coordinates an active throughput test between two live peers over the mesh
-itself, which only the running daemon can initiate. A CLI equivalent needs
-real new control-socket protocol (start a job, poll its status), not just a
-new command reusing an existing reader. Use the web admin for this today.`)
+	fatal(`monitor speedtest isn't available via the CLI. Use the web admin for this.`)
 }
 
 // cmdMonitorCapture is "gravinet monitor capture [iface] [tcpdump args...]":
@@ -291,22 +298,18 @@ func cmdMeshPeers(args []string) {
 	printPeers(resp.Peers)
 }
 
-// cmdMonitorMeshPeers is "gravinet monitor mesh-peers". It's the same list
-// as "gravinet mesh peers" — that's genuinely the closest CLI equivalent
-// this has today. What it's missing next to the actual Monitor > Mesh Peers
-// page: transport (tcp/udp), tx/rx byte counters, and clean/dirty session
-// state, none of which mesh.PeerInfo or the control protocol carry — that's
-// not something this can paper over locally, it needs those fields added to
-// the protocol first.
+// cmdMonitorMeshPeers is "gravinet monitor mesh-peers" — the same list as
+// "gravinet mesh peers". A long-standing note here claimed transport and
+// tx/rx counters "need protocol fields first"; that was doubly stale.
+// Transport was already on PeerInfo, and PeerInfo travels as JSON over the
+// control socket, so adding tx/rx (v558) needed no protocol change at all —
+// old daemons simply omit the fields and the CLI renders zeros.
 func cmdMonitorMeshPeers(args []string) {
 	for _, a := range args {
 		if a == "-h" || a == "--help" {
-			fmt.Println(`gravinet monitor mesh-peers: live peer list (node id, hostname, overlay addresses, endpoint, direct/relayed).
-
-Note: the web admin's Monitor > Mesh Peers page additionally shows transport
-(tcp/udp), tx/rx byte counters, and clean/dirty session state per peer. None
-of that is available over the control socket today, so it can't be shown
-here — this prints the same subset "gravinet mesh peers" does.`)
+			fmt.Println(`gravinet monitor mesh-peers: live peer list — node id, hostname, overlay
+addresses, endpoint, direct/relayed, transport (udp/tcp), and cumulative
+tx/rx wire bytes for each peer's current session.`)
 			return
 		}
 	}
@@ -546,6 +549,9 @@ func cmdMeshBans(args []string) {
 		cmdMeshBansList(nil)
 		return
 	}
+	if len(args) > 0 {
+		args[0] = expandVerb(args[0], v("list"), v("add"), v("del", "remove", "rm"))
+	}
 	switch args[0] {
 	case "list":
 		cmdMeshBansList(args[1:])
@@ -663,6 +669,9 @@ func cmdTrafficBGP(args []string) {
 	if len(args) == 0 {
 		cmdTrafficBGPShow(nil)
 		return
+	}
+	if len(args) > 0 {
+		args[0] = expandVerb(args[0], v("show"), v("enable"), v("disable"), v("set"), v("neighbor"), v("advertise"))
 	}
 	switch args[0] {
 	case "show":
@@ -783,6 +792,9 @@ func cmdTrafficBGPSet(args []string) {
 func cmdTrafficBGPNeighbor(args []string) {
 	if len(args) == 0 {
 		fatal("usage: gravinet traffic bgp neighbor <add|del> ...")
+	}
+	if len(args) > 0 {
+		args[0] = expandVerb(args[0], v("add"), v("del", "remove", "rm"))
 	}
 	switch args[0] {
 	case "add":
@@ -932,6 +944,7 @@ func cmdNamingDNS(args []string) {
 	}
 	sub, rest := rest[0], rest[1:]
 	n := pickNetwork(cfg, netName)
+	sub = expandVerb(sub, v("list"), v("add"), v("remove", "delete", "del"), v("enable", "disable"), v("reject"), v("reject-remove"), v("reject-enable", "reject-disable"))
 	switch sub {
 	case "list":
 		fmt.Printf("network %s advertised forwards:\n", n.Name)

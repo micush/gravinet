@@ -240,4 +240,34 @@ func (e *Engine) dropRetiredKeySessions(ns *netState) {
 	for _, ps := range dead {
 		e.log.Infof("mesh: dropped session to %q on net %x (its key was retired); re-handshaking with a current key", ps.nodeID, ns.spec.ID)
 	}
+
+	// Re-arm each dropped peer's endpoint as a node-tagged redial target and
+	// clear its seed backoff, exactly as reconnectAllPeers does and for the
+	// same two reasons (see its doc comment for the full account):
+	//
+	//  1. A peer learned only via gossip has no configured seed. Deleting its
+	//     session above deletes the only record of how to reach it; without
+	//     re-arming, that peer never comes back until it happens to dial us.
+	//     For a key retirement — where the operator has just removed a
+	//     possibly-compromised key mesh-wide and every session riding it drops
+	//     at once — that silently shrinks the mesh to "configured seeds plus
+	//     whoever dials in", which is the terminal state reconnectAllPeers was
+	//     built to prevent after roams.
+	//
+	//  2. The node now holds fewer keys, so planHandshake exhausts its key
+	//     cursor sooner: with a single remaining key, one lost or delayed
+	//     HS_INIT puts the seed into the full seedRetryBackoff (15s) cooldown.
+	//     Clearing the backoff makes the post-retirement redial start on the
+	//     next initLoop tick (~1s) instead of inheriting a cooldown earned
+	//     under keys that no longer exist.
+	for _, ps := range dead {
+		ep := ps.ep()
+		if !ep.IsValid() {
+			continue
+		}
+		ns.mu.Lock()
+		delete(ns.seedBackoff, ep)
+		ns.mu.Unlock()
+		e.AddSeedFor(ns.spec.ID, ep, ps.nodeID)
+	}
 }
