@@ -37,6 +37,41 @@ assuming it didn't happen.
 
 ---
 
+## v544 — 2026-07-20
+
+**Fixed: on FreeBSD, plain traffic to another mesh peer's overlay address
+(e.g. `ping gn-cush1`) failed instantly on every packet with `sendto: No
+buffer space available`.**
+
+`tun_freebsd.go`'s `New()` deliberately puts the tun(4) interface into
+`IFF_BROADCAST` mode instead of tun(4)'s point-to-point default, so
+`AddIPv4` gets a real subnet/connected route for the whole mesh `/24` —
+needed for `AddRoute` to work the same way it does on Linux and Windows.
+The side effect: `IFF_BROADCAST` also tells the kernel this interface has
+a link layer worth ARP-resolving, the same as a real Ethernet NIC — so
+any send to another address in that `/24` (i.e. any other mesh peer)
+goes through `arpresolve()` first. tun(4) has no actual link layer to
+answer that ARP request, so it never resolves; the kernel's small
+per-destination hold queue for the unresolved neighbor fills almost
+immediately, and every packet after that fails synchronously at
+`sendto()` with `ENOBUFS` — never a timeout, which is why it showed up
+on the very first ping, not after some delay.
+
+`New()` now disables ARP on the interface (`ifconfig <name> -arp`)
+right after setting `IFF_BROADCAST`, so the kernel hands on-link packets
+straight to tun(4)'s output routine instead of queuing them behind a
+resolution that can never complete. OpenBSD's backend was already
+unaffected — its tun(4) stays in the default point-to-point mode and
+never sets `IFF_BROADCAST` in the first place (see that file's own
+package comment).
+
+Not exercised on the Linux build host (same caveat as the rest of this
+backend) — verified by cross-compiling for freebsd/amd64 and
+freebsd/arm64 and by FreeBSD's own documented tun(4)/ARP behavior, not
+by a running FreeBSD test.
+
+---
+
 ## v543 — 2026-07-20
 
 **Fixed: a node redistributing a prefix from its own BGP RIB into mesh

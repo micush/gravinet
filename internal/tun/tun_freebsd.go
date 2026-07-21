@@ -172,6 +172,25 @@ func New(name string, mtu int) (*Device, error) {
 		d.Close()
 		return nil, err
 	}
+	// IFF_BROADCAST above gets AddRoute's subnet routing, but it also makes
+	// the kernel treat any other address in this interface's /24 (i.e. every
+	// other mesh peer's overlay address) as needing ARP resolution before a
+	// packet can go out — the same way it would for a real Ethernet NIC.
+	// tun(4) has no actual link layer to answer that ARP request with, so it
+	// never resolves; the kernel's per-destination hold queue for the
+	// unresolved neighbor fills (it's small — a packet or two) almost
+	// immediately, and every packet after that gets ENOBUFS synchronously
+	// from sendto(), not a timeout — this is what shows up as a plain `ping`
+	// to another peer's overlay address failing instantly with "sendto: No
+	// buffer space available" on every single packet, first one included.
+	// Disabling ARP tells the kernel this interface has no link layer to
+	// resolve in the first place, so it hands every on-link packet straight
+	// to tun(4)'s output routine instead of queuing it behind a resolution
+	// that can never complete.
+	if err := d.ifconfig("-arp"); err != nil {
+		d.Close()
+		return nil, err
+	}
 	if err := d.Up(); err != nil {
 		d.Close()
 		return nil, err
