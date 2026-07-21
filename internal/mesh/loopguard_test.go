@@ -54,6 +54,46 @@ func buildUDP6(src, dst netip.Addr, sport, dport uint16, payload int) []byte {
 	return p
 }
 
+// extHdr6 builds a TLV-shaped IPv6 extension header (hop-by-hop, routing,
+// destination options, ...). next is the following header's type; extra adds
+// that many 8-octet blocks, since the length field counts 8-octet units
+// excluding the first 8.
+func extHdr6(next byte, extra int) []byte {
+	h := make([]byte, 8*(extra+1))
+	h[0] = next
+	h[1] = byte(extra)
+	return h
+}
+
+// fragHdr builds an 8-octet IPv6 fragment header with the given fragment
+// offset in bytes (0 => first fragment, which still carries the UDP header).
+func fragHdr(next byte, offsetBytes int) []byte {
+	h := make([]byte, 8)
+	h[0] = next
+	off := offsetBytes / 8
+	h[2] = byte(off >> 5)
+	h[3] = byte(off<<3) & 0xf8
+	return h
+}
+
+// buildUDP6Ext is buildUDP6 with an extension-header chain spliced between the
+// fixed header and the UDP header. firstType is written into the fixed
+// header's next-header field.
+func buildUDP6Ext(src, dst netip.Addr, sport, dport uint16, payload int, firstType byte, ext []byte) []byte {
+	base := buildUDP6(src, dst, sport, dport, payload)
+	if len(ext) == 0 {
+		return base
+	}
+	out := make([]byte, 0, len(base)+len(ext))
+	out = append(out, base[:40]...)
+	out = append(out, ext...)
+	out = append(out, base[40:]...)
+	out[6] = firstType
+	plen := len(out) - 40
+	out[4], out[5] = byte(plen>>8), byte(plen)
+	return out
+}
+
 func TestUDPPorts(t *testing.T) {
 	a4 := netip.MustParseAddr("192.0.2.1")
 	b4 := netip.MustParseAddr("198.51.100.2")
@@ -88,12 +128,61 @@ func TestUDPPorts(t *testing.T) {
 		t.Fatal("first v4 fragment should still expose its UDP header")
 	}
 
-	// IPv6 with an extension header before UDP: parse must decline rather
-	// than misread the extension header's bytes as ports.
-	ext := buildUDP6(a6, b6, 48620, 51000, 4)
-	ext[6] = 44 // fragment header
-	if _, _, ok := udpPorts(ext); ok {
-		t.Fatal("v6 extension header parsed as udp")
+	// IPv6 with extension headers before UDP. These used to be a blind spot:
+	// the parser required UDP immediately after the fixed header, so a looped
+	// datagram carrying any extension header slipped the guard. The chain is
+	// walked now.
+	for _, tc := range []struct {
+		name  string
+		first byte
+		ext   []byte
+	}{
+		{"hop-by-hop", 0, extHdr6(17, 0)},
+		{"destination-options", 60, extHdr6(17, 0)},
+		{"routing", 43, extHdr6(17, 0)},
+		{"padded hop-by-hop", 0, extHdr6(17, 2)},
+		{"first-fragment", 44, fragHdr(17, 0)},
+		{"hop-by-hop+destination", 0, append(extHdr6(60, 0), extHdr6(17, 0)...)},
+	} {
+		pkt := buildUDP6Ext(a6, b6, 48620, 51000, 4, tc.first, tc.ext)
+		s, d, ok := udpPorts(pkt)
+		if !ok {
+			t.Fatalf("%s: udp ports not found behind extension header", tc.name)
+		}
+		if s != 48620 || d != 51000 {
+			t.Fatalf("%s: got ports %d/%d, want 48620/51000", tc.name, s, d)
+		}
+	}
+
+	// A non-first fragment genuinely has no UDP header to read, so the parser
+	// must still decline it rather than misread payload bytes as ports.
+	nonFirst := buildUDP6Ext(a6, b6, 48620, 51000, 4, 44, fragHdr(17, 8))
+	if _, _, ok := udpPorts(nonFirst); ok {
+		t.Fatal("non-first v6 fragment parsed as udp")
+	}
+
+	// ESP is encrypted: nothing parseable follows, so decline.
+	esp := buildUDP6Ext(a6, b6, 48620, 51000, 4, 60, extHdr6(17, 0))
+	esp[6] = 50 // ESP: encrypted, nothing parseable follows
+	if _, _, ok := udpPorts(esp); ok {
+		t.Fatal("ESP parsed as udp")
+	}
+
+	// A chain longer than the cap must be refused, not walked forever.
+	var long []byte
+	for i := 0; i < maxIPv6ExtHeaders+2; i++ {
+		long = append(long, extHdr6(60, 0)...)
+	}
+	long = append(long, extHdr6(17, 0)...)
+	if _, _, ok := udpPorts(buildUDP6Ext(a6, b6, 1, 2, 4, 60, long)); ok {
+		t.Fatal("over-long extension chain was walked")
+	}
+
+	// A header claiming a length that runs past the packet must be refused.
+	trunc := buildUDP6Ext(a6, b6, 48620, 51000, 4, 0, extHdr6(17, 0))
+	trunc[41] = 200 // absurd header extension length
+	if _, _, ok := udpPorts(trunc); ok {
+		t.Fatal("extension header overrunning the packet was accepted")
 	}
 
 	// Truncated packets.

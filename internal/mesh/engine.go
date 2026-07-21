@@ -2315,6 +2315,11 @@ func parseDst(p []byte) (netip.Addr, bool) {
 // UDP, or a packet too short to hold the headers it claims. Callers treat
 // "not parseable" as "not a loop suspect" — this feeds a best-effort guard
 // (isUnderlayLoop), not a security boundary.
+// maxIPv6ExtHeaders bounds the extension-header walk in udpPorts. Real traffic
+// uses at most one or two; the cap exists so a crafted chain cannot make the
+// parser walk indefinitely.
+const maxIPv6ExtHeaders = 8
+
 func udpPorts(p []byte) (src, dst uint16, ok bool) {
 	if len(p) < 1 {
 		return 0, 0, false
@@ -2333,10 +2338,71 @@ func udpPorts(p []byte) (src, dst uint16, ok bool) {
 		}
 		return uint16(p[ihl])<<8 | uint16(p[ihl+1]), uint16(p[ihl+2])<<8 | uint16(p[ihl+3]), true
 	case 6:
-		if len(p) < 48 || p[6] != 17 { // next header 17 = UDP, immediately after the fixed header
+		if len(p) < 40 {
 			return 0, 0, false
 		}
-		return uint16(p[40])<<8 | uint16(p[41]), uint16(p[42])<<8 | uint16(p[43]), true
+		// Walk the extension header chain rather than insisting UDP sit
+		// immediately after the fixed header. Requiring p[6]==17 was a real
+		// blind spot in the loop guard: a looped underlay datagram carrying any
+		// extension header — a Hop-by-Hop option, a destination option, a
+		// fragment header — parsed as "not UDP" and slipped through
+		// isUnderlayLoop entirely.
+		off, next := 40, p[6]
+		// Bound the walk. A packet with a pathological header chain is not
+		// something to spend time on, and refusing to parse it is the safe
+		// answer: the guard simply declines to claim it is a loop.
+		for i := 0; i < maxIPv6ExtHeaders; i++ {
+			switch next {
+			case 17: // UDP at last
+				if len(p) < off+8 {
+					return 0, 0, false
+				}
+				return uint16(p[off])<<8 | uint16(p[off+1]), uint16(p[off+2])<<8 | uint16(p[off+3]), true
+
+			case 0, 43, 60, 135, 139, 140:
+				// Hop-by-Hop, Routing, Destination Options, Mobility, HIP,
+				// Shim6: all share the TLV shape — next header in the first
+				// octet, length in 8-octet units (excluding the first 8) in
+				// the second.
+				if len(p) < off+8 {
+					return 0, 0, false
+				}
+				hlen := (int(p[off+1]) + 1) * 8
+				next = p[off]
+				off += hlen
+
+			case 44: // Fragment header: fixed 8 octets
+				if len(p) < off+8 {
+					return 0, 0, false
+				}
+				// Offset is the top 13 bits of the 16-bit field at +2. A
+				// non-zero offset means this is not the first fragment, so
+				// there is no UDP header in it to read — same reason the v4
+				// branch above declines non-first fragments.
+				if p[off+2] != 0 || p[off+3]&0xf8 != 0 {
+					return 0, 0, false
+				}
+				next = p[off]
+				off += 8
+
+			case 51: // Authentication Header: length is in 4-octet units, less 2
+				if len(p) < off+8 {
+					return 0, 0, false
+				}
+				hlen := (int(p[off+1]) + 2) * 4
+				next = p[off]
+				off += hlen
+
+			default:
+				// TCP, ICMPv6, ESP (50, payload encrypted), No Next Header
+				// (59), or anything unrecognised: nothing parseable follows.
+				return 0, 0, false
+			}
+			if off < 40 || off > len(p) {
+				return 0, 0, false // malformed or truncated chain
+			}
+		}
+		return 0, 0, false
 	}
 	return 0, 0, false
 }

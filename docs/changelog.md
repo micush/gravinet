@@ -38,6 +38,100 @@ assuming it didn't happen.
 
 ---
 
+## v557 — 2026-07-21
+
+**Triage of three long-standing shortfalls: one was already fixed, one is
+closed here (the loop guard now walks IPv6 extension headers), and the
+"unrunnable test suite" turned out to be a 2.5-minute `-short` gate that was
+failing for unrelated reasons — which v556's stale-test fixes had just
+repaired.**
+
+**The gateway gap is closed already.** The standing note read: *"on every other
+platform there's no gateway backend at all (`gatewaySupported` is Linux-only),
+so non-Linux boxes rely solely on the guard. The real fix is writing the
+BSD/macOS/Windows gateway backends — that's the biggest correctness gap in the
+tree."* That is out of date. `GatewaySupported == true` now on darwin, freebsd,
+linux, openbsd, and windows; only `gateway_unsupported.go` is false. The note
+should be retired rather than carried forward as an open item.
+
+**The loop guard's IPv6 blind spot is closed.** The other half of that note was
+still real. `udpPorts` required next-header 17 *immediately* after the fixed
+IPv6 header:
+
+```go
+if len(p) < 48 || p[6] != 17 { return 0, 0, false }
+```
+
+Any extension header — Hop-by-Hop, Routing, Destination Options, even a first
+Fragment header — made the parse decline, so `isUnderlayLoop` never got ports
+and a looped underlay datagram carrying one slipped the guard entirely. The
+parser now walks the chain: TLV-shaped headers (0, 43, 60, 135, 139, 140),
+Fragment (44), and AH (51, whose length is in 4-octet units less 2), stopping
+at UDP. ESP (50), No Next Header (59), TCP, and anything unrecognised still
+decline, since nothing parseable follows. The walk is bounded at
+`maxIPv6ExtHeaders` (8) and every step is length-checked, so a crafted chain
+cannot walk off the packet or loop.
+
+The **non-first-fragment** blind spot in the same note is *not* closed, and
+cannot be by parsing: a non-first fragment genuinely carries no UDP header to
+read. Both the v4 and v6 paths decline it deliberately, which is the correct
+conservative answer — the guard declines to claim a loop rather than misreading
+payload bytes as ports. Closing that properly needs reassembly state, which is
+a much larger change and is not attempted here.
+
+`TestUDPPorts` gained real coverage for all of this: six extension-header
+shapes (including a padded header and a two-header chain), a non-first v6
+fragment, ESP, an over-long chain, and a header whose declared length overruns
+the packet. These genuinely exercise the new path — every one of them would
+have failed against the old `p[6] != 17` parser. New test helpers `extHdr6`,
+`fragHdr`, and `buildUDP6Ext` build well-formed chains; the previous test built
+a synthetic one that happened to decline for the wrong reason.
+
+**The test-suite complaint had a better answer than the one proposed.** The
+note asked for an injectable clock, on the theory that *"dead-seed tests
+literally wait out 90-second dial timeouts."* Measuring first changed the
+conclusion twice.
+
+The 90 seconds is real but it is not a dial timeout: `TestDeadSeedWithTCPFallback
+DoesNotDegrade` has a hardcoded 90s soak, and at 91.04s it is the most
+expensive test in the package by a wide margin. It is also *already* skipped
+under `-short`, along with three others — that infrastructure was in place the
+whole time. Shortening it was tried and reverted: the duration is sized to
+outlast the transport's 45s `tlsReadIdle` and 20s `peerTimeout`, so a
+connection decaying on an idle boundary is actually caught, and this is a
+regression test for a reported degradation. Cutting it would quietly weaken
+what it exists to prove.
+
+What was actually broken is that the fast gate did not pass. `go test -short
+./internal/mesh/` runs in **151s versus 598s** for the full suite — a perfectly
+good pre-release gate — but three tests stale since v555's snapshot conversion
+failed it regardless of timing, including two anti-spoofing guard tests. Those
+were fixed in v556. So the gate works now:
+
+- `go test -short ./...` — ~2.5 min for mesh, the pre-commit / pre-release gate.
+- `go test ./...` — ~10 min, the full-fidelity release run.
+
+No injectable clock was added. It would be real work to thread a clock through
+the engine, and the measurement says it would buy the difference between 151s
+and something smaller, not the 10-minute problem the note described. If the
+2.5-minute gate proves too slow in practice that case can be reopened with
+better data than this note had.
+
+**Still open, unchanged:** `monitor mesh-peers` lacks transport/tx-rx/
+clean-dirty because `mesh.PeerInfo` does not carry them (needs protocol
+fields); `speedtest` needs an async start/poll control op. Both moderate, both
+untouched here. Also still open: `TestKeyDisableReconnects` (single-core
+scheduling artifact) and `TestRouteFailoverBetweenTwoOrigins` (timing-flaky in
+both trees, ~1 run in 3).
+
+Verified: `go build ./...` and `go vet ./...` clean; `TestUDPPorts` passes with
+the new chain-walking coverage; full `internal/mesh` under `-short` passes in
+151s; `internal/transport` passes with and without `-race`; cross-compiles
+clean for darwin/amd64, darwin/arm64, windows/amd64, freebsd/amd64,
+openbsd/amd64, linux/arm, linux/386, linux/arm64.
+
+---
+
 ## v556 — 2026-07-21
 
 **UDP I/O is now batched on 64-bit Linux: `recvmmsg`/`sendmmsg` replace the
