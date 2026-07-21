@@ -1206,14 +1206,11 @@ func clampInt(v, lo, hi int) int {
 // it doesn't belong in the restart-by-default bucket those use. No
 // --no-restart flag here either: there's nothing to opt out of restarting.
 func cmdManaged(args []string) {
+	cfg, path, rest := openCfg(args)
 	action := "status"
-	if len(args) > 0 && (args[0] == "on" || args[0] == "off" || args[0] == "enable" || args[0] == "disable" || args[0] == "status") {
-		action = args[0]
-		args = args[1:]
+	if len(rest) > 0 && (rest[0] == "on" || rest[0] == "off" || rest[0] == "enable" || rest[0] == "disable" || rest[0] == "status") {
+		action = rest[0]
 	}
-	fs := flag.NewFlagSet("managed", flag.ExitOnError)
-	_ = fs.Parse(args)
-	cfg, path, _ := openCfg(fs.Args())
 	switch action {
 	case "on", "enable":
 		cfg.Managed = true
@@ -1237,14 +1234,11 @@ func cmdManaged(args []string) {
 // Mirrors cmdManaged exactly: same live-reload path via engine.SetManager,
 // same reasoning for skipping commitCfgStructural and --no-restart.
 func cmdManager(args []string) {
+	cfg, path, rest := openCfg(args)
 	action := "status"
-	if len(args) > 0 && (args[0] == "on" || args[0] == "off" || args[0] == "enable" || args[0] == "disable" || args[0] == "status") {
-		action = args[0]
-		args = args[1:]
+	if len(rest) > 0 && (rest[0] == "on" || rest[0] == "off" || rest[0] == "enable" || rest[0] == "disable" || rest[0] == "status") {
+		action = rest[0]
 	}
-	fs := flag.NewFlagSet("manager", flag.ExitOnError)
-	_ = fs.Parse(args)
-	cfg, path, _ := openCfg(fs.Args())
 	switch action {
 	case "on", "enable":
 		cfg.Manager = true

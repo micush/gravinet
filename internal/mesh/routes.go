@@ -9,12 +9,14 @@ import (
 // route (longest-prefix match whose origin currently has a session). Used as a
 // fallback when no exact host route matches.
 func (e *Engine) redistRoute(ns *netState, dst netip.Addr) *peerSession {
-	ns.mu.RLock()
-	defer ns.mu.RUnlock()
+	snap := ns.fwd.Load()
+	if snap == nil {
+		return nil
+	}
 	var best *peerSession
 	bestBits := -1
 	bestMetric := 0
-	for _, re := range ns.redist {
+	for _, re := range snap.redist {
 		if !re.prefix.Contains(dst) {
 			continue
 		}
@@ -27,7 +29,7 @@ func (e *Engine) redistRoute(ns *netState, dst netip.Addr) *peerSession {
 		if bits == bestBits && best != nil && re.metric >= bestMetric {
 			continue
 		}
-		if ps := ns.byNode[re.origin]; ps != nil {
+		if ps := snap.byNode[re.origin]; ps != nil {
 			best = ps
 			bestBits = bits
 			bestMetric = re.metric
@@ -144,6 +146,7 @@ func (e *Engine) reloadRoutes(ns *netState, newRoutes []netip.Prefix, newReject 
 		}
 		ns.redist = kept
 	}
+	ns.publishFwd()
 	ns.mu.Unlock()
 	for _, p := range purged {
 		e.syncRoute(ns, p)
@@ -329,6 +332,9 @@ func (e *Engine) onRouteAdd(ps *peerSession, body []byte) {
 				break
 			}
 		}
+		if metricChanged {
+			ns.publishFwd()
+		}
 		ns.mu.Unlock()
 		if metricChanged {
 			e.log.Infof("mesh: route %s via %q metric -> %d on net %x", prefix, origin, metric, ns.spec.ID)
@@ -341,6 +347,7 @@ func (e *Engine) onRouteAdd(ps *peerSession, body []byte) {
 	}
 	ns.knownRoute[key] = true
 	ns.redist = append(ns.redist, routeEntry{origin: origin, prefix: prefix, metric: metric, lastSeen: now})
+	ns.publishFwd()
 	ns.mu.Unlock()
 
 	e.log.Infof("mesh: learned route %s via %q on net %x", prefix, origin, ns.spec.ID)
@@ -423,6 +430,9 @@ func (e *Engine) onRouteDel(ps *peerSession, body []byte) {
 			kept = append(kept, re)
 		}
 		ns.redist = kept
+	}
+	if had {
+		ns.publishFwd()
 	}
 	ns.mu.Unlock()
 	if !had {
@@ -756,6 +766,7 @@ func (e *Engine) dropNodeRoutes(ns *netState, nodeID string) {
 		kept = append(kept, re)
 	}
 	ns.redist = kept
+	ns.publishFwd()
 	ns.mu.Unlock()
 	if len(gone) == 0 {
 		return
@@ -811,6 +822,7 @@ func (e *Engine) sweepStaleRoutes(ns *netState, now time.Time) {
 		kept = append(kept, re)
 	}
 	ns.redist = kept
+	ns.publishFwd()
 	ns.mu.Unlock()
 	if len(gone) == 0 {
 		return

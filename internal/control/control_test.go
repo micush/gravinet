@@ -24,6 +24,7 @@ func (s *stubEngine) NATStatusStrings() (string, string) { return "open", "203.0
 func (s *stubEngine) ListBans(uint64) []mesh.BanInfo     { return s.bans }
 func (s *stubEngine) Routes(uint64) []mesh.RouteInfo     { return nil }
 func (s *stubEngine) Interfaces() []mesh.IfaceInfo       { return s.ifaces }
+func (s *stubEngine) LoopDrops() uint64                  { return 0 }
 func (s *stubEngine) BanNode(_ uint64, t, _ string) error {
 	s.lastBan = t
 	return nil

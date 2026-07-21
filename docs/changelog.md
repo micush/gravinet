@@ -9,12 +9,13 @@ available to this tool. That method has real limits worth stating plainly:
 - **Search returns snippets, not full transcripts.** Even for a conversation
   this found, it may only surface part of what was discussed or changed.
 - **Coverage is uneven.** The version counter (the `version` string in
-  `cmd/gravinet/main.go`) is currently at **353**, and jumps by exactly one
-  on every recorded change — but only a fraction of those ~270-odd increments
-  turned up specific, citable detail. Entries below with a version number
-  are ones a past conversation explicitly named; the gaps between them are
-  real gaps in what's recoverable this way, not evidence that nothing
-  happened in between. A second search pass (this session) went further back
+  `cmd/gravinet/main.go`) jumps by exactly one on every recorded change. The
+  search-reconstructed part of this document is the range *before* **v263** —
+  a couple hundred increments, only a fraction of which turned up specific,
+  citable detail. Entries below with a version number are ones a past
+  conversation explicitly named; the gaps between them are real gaps in what's
+  recoverable this way, not evidence that nothing happened in between. A second
+  search pass (this session) went further back
   than the first and recovered a fair number of versions the original pass
   missed — v202, v203, v207–209, v241–245, v259–262 below are new this
   round. **v273 specifically could not be recovered**: the version string
@@ -28,12 +29,305 @@ available to this tool. That method has real limits worth stating plainly:
 
 Versions **263–272** are from a single long conversation and are complete
 and precise — every change in that range was made directly in that session,
-not reconstructed from a search snippet. **v274** and **v306–353** are each
-their own session, also direct and precise. Everything else is a
+not reconstructed from a search snippet. **v274** and everything from
+**v306 onward** is direct and precise. Everything else is a
 best-effort reconstruction. If a
 specific version or feature isn't listed here and you
 want it filled in, it's worth asking to search for it directly rather than
 assuming it didn't happen.
+
+---
+
+## v556 — 2026-07-21
+
+**UDP I/O is now batched on 64-bit Linux: `recvmmsg`/`sendmmsg` replace the
+one-syscall-per-datagram hot path a field profile put ~49% of CPU in — but the
+measurements said batching only pays with a second core, so it is gated on
+one, and Phases B and C are deliberately not here.**
+
+A field CPU profile showed roughly **49% of hot-path CPU inside a single
+`sendto()`** (`internal/runtime/syscall.Syscall6` under
+`transport.(*Transport).Send`), plus one `read()` per TUN packet. `Send` issued
+exactly one syscall per datagram and each read worker one per datagram
+received; at multi-Gbps packet rates the syscall boundary, not the crypto, is
+what the CPU is spent on. This release amortises that boundary over a batch.
+
+**Phase A, and only Phase A.** The plan was phased — A: `recvmmsg`/`sendmmsg`
+batching; B: UDP GSO/GRO segmentation offload; C: TUN-side batching. B and C are
+**not implemented here** (see the end of this entry for why B was cut, which is
+a change from the original plan, not just a deferral of it).
+
+**No new dependencies.** The natural implementation wraps
+`golang.org/x/net`'s `ipv4`/`ipv6` `PacketConn.ReadBatch`/`WriteBatch`. Neither
+`golang.org/x/net` nor `golang.org/x/sys` is reachable from this build
+environment (`proxy.golang.org` and `golang.org` are both outside the egress
+allowlist), so the fallback was taken: the `mmsghdr` array is built by hand and
+handed to `syscall.Syscall6`. `go.mod` still lists zero requirements. The
+stdlib defines `SYS_RECVMMSG` on amd64 but *not* `SYS_SENDMMSG`, so both
+numbers are spelled out per-architecture in `batchnr_linux_{amd64,arm64}.go`.
+
+The syscalls are issued through `(*net.UDPConn).SyscallConn`'s `Read`/`Write`
+helpers rather than against a raw duplicated fd. That matters: the socket stays
+registered with the Go runtime's netpoller, so a batched read parks its
+goroutine exactly as `ReadFromUDPAddrPort` did instead of pinning an OS thread,
+`EAGAIN` is handled by the runtime, and `Close` still unblocks the worker.
+
+**Scoped to 64-bit Linux.** `struct msghdr`'s layout differs between 32- and
+64-bit, and only 64-bit could be verified here, so the fast path builds for
+`linux && (amd64 || arm64)` and everything else — including 32-bit Linux —
+keeps the per-packet code unchanged via `batch_other.go`. Guessing at a layout
+that is handed straight to the kernel is not a risk worth taking for a
+platform that cannot be tested; `TestMmsghdrLayout` pins the 64-bit ABI
+(56-byte `msghdr`, `msg_len` at offset 56, 64-byte stride).
+
+**The measurement that changed the design.** Batching was expected to be a
+straight win and it is not. On the only hardware available here — a single
+core — it is substantially *slower*:
+
+| configuration | `BenchmarkOutboundThroughput` |
+| --- | --- |
+| v555 per-packet | ~7.1–7.6 us/op |
+| batched send + receive | ~12.0 us/op (**68% slower**) |
+| batched receive only | ~8.9–9.4 us/op (**~20% slower**) |
+
+Both regressions have the same root cause: batching only pays when datagrams
+actually queue. With one core they never do. The sender and receiver ping-pong,
+so each `recvmmsg(vlen=64)` finds a single datagram and then spends an extra
+`EAGAIN` probe discovering the queue is empty — strictly more work than one
+`recvfrom` — and each batched send forces a context switch to a flusher
+goroutine that has no core of its own to run on.
+
+This is the same trap the TUN worker pool fell into in v549 and it takes the
+same fix: `initBatch` checks `GOMAXPROCS` and stays on the per-packet path
+below 2, exactly as `tunLoop` routes single-worker setups to `tunLoopSerial`
+rather than running the pooled path with N forced to 1. With the gate in place
+the benchmark is back to baseline (~7.2–7.6 us/op), i.e. **no regression on
+single-core hardware**.
+
+**Evidence the mechanism works.** A single core cannot demonstrate the win, so
+the mechanism was verified directly by counting syscalls under `strace` — which
+also inflates syscall cost, approximating the syscall-bound regime the original
+profile was taken in. 200,000 datagrams over loopback:
+
+| | syscalls | pkts/sec | delivered |
+| --- | --- | --- | --- |
+| per-packet | 395,763 (200,001 `sendto` + 195,762 `recvfrom`) | 54,351 | 97.9% |
+| batched | 148,230 (1,824 `sendmmsg` + 86,397 `sendto` + 60,009 `recvmmsg`) | 76,641 | 100% |
+
+**62% fewer syscalls and 41% more throughput** when syscalls are expensive. The
+86,397 residual `sendto` calls are the ring-full fallback doing its job: with
+only one physical core the flusher cannot keep up, and those datagrams take the
+direct path rather than being queued or dropped.
+
+**Receive side.** Each worker owns a fixed `mmsghdr` array wired to fixed
+buffers, so a steady-state read allocates nothing and the read `sync.Pool` is
+bypassed entirely on this path — the handler contract is unchanged (the payload
+is reused after it returns). Buffers are `protocol.MaxUDPPayload` (9472), *not*
+the 2500 the plan specified: 9472 is what the existing per-packet reader
+accepts, and 2500 would have silently truncated every jumbo datagram on an
+underlay that supports them. At 64 slots that is ~606 KB per read worker, small
+next to the 4 MB `SO_RCVBUF` this transport already requests per socket. Only
+the entries the previous call actually filled are re-armed before reuse;
+re-arming all 64 every call spent more bookkeeping than the saved syscall was
+worth.
+
+**Send side.** One flusher goroutine per outbound socket drains a 256-slot
+ring. `Send` copies the payload into a ring slot and returns — the copy is
+mandatory, not incidental: `mesh.sealAndSend` returns its buffer to
+`dataBufPool` the instant `Send` returns, so a queued datagram that aliased it
+would transmit whatever the pool handed out next.
+`TestSendRingCopiesPayload` pins this. Slot buffers **grow on demand** rather
+than being preallocated to `MaxUDPPayload` as planned: preallocating is ~2.4 MB
+per socket, which on a many-core box is tens of megabytes of resident memory
+almost none of which is used, since real traffic sits near the path MTU.
+A full ring returns false and `Send` falls through to the direct write —
+backpressure, never a drop, worst case exactly the v555 behaviour. There are no
+timers and no artificial delay: one queued datagram is sent immediately as a
+batch of one, so latency under light load is unchanged.
+
+**EMSGSIZE, and why there is no `resetPMTUByEndpoint`.** `sendmmsg` reports one
+result for the whole call, so per-message errors — `EMSGSIZE` above all, which
+is how a shrunk path MTU announces itself — need recovering. The plan called
+for re-sending the batch's messages individually on any error; that would
+**duplicate every datagram the kernel had already put on the wire**, since
+`sendmmsg` returns the count it accepted. Only the unaccepted remainder
+`[sent, n)` is re-sent individually, which is what surfaces the per-message
+error.
+
+The plan then called for a new `Engine.resetPMTUByEndpoint(to)` calling
+`ps.resetPMTU()`. That machinery already existed and is better:
+`Engine.noteTooLong(to, size)` matches the peer by endpoint and calls
+`ps.pmtu.tooBig(size, now)`, clamping to the size that actually failed instead
+of resetting to the floor. So the new callback is
+`Options.OnSendMsgSize(to, size)` — carrying the size the plan omitted — wired
+to a thin exported `Engine.NoteSendTooLong` at both `transport.Open` call
+sites. One notion of "the path shrank", not two. On the batched path this
+signal necessarily arrives via callback rather than `Send`'s return value,
+since `Send` returned `nil` long before; both `transport.go` and the engine
+document that.
+
+**Ordering.** Each ring is strictly FIFO, so traffic through one socket keeps
+its order. Sends still round-robin across sockets, so two datagrams to the same
+peer can reorder relative to each other — the same kind of reordering
+`tunLoopPooled` already introduced, safe for the same reasons: UDP promises
+nothing, the replay window (64) absorbs it, and TCP inside the tunnel has its
+own sequence numbers.
+
+**Not batched, deliberately:** `sendFrom` extra-port replies (low-rate, and
+they must egress a specific socket rather than the round-robin one) and the
+TCP/TLS fallback. Zoned link-local destinations also take the direct path,
+since resolving a zone to a scope id is the `net` package's job.
+
+**Escape hatch.** `GRAVINET_NO_UDP_BATCH=1` disables the fast path at open;
+the active mode is logged once at startup (`transport: udp batching=on ...` /
+`=off ...`).
+
+**Phase B (GSO/GRO) was cut, not deferred-as-planned.** The plan allowed
+shipping A alone if time-limited; the reason here is evidence, not time. Phase
+A's own numbers show batching's benefit is entirely conditional on a regime
+this environment cannot produce, and every Phase B path — `UDP_SEGMENT`
+coalescing, the buggy-driver `EIO/EINVAL/ENOTSUP` fallback dance, `UDP_GRO`
+splitting — depends on real NIC offload that loopback does not exercise.
+Shipping an unverifiable segmentation path on top of a batching path that
+already needed a correctness gate would be guessing twice. Phase B and Phase C
+(TUN-side `IFF_VNET_HDR` batching, the remaining syscall-per-packet on the read
+side) both remain future work.
+
+**Tests.** New: `sendring_test.go` (FIFO, copy-on-enqueue, ring-full fallback,
+claim stopping at an uncommitted slot, 8-producer concurrency under `-race`)
+and `batch_linux_test.go` (ABI layout, sockaddr round-trip for both families
+including v4-mapped unmapping, 4000-datagram bulk round-trip with a reused
+caller buffer, env kill-switch, flusher drain on `Close`). Tests raise
+`GOMAXPROCS` so the batched path is reachable on a single-core machine.
+`BenchmarkLoopbackThroughput` was added to `internal/transport` (two sockets,
+1200-byte payloads, reports pkts/sec).
+
+Verified: `go build ./...` and `go vet ./...` clean; all seventeen non-mesh
+packages pass, `internal/transport` with and without `-race`;
+`TestBroadcastDelivery`, `TestRouteRedistribution`, and
+`TestRouteRedistributionLive` pass over the batched path; a targeted
+`internal/mesh` subset (broadcast, routing, PMTU, fragmentation, relay, extra
+ports, underlay-loop) passes. Cross-compiles clean for darwin/amd64,
+darwin/arm64, windows/amd64, freebsd/amd64, openbsd/amd64, linux/arm,
+linux/386, and linux/arm64, proving the build-tag split. The full
+`internal/mesh` suite takes ~10 minutes on this single-core box and was run to
+completion once mid-development (one pre-existing failure, below, and nothing
+else); the final tree was checked against the targeted subset rather than
+another full pass, so that last full run is the weakest link in this
+verification.
+
+**Three stale tests fixed, from v555's own snapshot conversion.** A full
+`internal/mesh` run surfaced five failures, all pre-existing in a pristine v555
+tree. Three shared one root cause and are fixed here.
+
+v555 moved the forwarding path off `ns.mu` and onto a copy-on-write `fwdSnap`
+published by `publishFwd()`. Every *production* writer was updated. Two *test*
+helpers that hand-build a route were not: `addPeerWithOverlay`
+(`antispoof_test.go`) and the session setup in
+`TestProcessOutboundConcurrentSameDest` both mutate `ns.routes4`/`ns.byNode`
+under the lock and never publish, so the snapshot the read path consults stayed
+empty and:
+
+- `TestProcessOutboundConcurrentSameDest` — `routeTo` found no route, so all
+  3200 concurrent packets were dropped before reaching the sender (0 sends
+  recorded).
+- `TestDeliverInnerDropsSpoofedSource` and
+  `TestDeliverInnerDropsOtherPeersOverlayIdentity` — worse: with a nil
+  snapshot `sourceAllowedFrom` returns true unconditionally, so **both
+  anti-spoofing guard tests were failing by delivering spoofed packets**.
+
+The guard itself was never broken — production installs publish — but the tests
+that prove it had stopped reaching it. The fix is one `ns.publishFwd()` call in
+each helper. All three pass, under `-race`; that the two spoof tests flipped
+from *delivering* to *dropping* confirms they now exercise the guard rather
+than passing vacuously. This also restores real coverage of concurrent
+`processOutbound`, which is exactly the path this release makes asynchronous.
+
+**Two pre-existing failures left alone, both timing-flaky and unrelated:**
+`TestKeyDisableReconnects` fails at `GOMAXPROCS=1` and passes at 4 — a
+single-core scheduling artifact. `TestRouteFailoverBetweenTwoOrigins` (route
+metric convergence, ~11s) is flaky in *both* trees at the same setting,
+observed failing in pristine v555 and roughly one run in three here. Neither
+touches the transport; both want a session that can establish the intended
+timing margins rather than a speculative fix.
+
+---
+
+## v555 — 2026-07-21
+
+**The packet forwarding path is now lock-free: a published snapshot replaces
+the per-packet `RWMutex` that every outbound datagram used to contend on — and
+fixing the source-guard to match it uncovered a handshake-glare spoof-drop that
+`TestBroadcastDelivery` caught.**
+
+Every packet leaving the overlay took `ns.mu.RLock` at least once — `routeTo`
+for the destination lookup, again in `redistRoute` for a CIDR fallback, again
+in `flood` for broadcast/multicast, again in `sourceAllowedFrom` on the way in,
+and once more in `isUnderlayLoop`'s session scan. On a busy node that read lock
+is uncontended only until the first route churn, handshake install, or prune
+takes the write side; then the whole forwarding fleet stalls behind a single
+map mutation that has nothing to do with the packets waiting on it. The fix is
+a copy-on-write forwarding snapshot: a new `fwdSnap` (clones of `routes4`,
+`routes6`, `byNode`, and `redist`) held in an `atomic.Pointer[fwdSnap]` on the
+netState. Readers do a single atomic load and index plain maps with no lock at
+all; writers keep taking `ns.mu` exactly as before and call the new
+`publishFwd()` (which clones under the held lock) on the line before each
+`Unlock` that actually changed routing — install, ban, disable, prune,
+key-retirement drop, address repoint, and the six route mutation sites. The
+publish is deliberately gated where a mutation might be a no-op: `onRouteAdd`'s
+already-known branch republishes only when the metric actually changed (a
+bare lastSeen refresh must not churn the snapshot), and `onRouteDel` only when
+an entry was really removed.
+
+**The glare bug.** Rewriting `sourceAllowedFrom` to read the snapshot forced
+the question of *what* it compares, and the old answer was wrong in a way the
+lock had been hiding. It refused a source address owned by a `*peerSession`
+other than the sending one — a pointer compare. But under handshake glare (both
+ends re-initiate at once, or a peer roams and re-handshakes) a fresh
+`*peerSession` is installed for a node while an in-flight packet is still
+arriving on its *previous* session object. Same node, same authenticated
+overlay address, different pointer — and the pointer compare read that as one
+node impersonating another and dropped legitimate traffic until the old session
+aged out. The guard now compares `nodeID`: a source is refused only when the
+snapshot says it belongs to a *different node*, with the redistributed-prefix
+gateway exception preserved. `TestBroadcastDelivery` is what surfaced this — it
+exercises delivery across a re-handshake and started failing the moment the
+guard consulted the snapshot, which is exactly the scenario the pointer compare
+mishandled. Comparing identity, not object identity, is the correct invariant
+regardless of the snapshot work; the snapshot just stopped the lock from
+masking it.
+
+**One fewer copy per packet.** `processOutbound` used to defensively
+`append([]byte(nil), buf...)` every datagram before the NAT/route pipeline.
+But `sendData`, `sealAndSend`, `sendFragmented`, and `flood` all copy the body
+into their own buffers already — the *only* consumer that retains the caller's
+slice past the call is the egress shaper, which queues it and rewrites its DSCP
+byte in place. So the blanket copy is now gone, and the copy moved to the one
+place that needs it: the `eg.enqueue` call. Non-shaped sends (the common path)
+no longer allocate.
+
+**loopDrops is no longer invisible.** The loop guard (v552) has been counting
+gravinet's own underlay datagrams routed back into the tunnel and dropped, but
+the count lived only in a throttled log line. It's now surfaced: a `LoopDrops()`
+engine accessor, a `loop_drops` field on the control `list` response, and a
+`gravinet list` warning that fires when it's non-zero, pointing the operator at
+the host route covering a peer endpoint. 
+
+**`managed`/`manager` status with `-config`.** `gravinet managed status -config
+X` (and the `manager` twin) died with "flag provided but not defined" — the
+subcommand built a `FlagSet` with no `-config` flag and parsed the remaining
+args through it. Both now call `openCfg` first, which extracts `-config` from
+any position, and derive the action from what's left; the unused `FlagSet` is
+gone.
+
+Verified: `go build ./...`, `go vet ./...`, and the targeted forwarding/route/
+loop-guard suite (`TestBroadcastDelivery`, `TestBroadcastStormControl`,
+`TestRouteRedistribution`, `TestUDPPorts`, `TestIsUnderlayLoop`,
+`TestProcessOutboundDrops`, `TestMeshRouteCovers`, `TestSyncRoute`,
+`TestSyncPeerBypass`, `TestFrag`, `TestFallback`) plus the `cmd/gravinet` and
+`internal/control` packages all pass. The two loop-guard tests that hand-build
+netState under `ns.mu` now call `publishFwd()` before unlocking, mirroring what
+the real installer does.
 
 ---
 

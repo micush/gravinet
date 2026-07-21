@@ -8,6 +8,7 @@ package mesh
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"net/netip"
 	"runtime"
 	"sync"
@@ -585,6 +586,7 @@ type netState struct {
 	byNode      map[string]*peerSession
 	routes4     map[netip.Addr]*peerSession
 	routes6     map[netip.Addr]*peerSession
+	fwd         atomic.Pointer[fwdSnap]
 	pending     map[uint32]*pendingHS        // by initiator index (idxI)
 	seeds       []netip.AddrPort             // mutable; grows as peers are learned
 	tcpSeeds    []netip.AddrPort             // explicit TCP/TLS-fallback seeds to dial directly (ns.mu)
@@ -1658,6 +1660,18 @@ func (e *Engine) noteTooLong(to netip.AddrPort, size int) {
 	}
 }
 
+// NoteSendTooLong reports a datagram the kernel refused as too large for the
+// path (EMSGSIZE) on a send that had already returned. The batched UDP send
+// path on Linux (transport.Options.OnSendMsgSize) writes datagrams after Send
+// has returned nil, so it cannot deliver EMSGSIZE as a return value the way the
+// direct path does; it calls this instead. The effect is identical either way —
+// the peer owning that endpoint has its path MTU clamped and re-discovered —
+// so this is deliberately the same noteTooLong the synchronous path uses rather
+// than a second, parallel notion of the same event.
+//
+// Safe to call from any goroutine, including a transport flusher.
+func (e *Engine) NoteSendTooLong(to netip.AddrPort, size int) { e.noteTooLong(to, size) }
+
 // Start launches the TUN read loops, handshake initiation, and maintenance.
 func (e *Engine) Start() {
 	for _, ns := range e.netSnapshot() {
@@ -1850,38 +1864,27 @@ func (e *Engine) sourceAllowedFrom(ps *peerSession, ip []byte) bool {
 		return false
 	}
 	src = src.Unmap()
-
-	ns := ps.net
-	ns.mu.RLock()
-	defer ns.mu.RUnlock()
-
-	// The peer's own overlay address(es): always allowed. Set from the
-	// authenticated handshake payload, so this is the trustworthy binding.
-	if o4 := ps.overlay4; o4.IsValid() && src == o4 {
+	snap := ps.net.fwd.Load()
+	if snap == nil {
 		return true
 	}
-	if o6 := ps.overlay6; o6.IsValid() && src == o6 {
-		return true
+	var owner *peerSession
+	if src.Is4() {
+		owner = snap.routes4[src]
+	} else {
+		owner = snap.routes6[src]
 	}
-
-	// A subnet this peer is the advertised gateway for: allowed.
-	for _, re := range ns.redist {
+	if owner != nil && owner.nodeID == ps.nodeID {
+		return true
+	} // own addr, by node
+	for _, re := range snap.redist { // gateway prefixes
 		if re.origin == ps.nodeID && re.prefix.Contains(src) {
 			return true
 		}
 	}
-
-	// Otherwise, refuse only if this source is an overlay address another peer
-	// legitimately owns — i.e. an identity-impersonation attempt. Any source no
-	// other peer claims (NAT translate addresses, gatewayed hosts) is allowed;
-	// blocking those would break masquerade/forwarding for no security gain,
-	// since they don't let one node masquerade as another's mesh identity.
-	if owner := ns.routes4[src]; owner != nil && owner != ps {
+	if owner != nil {
 		return false
-	}
-	if owner := ns.routes6[src]; owner != nil && owner != ps {
-		return false
-	}
+	} // another node's overlay identity
 	return true
 }
 
@@ -1925,6 +1928,17 @@ var dataBufPool = sync.Pool{New: func() any { b := make([]byte, protocol.MaxUDPP
 // delivers it to the peer (directly, or wrapped through a relay). The whole outer
 // packet — header, inner type, ciphertext, and tag — is built in one pooled
 // buffer and the frame is encrypted in place, so the hot path allocates nothing.
+//
+// The pooled buffer goes back to dataBufPool the moment this returns, which is
+// safe even though the transport may batch the write asynchronously: the
+// batched path copies the payload into its own ring slot at enqueue precisely
+// so this buffer can be recycled here (see transport's sendRing).
+//
+// Note that on the batched path a nil return does not mean the kernel accepted
+// the datagram — only that it was queued. sendData's isMsgSize check below
+// therefore cannot see EMSGSIZE from a batched send; that signal arrives
+// out-of-band via transport.Options.OnSendMsgSize, wired to NoteSendTooLong,
+// which clamps the same peer's PMTU by endpoint.
 func (e *Engine) sealAndSend(ps *peerSession, innerType byte, body []byte) error {
 	const h = protocol.DataHeaderLen
 	need := h + 1 + len(body) + 16 // header + innerType + body + GCM tag
@@ -2200,7 +2214,7 @@ func (e *Engine) processOutbound(ns *netState, buf []byte) {
 	if !ns.fw.allow(fwOut, buf) {
 		return // dropped by firewall (egress)
 	}
-	pkt := append([]byte(nil), buf...)
+	pkt := buf
 	if nat := ns.nat.Load(); nat != nil {
 		// Never masquerade traffic sourced from this node's own overlay
 		// address: that address is our identity on the mesh, and rewriting it
@@ -2236,7 +2250,7 @@ func (e *Engine) processOutbound(ns *netState, buf []byte) {
 		return // no peer for this destination yet (relay later)
 	}
 	if eg := ns.egress.Load(); eg != nil {
-		if !eg.enqueue(ps, pkt) {
+		if !eg.enqueue(ps, append([]byte(nil), pkt...)) {
 			e.log.Debugf("mesh: egress queue full on net %x, dropping packet", ns.spec.ID)
 		}
 	} else {
@@ -2244,13 +2258,32 @@ func (e *Engine) processOutbound(ns *netState, buf []byte) {
 	}
 }
 
+type fwdSnap struct {
+	routes4 map[netip.Addr]*peerSession
+	routes6 map[netip.Addr]*peerSession
+	byNode  map[string]*peerSession
+	redist  []routeEntry
+}
+
+// Caller must hold ns.mu.
+func (ns *netState) publishFwd() {
+	ns.fwd.Store(&fwdSnap{
+		routes4: maps.Clone(ns.routes4),
+		routes6: maps.Clone(ns.routes6),
+		byNode:  maps.Clone(ns.byNode),
+		redist:  append([]routeEntry(nil), ns.redist...),
+	})
+}
+
 func (ns *netState) routeTo(dst netip.Addr) *peerSession {
-	ns.mu.RLock()
-	defer ns.mu.RUnlock()
-	if dst.Is4() {
-		return ns.routes4[dst]
+	s := ns.fwd.Load()
+	if s == nil {
+		return nil
 	}
-	return ns.routes6[dst]
+	if dst.Is4() {
+		return s.routes4[dst]
+	}
+	return s.routes6[dst]
 }
 
 // parseDst extracts the destination IP from a raw IPv4/IPv6 packet.
@@ -2364,14 +2397,12 @@ func (e *Engine) isUnderlayLoop(ns *netState, pkt []byte, dst netip.Addr) bool {
 			return true
 		}
 	}
-	sessions := make([]*peerSession, 0, len(ns.byNode))
-	for _, ps := range ns.byNode {
-		sessions = append(sessions, ps)
-	}
 	ns.mu.RUnlock()
-	for _, ps := range sessions {
-		if sameUnderlayAddrPort(ps.ep(), target) {
-			return true
+	if snap := ns.fwd.Load(); snap != nil {
+		for _, ps := range snap.byNode {
+			if sameUnderlayAddrPort(ps.ep(), target) {
+				return true
+			}
 		}
 	}
 	return false

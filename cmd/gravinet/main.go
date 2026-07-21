@@ -48,7 +48,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "554"
+	version = "556"
 	commit  = "none"
 )
 
@@ -564,6 +564,7 @@ func cmdRun(args []string) {
 				Workers:       workers,
 				Log:           logx.Default(),
 				Handler:       pktHandler,
+				OnSendMsgSize: engine.NoteSendTooLong,
 			})
 			if err != nil {
 				for _, d := range devices {
@@ -1206,6 +1207,7 @@ func cmdRun(args []string) {
 					Workers:       workers,
 					Log:           logx.Default(),
 					Handler:       pktHandler,
+					OnSendMsgSize: engine.NoteSendTooLong,
 				}); terr != nil {
 					logx.Errorf("underlay port change %d -> %d failed: %v — keeping port %d", prevPort, newCfg.PrimaryPort, terr, prevPort)
 				} else {
@@ -1734,6 +1736,9 @@ func cmdList(args []string) {
 			line += "  public=" + resp.Public
 		}
 		fmt.Println(line)
+	}
+	if resp.LoopDrops > 0 {
+		fmt.Printf("WARNING: %d of this node's own underlay datagram(s) were routed back into the tunnel and dropped by the loop guard since start — a route on this host covers a peer endpoint; check the daemon log and `ip route`\n", resp.LoopDrops)
 	}
 	printBans(resp.Bans)
 	fmt.Printf("Routes (%d):\n", len(resp.Routes))

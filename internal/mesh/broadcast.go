@@ -126,13 +126,11 @@ func subnetBroadcast4(p netip.Prefix) netip.Addr {
 // reach). Receivers write it to their interface but do not re-flood, so there
 // are no loops.
 func (e *Engine) flood(ns *netState, pkt []byte) {
-	ns.mu.RLock()
-	peers := make([]*peerSession, 0, len(ns.byNode))
-	for _, ps := range ns.byNode {
-		peers = append(peers, ps)
+	snap := ns.fwd.Load()
+	if snap == nil {
+		return
 	}
-	ns.mu.RUnlock()
-	for _, ps := range peers {
+	for _, ps := range snap.byNode {
 		e.sendData(ps, pkt)
 	}
 }

@@ -36,6 +36,7 @@ type Engine interface {
 	// happens at runtime), so this is the one piece of live daemon state that
 	// command needs, fetched over the control socket rather than guessed at.
 	Interfaces() []mesh.IfaceInfo
+	LoopDrops() uint64
 
 	FirewallRules(networkID uint64) ([]mesh.FirewallRule, error)
 	FirewallAdd(networkID uint64, r mesh.FirewallRule, at int) (mesh.FirewallRule, error)
@@ -89,6 +90,7 @@ type Response struct {
 	Count    int                 `json:"count,omitempty"`
 	NATClass string              `json:"nat_class,omitempty"`
 	Public   string              `json:"public,omitempty"`
+	LoopDrops uint64             `json:"loop_drops,omitempty"`
 	UpBody   json.RawMessage     `json:"up_body,omitempty"`
 }
 
@@ -231,6 +233,7 @@ func (s *Server) dispatch(req Request) Response {
 		}
 		if req.Cmd == "list" {
 			resp.NATClass, resp.Public = s.api.NATStatusStrings()
+			resp.LoopDrops = s.api.LoopDrops()
 		}
 		return resp
 	case "ban":

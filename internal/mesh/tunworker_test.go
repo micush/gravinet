@@ -62,6 +62,7 @@ func TestProcessOutboundConcurrentSameDest(t *testing.T) {
 	ns.mu.Lock()
 	ns.byNode["peer"] = ps
 	ns.routes4[dst] = ps
+	ns.publishFwd() // the forwarding path reads the snapshot, not these maps
 	ns.mu.Unlock()
 
 	const goroutines = 32

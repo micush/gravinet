@@ -5,6 +5,18 @@
 // round-robin across the same REUSEPORT socket set the read workers use (see
 // Send), so writes get the same per-socket spread reads already had instead
 // of funneling through a single socket regardless of worker count.
+//
+// On multi-core 64-bit Linux the I/O is batched: reads use recvmmsg and writes
+// are queued to a per-socket flusher that coalesces them into sendmmsg, so one
+// syscall carries many datagrams instead of one each (see batch_linux.go).
+// Everywhere else — and on a single core, where batching measurably costs more
+// than it saves — every datagram takes the per-packet path unchanged.
+//
+// One caller-visible consequence: a batched Send returns nil once the datagram
+// is queued, before the kernel has seen it, so a per-datagram error can no
+// longer come back as Send's return value. EMSGSIZE is the one that matters —
+// it is how a shrunk path MTU announces itself — and it is delivered instead
+// through Options.OnSendMsgSize.
 package transport
 
 import (
@@ -48,6 +60,20 @@ type Options struct {
 	SocketBuffer  int // SO_RCVBUF/SO_SNDBUF target in bytes; 0 => default
 	Handler       Handler
 	Log           *logx.Logger
+
+	// OnSendMsgSize, if non-nil, reports a datagram the kernel refused as
+	// larger than the path MTU (EMSGSIZE) on the *batched* send path. On the
+	// direct path that error is Send's return value and the caller acts on it
+	// synchronously; batched sends complete after Send has already returned
+	// nil, so the signal has to come back out-of-band. `size` is the datagram
+	// length that was refused, which is what path-MTU discovery needs to clamp
+	// its estimate. The engine wires this to the same handling its synchronous
+	// EMSGSIZE path uses (mesh.Engine.NoteSendTooLong). Called from a flusher
+	// goroutine: it must not block.
+	//
+	// Leaving this nil is safe but lossy: PMTU discovery then re-finds a shrunk
+	// path through its own probes instead of being told immediately.
+	OnSendMsgSize func(to netip.AddrPort, size int)
 }
 
 // Transport owns the bound sockets and the worker pool.
@@ -85,6 +111,16 @@ type Transport struct {
 
 	sendMu   sync.RWMutex
 	sendFrom map[netip.AddrPort]*net.UDPConn // remote -> socket to reply from
+
+	// Batched I/O state (Linux fast path; see batch_linux.go). On builds
+	// without it, batchRX stays false and rings4/rings6 stay nil, so every
+	// read and write takes the original per-packet path.
+	batchRX   bool          // read workers use recvmmsg
+	rings4    []*sendRing   // outbound queue per conns4 socket; nil entry => direct writes
+	rings6    []*sendRing   // ditto for conns6
+	stopFlush chan struct{} // closed to stop the flushers
+	flushWG   sync.WaitGroup
+	onMsgSize func(netip.AddrPort, int)
 
 	pool   sync.Pool
 	wg     sync.WaitGroup
@@ -199,6 +235,8 @@ func openWith(o Options, bind binder) (*Transport, error) {
 		t.sendFrom = make(map[netip.AddrPort]*net.UDPConn)
 	}
 
+	t.onMsgSize = o.OnSendMsgSize
+	t.initBatch() // no-op off the Linux fast path
 	t.startWorkers()
 	log.Infof("transport: listening on udp port %d (v4=%d socket(s), v6=%d socket(s), workers=%d, reuseport=%v)",
 		port, len(conns4), len(conns6), o.Workers, reusePort)
@@ -321,17 +359,20 @@ func (t *Transport) startWorkers() {
 		if len(conns) == 0 {
 			return
 		}
+		// readLoopBatched is the per-packet readLoop on every platform without
+		// the batched fast path, and on Linux when batching is disabled — the
+		// goroutine/WaitGroup accounting is identical either way.
 		if reusePort {
 			// One worker per socket: kernel load-balances, no shared-socket contention.
 			for _, c := range conns {
 				t.wg.Add(1)
-				go t.readLoop(c, fam)
+				go t.readLoopBatched(c, fam)
 			}
 		} else {
 			// Single socket, multiple readers (UDPConn is safe for concurrent use).
 			for i := 0; i < t.workers; i++ {
 				t.wg.Add(1)
-				go t.readLoop(conns[0], fam)
+				go t.readLoopBatched(conns[0], fam)
 			}
 		}
 	}
@@ -411,27 +452,48 @@ func (t *Transport) Send(to netip.AddrPort, payload []byte) error {
 	// accepted by the v4 socket.
 	to = netip.AddrPortFrom(to.Addr().Unmap(), to.Port())
 	var conn *net.UDPConn
+	var rings []*sendRing
+	var idx uint64
 	if to.Addr().Is4() {
 		if len(t.conns4) == 0 {
 			return fmt.Errorf("transport: no IPv4 socket for %s", to)
 		}
-		conn = t.conns4[t.txRR4.Add(1)%uint64(len(t.conns4))]
+		idx = t.txRR4.Add(1) % uint64(len(t.conns4))
+		conn, rings = t.conns4[idx], t.rings4
 	} else {
 		if len(t.conns6) == 0 {
 			return fmt.Errorf("transport: no IPv6 socket for %s", to)
 		}
-		conn = t.conns6[t.txRR6.Add(1)%uint64(len(t.conns6))]
+		idx = t.txRR6.Add(1) % uint64(len(t.conns6))
+		conn, rings = t.conns6[idx], t.rings6
 	}
 	// If this remote first reached us on an extra listen port, answer from that
 	// same socket so its stateful firewall/NAT accepts the reply. The key is the
 	// exact addr:port, so the recorded socket's family always matches `to`.
+	// These replies are deliberately left unbatched: they are low-rate by
+	// nature, and the socket they must egress from is not the round-robin one
+	// the rings belong to.
 	if t.hasExtra {
 		t.sendMu.RLock()
 		if c := t.sendFrom[to]; c != nil {
-			conn = c
+			conn, rings = c, nil
 		}
 		t.sendMu.RUnlock()
 	}
+
+	// Batched path: hand the datagram to this socket's flusher, which coalesces
+	// it with whatever else is queued into a single sendmmsg. enqueue copies the
+	// payload, so the caller may reuse its buffer the moment Send returns, as it
+	// always could. A full ring returns false and falls through to the direct
+	// write below — backpressure, not a drop, whose worst case is exactly the
+	// unbatched behaviour. Zoned (link-local) destinations also fall through:
+	// resolving a zone to a scope id is the net package's job.
+	if int(idx) < len(rings) && to.Addr().Zone() == "" {
+		if ring := rings[idx]; ring != nil && ring.enqueue(to, payload) {
+			return nil // txPackets is counted by the flusher, on the actual write
+		}
+	}
+
 	if _, err := conn.WriteToUDPAddrPort(payload, to); err != nil {
 		return err
 	}
@@ -452,6 +514,10 @@ func (t *Transport) Close() error {
 	if t.closed.Swap(true) {
 		return nil
 	}
+	// Stop the send flushers first, while the sockets are still open, so each
+	// gets one last best-effort drain of whatever it had queued. Only then are
+	// the sockets closed, which is what unblocks the read workers.
+	t.stopBatch()
 	for _, c := range t.conns4 {
 		c.Close()
 	}

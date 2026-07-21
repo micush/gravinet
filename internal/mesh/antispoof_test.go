@@ -40,6 +40,7 @@ func addPeerWithOverlay(ns *netState, id string, overlay netip.Addr) *peerSessio
 	ns.mu.Lock()
 	ns.byNode[id] = ps
 	ns.routes4[overlay] = ps
+	ns.publishFwd() // sourceAllowedFrom reads the snapshot, not these maps
 	ns.mu.Unlock()
 	return ps
 }

@@ -114,6 +114,7 @@ func TestIsUnderlayLoopDetectsOwnDatagram(t *testing.T) {
 	ns.mu.Lock()
 	ns.byNode["peer"] = ps
 	ns.seeds = append(ns.seeds, netip.MustParseAddrPort("198.51.100.9:48620"))
+	ns.publishFwd()
 	ns.mu.Unlock()
 
 	self := netip.MustParseAddr("192.0.2.10")
@@ -183,6 +184,7 @@ func TestProcessOutboundDropsLoopedDatagram(t *testing.T) {
 	// misconfiguration behind the v552 field report — so processOutbound's
 	// route lookup would resolve the looped packet right back to the peer.
 	ns.redist = append(ns.redist, routeEntry{origin: "peer", prefix: netip.MustParsePrefix("203.0.113.0/24"), lastSeen: time.Now()})
+	ns.publishFwd()
 	ns.mu.Unlock()
 
 	loop := buildUDP4(netip.MustParseAddr("192.0.2.10"), peerEP.Addr(), 48620, peerEP.Port(), 64)

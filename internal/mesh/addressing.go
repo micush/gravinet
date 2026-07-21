@@ -301,6 +301,7 @@ func (e *Engine) onAddrNotify(ps *peerSession, body []byte) {
 			ni.overlay6 = v6
 		}
 	}
+	ns.publishFwd()
 	ns.mu.Unlock()
 	e.log.Debugf("mesh: peer %q announced overlay v4=%s v6=%s", ps.nodeID, v4, v6)
 }

@@ -802,6 +802,7 @@ func (e *Engine) pruneDead(ns *netState, now time.Time) {
 			delete(ns.routes6, ps.overlay6)
 		}
 	}
+	ns.publishFwd()
 	ns.mu.Unlock()
 	for _, ps := range dead {
 		e.removePeerBypassRoute(ns, ps)

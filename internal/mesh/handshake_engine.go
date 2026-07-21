@@ -170,6 +170,7 @@ func (e *Engine) install(ns *netState, ps *peerSession) {
 		}
 		ns.seeds = kept
 	}
+	ns.publishFwd()
 	ns.mu.Unlock()
 
 	e.addLocalCandidates(ns.spec.ID, ps.nodeID, localCands)

@@ -42,6 +42,7 @@ func (e *Engine) localDisconnect(ns *netState, target string) {
 			delete(ns.routes6, ps.overlay6)
 		}
 	}
+	ns.publishFwd()
 	ns.mu.Unlock()
 	if victim != nil {
 		e.mu.Lock()

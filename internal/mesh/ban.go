@@ -893,6 +893,10 @@ func (e *Engine) Interfaces() []IfaceInfo {
 	return out
 }
 
+// LoopDrops returns the number of this node's own underlay datagrams that were
+// routed back into the tunnel and dropped by the loop guard since start.
+func (e *Engine) LoopDrops() uint64 { return e.loopDrops.Load() }
+
 func (e *Engine) NetworkIDs() []uint64 {
 	cur := e.netSnapshot()
 	out := make([]uint64, 0, len(cur))
@@ -945,6 +949,7 @@ func (e *Engine) applyBan(ns *netState, target string) {
 		}
 		ns.seeds = kept
 	}
+	ns.publishFwd()
 	ns.mu.Unlock()
 
 	if victim != nil {
