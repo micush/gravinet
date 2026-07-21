@@ -392,6 +392,13 @@ type Engine struct {
 	// come from, but that's exactly the mechanism host candidates exist to
 	// work around. 0 means UDP is disabled (the '-' port setting).
 	primaryPort atomic.Int64
+	// loopDrops counts underlay datagrams of gravinet's own that were read
+	// back off a TUN device and dropped by processOutbound's loop guard —
+	// see isUnderlayLoop. loopWarnUnix is the unix time of the last WARN
+	// logged about it, so a storm arriving at line rate produces one line
+	// per ~10s instead of one per packet.
+	loopDrops    atomic.Uint64
+	loopWarnUnix atomic.Int64
 	// localCands is the published host-candidate set (see localcand.go).
 	// Refreshed off the handshake path by refreshLocalCandidates and read
 	// atomically by localEndpoints, which buildHSInit calls under ns.mu — the
@@ -2177,6 +2184,19 @@ func (e *Engine) processOutbound(ns *netState, buf []byte) {
 	if !ok {
 		return
 	}
+	if e.isUnderlayLoop(ns, buf, dst) {
+		// One of gravinet's own underlay datagrams was read back off the
+		// overlay interface: the kernel routed our encrypted output into the
+		// very tunnel it came out of. Re-encapsulating it would loop it
+		// forever — each pass growing it by one header+tag until it starts
+		// fragmenting, at which point every cycle multiplies the packet count
+		// and a single trigger packet becomes a self-sustaining storm that
+		// saturates every core (see changelog v552 for the field report and
+		// CPU profile this was diagnosed from). Drop it here, before the
+		// firewall/NAT/route pipeline spends anything more on it.
+		e.noteUnderlayLoop(ns, dst)
+		return
+	}
 	if !ns.fw.allow(fwOut, buf) {
 		return // dropped by firewall (egress)
 	}
@@ -2253,6 +2273,126 @@ func parseDst(p []byte) (netip.Addr, bool) {
 		return netip.AddrFrom16(a), true
 	}
 	return netip.Addr{}, false
+}
+
+// udpPorts extracts the UDP source and destination ports from a raw
+// IPv4/IPv6 packet. ok is false for anything that isn't a plainly-parseable
+// UDP datagram: another protocol, a non-first IPv4 fragment (no transport
+// header present to read), an IPv6 packet with extension headers ahead of
+// UDP, or a packet too short to hold the headers it claims. Callers treat
+// "not parseable" as "not a loop suspect" — this feeds a best-effort guard
+// (isUnderlayLoop), not a security boundary.
+func udpPorts(p []byte) (src, dst uint16, ok bool) {
+	if len(p) < 1 {
+		return 0, 0, false
+	}
+	switch p[0] >> 4 {
+	case 4:
+		if len(p) < 20 || p[9] != 17 { // protocol 17 = UDP
+			return 0, 0, false
+		}
+		if p[6]&0x1f != 0 || p[7] != 0 {
+			return 0, 0, false // non-first IP fragment: no UDP header to read
+		}
+		ihl := int(p[0]&0x0f) * 4
+		if ihl < 20 || len(p) < ihl+8 {
+			return 0, 0, false
+		}
+		return uint16(p[ihl])<<8 | uint16(p[ihl+1]), uint16(p[ihl+2])<<8 | uint16(p[ihl+3]), true
+	case 6:
+		if len(p) < 48 || p[6] != 17 { // next header 17 = UDP, immediately after the fixed header
+			return 0, 0, false
+		}
+		return uint16(p[40])<<8 | uint16(p[41]), uint16(p[42])<<8 | uint16(p[43]), true
+	}
+	return 0, 0, false
+}
+
+// ownUDPPort reports whether port is one this node's own transport is bound
+// to (the primary UDP listen port, or any extra listen port — replies go
+// back out the arrival socket, so an extra port is a possible source port
+// for our own datagrams too, not just an inbound-only detail).
+func (e *Engine) ownUDPPort(port uint16) bool {
+	if pp := e.primaryPort.Load(); pp > 0 && uint16(pp) == port {
+		return true
+	}
+	for _, p := range loadPortList(&e.extraUDPPorts) {
+		if p == port {
+			return true
+		}
+	}
+	return false
+}
+
+// sameUnderlayAddrPort compares two underlay endpoints with 4-in-6 mapped
+// addresses canonicalized: a dual-stack socket reports an IPv4 peer as
+// ::ffff:a.b.c.d, while the same address parsed out of an IPv4 header is
+// plain a.b.c.d — those must compare equal here.
+func sameUnderlayAddrPort(a, b netip.AddrPort) bool {
+	return a.Port() == b.Port() && a.Addr().Unmap() == b.Addr().Unmap()
+}
+
+// isUnderlayLoop reports whether a packet just read from the TUN device is
+// one of gravinet's own underlay datagrams — encrypted mesh output that the
+// kernel routed back into the overlay interface instead of out the physical
+// one. That happens when a route steering traffic into the tunnel (most
+// plausibly a redistributed prefix installed by syncRoute) covers a peer's
+// real underlay endpoint; see processOutbound's call site for why the only
+// safe thing to do with such a packet is drop it.
+//
+// The test is deliberately narrow, so ordinary gatewayed/forwarded traffic
+// can't false-positive: the packet must be plain UDP, its source port must
+// be one of this node's own bound listen ports (no other local process can
+// send from those while gravinet holds them), and its destination
+// address:port must match a live peer session endpoint or a currently-dialed
+// seed on this network — i.e. an address gravinet itself sends underlay
+// datagrams to. Only the (rare, in healthy operation: zero) packets passing
+// the cheap port checks ever pay for the endpoint scan.
+func (e *Engine) isUnderlayLoop(ns *netState, pkt []byte, dst netip.Addr) bool {
+	srcPort, dstPort, ok := udpPorts(pkt)
+	if !ok || !e.ownUDPPort(srcPort) {
+		return false
+	}
+	target := netip.AddrPortFrom(dst, dstPort)
+	// Snapshot sessions under ns.mu, but read each endpoint (ps.mu) only
+	// after releasing it — same discipline as resyncAllBypassRoutes, so no
+	// ns.mu→ps.mu ordering is introduced here.
+	ns.mu.RLock()
+	for _, s := range ns.seeds {
+		if sameUnderlayAddrPort(s, target) {
+			ns.mu.RUnlock()
+			return true
+		}
+	}
+	sessions := make([]*peerSession, 0, len(ns.byNode))
+	for _, ps := range ns.byNode {
+		sessions = append(sessions, ps)
+	}
+	ns.mu.RUnlock()
+	for _, ps := range sessions {
+		if sameUnderlayAddrPort(ps.ep(), target) {
+			return true
+		}
+	}
+	return false
+}
+
+// noteUnderlayLoop counts a dropped looped underlay datagram and warns —
+// throttled to once per ~10s, since the whole point of the drop is that
+// these can arrive at line rate — with enough context for an operator to go
+// find the route that's capturing underlay traffic. The bypass-route
+// machinery (see meshRouteCovers and fulltunnel.go) should normally have
+// kept the loop from forming at all; this fires when it couldn't (platform
+// without a gateway backend, a route gravinet didn't install itself, a
+// bypass install that failed and was logged at the time).
+func (e *Engine) noteUnderlayLoop(ns *netState, dst netip.Addr) {
+	n := e.loopDrops.Add(1)
+	now := time.Now().Unix()
+	last := e.loopWarnUnix.Load()
+	if now-last < 10 || !e.loopWarnUnix.CompareAndSwap(last, now) {
+		return
+	}
+	e.log.Warnf("mesh: dropped gravinet's own underlay datagram to %s read back from the overlay interface on net %x (%d dropped since start) — a route on this host is steering mesh underlay traffic into the tunnel itself; check `ip route get %s` for a mesh-installed route covering that peer endpoint", dst, ns.spec.ID, n, dst)
 }
 
 // parseSrc returns the source address of an IPv4/IPv6 packet.

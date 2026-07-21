@@ -493,7 +493,7 @@ func TestStageFromSourceBuildsWithGoOffPATH(t *testing.T) {
 	tgz := tarGzOfDir(t, repoRoot, "gravinet")
 	st := newTestStore(t)
 
-	m, err := stageFromSource(st, tgz)
+	m, err := StageFromSource(st, tgz, "test build")
 	if err != nil {
 		t.Fatalf("stageFromSource failed with Go reachable only via the fallback path: %v", err)
 	}
@@ -521,7 +521,7 @@ func TestStageFromSourceAcceptsZip(t *testing.T) {
 	zr := zipOfDir(t, repoRoot, "gravinet")
 	st := newTestStore(t)
 
-	m, err := stageFromSource(st, zr)
+	m, err := StageFromSource(st, zr, "test build")
 	if err != nil {
 		t.Fatalf("stageFromSource failed on a zip source upload: %v", err)
 	}

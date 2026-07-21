@@ -37,6 +37,226 @@ assuming it didn't happen.
 
 ---
 
+## v554 — 2026-07-21
+
+**`gravinet monitor capture` is real: it runs tcpdump on the overlay
+interface instead of refusing with an essay about pcap encoders.**
+
+v551's placeholder correctly identified why an *in-process* CLI capture
+wasn't worth rushing (the web admin's pcap writer and capture-handle
+lifecycle are private to its ring buffer; parity meant exporting that
+machinery across six platform files or writing a second pcap encoder,
+with per-platform raw-capture risk either way) — and then drew the wrong
+conclusion from it. On a terminal, the tool for "show me packets on this
+interface" already exists, is installed nearly everywhere, and does
+filters, `-w` pcap output, count limits, and rotation better than any
+reimplementation here ever would. Field feedback said exactly that, so:
+`gravinet monitor capture [iface] [tcpdump args...]` now execs tcpdump
+with `-i <iface>`, stdio wired straight through, everything after the
+interface passed verbatim (`port 53`, `-n`, `-v`, `-w out.pcap`,
+`-c 100` — the whole tcpdump(8) vocabulary, undocumented-here by design
+because it's tcpdump's, not gravinet's).
+
+What gravinet adds is the one thing tcpdump can't know: which interfaces
+are its overlays. With no interface named, the command asks the running
+daemon over the control socket (the same "ifaces" op v550 added for
+`monitor dns-state`) — exactly one overlay up means it's picked
+automatically (announced on stderr, so a piped stdout stays pure
+tcpdump), several means a ready-to-paste list of `gravinet monitor
+capture <iface>` lines, daemon unreachable means a plain "name one
+explicitly". Ctrl-C stops the capture, not the wrapper: SIGINT is
+ignored in the parent so tcpdump (which shares the foreground process
+group) catches it, prints its packet counts, and exits, with its exit
+code relayed as gravinet's own. If tcpdump isn't on PATH the usual sbin
+homes are checked before declaring it absent (a sudo-less shell's PATH
+often lacks /usr/sbin even when the binary is right there), and the
+failure message says how to install it — or to use the web admin's
+Monitor → Capture page, which keeps its own in-process capture
+unchanged. `monitor speedtest` remains the one honestly-not-yet leaf,
+for the reason its message states: it needs new asynchronous
+control-socket protocol, not a local reader.
+
+Verified: `-h`, auto-pick error path with no daemon, and a live
+`capture lo -c 1 -n` run — tcpdump inherits the terminal, extra args
+pass through, exit code comes back.
+
+---
+
+## v553 — 2026-07-21
+
+**Two CLI gaps closed from field complaints: `upgrade stage` can now take a
+source archive directly (`-src`), and `gravinet settings` carries the whole
+web-admin Settings page instead of two rows of it.**
+
+**`gravinet upgrade stage -src ARCHIVE`** — the upgrade CLI previously only
+accepted a built binary plus a manifest, which made `gravinet info upgrade`
+useless in the most common situation this project is actually in: you have
+a source tarball (there is no prebuilt release artifact anywhere — every
+fresh checkout is source) and a terminal, not a browser. The web admin has
+had the answer since the source-upload path landed: extract a
+.tgz/.tar.gz or .zip, `go build` it with the local toolchain, probe the
+result for version/OS/arch/PAM, and ingest it unsigned. That exact
+pipeline (`webadmin.StageFromSource`, exported this session the same way
+v550 exported `RunVtysh`/`LocalRouteTableText`/`TakeHostSnapshot` — one
+implementation, two front doors, no CLI reimplementation to drift) is now
+reachable as `gravinet upgrade stage -src PATH`. The trust policy is
+mirrored exactly, and owned by the caller just as the web handler owns
+it: with `upgrade.trusted_keys` configured the command refuses outright —
+source code has no signature to check even in principle, so building from
+it is only ever offered in local-only-unsigned mode; sign a binary and
+use `-bin`/`-manifest` instead. `-src` and `-bin` are mutually exclusive
+and the usage text shows both shapes. On success it prints the staged
+artifact id and the exact `upgrade apply -id ...` line to run next. The
+function gained a `notes` parameter so the generated manifest records
+which front door built it ("via CLI" vs "via web admin") instead of a
+hardcoded web-admin string either way.
+
+**`gravinet settings` filled out** (new file `cmd/gravinet/cli_settings.go`)
+— the group previously held managed/manager and nothing else, while the
+web admin's Settings page has grown twelve rows. Every row with a config
+field behind it now has a leaf: `shell` (AllowRemoteShell), `log-level`,
+`log-size`, `route-adv`, `udp-port`, `tcp-port`, `nat-state`, `upnp`, and
+`geoip`, alongside the pre-existing `managed`/`manager`. Dark mode is the
+one deliberate omission — it's a per-browser preference stored
+client-side, with nothing in config.json for a CLI to set.
+
+Each command edits the same field the corresponding web handler does and
+applies it the same way, live-vs-restart decided by mirroring what that
+handler reports rather than re-deriving it here: log level/size, route
+advertisement, UDP/TCP ports, and NAT state timeout go through commitCfg
+(save + live daemon reload — the log level especially exists to be
+changed *without* a restart, since restarting destroys the very mesh
+state you raised it to observe); shell, UPnP, and Geo-IP go through
+commitCfgStructural (save + service restart, `--no-restart` to opt out)
+because the daemon or web admin only reads them at startup — shell and
+Geo-IP are captured into the web server's config snapshot once, and the
+UPnP manager is only ever built alongside the listen-port transports.
+Port commands take a comma-separated list where the first entry is the
+primary (UDP) or the fallback listener (TCP) and the rest become extras,
+with `-` disabling that transport — including the same you-can't-turn-
+both-off refusal both web handlers enforce, in both directions. Values
+are validated with the same helpers the handlers use
+(`config.ParseSize`, `NATStateTimeoutSet`, the 0–86400 route-adv range,
+the webadmin log-level list), so a value the web admin would reject is
+rejected here with the same bounds. Toggle commands keep
+`cmdManaged`'s on/off/enable/disable/status verb shape; valued commands
+are `status` (or bare) to read and a positional value to set, printed
+in a form that round-trips as input. The new commands follow the
+canonical openCfg-first argument pattern (`-config` extracted from raw
+args) rather than a FlagSet, which is what lets `-config` appear
+anywhere on the line. The top-level usage banner and the settings
+group's own menu list all eleven leaves.
+
+Verified by building and running every new command against a scratch
+config: each status/set/round-trip, the live-vs-restart messaging, the
+size/level/port/range validation errors, both disable-refusals, the
+`-src`/`-bin` mutual exclusion, the trusted_keys refusal, the
+invalid-archive fast failure, and a full end-to-end `-src` stage of
+gravinet's own source tree (extract → build → probe → staged artifact
+with a correct id).
+
+---
+
+## v552 — 2026-07-21
+
+**Found and fixed the idle-CPU burn v551's profiler was added to diagnose:
+an underlay routing loop — gravinet's own encrypted UDP output routed by
+the kernel back into its own tunnel, re-encapsulated, and re-sent, forever.**
+
+The v551 pprof endpoint paid off on its first real capture. The 10-second
+CPU profile from the affected 8-core box (53.46s of samples — ~529%,
+matching htop's per-thread rows) split unambiguously: ~63% of all CPU in
+the outbound TUN path (`tunLoopPooled → processOutbound → sendData →
+sealAndSend → UDP sendto`, both address families), while the *inbound* UDP
+read loops accounted for 0.02s — effectively zero. An "idle" daemon
+reading a firehose of packets off its own overlay interface and
+encapsulating them out, with nothing arriving from anywhere. The third
+tell: `sendFragmented` at ~25% of the send path — the packets were
+*growing* past the session MTU.
+
+That's a routing loop, and the growth is what makes it catastrophic
+rather than merely wasteful: a kernel route steering traffic into the
+tunnel covers a peer's own real underlay endpoint, so the sealed datagram
+addressed to that endpoint is handed back to the TUN instead of the
+physical interface. Each pass re-wraps it (+header +tag) until it crosses
+the fragmentation threshold, after which every cycle multiplies the packet
+count — one trigger packet becomes a self-sustaining, self-amplifying
+storm that saturates every core and never touches the network.
+
+Why nothing already in place caught it: fulltunnel.go's peer-bypass /32
+machinery guards exactly this capture — but only behind `ns.fullTunnel`,
+i.e. an accepted *default* route. An ordinary redistributed prefix (say, a
+peer advertising a /24 that happens to contain another peer's public
+endpoint) installs with no protection at all. `MeshRouteMetricFloor`
+(9000) doesn't help either, and it's worth being precise about why: the
+kernel routes by longest-prefix-match *first* and consults metric only
+among equal prefixes — a mesh-installed /24 at metric 9000+ still beats
+the host's physical `0.0.0.0/0` default route for every address inside
+it. The floor protects same-prefix collisions with local routes; it was
+never able to protect a *more specific* mesh route capturing an endpoint
+this host otherwise reaches via its default route.
+
+Two independent layers, both new:
+
+- **Dataplane loop guard** (`isUnderlayLoop`, first check in
+  `processOutbound`): any packet read from the TUN that is plainly one of
+  gravinet's own underlay datagrams is dropped before the
+  firewall/NAT/route pipeline spends anything on it. "Plainly own" is
+  deliberately narrow so gatewayed/forwarded traffic can't
+  false-positive: UDP, source port equal to one of this node's own bound
+  listen ports (primary or extra — replies go back out the arrival
+  socket, so extras are legitimate own source ports too), and destination
+  address:port matching a live peer session endpoint or currently-dialed
+  seed (seeds matter: looped handshake inits would keep a session from
+  ever forming). 4-in-6 mapped endpoints from dual-stack sockets compare
+  canonicalized. Only packets passing the cheap port checks ever pay for
+  the endpoint scan — in healthy operation, none. Drops are counted
+  (`Engine.loopDrops`) and WARN-logged with an `ip route get` diagnosis
+  hint, throttled to one line per ~10s since the entire premise is that
+  these arrive at line rate. This layer works on every platform,
+  including the ones with no gateway backend, and stops the CPU burn no
+  matter how the routing table got into that state — even a route
+  gravinet didn't install itself.
+
+- **Bypass host routes extended beyond full-tunnel** (`meshRouteCovers` +
+  a widened `acquireBypassRoute`/`syncPeerBypassRoute` gate): a /32
+  (/128) escape-hatch route via the physical gateway is now acquired for
+  any live session or seed endpoint that a mesh-installed kernel route
+  (anything in `ns.osMetric`) covers — not just under an accepted /0.
+  `syncRoute` reconciles all bypass routes whenever a prefix *enters or
+  leaves* the installed set (not on mere metric swaps, which change no
+  coverage; and no longer under `osMu`, which the resync path itself
+  needs), and the existing session-lifecycle call sites
+  (install/roam/teardown) pick the new gate up for free, so a handshake
+  completing for an already-covered endpoint gets its bypass on the spot.
+  This is what restores actual connectivity — the guard alone would stop
+  the burn but blackhole the peer; the bypass makes the encrypted packets
+  reach it out the physical interface, which is what should have happened
+  all along. On platforms without a gateway backend the acquisition
+  declines with a debug line and the dataplane guard carries the load.
+
+Also in passing: `syncPeerBypassRoute` no longer computes its decision
+while holding `ps.mu` (the coverage check takes `ns.osMu`, and holding a
+session lock across a route-table lock was a lock-ordering hazard waiting
+for a caller to complete the cycle), and the endpoint address is
+canonicalized (`Unmap`) before becoming a bypass prefix so a 4-in-6
+mapped endpoint yields a correct v4 /32 rather than a /128 of the mapped
+form.
+
+Verified with new tests (`loopguard_test.go`): UDP header parsing
+including the non-first-IPv4-fragment and IPv6-extension-header decline
+paths, loop detection positives/negatives (foreign source port, unrelated
+destination port on the peer's own address, unknown destination, mapped
+endpoints, extra listen ports), a full `processOutbound` drop of the
+exact field-report topology (redistributed /24 covering the advertising
+peer's own endpoint) alongside proof that ordinary traffic *into* that
+same covered prefix still flows, and the end-to-end bypass lifecycle —
+install-on-cover, release-on-withdrawal, and acquisition at the session
+lifecycle with `fullTunnel` off throughout. All pre-existing
+fulltunnel/route tests pass unchanged.
+
+---
+
 ## v551 — 2026-07-21
 
 **New: `/debug/pprof/*` — Go's standard runtime profiler, authenticated,

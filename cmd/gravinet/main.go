@@ -48,7 +48,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "551"
+	version = "554"
 	commit  = "none"
 )
 
@@ -176,7 +176,8 @@ commands are grouped the same way the web admin's own left rail is:
   monitor    metrics, mesh-peers, capture, speedtest, latency, route-table,
              bgp-peers, hosts-file, dns-state, logs
   info       upgrade, readme, getting-started, license, about
-  settings   managed, manager
+  settings   managed, manager, shell, log-level, log-size, route-adv,
+             udp-port, tcp-port, nat-state, upnp, geoip
 
 run "gravinet <group>" alone to list what's under it, or
 "gravinet <group> <section> -h" for that command's own flags. A few

@@ -432,12 +432,23 @@ func buildFromSource(ctx context.Context, moduleRoot, outPath string) (output st
 	return "cgo build failed:\n" + cgoOut + "\n\nstatic build also failed:\n" + staticOut, fmt.Errorf("build failed: %w", staticErr)
 }
 
-// stageFromSource is the full pipeline handleUpgradeStageSource drives:
-// extract, build, probe, ingest. src is the raw request-body stream — a
+// StageFromSource is the full pipeline handleUpgradeStageSource drives:
+// extract, build, probe, ingest. src is the raw archive stream — a
 // gzip-compressed tar (.tgz/.tar.gz) or a zip (.zip), either is fine (see
-// extractSourceArchive, which is what tells them apart). Every temp
-// directory this creates is cleaned up before returning, win or lose.
-func stageFromSource(st *upgrade.Store, src io.Reader) (upgrade.Manifest, error) {
+// extractSourceArchive, which is what tells them apart, by content, and
+// which self-caps how much it will read regardless of the caller). notes is
+// recorded in the generated manifest as the artifact's provenance. Every
+// temp directory this creates is cleaned up before returning, win or lose.
+//
+// Exported (v553) so `gravinet upgrade stage -src` can reuse it verbatim —
+// same reasoning as RunVtysh/LocalRouteTableText/TakeHostSnapshot in v550:
+// one implementation of the extract-build-probe-ingest sequence, reached
+// from two front doors, not a CLI reimplementation that could drift from
+// what the web admin's upload does. The caller owns the trust-policy check
+// (refusing when trusted_keys is configured) exactly the way
+// handleUpgradeStageSource does — see its doc comment for why source
+// builds are only ever offered in local-only-unsigned mode.
+func StageFromSource(st *upgrade.Store, src io.Reader, notes string) (upgrade.Manifest, error) {
 	workDir, err := os.MkdirTemp(st.Dir(), ".source-build-*")
 	if err != nil {
 		return upgrade.Manifest{}, err
@@ -480,8 +491,7 @@ func stageFromSource(st *upgrade.Store, src io.Reader) (upgrade.Manifest, error)
 	if err != nil {
 		return upgrade.Manifest{}, fmt.Errorf("built a binary but could not identify it: %w", err)
 	}
-	m, err := upgrade.NewManifest(outPath, probe.Version, probe.OS, probe.Arch, probe.PAM,
-		"built from uploaded source via web admin, unsigned (local-only mode)")
+	m, err := upgrade.NewManifest(outPath, probe.Version, probe.OS, probe.Arch, probe.PAM, notes)
 	if err != nil {
 		return upgrade.Manifest{}, err
 	}

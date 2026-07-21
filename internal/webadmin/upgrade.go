@@ -315,7 +315,7 @@ func (s *Server) handleUpgradeStageSource(w http.ResponseWriter, r *http.Request
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxSourceUploadSize)
-	m, err := stageFromSource(s.upg.Store, r.Body)
+	m, err := StageFromSource(s.upg.Store, r.Body, "built from uploaded source via web admin, unsigned (local-only mode)")
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return

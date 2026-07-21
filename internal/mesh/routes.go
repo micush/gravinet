@@ -540,34 +540,81 @@ func (e *Engine) syncRoute(ns *netState, p netip.Prefix) {
 	}
 	metric, advertised := ns.bestRedistMetric(p)
 	metric += MeshRouteMetricFloor
+	// coverageChanged is true when p entered or left the set of
+	// mesh-installed kernel routes (not on a mere metric change, which alters
+	// no prefix's coverage) — the trigger for reconciling underlay-endpoint
+	// bypass routes below, after osMu is released (the resync path re-takes
+	// osMu via meshRouteCovers/physicalGateway, so it must not run under it).
+	coverageChanged := false
 	ns.osMu.Lock()
-	defer ns.osMu.Unlock()
 	old, installed := ns.osMetric[p]
 
-	if !advertised {
+	switch {
+	case !advertised:
 		if installed {
 			if err := ns.dev().DelRoute(p, old); err != nil {
 				e.log.Debugf("mesh: remove route %s from OS table (net %x): %v", p, ns.spec.ID, err)
 			}
 			delete(ns.osMetric, p)
+			coverageChanged = true
 		}
-		return
-	}
-	if installed && old == metric {
-		return // already programmed at this metric
-	}
-	if installed && old != metric {
-		// Priority is part of the route key; drop the stale-metric entry first so
-		// we don't leave two routes for the same prefix.
-		if err := ns.dev().DelRoute(p, old); err != nil {
-			e.log.Debugf("mesh: replace route %s (old metric %d) on net %x: %v", p, old, ns.spec.ID, err)
+	case installed && old == metric:
+		// already programmed at this metric
+	default:
+		if installed {
+			// Priority is part of the route key; drop the stale-metric entry
+			// first so we don't leave two routes for the same prefix.
+			if err := ns.dev().DelRoute(p, old); err != nil {
+				e.log.Debugf("mesh: replace route %s (old metric %d) on net %x: %v", p, old, ns.spec.ID, err)
+			}
+		}
+		if err := ns.dev().AddRoute(p, metric); err != nil {
+			e.log.Warnf("mesh: install route %s (metric %d) into OS table (net %x): %v", p, metric, ns.spec.ID, err)
+		} else {
+			ns.osMetric[p] = metric
+			coverageChanged = !installed // fresh install covers new address space; a metric swap doesn't
 		}
 	}
-	if err := ns.dev().AddRoute(p, metric); err != nil {
-		e.log.Warnf("mesh: install route %s (metric %d) into OS table (net %x): %v", p, metric, ns.spec.ID, err)
-		return
+	ns.osMu.Unlock()
+
+	if coverageChanged {
+		// A mesh route just started (or stopped) covering some address
+		// space. If a live peer session's or dialed seed's underlay endpoint
+		// sits inside it, the kernel will now steer gravinet's own encrypted
+		// output to that endpoint back into the tunnel — the routing loop
+		// documented in changelog v552. Reconcile every endpoint's bypass
+		// host route (see meshRouteCovers and fulltunnel.go) so covered
+		// endpoints get their /32 (/128) escape hatch immediately, and
+		// no-longer-covered ones release theirs.
+		e.resyncAllBypassRoutes(ns)
+		e.syncSeedBypassRoutes(ns)
 	}
-	ns.osMetric[p] = metric
+}
+
+// meshRouteCovers reports whether any route this engine itself programmed
+// into the OS routing table for ns (an entry in ns.osMetric — redistributed
+// prefixes via syncRoute, or an accepted full-tunnel default via
+// syncFullTunnelRoute) contains addr. Used to decide whether an underlay
+// endpoint at addr needs a peer-bypass host route even without full-tunnel:
+// kernel routing is longest-prefix-match first and metric only among equal
+// prefixes, so a mesh-installed /24 (at MeshRouteMetricFloor+) still beats
+// the host's physical /0 default route for every address it contains — the
+// metric floor protects same-prefix collisions, never a more-specific mesh
+// route capturing a peer's endpoint that this host otherwise only reaches
+// via its default route.
+func (ns *netState) meshRouteCovers(addr netip.Addr) bool {
+	if !addr.IsValid() {
+		return false
+	}
+	a := addr.Unmap()
+	ns.osMu.Lock()
+	defer ns.osMu.Unlock()
+	for p := range ns.osMetric {
+		if p.Contains(a) {
+			return true
+		}
+	}
+	return false
 }
 
 // isDefaultRoute reports whether p is a default route in either address

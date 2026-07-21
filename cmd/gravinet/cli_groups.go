@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -81,44 +83,38 @@ func notYetInCLI(what string) func([]string) {
 	}
 }
 
-// captureNotYetInCLI and speedtestNotYetInCLI give a specific reason rather
-// than notYetInCLI's generic one — both were actually investigated (not
-// just assumed out of scope), and the reason is worth stating precisely
-// since it's different for each and shapes what a real implementation
-// would need:
+// cmdMonitorCapture and speedtestNotYetInCLI: both of these were actually
+// investigated rather than assumed out of scope, and they landed
+// differently —
 //
-// capture: internal/webadmin's startCapture(iface, snaplen, onPacket) is
-// genuinely daemon-independent (one per platform — capture_linux.go,
-// capture_darwin.go, etc. — no engine state involved), so a CLI capture
-// command is possible in principle. What's not readily reusable is
-// everything downstream of it: capHandle/stop() and the pcap writer
-// (captureState.writePcap) are unexported and coupled to the web admin's
-// own in-memory ring buffer, so reaching parity means either exporting a
-// meaningful chunk of that machinery across six platform files or writing
-// a second, independent pcap encoder — real work, with the same
-// per-platform-raw-capture risk profile as the FreeBSD tun fixes earlier
-// this session, not something to rush through without the same level of
-// per-platform testing those got.
+// capture (real since v554, by delegation): internal/webadmin's
+// startCapture(iface, snaplen, onPacket) is genuinely daemon-independent
+// (one per platform — capture_linux.go, capture_darwin.go, etc. — no
+// engine state involved), so an in-process CLI capture was possible in
+// principle. What was never readily reusable is everything downstream of
+// it: capHandle/stop() and the pcap writer (captureState.writePcap) are
+// unexported and coupled to the web admin's own in-memory ring buffer, so
+// in-process parity meant either exporting a meaningful chunk of that
+// machinery across six platform files or writing a second, independent
+// pcap encoder — real work, with the same per-platform-raw-capture risk
+// profile as the FreeBSD tun fixes got. The field answer was simpler and
+// better: on a terminal, the tool for "show me packets on this interface"
+// already exists, is installed nearly everywhere, and does filtering,
+// -w pcap output, and rotation better than a reimplementation ever would.
+// So cmdMonitorCapture just runs tcpdump on the requested overlay
+// interface, passing any extra args through verbatim — gravinet's only
+// added value here is knowing *which* interfaces are its overlays (the
+// "ifaces" control command, same one monitor dns-state uses) so a bare
+// "gravinet monitor capture" can pick the interface for you when there's
+// only one, and list them when there's more.
 //
-// speedtest: unlike everything else in this file, this isn't a local
+// speedtest: unlike everything else under "monitor", this isn't a local
 // read — handleSpeedtestRun coordinates an active throughput test between
 // two live peers over the mesh itself, which only the running daemon can
 // initiate. A CLI equivalent needs actual new control-socket protocol (an
 // asynchronous start-job/poll-status shape, not a single request/response
 // like everything else here), not just a new command reusing an existing
 // local reader.
-func captureNotYetInCLI(args []string) {
-	fatal(`monitor capture isn't available via the CLI yet.
-
-Investigated, not just skipped: the actual packet-capture primitive
-(startCapture, per-platform, no daemon state involved) is reusable in
-principle, but the pcap writer and capture-handle lifecycle it feeds are
-internal to the web admin's own capture buffer — reaching parity needs
-either exporting that machinery across six platform files or a second pcap
-encoder, real work with real per-platform risk. Use the web admin for this
-today.`)
-}
-
 func speedtestNotYetInCLI(args []string) {
 	fatal(`monitor speedtest isn't available via the CLI yet.
 
@@ -127,6 +123,90 @@ coordinates an active throughput test between two live peers over the mesh
 itself, which only the running daemon can initiate. A CLI equivalent needs
 real new control-socket protocol (start a job, poll its status), not just a
 new command reusing an existing reader. Use the web admin for this today.`)
+}
+
+// cmdMonitorCapture is "gravinet monitor capture [iface] [tcpdump args...]":
+// live packet capture on an overlay interface, by running tcpdump — see the
+// doc comment above for why delegation beat an in-process reimplementation.
+// Everything after the interface is handed to tcpdump untouched, so the
+// full filter/output vocabulary works exactly as documented in tcpdump(8):
+//
+//	gravinet monitor capture                      # sole overlay iface, or a list to pick from
+//	gravinet monitor capture mesh0                # tcpdump -i mesh0
+//	gravinet monitor capture mesh0 -n port 53     # plus any tcpdump flags/filter
+//	gravinet monitor capture mesh0 -w out.pcap    # write a pcap
+//
+// tcpdump needs the same privileges here it needs anywhere (root or
+// CAP_NET_RAW); it reports that itself, in its own words, if missing.
+func cmdMonitorCapture(args []string) {
+	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
+		fmt.Println(`gravinet monitor capture [iface] [tcpdump args...] — live packet capture on an
+overlay interface, delegated to tcpdump.
+
+With no interface named, asks the running daemon for its overlay interfaces
+and uses the only one (or lists them if there are several). Everything after
+the interface is passed to tcpdump verbatim: filters ("port 53"), -n, -v,
+-w file.pcap, -c 100, anything tcpdump(8) documents. Requires tcpdump on
+PATH and the privileges tcpdump itself needs (root or CAP_NET_RAW).`)
+		return
+	}
+
+	var iface string
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		iface, args = args[0], args[1:]
+	}
+	if iface == "" {
+		// No interface named: the one thing gravinet knows that tcpdump
+		// doesn't is which interfaces are its overlays. Ask the daemon.
+		resp, err := control.Do(defaultControlSocket(), control.Request{Cmd: "ifaces"})
+		if err != nil || !resp.OK {
+			fatal("no interface given and the daemon isn't reachable to list overlay interfaces — name one explicitly: gravinet monitor capture <iface>")
+		}
+		switch len(resp.Ifaces) {
+		case 0:
+			fatal("no interface given and the daemon reports no overlay interfaces up — name one explicitly")
+		case 1:
+			iface = resp.Ifaces[0].Iface
+			fmt.Fprintf(os.Stderr, "capturing on %s (network %q — the only overlay interface)\n", iface, resp.Ifaces[0].Name)
+		default:
+			fmt.Fprintln(os.Stderr, "several overlay interfaces are up — pick one:")
+			for _, ifc := range resp.Ifaces {
+				fmt.Fprintf(os.Stderr, "  gravinet monitor capture %-8s (network %q)\n", ifc.Iface, ifc.Name)
+			}
+			os.Exit(2)
+		}
+	}
+
+	td, err := exec.LookPath("tcpdump")
+	if err != nil {
+		// Root's PATH often carries the sbin dirs, but a sudo-less shell's
+		// may not even though the binary is right there — check the usual
+		// homes before declaring it absent.
+		for _, p := range []string{"/usr/sbin/tcpdump", "/sbin/tcpdump", "/usr/local/sbin/tcpdump", "/usr/bin/tcpdump"} {
+			if st, serr := os.Stat(p); serr == nil && !st.IsDir() {
+				td = p
+				break
+			}
+		}
+		if td == "" {
+			fatal("tcpdump not found on this host — install it (e.g. apt install tcpdump / pkg install tcpdump), or use the web admin's Monitor → Capture page")
+		}
+	}
+
+	cmd := exec.Command(td, append([]string{"-i", iface}, args...)...)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	// Ctrl-C should stop the capture, not this wrapper: the SIGINT goes to
+	// the whole foreground process group, tcpdump catches it, prints its
+	// packet counts, and exits — ignore it here so gravinet is still around
+	// to relay that exit code instead of dying first mid-stream.
+	signal.Ignore(os.Interrupt)
+	err = cmd.Run()
+	if ee, ok := err.(*exec.ExitError); ok {
+		os.Exit(ee.ExitCode())
+	}
+	if err != nil {
+		fatal("tcpdump: %v", err)
+	}
 }
 
 var meshGroup = []groupLeaf{
@@ -154,7 +234,7 @@ var namingGroup = []groupLeaf{
 var monitorGroup = []groupLeaf{
 	{"metrics", "live CPU, memory, disk, and per-overlay-interface throughput", cmdMonitorMetrics},
 	{"mesh-peers", "live connection health for every peer (partial — see -h)", cmdMonitorMeshPeers},
-	{"capture", "live packet capture on an overlay interface", captureNotYetInCLI},
+	{"capture", "live packet capture on an overlay interface (runs tcpdump)", cmdMonitorCapture},
 	{"speedtest", "measure throughput between this node and a managed peer", speedtestNotYetInCLI},
 	{"latency", "round-trip time from this host to every other mesh peer", cmdLatency},
 	{"route-table", "the live kernel routing table on this host", cmdMonitorRouteTable},
@@ -172,14 +252,25 @@ var infoGroup = []groupLeaf{
 	{"about", "build and host identity", cmdInfoAbout},
 }
 
-// settingsGroup isn't a NAV_GROUPS entry — managed/manager mode live on the
-// web admin's Settings page, reached from the gear icon rather than the
-// left rail (see ui.go's cluster-managed-row/cluster-manager-row). It's
-// included anyway since it's still a real, distinct part of the web admin
-// with no other natural home in the groups above.
+// settingsGroup isn't a NAV_GROUPS entry — it mirrors the web admin's
+// Settings page, reached from the gear icon rather than the left rail. As
+// of v553 it carries the whole page, not just cluster mode: every row there
+// with a config field behind it has a leaf here (see cli_settings.go's
+// package comment for the live-vs-restart split and why each setting lands
+// where it does). The one deliberate omission is Dark mode, a per-browser
+// preference stored client-side with nothing in config.json to set.
 var settingsGroup = []groupLeaf{
 	{"managed", "get/set managed mode (be managed by a Manager-mode peer)", cmdManaged},
 	{"manager", "get/set manager mode (manage other nodes)", cmdManager},
+	{"shell", "allow a Manager peer to open a real OS shell here: on|off|status", cmdSettingsShell},
+	{"log-level", "how much this node logs (error|warn|info|debug); applied live", cmdSettingsLogLevel},
+	{"log-size", "log-file size cap (e.g. 200M, 1G); oldest lines drop first; applied live", cmdSettingsLogSize},
+	{"route-adv", "route re-advertisement interval in seconds (0 = default); applied live", cmdSettingsRouteAdv},
+	{"udp-port", "UDP listen port(s), comma-separated, first is primary; \"-\" turns UDP off", cmdSettingsUDPPort},
+	{"tcp-port", "TCP/TLS fallback port(s), comma-separated; \"-\" turns the fallback off", cmdSettingsTCPPort},
+	{"nat-state", "idle NAT connection timeout in seconds (0 = default 120s); applied live", cmdSettingsNATState},
+	{"upnp", "ask the LAN router to forward this node's ports automatically: on|off|status", cmdSettingsUPnP},
+	{"geoip", "approximate peer/seed locations via ipapi.co in the web admin: on|off|status", cmdSettingsGeoIP},
 }
 
 // cmdMeshPeers is "gravinet mesh peers" — the live peer list, the same data

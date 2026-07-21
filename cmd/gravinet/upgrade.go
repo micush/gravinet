@@ -63,7 +63,11 @@ Build host (only if you want signed provenance; not required):
   gravinet upgrade sign -bin PATH -key B64      sign a built binary -> PATH.json
 
 On this node:
-  gravinet upgrade stage -bin PATH [-manifest P]  stage an artifact locally
+  gravinet upgrade stage -bin PATH [-manifest P]  stage a built artifact locally
+  gravinet upgrade stage -src ARCHIVE             build a source archive (.tgz/.tar.gz/.zip)
+                                                  with the local Go toolchain and stage the
+                                                  result, no manifest needed (only with no
+                                                  trusted_keys configured)
   gravinet upgrade list                           artifacts staged here
   gravinet upgrade status                         this node's upgrade state
   gravinet upgrade apply -id ID                   apply a staged artifact
@@ -203,35 +207,72 @@ func cmdUpgradeSign(args []string) {
 // cmdUpgradeStage ingests an artifact into this node's store directly, without
 // going through the daemon: the store is a directory and Ingest is atomic and
 // self-verifying, so a root CLI writing into it races safely with a running
-// daemon reading from it. This CLI path always takes a manifest (signed or
-// not, per Store.Verify's trust policy — see internal/upgrade/store.go); the
-// web admin's Upgrade page is the one with the no-manifest, auto-probed
-// upload for a raw binary or a source archive.
+// daemon reading from it. Two shapes:
+//
+//	-bin PATH [-manifest PATH]   a built binary + its manifest (signed or
+//	                             not, per Store.Verify's trust policy — see
+//	                             internal/upgrade/store.go)
+//	-src PATH                    a source archive (.tgz/.tar.gz or .zip):
+//	                             extracted, built with the local Go
+//	                             toolchain, probed, and staged unsigned —
+//	                             the exact pipeline the web admin's
+//	                             Info → Upgrade source upload runs
+//	                             (webadmin.StageFromSource), reached from
+//	                             the terminal. Like that upload, only
+//	                             offered in local-only-unsigned mode: with
+//	                             upgrade.trusted_keys configured there is
+//	                             no signature to check on source code even
+//	                             in principle, so it's refused — build and
+//	                             sign a binary yourself instead.
 func cmdUpgradeStage(args []string) {
 	fs := flag.NewFlagSet("upgrade stage", flag.ExitOnError)
 	cfgPath := fs.String("config", defaultConfigPath, "path to config file")
-	bin := fs.String("bin", "", "path to the artifact")
+	bin := fs.String("bin", "", "path to a built artifact (requires a manifest)")
 	manPath := fs.String("manifest", "", "path to its signed manifest (default: <bin>.json)")
+	src := fs.String("src", "", "path to a source archive (.tgz/.tar.gz/.zip) to build and stage, no manifest needed")
 	fs.Parse(args)
-	if *bin == "" {
-		fatal("usage: gravinet upgrade stage -bin PATH [-manifest PATH]")
-	}
-	if *manPath == "" {
-		*manPath = *bin + ".json"
+	if (*bin == "") == (*src == "") {
+		fatal("usage: gravinet upgrade stage -bin PATH [-manifest PATH]\n       gravinet upgrade stage -src ARCHIVE.tgz  (build from a source archive, no manifest)")
 	}
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
 		fatal("config: %v", err)
+	}
+	st, err := upgrade.NewStore(cfg.UpgradeStoreDir(), cfg.Upgrade.TrustedKeys)
+	if err != nil {
+		fatal("%v", err)
+	}
+
+	if *src != "" {
+		// Mirror handleUpgradeStageSource's trust-policy refusal exactly —
+		// see webadmin.StageFromSource's doc comment for why the caller owns
+		// this check.
+		if len(cfg.Upgrade.TrustedKeys) > 0 {
+			fatal("this node trusts release keys (upgrade.trusted_keys) — building from a source archive has no signature to check and is only offered in local-only-unsigned mode; build and sign a binary yourself and use 'upgrade stage -bin ... -manifest ...' instead")
+		}
+		f, err := os.Open(*src)
+		if err != nil {
+			fatal("%v", err)
+		}
+		defer f.Close()
+		fmt.Printf("building %s (this runs a full 'go build'; a minute or two is normal)...\n", *src)
+		m, err := webadmin.StageFromSource(st, f, "built from source archive via CLI, unsigned (local-only mode)")
+		if err != nil {
+			fatal("%v", err)
+		}
+		fmt.Printf("built and staged %s (%s, %s/%s, pam=%v) in %s\napply it with: gravinet upgrade apply -id %s\n",
+			m.ID(), m.Version, m.OS, m.Arch, m.PAM, st.Dir(), m.ID())
+		return
+	}
+
+	if *manPath == "" {
+		*manPath = *bin + ".json"
 	}
 	mb, err := os.ReadFile(*manPath)
 	if err != nil {
 		fatal("manifest: %v", err)
 	}
 	m, err := upgrade.ParseManifest(mb)
-	if err != nil {
-		fatal("%v", err)
-	}
-	st, err := upgrade.NewStore(cfg.UpgradeStoreDir(), cfg.Upgrade.TrustedKeys)
 	if err != nil {
 		fatal("%v", err)
 	}

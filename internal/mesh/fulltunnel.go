@@ -23,11 +23,12 @@ package mesh
 // Add/DelGatewayRoute call, are the only way anything in this package
 // touches one of these routes.
 //
-// ns.fullTunnel gates acquisition: while it's false (the default, and the
-// only value anything sets it to today — nothing yet flips it live) every
-// acquire call here is a no-op, so wiring these calls into the session and
-// seed lifecycle doesn't change behavior for a network that hasn't opted
-// in. Release always proceeds regardless of fullTunnel's current value — a
+// Acquisition is gated (see acquireBypassRoute) on something actually
+// threatening to capture underlay traffic to the address: ns.fullTunnel, or
+// — since v552 — a mesh-installed kernel route covering it
+// (netState.meshRouteCovers). With neither in play every acquire call here
+// is a no-op, so wiring these calls into the session and seed lifecycle
+// doesn't change behavior for a network with no capturing routes. Release always proceeds regardless of fullTunnel's current value — a
 // route acquired while it was on must still be releasable after it's turned
 // off. The trigger that actually turns fullTunnel on — accepting a
 // peer-advertised default route and installing it (literally, at its
@@ -105,14 +106,34 @@ type bypassRef struct {
 	ifIndex int32
 }
 
-// acquireBypassRoute records one more reference to addr's full-tunnel
-// bypass route, installing it for real (via AddGatewayRoute) only on the
-// first reference. A no-op if ns.fullTunnel is false. ns supplies the
-// gateway-lookup context (which tun device's ifindex to exclude) only when
-// this is the first reference — later callers acquiring an address another
-// tracker already holds don't re-resolve anything.
+// acquireBypassRoute records one more reference to addr's bypass route,
+// installing it for real (via AddGatewayRoute) only on the first reference.
+// A no-op unless something on this network actually threatens to capture
+// underlay traffic to addr: ns.fullTunnel (the original trigger — an
+// accepted default route captures *every* underlay address), or, since
+// v552, any narrower mesh-installed kernel route that covers addr
+// specifically (see meshRouteCovers in routes.go — a redistributed /24
+// containing a peer's real endpoint loops that peer's underlay traffic into
+// the tunnel exactly the way an unprotected /0 would, and needs exactly the
+// same /32 escape hatch). ns supplies the gateway-lookup context (which tun
+// device's ifindex to exclude) only when this is the first reference —
+// later callers acquiring an address another tracker already holds don't
+// re-resolve anything.
 func (e *Engine) acquireBypassRoute(ns *netState, addr netip.Addr) {
-	if !ns.fullTunnel.Load() || !addr.IsValid() {
+	if !addr.IsValid() {
+		return
+	}
+	if !ns.fullTunnel.Load() && !ns.meshRouteCovers(addr) {
+		return
+	}
+	if !gatewaySupported {
+		// Reachable only via the meshRouteCovers path: full-tunnel refuses
+		// to activate at all on a platform with no gateway backend (see
+		// syncFullTunnelRoute's hard guard), but an ordinary redistributed
+		// route installs everywhere. No bypass is possible here — the
+		// dataplane loop guard (isUnderlayLoop) is what protects such a
+		// platform, and it logs its own WARN with the diagnosis.
+		e.log.Debugf("mesh: underlay endpoint %s on net %x is covered by a mesh-installed route, but this platform has no bypass-route backend (see internal/tun/gateway_unsupported.go)", addr, ns.spec.ID)
 		return
 	}
 	e.bypassMu.Lock()
@@ -167,10 +188,12 @@ func (e *Engine) releaseBypassRoute(addr netip.Addr) {
 	}
 }
 
-// syncPeerBypassRoute acquires or releases ps's full-tunnel peer-bypass host
-// route to match its current reachability: a reference on ps.endpoint if ps
-// is reached directly (ps.relay == nil) and its endpoint is known, none
-// otherwise. A relayed peer isn't dialed at its own advertised endpoint, so
+// syncPeerBypassRoute acquires or releases ps's peer-bypass host route to
+// match its current reachability: a reference on ps.endpoint if ps is
+// reached directly (ps.relay == nil), its endpoint is known, and something
+// on this network would otherwise capture underlay traffic to it
+// (full-tunnel, or since v552 any mesh-installed route covering the
+// endpoint — see acquireBypassRoute); none otherwise. A relayed peer isn't dialed at its own advertised endpoint, so
 // there's nothing of its own to bypass — the relay session it goes through
 // gets its own reference via this same function, since a relay is itself
 // always a direct peer session. Safe to call from any point in the
@@ -179,12 +202,23 @@ func (e *Engine) releaseBypassRoute(addr netip.Addr) {
 // calling it when nothing actually changed is a cheap no-op.
 func (e *Engine) syncPeerBypassRoute(ns *netState, ps *peerSession) {
 	ps.mu.Lock()
-	var want netip.Addr
-	if ns.fullTunnel.Load() && ps.relay == nil && ps.endpoint.IsValid() {
-		want = ps.endpoint.Addr()
+	var ep netip.AddrPort
+	if ps.relay == nil {
+		ep = ps.endpoint
 	}
 	have := ps.bypassAddr
 	ps.mu.Unlock()
+
+	// The coverage check runs after ps.mu is released: meshRouteCovers takes
+	// ns.osMu, and nothing should hold a session lock across a route-table
+	// lock. Since v552 a bypass is wanted not only under full-tunnel but
+	// also whenever a narrower mesh-installed route covers this peer's
+	// endpoint — see acquireBypassRoute's doc comment for the loop that
+	// guards against.
+	var want netip.Addr
+	if ep.IsValid() && (ns.fullTunnel.Load() || ns.meshRouteCovers(ep.Addr())) {
+		want = ep.Addr().Unmap()
+	}
 
 	if have == want {
 		return
