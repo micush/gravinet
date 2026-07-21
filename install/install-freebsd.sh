@@ -46,6 +46,22 @@
 #                        frr_daemons, driven via service(8)) — no separate setup
 #                        needed beyond this. Pass this if you don't want this
 #                        host's package set changed.
+#   --no-ifqmaxlen       don't touch net.link.ifqmaxlen. By default, if it isn't
+#                        already set to at least 1000 and nothing in
+#                        /boot/loader.conf already mentions it, this installer
+#                        appends net.link.ifqmaxlen="1000" there. FreeBSD's
+#                        default (50) is the outbound queue depth a freshly
+#                        attached interface gets, gravinet's overlay interface
+#                        included — easily overrun by even a brief stall in
+#                        gravinet's single overlay reader, which then shows up
+#                        as ordinary mesh traffic failing locally with
+#                        "sendto: No buffer space available" (ENOBUFS). This can
+#                        only be changed at boot — there's no live sysctl for
+#                        it — so this only takes effect after your next reboot,
+#                        and the installer will tell you so. Never overrides a
+#                        value already set (by you or a previous run of this
+#                        installer); pass this if you'd rather manage it
+#                        yourself.
 set -eu
 
 PREFIX=/usr/local
@@ -55,6 +71,7 @@ START=1
 ACTION=install
 ENABLE_LOCAL_UNBOUND=1
 INSTALL_FRR=1
+ENABLE_IFQMAXLEN=1
 RCSCRIPT=/usr/local/etc/rc.d/gravinet
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 GO_MIN_MINOR=21
@@ -84,7 +101,9 @@ while [ $# -gt 0 ]; do
     --enable-local-unbound) ENABLE_LOCAL_UNBOUND=1 ;; # now the default; kept as a harmless no-op for anyone already scripting it
     --no-frr) INSTALL_FRR=0 ;;
     --frr) INSTALL_FRR=1 ;;
-    -h|--help) sed -n '2,49p' "$0"; exit 0 ;;
+    --no-ifqmaxlen) ENABLE_IFQMAXLEN=0 ;;
+    --ifqmaxlen) ENABLE_IFQMAXLEN=1 ;; # default; kept for symmetry with --frr/--enable-local-unbound
+    -h|--help) sed -n '2,64p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -438,6 +457,64 @@ EOF
 # code is the only thing this depends on. Costs a handful of doomed
 # lookups against whichever candidates don't exist in a given repo; each is
 # a quick "no such package" from pkg, not a real download attempt.
+# LOADER_CONF / IFQMAXLEN_FLOOR: see ensure_ifqmaxlen below. Keep
+# IFQMAXLEN_FLOOR in sync with internal/tun/tun_freebsd.go's minIfqMaxLen —
+# same number, same reasoning, this is just the only place that can actually
+# apply it.
+LOADER_CONF=/boot/loader.conf
+IFQMAXLEN_FLOOR=1000
+IFQMAXLEN_CHANGED=0
+
+# ifqmaxlen_configured reports whether $LOADER_CONF already sets
+# net.link.ifqmaxlen at all, at any value — an operator's own choice (even a
+# lower one) always wins here and this installer leaves it completely alone,
+# the same "never override, only fill a gap" stance gravinet's own runtime
+# check takes (internal/tun/tun_freebsd.go's checkIfqMaxLen only warns, it
+# never writes).
+ifqmaxlen_configured() {
+  [ -f "$LOADER_CONF" ] && grep -qE '^[[:space:]]*net\.link\.ifqmaxlen[[:space:]]*=' "$LOADER_CONF"
+}
+
+# ensure_ifqmaxlen appends a net.link.ifqmaxlen floor to $LOADER_CONF if
+# nothing there already sets it and the live value is currently below the
+# floor. This is the fix for gravinet's overlay traffic — pings included —
+# locally failing with "sendto: No buffer space available" (ENOBUFS):
+# FreeBSD's own default outbound queue depth for a freshly attached
+# interface is 50 packets, easily overrun by even a brief stall in
+# gravinet's single-goroutine overlay reader.
+#
+# This has to live here rather than in gravinet itself: net.link.ifqmaxlen
+# is a boot-time-only *tunable*, not a live sysctl — FreeBSD's own sysctl(8)
+# refuses a runtime write to it outright ("read only tunable... Tunable
+# values are set in /boot/loader.conf"), confirmed the hard way after an
+# earlier gravinet version tried exactly that and silently no-op'd every
+# time. loader.conf plus a reboot is the only place this can actually take
+# effect, so that's what this does — and, critically, why the reboot note
+# below matters: appending the line here does nothing until the box is
+# rebooted, this run included.
+ensure_ifqmaxlen() {
+  if ifqmaxlen_configured; then
+    echo "    net.link.ifqmaxlen already set in $LOADER_CONF; leaving it alone"
+    return 0
+  fi
+  local cur
+  cur="$(sysctl -n net.link.ifqmaxlen 2>/dev/null || echo 0)"
+  if [ "$cur" -ge "$IFQMAXLEN_FLOOR" ] 2>/dev/null; then
+    echo "    net.link.ifqmaxlen is already $cur (>= $IFQMAXLEN_FLOOR); nothing to do"
+    return 0
+  fi
+  {
+    echo ""
+    echo "# Added by gravinet's installer: FreeBSD's default net.link.ifqmaxlen (50)"
+    echo "# is too shallow for gravinet's overlay interface — a brief stall in its"
+    echo "# single reader can overflow it and drop packets with ENOBUFS"
+    echo "# (\"no buffer space available\")."
+    echo "net.link.ifqmaxlen=\"$IFQMAXLEN_FLOOR\""
+  } >> "$LOADER_CONF"
+  IFQMAXLEN_CHANGED=1
+  echo "    added net.link.ifqmaxlen=\"$IFQMAXLEN_FLOOR\" to $LOADER_CONF (currently $cur — needs a reboot to take effect)"
+}
+
 FRR_PKG_CANDIDATES="frr12 frr11 frr10 frr9 frr8"
 
 # frr_installed reports whether FRR (specifically vtysh) is already on this
@@ -533,6 +610,13 @@ else
   echo "    --no-frr passed; leaving FRR alone."
 fi
 
+echo "==> outbound queue depth (net.link.ifqmaxlen)"
+if [ "$ENABLE_IFQMAXLEN" = 1 ]; then
+  ensure_ifqmaxlen
+else
+  echo "    --no-ifqmaxlen passed; leaving net.link.ifqmaxlen alone."
+fi
+
 echo "==> writing rc.d script $RCSCRIPT"
 "$BIN" service install -config "$CONFIG" >/dev/null
 
@@ -581,6 +665,13 @@ if [ "$INSTALL_FRR" = 1 ]; then
     echo "FRR: NOT installed — see the warning above. Traffic > BGP will let you"
     echo "     author a config, but nothing runs until FRR is installed somehow."
   fi
+fi
+
+if [ "$IFQMAXLEN_CHANGED" = 1 ]; then
+  echo ""
+  echo "*** net.link.ifqmaxlen=\"$IFQMAXLEN_FLOOR\" was added to $LOADER_CONF but"
+  echo "*** doesn't take effect until this box is rebooted (it's a boot-time-only"
+  echo "*** tunable, not a live sysctl) — reboot when convenient: 'reboot'"
 fi
 
 cat <<EOF

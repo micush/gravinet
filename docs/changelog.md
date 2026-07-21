@@ -37,6 +37,78 @@ assuming it didn't happen.
 
 ---
 
+## v547 — 2026-07-20
+
+**install-freebsd.sh now sets `net.link.ifqmaxlen` at install time —
+the actual fix for v546's warning, applied where it can actually work.**
+
+v546 made gravinet detect and warn about a too-shallow
+`net.link.ifqmaxlen` (FreeBSD's default outbound interface-queue depth,
+50 packets) instead of silently failing to fix it — but a running daemon
+architecturally cannot fix this itself; it's a boot-time-only tunable.
+The installer runs once, as root, specifically at the point a system is
+being set up — the one place this can legitimately be changed.
+
+New `ensure_ifqmaxlen`, called from the main install flow right after
+the FRR step: if `/boot/loader.conf` doesn't already mention
+`net.link.ifqmaxlen` at all (an operator's own existing value, whatever
+it is, is always left alone) and the live value is below 1000, appends
+`net.link.ifqmaxlen="1000"` to it. Since this can't take effect until a
+reboot, the final install summary now says so explicitly if it made the
+change, instead of letting that requirement get lost in the scroll of
+install output. New `--no-ifqmaxlen`/`--ifqmaxlen` flags, matching the
+existing `--no-frr`/`--no-local-unbound` pattern, for anyone who'd
+rather manage this themselves.
+
+Confirmed against real field output: the same box that showed
+`net.link.ifqmaxlen: 50` before this change showed `1000` and (after a
+reboot) meaningfully different ping behavior once the loader.conf line
+was in place by hand — this just automates writing that line.
+
+Field note, unrelated to this fix: field testing before this loader.conf
+change went in also showed a peer-specific asymmetry — one peer's ping
+converging to 0% loss on a repeat run, another peer's not, despite both
+being direct connections — that queue depth alone may not fully explain.
+Worth its own look once the loader.conf change has had a chance to
+settle in.
+
+---
+
+## v546 — 2026-07-20
+
+**Corrects v545: the `net.link.ifqmaxlen` bump never actually worked, and
+failed silently.**
+
+v545 tried to raise FreeBSD's default interface-queue depth (50 packets)
+via `sysctl net.link.ifqmaxlen=1000` at tun-interface creation time, to
+address leftover intermittent ENOBUFS after v544's ARP fix. That doesn't
+work: `net.link.ifqmaxlen` is a boot-time-only *tunable* on FreeBSD, not
+a live sysctl — the kernel rejects a runtime write outright ("oid
+'net.link.ifqmaxlen' is a read only tunable — Tunable values are set in
+/boot/loader.conf"). v545's code discarded that error
+(`_ = exec.Command(...).Run()`) and treated the no-op as success, so
+every install running v545 had this "fix" silently fail every single
+time — confirmed against real field output: `sysctl net.link.ifqmaxlen`
+still reads 50 on a v545 box that had already been restarted.
+
+There is no runtime lever for this at all, so `tun_freebsd.go` no longer
+pretends there is one. `checkIfqMaxLen` (renamed from `bumpIfqMaxLen`)
+now only reads the current value and logs a clear warning if it's below
+1000, pointing at the one place that's actually true — add
+`net.link.ifqmaxlen=1000` (or higher) to `/boot/loader.conf` and reboot.
+
+Net effect: as of v546, gravinet is honest about this rather than
+silently no-op'ing, but the underlying queue-depth question — whether
+raising it actually clears the remaining intermittent loss — is still
+unverified on a real system, since no test so far has actually run with
+a raised value. Worth confirming once the loader.conf change + reboot is
+in place. Separately: field testing also showed a peer-specific
+asymmetry (one peer's ping converging to 0% loss on a repeat run,
+another's not, despite both being direct connections) that queue depth
+alone may not fully explain — still open.
+
+---
+
 ## v545 — 2026-07-20
 
 **Fixed (partial → full): FreeBSD's intermittent `sendto: No buffer space

@@ -34,6 +34,8 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
+	"gravinet/internal/logx"
 )
 
 const (
@@ -75,8 +77,8 @@ type ifreqData struct {
 	_    [16 - 8]byte // pad to 32 bytes; 8 == sizeof(uintptr) on amd64/arm64
 }
 
-// minIfqMaxLen is the floor this backend raises net.link.ifqmaxlen to
-// before creating a tun(4) interface — see bumpIfqMaxLen's doc comment.
+// minIfqMaxLen is the net.link.ifqmaxlen floor checkIfqMaxLen warns below
+// — see its doc comment for why gravinet can only detect this, not fix it.
 // Matches defaultTxQueueLen in tun_linux.go for the same reason: both
 // exist so a brief stall in the single overlay reader (this process's own
 // dev.Read() loop) doesn't overflow the interface's outbound queue and
@@ -97,7 +99,7 @@ const minIfqMaxLen = 1000
 // its own. Neither the Darwin nor Windows TUN backends have an equivalent
 // pre-check either.
 func New(name string, mtu int) (*Device, error) {
-	bumpIfqMaxLen()
+	checkIfqMaxLen()
 	f, err := os.OpenFile("/dev/tun", os.O_RDWR, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open /dev/tun: %w", err)
@@ -209,44 +211,34 @@ func New(name string, mtu int) (*Device, error) {
 	return d, nil
 }
 
-// bumpIfqMaxLen raises net.link.ifqmaxlen — FreeBSD's global default for a
-// freshly attached interface's outbound queue depth, 50 packets out of the
-// box — to minIfqMaxLen, if it's currently lower. It has to run before
-// os.OpenFile("/dev/tun", ...) below: that call is what implicitly clones a
-// brand new tunN unit, and FreeBSD's ifnet layer captures ifqmaxlen's
-// *current* value into the new interface's queue at that exact attach
-// moment (see if_attach()) — changing the sysctl afterward wouldn't reach
-// back and resize a queue that's already been sized.
+// checkIfqMaxLen warns if net.link.ifqmaxlen — FreeBSD's default outbound
+// queue depth for a freshly attached interface, 50 packets out of the box —
+// is below minIfqMaxLen, and points at the one place it can actually be
+// changed.
 //
-// This is the closest FreeBSD equivalent to what tun_linux.go's
-// setTxQueueLen(SIOCSIFTXQLEN) does, but coarser: Linux's ioctl resizes one
-// interface's queue in place after the fact; FreeBSD has no per-interface
-// knob for this at all; the only lever is the process-wide default new
-// interfaces inherit at attach time. Concretely, that means this also
-// widens the queue for any *other* interface attached elsewhere on the box
-// afterward, and it never lowers a value an operator (or /boot/loader.conf)
-// already set higher — this only ever ratchets up, matching how every
-// FreeBSD tuning guide already recommends raising it, and 1000 sits well
-// inside the range those guides suggest for this exact "don't drop
-// perfectly good packets over a momentary stall" reason.
-//
-// Best-effort and entirely non-fatal: gravinet already needed root to open
-// /dev/tun and clone an interface in the first place, so failing here would
-// almost certainly mean something more unusual (sysctl missing from PATH,
-// a jail without CAP_SYS_ADMIN-equivalent, a MAC policy) that New()'s own
-// steps are about to hit anyway and report properly — this is purely an
-// optimization, and forgoing it should never be why interface creation
-// itself fails.
-func bumpIfqMaxLen() {
+// This used to try to fix it directly with `sysctl net.link.ifqmaxlen=N`
+// before opening /dev/tun (the same idea as tun_linux.go's setTxQueueLen,
+// timed to land before the implicit clone-create captures the value into
+// the new interface's queue at attach — see if_attach()). That write
+// doesn't actually work: net.link.ifqmaxlen is a *tunable*, not a live
+// sysctl — FreeBSD's own sysctl(8) refuses the write outright ("oid
+// 'net.link.ifqmaxlen' is a read only tunable — Tunable values are set in
+// /boot/loader.conf"), and the previous version of this function discarded
+// that error and treated the no-op as success, so it silently never worked
+// on any system that hit this warning. There is no runtime lever here at
+// all — /boot/loader.conf plus a reboot is the only way this value moves,
+// which is why this function only ever reports the gap instead of trying
+// to close it.
+func checkIfqMaxLen() {
 	out, err := exec.Command("sysctl", "-n", "net.link.ifqmaxlen").Output()
 	if err != nil {
-		return
+		return // best-effort diagnostic; a failed read here isn't worth surfacing on its own
 	}
 	cur, err := strconv.Atoi(strings.TrimSpace(string(out)))
 	if err != nil || cur >= minIfqMaxLen {
 		return
 	}
-	_ = exec.Command("sysctl", "net.link.ifqmaxlen="+strconv.Itoa(minIfqMaxLen)).Run()
+	logx.Warnf("net.link.ifqmaxlen is %d (FreeBSD's own default) — a brief stall in gravinet's overlay reader can overflow this interface's outbound queue and drop packets with ENOBUFS/\"no buffer space available\" until it's raised. This can only be changed at boot: add \"net.link.ifqmaxlen=%d\" to /boot/loader.conf and reboot; gravinet cannot set it at runtime", cur, minIfqMaxLen)
 }
 
 func nullTerminated(b []byte) string {
