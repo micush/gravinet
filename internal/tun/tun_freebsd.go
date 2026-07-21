@@ -30,6 +30,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 	"unsafe"
@@ -74,6 +75,15 @@ type ifreqData struct {
 	_    [16 - 8]byte // pad to 32 bytes; 8 == sizeof(uintptr) on amd64/arm64
 }
 
+// minIfqMaxLen is the floor this backend raises net.link.ifqmaxlen to
+// before creating a tun(4) interface — see bumpIfqMaxLen's doc comment.
+// Matches defaultTxQueueLen in tun_linux.go for the same reason: both
+// exist so a brief stall in the single overlay reader (this process's own
+// dev.Read() loop) doesn't overflow the interface's outbound queue and
+// start dropping — or, on FreeBSD specifically, ENOBUFS-ing — packets
+// that were otherwise perfectly deliverable a few milliseconds later.
+const minIfqMaxLen = 1000
+
 // New opens a fresh tun(4) device (the kernel clones the next free tunN),
 // puts it into multi-af mode, and — if name is non-empty — renames it to the
 // requested name, so gravinet's networks get the same predictable interface
@@ -87,6 +97,7 @@ type ifreqData struct {
 // its own. Neither the Darwin nor Windows TUN backends have an equivalent
 // pre-check either.
 func New(name string, mtu int) (*Device, error) {
+	bumpIfqMaxLen()
 	f, err := os.OpenFile("/dev/tun", os.O_RDWR, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open /dev/tun: %w", err)
@@ -196,6 +207,46 @@ func New(name string, mtu int) (*Device, error) {
 		return nil, err
 	}
 	return d, nil
+}
+
+// bumpIfqMaxLen raises net.link.ifqmaxlen — FreeBSD's global default for a
+// freshly attached interface's outbound queue depth, 50 packets out of the
+// box — to minIfqMaxLen, if it's currently lower. It has to run before
+// os.OpenFile("/dev/tun", ...) below: that call is what implicitly clones a
+// brand new tunN unit, and FreeBSD's ifnet layer captures ifqmaxlen's
+// *current* value into the new interface's queue at that exact attach
+// moment (see if_attach()) — changing the sysctl afterward wouldn't reach
+// back and resize a queue that's already been sized.
+//
+// This is the closest FreeBSD equivalent to what tun_linux.go's
+// setTxQueueLen(SIOCSIFTXQLEN) does, but coarser: Linux's ioctl resizes one
+// interface's queue in place after the fact; FreeBSD has no per-interface
+// knob for this at all; the only lever is the process-wide default new
+// interfaces inherit at attach time. Concretely, that means this also
+// widens the queue for any *other* interface attached elsewhere on the box
+// afterward, and it never lowers a value an operator (or /boot/loader.conf)
+// already set higher — this only ever ratchets up, matching how every
+// FreeBSD tuning guide already recommends raising it, and 1000 sits well
+// inside the range those guides suggest for this exact "don't drop
+// perfectly good packets over a momentary stall" reason.
+//
+// Best-effort and entirely non-fatal: gravinet already needed root to open
+// /dev/tun and clone an interface in the first place, so failing here would
+// almost certainly mean something more unusual (sysctl missing from PATH,
+// a jail without CAP_SYS_ADMIN-equivalent, a MAC policy) that New()'s own
+// steps are about to hit anyway and report properly — this is purely an
+// optimization, and forgoing it should never be why interface creation
+// itself fails.
+func bumpIfqMaxLen() {
+	out, err := exec.Command("sysctl", "-n", "net.link.ifqmaxlen").Output()
+	if err != nil {
+		return
+	}
+	cur, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil || cur >= minIfqMaxLen {
+		return
+	}
+	_ = exec.Command("sysctl", "net.link.ifqmaxlen="+strconv.Itoa(minIfqMaxLen)).Run()
 }
 
 func nullTerminated(b []byte) string {

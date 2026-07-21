@@ -37,6 +37,44 @@ assuming it didn't happen.
 
 ---
 
+## v545 — 2026-07-20
+
+**Fixed (partial → full): FreeBSD's intermittent `sendto: No buffer space
+available` remaining after v544's ARP fix.**
+
+v544 fixed the *constant* ENOBUFS (every packet, from the very first one)
+caused by the tun interface's `IFF_BROADCAST` mode triggering unresolvable
+ARP lookups. What was left afterward — occasional ENOBUFS on an otherwise
+working connection — is a second, unrelated gap: FreeBSD's default
+interface outbound queue depth is 50 packets, and gravinet's tun backend
+never raised it. tun_linux.go already does the equivalent
+(`SIOCSIFTXQLEN`, deepened to 1000) specifically so a brief stall in the
+single overlay reader doesn't overflow the queue — the FreeBSD backend
+had no counterpart at all, so any short delay in this process's own
+`dev.Read()` loop (well within the range ordinary scheduling jitter or a
+GC pause can cause) drops straight into ENOBUFS the moment 50 packets
+have piled up.
+
+FreeBSD has no per-interface equivalent to `SIOCSIFTXQLEN` — the queue
+depth is set once, at interface-attach time, from the process-wide
+`net.link.ifqmaxlen` sysctl. `tun_freebsd.go`'s `New()` now raises that
+sysctl to 1000 (ratchet-only — never lowers a value already set higher,
+e.g. by `/boot/loader.conf`) immediately before opening `/dev/tun`, since
+that open is what implicitly clones the new tun unit and captures the
+sysctl's value at that exact moment. Best-effort and non-fatal, like
+every other step in this backend that isn't essential to interface
+creation itself.
+
+Same disclosure as v544: not exercised on the Linux build host, verified
+by cross-compiling for freebsd/{amd64,arm64} and by FreeBSD's own
+documented `ifqmaxlen`/`if_attach()` behavior, not by a running FreeBSD
+test — this one's confirmed against real field output (v544's ARP fix
+took packet loss from 100% to 31.2%; this addresses the queue-depth gap
+behind the remainder), but the exact number afterward is still worth
+confirming on your end.
+
+---
+
 ## v544 — 2026-07-20
 
 **Fixed: on FreeBSD, plain traffic to another mesh peer's overlay address
