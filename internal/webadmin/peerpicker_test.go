@@ -100,6 +100,33 @@ func TestUIRawStringHasNoStrayBackticks(t *testing.T) {
 	}
 }
 
+// TestHeaderPeerPickerHasFixedWidth pins the fix for a reported bug: the
+// header's peer picker had no width of its own, so it visibly resized on
+// every pick — "This node" versus a peer's (usually longer, and
+// differently-long peer to peer) hostname reflowed the whole top bar. The
+// fix is scoped to #peerSel specifically, not the base .peer-sel class, so
+// it must not touch .peer-sel-sm (the speedtest pickers) at all — nothing
+// about their sizing was reported as broken, and a global width change to
+// the shared class risks breaking their tighter toolbar layout instead.
+func TestHeaderPeerPickerHasFixedWidth(t *testing.T) {
+	if !strings.Contains(indexHTML, "#peerSel { width:") {
+		t.Error("no fixed width rule for #peerSel — the header peer picker can still resize on every pick")
+	}
+	if !strings.Contains(indexHTML, "#peerSel .peer-sel-label") || !strings.Contains(indexHTML, "text-overflow:ellipsis") {
+		t.Error("#peerSel's label isn't set to truncate — a long hostname would overflow the fixed-width button instead of ellipsizing")
+	}
+	// The fix must not be a bare .peer-sel rule: that class is shared with
+	// .peer-sel-sm (the speedtest pickers), and widening it there was never
+	// asked for and isn't proven safe for that layout.
+	if strings.Contains(indexHTML, "\n  .peer-sel { ") {
+		body := indexHTML[strings.Index(indexHTML, "\n  .peer-sel { "):]
+		body = body[:strings.IndexByte(body, '\n')+1]
+		if strings.Contains(body, "width:") {
+			t.Error(".peer-sel itself gained a width rule — this should be scoped to #peerSel, not every picker sharing the base class")
+		}
+	}
+}
+
 // speedtestFn returns the source of infoSpeedtest, so the assertions above are
 // scoped to that function rather than matching something elsewhere in the file.
 func speedtestFn(t *testing.T) string {

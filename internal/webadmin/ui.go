@@ -28,6 +28,19 @@ const indexHTML = `<!doctype html>
   .peer-sel:hover { background:var(--hover); }
   .peer-sel:focus-visible { outline:none; border-color:var(--acc); }
   .peer-caret { color:var(--mut); font-size:10px; line-height:1; }
+  /* The header's picker (#peerSel) is the one place this ever had to hold
+     still: it sits in the top bar next to the search box, and with no width
+     of its own the button sized itself to whatever text was currently in
+     it — "This node" is short, a picked peer's hostname usually isn't, and
+     switching between peers of different name lengths visibly reflowed the
+     whole header on every pick. Fixed to match .global-search's own
+     220px right next to it, with the label truncating instead of the button
+     resizing. Scoped to the id rather than the base .peer-sel class: the
+     speedtest pickers below share that class (via .peer-sel-sm) in a
+     tighter toolbar layout where a fixed 220px would be the wrong call, and
+     nothing about their sizing was reported as a problem. */
+  #peerSel { width:220px; }
+  #peerSel .peer-sel-label { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   /* Compact variant for pickers inside a card's toolbar (the speedtest pair),
      matching the sizing the inline-styled <select>s there used to have. */
   .peer-sel-sm { padding:5px 9px; font-size:12px; background:var(--bg); }

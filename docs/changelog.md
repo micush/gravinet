@@ -38,6 +38,43 @@ assuming it didn't happen.
 
 ---
 
+## v566 — 2026-07-21
+
+**Header peer picker no longer resizes when a peer is picked.**
+
+`.peer-sel` — the button that shows "This node" or the currently-selected
+peer's hostname — had no width of its own. It's a `display:flex` button, so
+it sized itself to whatever text was inside it: short for the placeholder,
+usually longer for a real hostname, and differently long from one peer to
+the next. Every pick visibly reflowed the whole top bar.
+
+Fixed at 220px, matching `.global-search`'s own width right next to it in
+the same header row, with the label now truncating (`text-overflow:
+ellipsis`) instead of the button resizing to fit.
+
+**Scoped to `#peerSel`, not the base `.peer-sel` class.** The speedtest's
+two pickers share that class through `.peer-sel-sm` in a tighter toolbar
+layout (`buildPeerPicker`'s call to `buildListPicker` is the only
+non-compact one in the whole file — confirmed by grepping every call site,
+not assumed), and nothing about their sizing was reported as broken. A
+global width change risked fixing one dropdown by breaking another that
+wasn't asked about. `#peerSel` is already the header button's id (set by
+`buildPeerPicker`), so scoping to it needed no markup change, only CSS.
+
+New `TestHeaderPeerPickerHasFixedWidth` pins the fix, and specifically
+checks it did *not* land as a bare `.peer-sel` rule — a regression that
+would quietly widen the speedtest pickers along with it. Verified the test
+actually catches the bug it claims to, not just passes trivially: reverted
+the CSS locally, confirmed the test fails with the exact right message, put
+it back, confirmed it passes again.
+
+Verified: `go build ./...`, `go vet ./...` clean; the peer-picker test file
+and the full `internal/webadmin` suite (110s) pass; cross-compiles for
+darwin/amd64, darwin/arm64, windows/amd64, freebsd/amd64, openbsd/amd64,
+linux/arm, linux/386, linux/arm64.
+
+---
+
 ## v565 — 2026-07-21
 
 **Packets/sec now graphs over time, its own chart, separate from the
