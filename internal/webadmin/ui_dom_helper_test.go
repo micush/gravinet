@@ -268,8 +268,13 @@ func TestManagerUpgradeUIWired(t *testing.T) {
 	if !strings.Contains(indexHTML, "/api/upgrade/push") {
 		t.Error("the push control no longer references /api/upgrade/push")
 	}
-	if !strings.Contains(indexHTML, "Push to managed peers") {
-		t.Error("the Push-to-managed-peers card heading is missing")
+	// The standalone "Push to managed peers" card was merged into the Upload
+	// card: the peer picker now sits with the upload, an empty selection
+	// upgrades this node and a non-empty one pushes the same source to the
+	// selected peers. The push endpoint above must still be wired, but the
+	// separate card must not come back.
+	if strings.Contains(indexHTML, "Push to managed peers") {
+		t.Error("the standalone Push-to-managed-peers card is back; its picker belongs in the Upload card now")
 	}
 	// LOCAL_API must list the two local-only upgrade endpoints (accept-manager
 	// is a security toggle; push is a fleet action) and must NOT list
@@ -318,5 +323,93 @@ func TestUpgradeUIHasNoDeadEndpoints(t *testing.T) {
 	// with no server behind it.
 	if strings.Contains(indexHTML, "signing_required") {
 		t.Error("the UI still branches on signing_required, which handleUpgradeHome no longer reports")
+	}
+}
+
+// TestPushUsesTheSharedChipPicker keeps the push target selector on the same
+// widget as the redistribute pickers (Redistribute connected/static/mesh on the
+// BGP editor, Redistribute from BGP on Mesh Routes) rather than letting it drift
+// back to a bespoke checkbox list. The reason is not consistency for its own
+// sake: a checkbox list is fine for three peers and unusable at thirty, which is
+// exactly the size where a fleet push starts to matter, and buildRouteChipPicker
+// already solves that with search-to-narrow plus a bounded chip list.
+func TestPushUsesTheSharedChipPicker(t *testing.T) {
+	// The picker now lives in the Upload card, so anchor on that heading and
+	// bound the block at the next section, which still covers the picker
+	// construction and the Upgrade button's handler.
+	pushIdx := strings.Index(indexHTML, "<h3>Upload</h3>")
+	if pushIdx < 0 {
+		t.Fatal("the Upload card is missing")
+	}
+	block := indexHTML[pushIdx:]
+	if end := strings.Index(block, "// infoMetrics renders"); end > 0 {
+		block = block[:end]
+	}
+	if !strings.Contains(block, "buildRouteChipPicker(") {
+		t.Error("the Upload card no longer builds its peer selector with buildRouteChipPicker — " +
+			"a bespoke list here drifts from the redistribute pickers and stops scaling past a handful of peers")
+	}
+	if strings.Contains(block, "up-push-peer") {
+		t.Error("the Upload card still contains the old per-peer checkbox class (up-push-peer)")
+	}
+	if !strings.Contains(block, "labelOf") {
+		t.Error("the peer picker must pass labelOf — peers are keyed by node_id but have to read as hostnames")
+	}
+	// The picker is keyed on node ids, so the push body must send what get()
+	// returns rather than anything derived from the on-screen label.
+	if !strings.Contains(block, "peerPicker.get()") {
+		t.Error("the push handler no longer reads its target list from the picker's get()")
+	}
+}
+
+// TestUpgradeAllThenLocalOption guards the "all peers, then this node" rollout
+// mode: the picker offers a single item that pushes to every reachable peer and
+// then, only if every one applied, upgrades the local (control-plane) node last.
+// The two things that make it safe rather than a footgun are asserted here — it
+// drives both endpoints (fleet push, then local source apply), and it gates the
+// local phase on every peer having applied, so a bad build reverts on the peers
+// before it can reach the node the operator is logged into.
+func TestUpgradeAllThenLocalOption(t *testing.T) {
+	if !strings.Contains(indexHTML, "all peers, then this node") {
+		t.Error("the Upgrade picker no longer offers the 'all peers, then this node' option")
+	}
+	up := strings.Index(indexHTML, "<h3>Upload</h3>")
+	if up < 0 {
+		t.Fatal("the Upload card is missing")
+	}
+	block := indexHTML[up:]
+	if end := strings.Index(block, "// infoMetrics renders"); end > 0 {
+		block = block[:end]
+	}
+	for _, want := range []string{
+		"/api/upgrade/push",               // phase one: the fleet
+		"/api/upgrade/source",             // phase two: this node
+		"allThenLocal",                    // the mode flag the handler branches on
+		"applied.length === nodes.length", // the "every peer applied" gate on the local phase
+	} {
+		if !strings.Contains(block, want) {
+			t.Errorf("the all-peers-then-local flow is missing %q", want)
+		}
+	}
+}
+
+// TestChipPickerOptionsAreOptional guards the three original redistribute call
+// sites: buildRouteChipPicker grew an opts argument for the peer picker, and
+// every one of those call sites still passes three arguments and must keep
+// getting the original route-flavoured strings and identity labelling.
+func TestChipPickerOptionsAreOptional(t *testing.T) {
+	idx := strings.Index(indexHTML, "function buildRouteChipPicker(")
+	if idx < 0 {
+		t.Fatal("buildRouteChipPicker not found")
+	}
+	body := indexHTML[idx : idx+3000]
+	if !strings.Contains(body, "opts = opts || {}") {
+		t.Error("buildRouteChipPicker must tolerate being called without opts — three redistribute call sites do")
+	}
+	if !strings.Contains(body, "opts.labelOf || (v => v)") {
+		t.Error("labelOf must default to identity, or the redistribute pickers stop showing their CIDRs")
+	}
+	if !strings.Contains(body, "loading available routes") {
+		t.Error("the default loading string changed; the redistribute pickers rely on it")
 	}
 }

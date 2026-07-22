@@ -38,6 +38,150 @@ assuming it didn't happen.
 
 ---
 
+## v584 — 2026-07-22
+
+**The local-node upgrade confirm now matches its siblings.** It read "Build this
+on this node, apply it, and restart into it? / Nothing is touched until the build
+succeeds and passes preflight. If the new binary can't rejoin the mesh, it
+reverts itself automatically." — the last verbose confirm left over after v581
+tightened the peer prompts. It is now simply **"Upgrade this node?"**, parallel
+to "Upgrade this peer?", "Upgrade these N peers?" and "Upgrade all N peers, then
+this node?". The auto-revert reassurance it used to carry was redundant: it is
+already stated in the Peers description on the card and repeated in the
+post-apply notice. The "all peers, then this node" confirm keeps its second line,
+since the partial-failure behaviour (this node is left as-is if any peer fails)
+is a real consequence worth stating at the moment of decision rather than fluff.
+
+## v583 — 2026-07-22
+
+**The Upgrade picker gained an "all peers, then this node" option** for rolling a
+whole fleet in one action. Selecting it pushes the uploaded source to every
+reachable managed peer and then, **only if every peer applied successfully**,
+upgrades the local node last. It is offered as a single item at the top of the
+same chip picker (only when at least one peer is reachable — with none it would
+just mean "this node", which an empty selection already does).
+
+This is the sequence v582's merge notes recommended but left the operator to do
+by hand ("push to peers, confirm healthy, then upgrade this node last"), now made
+one click. The ordering is the safety property: the node you are logged into is
+the control plane driving the rollout, so it goes last and only once the fleet
+has proven the build good. Because the local node can't upgrade itself inside the
+same request that coordinates the push — its restart would kill that request — the
+two phases are sequential browser calls: `/api/upgrade/push` for the fleet, then
+`/api/upgrade/source` for this node.
+
+**Partial failure deliberately stops before the local node.** If any peer fails,
+the local node is left exactly as-is and the picker is repopulated with just the
+failed peers, so a retry targets only those and the operator is back in explicit
+control before the control-plane node is ever touched. A single failed peer is
+enough to hold the local upgrade back — the whole reason to do peers first is to
+avoid discovering a bad build on the node you are logged into.
+
+The sentinel and specific peers are mutually exclusive in the picker (choosing
+"all" collapses any hand-picked chips; picking a specific peer afterward drops
+"all"), since "all" already covers everything. `buildRouteChipPicker` is
+unchanged — the exclusivity is enforced entirely from the call site's `onChange`
+using the `set()` method added in v582, so the three redistribute call sites are
+untouched.
+
+**Verified.** New `TestUpgradeAllThenLocalOption` (the option label is present,
+and the handler drives both `/api/upgrade/push` and `/api/upgrade/source` and
+gates the local phase on `applied.length === nodes.length`). Existing
+`TestPushUsesTheSharedChipPicker`, `TestManagerUpgradeUIWired` and
+`TestChipPickerOptionsAreOptional` still pass unchanged. Full `internal/webadmin`
+suite green; `go vet` and `gofmt` clean.
+
+## v582 — 2026-07-22
+
+**The Upgrade page's two cards are now one.** v581's separate "Push to managed
+peers" card is gone; its peer picker moved up into the Upload card, and a single
+**Upgrade** button now decides its target from that selection alone. Leave the
+picker empty and Upgrade builds and applies on *this* node, exactly the old
+Upload path (`/api/upgrade/source`). Select one or more peers and the same
+Upgrade button pushes the uploaded source to them (`/api/upgrade/push`) and
+leaves this node untouched — one archive, one button, two destinations chosen by
+whether anything is selected. There is no longer a second file input: the one
+upload feeds both paths.
+
+After a successful push, the peers that applied are **deselected**, while any
+that failed stay selected so they can be retried without being re-added. To
+support that, `buildRouteChipPicker` gained a `set(list)` method (a companion to
+`get()`/`setAvailable()`) that replaces the current selection and redraws; it
+does not fire `onChange`, matching `setAvailable`.
+
+The push confirm prompt is now just the question: **"Upgrade this peer?"** for
+one, **"Upgrade these N peers?"** for several, replacing v581's longer
+"Push this source to N peer(s), build it there, and apply it?" wording.
+
+**Copy fixes on the Upgrade and Cluster settings surfaces.** The "Accept
+Manager-pushed upgrades" description and the Upload blurb were tightened, and
+in doing so a latent rendering bug was fixed: several em-dashes and apostrophes
+in those strings were written `\\u2014` / `\\u2019` (double backslash) inside
+`indexHTML`, which is a Go raw string. The browser's JS parser turned `\\` into
+one literal backslash, so the text showed a literal `\u2014` on screen instead
+of an em-dash. Rewritten as single-backslash JS escapes (`\u2014`, `\u2019`),
+the form every working string in the file already uses, so they now render as
+the intended characters. The moved peer picker's own description absorbed the
+gist of the removed card's copy: leave empty to upgrade this node, select peers
+to build-and-apply on them instead, each peer must have **Accept
+Manager-pushed upgrades** on or it refuses, each reverts on its own if it can't
+rejoin the mesh.
+
+The local-only guard is unchanged: the whole card still disables when a peer is
+selected in the header, the picker still only appears on the node you are logged
+into and only when it is a Manager, and every `/api/upgrade/*` endpoint stays in
+`LOCAL_API`.
+
+**Verified.** `TestManagerUpgradeUIWired` now asserts the standalone
+"Push to managed peers" card is *gone* while `/api/upgrade/push` stays wired;
+`TestPushUsesTheSharedChipPicker` was re-anchored from that card heading to the
+`<h3>Upload</h3>` card and still checks the shared `buildRouteChipPicker`,
+`labelOf`, `peerPicker.get()`, and the absence of the old `up-push-peer` class.
+The full `internal/webadmin` suite passes, and `go vet` and `gofmt` are clean.
+As with the rest of this package's UI guards, these stay string scans with no JS
+runtime dependency.
+
+## v581 — 2026-07-22
+
+**The Upgrade page's "Push to managed peers" target list is now the same
+search-to-add chip picker the redistribute options use** (Redistribute
+connected/static/mesh on the BGP editor, Redistribute from BGP on Mesh Routes),
+replacing v580's checkbox list. A checkbox column is fine for three peers and
+unreadable at thirty, which is the size where pushing to a fleet actually starts
+to matter; the picker narrows by typing and shows the current selection as a
+bounded chip list instead of a list that grows with the mesh.
+
+`buildRouteChipPicker` gained one optional `opts` argument rather than being
+copied: `labelOf` (peers are keyed by `node_id` but have to read as hostnames —
+a CIDR is still its own label), plus `placeholder`, `loadingText`, `noneText` and
+`staleTitle`. All three existing call sites still pass three arguments and are
+byte-for-byte unaffected; every default reproduces the previous strings and
+identity labelling. Search now matches a value *or* its label, so a peer is
+findable by hostname (what is on screen) and by node id (what you may have
+pasted), and chips sort by label, since a peer list ordered by node id looks
+arbitrary to whoever is reading hostnames.
+
+The widget's existing stale-chip behaviour turns out to matter more for peers
+than for routes: a peer that drops off the mesh while you are still choosing
+stays selected and is marked "no longer reachable" rather than silently
+vanishing from the selection mid-edit.
+
+Per-peer results moved out from beside each row into their own block under the
+button, because a chip has nowhere to write into and a failed remote build
+returns a compiler error, which needs more room than a chip has.
+
+**Verified.** New `TestPushUsesTheSharedChipPicker` (the push card builds its
+selector with the shared widget, passes `labelOf`, reads targets from `get()`,
+and no longer carries the old `up-push-peer` checkbox class) and
+`TestChipPickerOptionsAreOptional` (opts is optional and every default is the
+original route-flavoured one, so the three redistribute call sites cannot
+silently regress). This package's test suite deliberately has no JS runtime
+dependency, so those stay string scans as the existing UI guards do; the widget
+itself was additionally exercised outside the suite in a real DOM across both
+modes — 19 checks covering the unchanged route behaviour, label/value
+separation, search by either, label-order sorting, stale marking and the empty
+pool — and the whole served page was parsed with `node --check`.
+
 ## v580 — 2026-07-22
 
 **Upgrades are now source-only, everywhere: nothing distributes or accepts a

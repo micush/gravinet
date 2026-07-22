@@ -2469,7 +2469,7 @@ function secSettings(c) {
   // render rather than riding the status blob, since it is a rarely-touched
   // setting. No restart: the push gate reads the config live.
   const am = $('<div class="settings-row" id="accept-manager-upg-row"></div>');
-  const amDesc = 'Let a directly-connected Manager peer push gravinet <b>source</b> to this node, which this node then compiles and applies itself. Off by default \\u2014 while off, upgrades here are strictly local-only. A Manager never sends executable code: it sends an archive, checked against its declared hash, that this node builds with its own toolchain and then puts through the same config self-test and confirm-or-rollback guard as a local upgrade. It backs out on its own if the new binary can\\u2019t rejoin the mesh, so a Manager cannot force a broken upgrade to stick. A Manager known only through gossip (not a direct session) is refused. Local-only; never remotely toggleable, even by an authorized Manager peer.';
+  const amDesc = 'Let a directly-connected Manager peer push gravinet <b>source</b> that this node compiles and applies itself. Off by default; while off, upgrades here stay strictly local-only. The Manager sends an archive \u2014 never executable code \u2014 checked against its declared hash and built with this node\u2019s own toolchain, then run through the same config self-test and confirm-or-rollback guard as a local upgrade. It reverts on its own if the new build can\u2019t rejoin the mesh, so a Manager can\u2019t force a broken upgrade to stick. A Manager known only through gossip, with no direct session, is refused. This setting is local-only and can never be toggled remotely, even by an authorized Manager peer.';
   const amLabel = $('<div><div class="settings-label">Accept Manager-pushed upgrades</div><div class="settings-desc" id="accept-manager-upg-desc">'+esc(amDesc)+'</div></div>');
   const amSw = $('<label class="sw"><input type="checkbox" id="accept-manager-upg-cb"><span class="sw-slider"></span></label>');
   const amCb = amSw.querySelector('input');
@@ -4596,14 +4596,23 @@ function fwCatalogCombobox(input, getNames){
 // large. A selected CIDR no longer in available (a route that's gone, or
 // no longer advertised/redistributed on the source side) still shows as
 // a chip, marked, so it stays visible and removable rather than silently
-// vanishing along with the ability to deliberately drop it. onChange(get())
+// vanishing along with the ability to deliberately drop it — the same
+// property that keeps a peer that just went offline from disappearing out
+// of a push selection mid-edit. onChange(get())
 // fires after every add/remove — a debounced form save for the BGP
 // editor, an immediate POST for Mesh Routes' subcard; this widget itself
 // has no opinion on how persistence happens, only that something changed.
-function buildRouteChipPicker(available, selected, onChange){
+function buildRouteChipPicker(available, selected, onChange, opts){
+  // opts is optional and every field defaults to the route-picker behaviour
+  // the three original call sites rely on, so this stays one widget rather
+  // than a second near-copy: labelOf separates a value from how it reads
+  // (peers are chosen by node id but shown by hostname; a CIDR is its own
+  // label), and the three strings below name whatever is being picked.
+  opts = opts || {};
+  const labelOf = opts.labelOf || (v => v);
   const wrap = $('<div class="route-picker"></div>');
   const searchWrap = $('<div class="search-select route-search"></div>');
-  const searchInp = $('<input class="ss-input" type="text" autocomplete="off" spellcheck="false" placeholder="search to add\u2026">');
+  const searchInp = $('<input class="ss-input" type="text" autocomplete="off" spellcheck="false" placeholder="'+esc(opts.placeholder || 'search to add\u2026')+'">');
   const optList = $('<div class="ss-list" role="listbox"></div>');
   searchWrap.appendChild(searchInp); searchWrap.appendChild(optList);
   const chipBox = $('<div class="route-chips"></div>');
@@ -4618,12 +4627,15 @@ function buildRouteChipPicker(available, selected, onChange){
       chipBox.appendChild($('<div class="hint" style="padding:2px 0">none selected</div>'));
       return;
     }
-    Array.from(selSet).sort().forEach(cidr => {
+    // Sorted by label, not by value: for routes the two are the same, but a
+    // peer list sorted by node id would look arbitrary to whoever is reading
+    // hostnames.
+    Array.from(selSet).sort((a,b) => labelOf(a).localeCompare(labelOf(b))).forEach(cidr => {
       const stale = items !== undefined && items.indexOf(cidr) === -1;
       const chip = $('<span class="route-chip'+(stale ? ' stale' : '')+'"></span>');
-      if (stale) chip.title = 'not currently present';
-      chip.appendChild(document.createTextNode(cidr));
-      const x = $('<button type="button" class="route-chip-x" aria-label="remove '+esc(cidr)+'">\u00d7</button>');
+      if (stale) chip.title = opts.staleTitle || 'not currently present';
+      chip.appendChild(document.createTextNode(labelOf(cidr)));
+      const x = $('<button type="button" class="route-chip-x" aria-label="remove '+esc(labelOf(cidr))+'">\u00d7</button>');
       x.onclick = () => { selSet.delete(cidr); drawChips(); drawOpts(); onChange(Array.from(selSet)); };
       chip.appendChild(x);
       chipBox.appendChild(chip);
@@ -4632,18 +4644,21 @@ function buildRouteChipPicker(available, selected, onChange){
   const drawOpts = () => {
     optList.innerHTML = '';
     if (items === undefined){
-      optList.appendChild($('<div class="ss-empty">loading available routes\u2026</div>'));
+      optList.appendChild($('<div class="ss-empty">'+esc(opts.loadingText || 'loading available routes\u2026')+'</div>'));
       return;
     }
     const q = searchInp.value.trim().toLowerCase();
-    const pool = items.filter(cidr => !selSet.has(cidr) && (!q || cidr.toLowerCase().indexOf(q) >= 0));
+    // Match on both the value and its label, so a peer is findable by
+    // hostname (what's on screen) and by node id (what you may have pasted).
+    const pool = items.filter(cidr => !selSet.has(cidr) &&
+      (!q || cidr.toLowerCase().indexOf(q) >= 0 || labelOf(cidr).toLowerCase().indexOf(q) >= 0));
     if (!pool.length){
-      optList.appendChild($('<div class="ss-empty">'+(items.length ? 'no matches' : 'none available') +'</div>'));
+      optList.appendChild($('<div class="ss-empty">'+(items.length ? 'no matches' : esc(opts.noneText || 'none available')) +'</div>'));
       return;
     }
     pool.slice(0, 200).forEach(cidr => {
       const o = $('<div class="ss-opt" role="option"></div>');
-      o.textContent = cidr;
+      o.textContent = labelOf(cidr);
       // mousedown, not click: fires before the blur that closes the list
       // would otherwise swallow it (same reason as the other .ss-* pickers).
       o.onmousedown = (e) => { e.preventDefault(); selSet.add(cidr); searchInp.value = ''; drawOpts(); drawChips(); onChange(Array.from(selSet)); };
@@ -4659,6 +4674,7 @@ function buildRouteChipPicker(available, selected, onChange){
   return {
     wrap,
     get: () => Array.from(selSet),
+    set: (list) => { selSet.clear(); (list||[]).forEach(v => selSet.add(v)); drawChips(); drawOpts(); },
     setAvailable: (list) => { items = list; drawOpts(); drawChips(); },
   };
 }
@@ -5458,7 +5474,7 @@ async function drawUpgrade(host){
       + esc(peerName) + '\u2019, which is selected above. Disabled here so it can\u2019t look like it\u2019s upgrading that peer when it isn\u2019t. Select \u201cThis node\u201d to use this on the node you\u2019re actually on, or log into '
       + esc(peerName) + '\u2019s own web admin to upgrade it there.</div>'));
   }
-  stCard.appendChild($('<div class="hint" style="margin:0 0 10px">Upload a gravinet source archive. It\u2019s compiled here with this node\u2019s own Go toolchain, checked against this node\u2019s config, and applied \\u2014 all in one step. There is no binary to download: gravinet ships no prebuilt release, and a binary would only ever be valid for one platform anyway.</div>'));
+  stCard.appendChild($('<div class="hint" style="margin:0 0 10px">Upload a gravinet source archive. It\u2019s compiled here with this node\u2019s own Go toolchain, checked against this node\u2019s config, and applied in one step. There\u2019s no binary to download \u2014 gravinet ships no prebuilt release, and a binary would only be valid for a single platform anyway.</div>'));
 
   const up = $('<div class="tbar"></div>');
   // No format choice on this side: .tgz/.tar.gz and .zip are both accepted,
@@ -5470,91 +5486,166 @@ async function drawUpgrade(host){
   const upgradeBtn = $('<button class="sm" style="margin-left:16px">Upgrade</button>');
   up.appendChild(fileIn);
   up.appendChild(upgradeBtn);
+  stCard.appendChild(up);
+
+  // Peer picker, moved in from what used to be a separate "Push to managed
+  // peers" card. The single Upgrade button decides its target from the picker:
+  //   - nothing selected    -> upgrade THIS node (/api/upgrade/source)
+  //   - specific peers       -> push to them (/api/upgrade/push), this node
+  //                             untouched
+  //   - "all peers, then this node" -> push to every reachable peer, and only
+  //                             if every one applies, upgrade THIS node last.
+  // That last mode is the recommended fleet rollout: the control-plane node you
+  // are logged into is upgraded last and only once the fleet has proven the
+  // build good, so a bad build reverts on the peers (each self-tests and rolls
+  // back) before it can ever reach this node. Shown only on the node you're
+  // logged into and only when this node is a Manager \u2014 the same constraint
+  // every /api/upgrade/* action already carries. peerPicker, resBox, peerLabel,
+  // targets and ALL_PEERS live in the function scope because the button handler
+  // below reaches them.
+  let peerPicker = null;
+  let resBox = null;
+  let targets = [];
+  const ALL_PEERS = '*all*'; // sentinel; real node_ids never equal this
+  const peerLabel = (id) => {
+    const p = (state.cluster || []).find(x => x.node_id === id);
+    const name = (p && p.hostname) || id.slice(0,8);
+    return name + ' \u00b7 ' + id.slice(0,8);
+  };
+  if (!remote && state.manager){
+    // Same search-to-add chip widget the redistribute pickers use
+    // (buildRouteChipPicker), keyed on node_id but labelled with the hostname:
+    // a checkbox list is fine for three peers and unreadable for thirty.
+    const peerRow = $('<div class="settings-row"></div>');
+    peerRow.appendChild($('<div><div class="settings-label">Peers</div><div class="settings-desc">Leave empty to upgrade this node. Pick specific peers to build and apply the same archive on them (this node is left untouched), or pick <b>all peers, then this node</b> to roll the whole fleet and finish with this node last \u2014 this node is upgraded only after every peer has applied, so a bad build reverts on the peers before it can reach the node you\u2019re logged into. Each peer must have <b>Accept Manager-pushed upgrades</b> turned on or it refuses (shown per peer), and each reverts on its own if it can\u2019t rejoin the mesh. A peer that drops off the mesh while you\u2019re choosing stays selected and is marked rather than vanishing from the list.</div></div>'));
+    targets = computeSortedManageablePeers();
+    // Offer the "all peers, then this node" sentinel only when there is at least
+    // one peer to roll; with none it would just mean "this node", which the
+    // empty selection already does.
+    const options = targets.length ? [ALL_PEERS].concat(targets.map(p => p.node_id)) : [];
+    const pickLabel = (id) => id === ALL_PEERS ? 'all peers, then this node' : peerLabel(id);
+    // The sentinel and specific peers are mutually exclusive: "all" already
+    // covers everything, so whichever the operator picked most recently wins.
+    let prevHadAll = false;
+    const onPick = (sel) => {
+      const hasAll = sel.indexOf(ALL_PEERS) !== -1;
+      if (hasAll && sel.length > 1){
+        if (prevHadAll) peerPicker.set(sel.filter(x => x !== ALL_PEERS)); // a peer was just added -> switch to explicit
+        else            peerPicker.set([ALL_PEERS]);                       // "all" was just added -> collapse to it
+      }
+      prevHadAll = peerPicker.get().indexOf(ALL_PEERS) !== -1;
+    };
+    peerPicker = buildRouteChipPicker(options, [], onPick, {
+      labelOf: pickLabel,
+      placeholder: 'search peers to add\u2026',
+      loadingText: 'loading peers\u2026',
+      noneText: 'no managed peers are currently reachable',
+      staleTitle: 'no longer reachable',
+    });
+    peerRow.appendChild(peerPicker.wrap);
+    stCard.appendChild(peerRow);
+    // Push results land in their own block rather than beside each peer: with a
+    // chip list there is no per-row slot to write into, and a build failure's
+    // message is a compiler error, which needs more room than a chip has.
+    resBox = $('<div class="up-push-results" style="margin-top:10px"></div>');
+    stCard.appendChild(resBox);
+  }
+
   upgradeBtn.onclick = async () => {
     if (!fileIn.files[0]){ alert('Pick a source .tgz/.tar.gz or .zip first.'); return; }
-    if (!confirm('Build this on this node, apply it, and restart into it?\n\nNothing is touched until the build succeeds and passes preflight. If the new binary can\u2019t rejoin the mesh, it reverts itself automatically.')) return;
-    upgradeBtn.disabled = true; upgradeBtn.textContent = 'Building\u2026';
-    try {
+    const sel = peerPicker ? peerPicker.get() : [];
+    const allThenLocal = sel.indexOf(ALL_PEERS) !== -1;
+    const nodes = allThenLocal ? targets.map(p => p.node_id) : sel;
+
+    // Confirm (modal) before anything is disabled or sent.
+    if (nodes.length){
+      const msg = allThenLocal
+        ? 'Upgrade all ' + nodes.length + ' peer' + (nodes.length === 1 ? '' : 's') + ', then this node?\n\nThis node is upgraded only after every peer has applied. If any peer fails, this node is left as-is.'
+        : (nodes.length === 1 ? 'Upgrade this peer?' : 'Upgrade these ' + nodes.length + ' peers?');
+      if (!confirm(msg)) return;
+    } else {
+      if (!confirm('Upgrade this node?')) return;
+    }
+
+    // applyLocal builds+applies on THIS node (/api/upgrade/source) and restarts
+    // into it. Used for an empty selection and as the second phase of "all
+    // peers, then this node". Assumes the caller has already disabled the button.
+    const applyLocal = async () => {
+      upgradeBtn.textContent = 'Building\u2026';
       const resp = await fetch('/api/upgrade/source', { method:'POST', body: fileIn.files[0] });
       const body = await resp.json().catch(()=>({}));
       if (!resp.ok){ alert(body.error || 'build failed'); return; }
       alert('Applied. This node is restarting into ' + (body.applied || 'the new build') + '.\n\nIf it cannot get its peers back within the confirm window, it will revert itself.');
       drawUpgrade(host);
+    };
+
+    upgradeBtn.disabled = true;
+    try {
+      if (!nodes.length){ await applyLocal(); return; }
+
+      // Push phase: one archive to every target peer. The server fans out with a
+      // bounded concurrency and returns once they have all finished, so "all
+      // peers first" is already guaranteed before the local phase can start.
+      resBox.innerHTML = '';
+      resBox.appendChild($('<div class="hint">Building on '+nodes.length+' peer(s)\u2026 this can take several minutes each.</div>'));
+      upgradeBtn.textContent = 'Pushing\u2026';
+      // Order matters: the peer list is read before the archive so the server
+      // knows the targets before it spends anything spooling.
+      const fd = new FormData();
+      fd.append('nodes', JSON.stringify(nodes));
+      fd.append('source', fileIn.files[0]);
+      const resp = await fetch('/api/upgrade/push', { method:'POST', body: fd });
+      const body = await resp.json().catch(()=>({}));
+      const results = body.results || [];
+      resBox.innerHTML = '';
+      if (!results.length){
+        resBox.appendChild($('<div class="hint" style="color:var(--danger,#b33)">'+esc(body.error || 'push failed')+'</div>'));
+        return;
+      }
+      const applied = [];
+      for (const res of results){
+        if (res.ok) applied.push(res.node);
+        const line = $('<div style="margin:3px 0;font-size:12px"></div>');
+        const mark = $('<span></span>');
+        mark.textContent = res.ok ? '\u2713 ' : '\u2717 ';
+        mark.style.color = res.ok ? 'var(--ok,#2a2)' : 'var(--danger,#b33)';
+        line.appendChild(mark);
+        line.appendChild(document.createTextNode(peerLabel(res.node) + (res.ok ? ' \u2014 applied, restarting' : '')));
+        if (!res.ok && res.error){
+          const why = $('<div class="hint" style="margin:2px 0 6px 16px;white-space:pre-wrap"></div>');
+          why.textContent = res.error;
+          line.appendChild(why);
+        }
+        resBox.appendChild(line);
+      }
+      const done = new Set(applied);
+      const allApplied = applied.length === nodes.length;
+
+      if (allThenLocal){
+        // The picker holds the ALL sentinel, not individual chips. On full
+        // success clear it (this node is about to restart anyway); on partial
+        // failure replace it with just the peers that failed, so a retry targets
+        // exactly those and the operator is back in explicit control before this
+        // node is ever touched.
+        peerPicker.set(allApplied ? [] : nodes.filter(n => !done.has(n)));
+        if (allApplied){
+          resBox.appendChild($('<div class="hint">All peers applied \u2014 upgrading this node now\u2026</div>'));
+          await applyLocal();
+        } else {
+          resBox.appendChild($('<div class="hint" style="color:var(--danger,#b33)">'+applied.length+' of '+nodes.length+' peers applied; this node was left as-is. Fix or retry the failed peers, then upgrade this node.</div>'));
+        }
+      } else if (applied.length){
+        // Explicit selection: drop the peers that applied, keep any that failed
+        // so they can be retried without re-adding them.
+        peerPicker.set(peerPicker.get().filter(n => !done.has(n)));
+      }
     } finally { upgradeBtn.disabled = false; upgradeBtn.textContent = 'Upgrade'; }
   };
+
   if (remote){
     up.querySelectorAll('input,button').forEach(el => { el.disabled = true; });
   }
-  stCard.appendChild(up);
   host.appendChild(stCard);
-
-  // Push to managed peers — only meaningful on the node you're logged into
-  // (like every /api/upgrade/* action) and only when this node is a Manager.
-  // There is no staged-artifact picker: what gets pushed is a source archive
-  // uploaded here and now, because nothing is retained between a build and an
-  // apply anymore. One archive serves every peer regardless of platform —
-  // each compiles its own native binary — so there is no per-architecture
-  // selection to get wrong either.
-  //
-  // Each target peer independently decides whether to accept it (its own
-  // Accept-Manager-pushed-upgrades opt-in), so a peer that hasn't opted in
-  // shows a per-row error rather than silently failing the whole push.
-  if (!remote && state.manager){
-    const pushCard = $('<div class="card"></div>');
-    pushCard.appendChild($('<h3>Push to managed peers</h3>'));
-    pushCard.appendChild($('<div class="hint" style="margin:0 0 10px">Send a source archive to other Managed-mode peers; each one builds it locally and applies it. Every peer must have <b>Accept Manager-pushed upgrades</b> turned on in its own settings, or it will refuse \u2014 shown per peer below. Each peer needs a Go toolchain, verifies the archive against its digest, and reverts on its own if it can\u2019t rejoin the mesh. This node is not upgraded by a push; use Upload above for that, and do it last.</div>'));
-
-    const pickRow = $('<div class="tbar"></div>');
-    pickRow.appendChild($('<span class="hint">source</span>'));
-    const pushFile = $('<input type="file" class="up-push-file" accept=".tgz,.tar.gz,.zip,application/gzip,application/zip">');
-    pickRow.appendChild(pushFile);
-    pushCard.appendChild(pickRow);
-
-    // Managed peers this node can actually reach (manageable = overlay addr +
-    // web port known). Reuse the same list the header dropdown filters.
-    const targets = computeSortedManageablePeers();
-    if (!targets.length){
-      pushCard.appendChild($('<div class="hint" style="margin-top:8px">No managed peers are currently reachable to push to.</div>'));
-    } else {
-      const list = $('<div style="margin:8px 0"></div>');
-      for (const p of targets){
-        const name = p.hostname || p.node_id.slice(0,8);
-        const row = $('<label style="display:block;margin:3px 0"><input type="checkbox" class="up-push-peer" value="'+esc(p.node_id)+'"> '+esc(name)+' <span class="hint">'+esc(p.node_id.slice(0,12))+'</span> <span class="up-push-result" data-node="'+esc(p.node_id)+'"></span></label>');
-        list.appendChild(row);
-      }
-      pushCard.appendChild(list);
-
-      const pushBtn = $('<button class="sm">Push to selected</button>');
-      pushCard.appendChild(pushBtn);
-      pushBtn.onclick = async () => {
-        const nodes = Array.from(pushCard.querySelectorAll('.up-push-peer:checked')).map(c => c.value);
-        if (!nodes.length){ alert('Tick one or more peers to push to.'); return; }
-        if (!pushFile.files[0]){ alert('Pick a source .tgz/.tar.gz or .zip to push.'); return; }
-        if (!confirm('Push this source to '+nodes.length+' peer(s), build it there, and apply it?\n\nEach peer compiles it itself, which can take several minutes per node, and reverts on its own if it can\u2019t rejoin the mesh.')) return;
-        pushCard.querySelectorAll('.up-push-result').forEach(s => s.textContent = '');
-        pushBtn.disabled = true; pushBtn.textContent = 'Pushing\u2026';
-        try {
-          // Order matters: the peer list is read before the archive so the
-          // server knows the targets before it spends anything spooling.
-          const fd = new FormData();
-          fd.append('nodes', JSON.stringify(nodes));
-          fd.append('source', pushFile.files[0]);
-          const resp = await fetch('/api/upgrade/push', { method:'POST', body: fd });
-          const body = await resp.json().catch(()=>({}));
-          const results = body.results || [];
-          for (const res of results){
-            const span = pushCard.querySelector('.up-push-result[data-node="'+CSS.escape(res.node)+'"]');
-            if (span){
-              span.textContent = res.ok ? '\u2713 applied' : ('\u2717 ' + (res.error || 'failed'));
-              span.style.color = res.ok ? 'var(--ok,#2a2)' : 'var(--danger,#b33)';
-            }
-          }
-          if (!resp.ok && !results.length){ alert(body.error || 'push failed'); }
-        } finally { pushBtn.disabled = false; pushBtn.textContent = 'Push to selected'; }
-      };
-    }
-    host.appendChild(pushCard);
-  }
   return;
 }
 
