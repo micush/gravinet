@@ -35,15 +35,17 @@ import (
 // command's logic, reached two ways, not two implementations that could
 // drift apart.
 //
-// A few NAV_GROUPS sections don't have any CLI-reachable equivalent today —
-// mostly Monitor's live host-state views (metrics, capture, route-table,
-// bgp-peers, hosts-file, dns-state, logs) and Traffic > BGP / Naming > DNS,
-// which are web-admin/config-file-only features with no control-socket
-// command behind them at all. Rather than omit those sections (which would
-// make the CLI's shape silently incomplete next to the web admin, or make
-// "gravinet monitor logs" a confusing "unknown subcommand") they're listed
-// with notYetInCLI, which says plainly that this isn't wired up yet instead
-// of pretending to be a real answer.
+// speedtestNotYetInCLI is the one remaining leaf without a real CLI path
+// (see its own doc comment for why: it needs new async control-socket
+// protocol, not just a new command reusing an existing local reader). Every
+// other NAV_GROUPS section this file once listed as a gap — Monitor's
+// metrics, capture, route-table, bgp-peers, hosts-file, dns-state, and logs,
+// plus Traffic > BGP and Naming > DNS — has since been given a real leaf
+// below; this comment previously listed them as unimplemented well after
+// that stopped being true, which is worth a general warning: check the leaf
+// tables below directly rather than trust a paragraph like this one, because
+// paragraphs go stale the moment someone lands a leaf without also updating
+// the paragraph describing what leaves don't exist yet.
 
 // groupLeaf is one runnable entry in a group's menu.
 type groupLeaf struct {
@@ -86,15 +88,14 @@ func dispatchGroup(groupPath string, leaves []groupLeaf, args []string) {
 	os.Exit(2)
 }
 
-// notYetInCLI is the leaf for a NAV_GROUPS section with no control-socket
-// command behind it — see this file's package comment for which ones and
-// why. Reports that plainly rather than a bare "unknown subcommand", and
-// exits nonzero like any other command that couldn't do what was asked.
-func notYetInCLI(what string) func([]string) {
-	return func(args []string) {
-		fatal("%s isn't available via the CLI yet — use the web admin for this", what)
-	}
-}
+// speedtestNotYetInCLI, below, is the one remaining leaf without a real CLI
+// path. There used to be a generic notYetInCLI(what) helper here for
+// listing several such gaps; it's gone because every gap it once covered
+// has since been given a real leaf (see the package comment above) and a
+// helper with zero call sites is worse than no helper — it looks load-
+// bearing to the next reader. If another real gap shows up, write its
+// stub the way speedtestNotYetInCLI is written below: specific to that one
+// command, so it can't silently outlive the gap it describes.
 
 // cmdMonitorCapture and speedtestNotYetInCLI: both of these were actually
 // investigated rather than assumed out of scope, and they landed

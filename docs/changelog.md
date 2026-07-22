@@ -38,6 +38,74 @@ assuming it didn't happen.
 
 ---
 
+## v560 — 2026-07-21
+
+**Went looking for the same class of bug the gateway note turned out to be —
+a comment describing a gap that had already been closed — and found one:
+seven CLI sections in cli_groups.go's own package comment were listed as
+"no CLI-reachable equivalent" while every one of them had a real
+implementation sitting a few lines below. Also fuzzed the new IPv6
+extension-header walker (v557) for correctness under attacker-controlled
+bytes: 667,591 executions, zero crashes.**
+
+**The stale gap list.** cli_groups.go's package comment claimed Monitor's
+metrics, capture, route-table, bgp-peers, hosts-file, dns-state, and logs,
+plus Traffic > BGP and Naming > DNS, had "no control-socket command behind
+[them] at all" and were routed through a `notYetInCLI(what)` stub. Checked
+each against `monitorGroup`/`trafficGroup`/`namingGroup` directly: every
+single one is wired to a real function — `cmdMonitorMetrics`,
+`cmdMonitorRouteTable`, `cmdTrafficBGP`, `cmdNamingDNS`, and so on, all
+verified non-stub (spot-checked `cmdMonitorMetrics`: parses flags, calls the
+control socket, renders CPU/mem/disk/uptime/per-interface throughput — a
+real implementation). `notYetInCLI` itself had zero call sites anywhere in
+the repo; it was pure dead code, kept alive only by comments describing a
+past state.
+
+Only `speedtest` is still a genuine gap (see its own doc comment, unchanged
+from v558/559). The package comment now says that plainly instead of listing
+seven things that no longer belong on the list, and adds the general
+warning this bug is evidence for: trust the leaf tables directly, not a
+paragraph describing them, because the paragraph goes stale the moment
+someone lands a leaf without updating it — which is exactly what happened
+here.
+
+`notYetInCLI` is removed rather than kept as unused infrastructure. A
+function with zero call sites looks load-bearing to the next reader in
+exactly the way this comment did; if a genuine future gap needs a stub, it
+should be written specific to that command (as `speedtestNotYetInCLI`
+already is), so it can't quietly outlive the gap it describes the way this
+one did.
+
+Verified live against the built binary post-fix:
+`gravinet traffic bgp -h` and `gravinet naming dns -h` both produce real
+usage output, not the old fatal-and-exit stub.
+
+**Fuzzed the IPv6 extension-header walker.** v557 added a bounded loop that
+parses attacker-controlled bytes off the wire before any authentication
+happens (`isUnderlayLoop` runs on outbound TUN reads, pre-encryption) —
+exactly the kind of code where "the bounds logic looks right by inspection"
+isn't good enough on its own. Manual analysis said the loop can't hang
+(every branch advances the offset by at least 8 bytes, the smallest
+possible extension header, independent of any attacker-controlled length
+field) and can't panic (every read is bounds-checked, including the "does
+the claimed header length run past the buffer" case). `FuzzUDPPorts` checks
+the panic half empirically rather than resting on that analysis: seeded
+with the known-good/known-bad shapes `TestUDPPorts` already covers, plus a
+self-referential all-zero header chain and a length byte set to its
+maximum (255, claiming a 2048-byte header) — 667,591 executions, zero
+crashes, zero hangs. New corpus entries the fuzzer found interesting are
+cached locally but not committed (standard for `go test -fuzz`; a real
+crasher would instead land in `testdata/fuzz/` and fail this commit's test
+run, which it didn't).
+
+Verified: `go build ./...`, `go vet ./...` clean; `go test -fuzz FuzzUDPPorts
+-fuzztime 100s` passes with 667,591 executions; existing `TestUDPPorts` and
+`cmd/gravinet` suites pass; cross-compiles for darwin/amd64, darwin/arm64,
+windows/amd64, freebsd/amd64, openbsd/amd64, linux/arm, linux/386,
+linux/arm64.
+
+---
+
 ## v559 — 2026-07-21
 
 **Every CLI command now accepts any unambiguous prefix — `gravinet mon met`
