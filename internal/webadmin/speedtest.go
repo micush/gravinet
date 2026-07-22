@@ -48,6 +48,16 @@ type stSample struct {
 	Mbps float64 `json:"mbps"`
 }
 
+// stPktSample is stSample's packet-rate counterpart, plotted as its own
+// chart rather than a second series on the Mbps one (very different scales —
+// Mbps in the tens to low hundreds, pps in the thousands — so sharing one
+// y-axis would flatten one of them). T is on the same start-relative time
+// base as stSample's, even though the two are graphed separately.
+type stPktSample struct {
+	T   float64 `json:"t"`
+	Pps float64 `json:"pps"`
+}
+
 type stResult struct {
 	Samples []stSample `json:"samples"`
 	AvgMbps float64    `json:"avg_mbps"`
@@ -70,7 +80,15 @@ type stResult struct {
 	// couldn't be found in this node's own peer list at snapshot time, which
 	// the UI should treat as "not available" rather than "zero packets".
 	PacketsPerSec float64 `json:"packets_per_sec,omitempty"`
-	Error         string  `json:"error,omitempty"`
+	// PacketSamples is PacketsPerSec's time series, for its own chart —
+	// collected by pktSampleLoop polling the same peer counters every
+	// stSampleEvery while this phase runs, concurrently with
+	// measureDownload/measureUpload rather than inside them (same reason
+	// PacketsPerSec itself is computed in handleSpeedtestRun: only the
+	// caller has the backend handle). Empty, not a zero-filled series, when
+	// the peer was never found during this phase.
+	PacketSamples []stPktSample `json:"packet_samples,omitempty"`
+	Error         string        `json:"error,omitempty"`
 }
 
 // findPeerByOverlay looks up a peer's current PeerInfo by its overlay
@@ -176,15 +194,28 @@ func (s *Server) handleSpeedtestRun(w http.ResponseWriter, r *http.Request) {
 	// duration it's divided by. In practice this is negligible — the bulk
 	// transfer that dominates the window (64KB chunks flooding for
 	// stDuration) vastly outnumbers one incidental keepalive — and not worth
-	// the more invasive refactor an exact fix would need.
+	// the more invasive refactor an exact fix would need. The same gap
+	// applies to pktSampleLoop's time series below it, for the same reason:
+	// it also has to wrap the whole measure call from outside rather than
+	// start only once reading/writing actually begins.
 	beforeDown, haveBeforeDown := findPeerByOverlay(s.be, ip)
+	downPktDone := make(chan struct{})
+	downPktOut := make(chan []stPktSample, 1)
+	go pktSampleLoop(s.be, ip, true /* rx: download counts our RxPackets */, time.Now(), downPktDone, downPktOut)
 	down := measureDownload(base + "/api/speedtest/source")
+	close(downPktDone)
+	down.PacketSamples = <-downPktOut
 	afterDown, haveAfterDown := findPeerByOverlay(s.be, ip)
 	// Download: this node is the receiver, so it's our RxPackets that moved.
 	down.PacketsPerSec = packetsPerSec(beforeDown.RxPackets, afterDown.RxPackets, haveBeforeDown, haveAfterDown, down.DurationSec)
 
 	beforeUp, haveBeforeUp := findPeerByOverlay(s.be, ip)
+	upPktDone := make(chan struct{})
+	upPktOut := make(chan []stPktSample, 1)
+	go pktSampleLoop(s.be, ip, false /* tx: upload counts our TxPackets */, time.Now(), upPktDone, upPktOut)
 	up := measureUpload(base + "/api/speedtest/sink")
+	close(upPktDone)
+	up.PacketSamples = <-upPktOut
 	afterUp, haveAfterUp := findPeerByOverlay(s.be, ip)
 	// Upload: this node is the sender, so it's our TxPackets that moved.
 	up.PacketsPerSec = packetsPerSec(beforeUp.TxPackets, afterUp.TxPackets, haveBeforeUp, haveAfterUp, up.DurationSec)
@@ -244,6 +275,60 @@ func sampleLoop(m *meter, start time.Time, done <-chan struct{}, out chan<- []st
 				})
 			}
 			last, lastT = cur, now
+		}
+	}
+}
+
+// pktSampleLoop is sampleLoop's packet-rate counterpart, same interval and
+// same start-relative timestamps, but a different source entirely: it polls
+// the target peer's own TxPackets/RxPackets session counters through be
+// (findPeerByOverlay) rather than a local byte meter, since packet counts
+// aren't something measureDownload/measureUpload can see themselves — only
+// the caller holds the backend handle that can read them. rx selects which
+// counter tracks this phase's direction (true for download, false for
+// upload — same mapping handleSpeedtestRun's single before/after
+// PacketsPerSec snapshot uses).
+//
+// The first successful read only establishes a baseline; it can't yet
+// produce a sample, since a session's packet counters are cumulative over
+// its whole lifetime, not zeroed at the start of this call the way the local
+// byte meter is — there is no meaningful "delta since zero" for a number
+// that didn't start at zero. A tick where the peer isn't currently listed
+// (haveBefore-style miss) is skipped rather than treated as zero traffic;
+// the next successful tick resumes from its own fresh baseline rather than
+// spanning the gap with the previous one, which would understate the true
+// rate by including that observation gap as this-tick elapsed time.
+func pktSampleLoop(be Backend, overlay netip.Addr, rx bool, start time.Time, done <-chan struct{}, out chan<- []stPktSample) {
+	var samples []stPktSample
+	tick := time.NewTicker(stSampleEvery)
+	defer tick.Stop()
+	var last uint64
+	haveLast := false
+	lastT := start
+	for {
+		select {
+		case <-done:
+			out <- samples
+			return
+		case now := <-tick.C:
+			p, ok := findPeerByOverlay(be, overlay)
+			if !ok {
+				haveLast = false // resume from a fresh baseline on the next successful read
+				continue
+			}
+			cur := p.TxPackets
+			if rx {
+				cur = p.RxPackets
+			}
+			if haveLast && cur >= last {
+				if dt := now.Sub(lastT).Seconds(); dt > 0 {
+					samples = append(samples, stPktSample{
+						T:   now.Sub(start).Seconds(),
+						Pps: float64(cur-last) / dt,
+					})
+				}
+			}
+			last, lastT, haveLast = cur, now, true
 		}
 	}
 }

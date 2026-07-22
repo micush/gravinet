@@ -38,6 +38,89 @@ assuming it didn't happen.
 
 ---
 
+## v565 — 2026-07-21
+
+**Packets/sec now graphs over time, its own chart, separate from the
+existing Mbps one — not just the single average v564 shipped.**
+
+v564 added a `packets_per_sec` figure computed once per phase, from a single
+before/after snapshot of the target peer's packet counters spanning the
+whole download or upload. That's an average, not a series, and the existing
+chart only ever plots Mbps — there was nothing to graph packets against.
+
+**The reason it wasn't already time-series data**, and the reason adding it
+took real plumbing rather than a one-line change: `measureDownload`/
+`measureUpload` sample their own local byte meter every `stSampleEvery`
+(250ms) to build the Mbps chart, but packet counts live somewhere those
+functions can't see — the target peer's session counters, reachable only
+through the backend handle `handleSpeedtestRun` holds. Getting a packets/sec
+series meant polling that handle on the same 250ms cadence, concurrently
+with the (blocking) transfer, from outside the functions that do the actual
+transferring.
+
+**New `pktSampleLoop`** is `sampleLoop`'s packet-rate sibling: same tick
+interval, same start-relative timestamps, but polls `findPeerByOverlay`
+instead of a local meter. It handles two things a local-meter poller
+doesn't have to: a session's packet counter is cumulative over its whole
+lifetime, not zeroed at call start, so the very first successful read only
+establishes a baseline — it can't produce a sample yet, since there is no
+meaningful "delta since zero" for a number that never was zero; and a tick
+where the peer isn't currently listed (a lookup miss) is skipped and the
+next successful tick resumes from a *fresh* baseline rather than spanning
+the gap, which would otherwise understate the rate by folding an
+observation gap into the elapsed time.
+
+`handleSpeedtestRun` now starts one `pktSampleLoop` goroutine right before
+each phase's `measureDownload`/`measureUpload` call and closes it right
+after, same shape as the existing before/after average snapshot (which is
+unchanged and still runs alongside it — the two are independent, and both
+existing, tested). New `stResult.PacketSamples []stPktSample` (own type,
+`{T, Pps}`, not reused from `stSample` — reusing a field literally named
+`Mbps` for a packet rate would have been dishonest field-naming) carries the
+series to the UI, empty rather than zero-filled when the peer was never
+found during the phase.
+
+**UI**: `speedChartSVG` is generalized to take a value accessor and a
+formatter instead of hardcoding `.mbps`/`fmtMbps`, so the same
+scaling/gridline/path logic now draws both charts rather than being
+duplicated. `speedGraph` appends the packets/sec chart as its own
+`chart-holder` underneath the Mbps one, with a small "packets/sec" label —
+deliberately not a second series on the existing chart: Mbps runs in the
+tens to low hundreds here while pps runs into the thousands, and sharing one
+y-axis would flatten whichever is smaller. Skipped entirely, no empty
+placeholder, when the peer was never found for that whole phase.
+
+**Tests.** New `TestPktSampleLoop` drives the poller directly against a fake
+backend whose packet count grows by a fixed step every call, including one
+deliberately missed tick, and checks the resulting series has increasing
+timestamps, no negative rates, and per-sample values in a broad band around
+the expected step/interval rate — proving the miss-and-resume path doesn't
+corrupt what follows it.
+
+Extending the existing end-to-end test (`TestSpeedtestRunReportsPacketsPerSec`,
+from v564) surfaced a real bug in *that test*, not in the new code: it
+predicted the average rate as `(per-call growth) / DurationSec`, which was
+correct back when exactly one `ListPeers` call happened between the
+before/after snapshot. With the poller now calling `ListPeers` roughly once
+a tick throughout the whole phase, the fake backend's shared call counter
+advances far more per phase, and the old prediction was off by roughly the
+tick count (got ~21,240 pps, old formula predicted ~1,249). The right
+invariant is simpler and more robust: since every call adds the same
+fixed growth, the average rate converges on `(per-call growth) /
+stSampleEvery)`, independent of how many calls actually happened — verified
+against the real number before rewriting the assertion, not just reasoned
+through. The test now also asserts on `packet_samples` itself: non-empty,
+monotonically increasing timestamps, non-negative values, and each sample
+within a broad band of the expected rate.
+
+Verified: `go build ./...`, `go vet ./...` clean; the full speedtest test
+set passes, including 3 stable runs of the end-to-end test and a `-race`
+pass on the new concurrent-poller code; full `internal/webadmin` suite
+passes (111s); cross-compiles for darwin/amd64, darwin/arm64, windows/amd64,
+freebsd/amd64, openbsd/amd64, linux/arm, linux/386, linux/arm64.
+
+---
+
 ## v564 — 2026-07-21
 
 **Speedtest now reports packets/sec alongside the existing upload/download

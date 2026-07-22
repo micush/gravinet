@@ -356,11 +356,15 @@ func TestSpeedtestRunReportsPacketsPerSec(t *testing.T) {
 		t.Fatalf("upload errored: %s", e)
 	}
 
-	// Exactly one before/after pair backs each phase's ListPeers-derived
-	// delta, and txPerCall/rxPerCall are constant per call — so the reported
-	// rate is fully determined: (per-call growth) / (that phase's measured
-	// duration), independent of how much throughput the transfer itself
-	// happened to move.
+	// Every ListPeers call — whether it's the poller's or one of the two
+	// snapshot calls — adds exactly rxPerCall/txPerCall to the shared
+	// counter, and the poller ticks roughly once every stSampleEvery for the
+	// whole phase. So the average rate over the phase converges on
+	// (per-call growth / tick interval), independent of how many calls
+	// actually happened or how long the phase ran — a much more robust
+	// prediction than "one call's growth over the whole duration", which is
+	// what a before/after pair *without* a concurrent poller would need
+	// instead (and what this test asserted before the poller existed).
 	downPps, _ := down["packets_per_sec"].(float64)
 	upPps, _ := up["packets_per_sec"].(float64)
 	downDur, _ := down["duration_sec"].(float64)
@@ -368,30 +372,145 @@ func TestSpeedtestRunReportsPacketsPerSec(t *testing.T) {
 	if downDur <= 0 || upDur <= 0 {
 		t.Fatalf("expected positive measured durations: down=%v up=%v", downDur, upDur)
 	}
-	wantDown := float64(be.rxPerCall) / downDur
-	wantUp := float64(be.txPerCall) / upDur
+	wantDown := float64(be.rxPerCall) / stSampleEvery.Seconds()
+	wantUp := float64(be.txPerCall) / stSampleEvery.Seconds()
 	if downPps <= 0 {
 		t.Fatalf("download packets_per_sec = %v, want > 0 (backend reported growing RxPackets)", downPps)
 	}
 	if upPps <= 0 {
 		t.Fatalf("upload packets_per_sec = %v, want > 0 (backend reported growing TxPackets)", upPps)
 	}
-	// A little tolerance for the two counter reads not landing at exactly the
-	// same instant as the duration timer's own start/stop.
+	// A little tolerance for tick timing jitter and the two counter reads
+	// not landing at exactly the same instant as the duration timer's own
+	// start/stop.
 	if ratio := downPps / wantDown; ratio < 0.5 || ratio > 2 {
-		t.Errorf("download pps = %v, want roughly %v (rxPerCall/DurationSec)", downPps, wantDown)
+		t.Errorf("download pps = %v, want roughly %v (rxPerCall/stSampleEvery)", downPps, wantDown)
 	}
 	if ratio := upPps / wantUp; ratio < 0.5 || ratio > 2 {
-		t.Errorf("upload pps = %v, want roughly %v (txPerCall/DurationSec)", upPps, wantUp)
+		t.Errorf("upload pps = %v, want roughly %v (txPerCall/stSampleEvery)", upPps, wantUp)
 	}
 	// Direction isolation: upload must use TxPackets growth, not RxPackets',
 	// and vice versa — rxPerCall (5000) and txPerCall (3000) are different on
 	// purpose so a swapped direction would show up as a ~5000/3000 mismatch
 	// rather than accidentally matching.
 	if downPps > upPps*3 || upPps > downPps*3 {
-		// Both phases run for a similar DurationSec (~4s each), so with
-		// rxPerCall = 5000 and txPerCall = 3000 the two rates should differ
-		// by roughly that same ~5:3 ratio, not be swapped or collapsed together.
+		// Both phases share the same tick rate, so with rxPerCall = 5000 and
+		// txPerCall = 3000 the two average rates should differ by roughly
+		// that same ~5:3 ratio, not be swapped or collapsed together.
 		t.Logf("down=%v up=%v (expected roughly a %v:%v ratio)", downPps, upPps, be.rxPerCall, be.txPerCall)
+	}
+
+	// The chart data: proves handleSpeedtestRun's concurrent poller actually
+	// produced a time series, not just the single before/after average above
+	// — the unit tests for packetsPerSec and pktSampleLoop each prove their
+	// own function works in isolation; this is what proves handleSpeedtestRun
+	// wires the poller in at all and per-sample values land in the same
+	// ballpark as the average they should be consistent with.
+	downSamples, _ := down["packet_samples"].([]any)
+	upSamples, _ := up["packet_samples"].([]any)
+	if len(downSamples) == 0 {
+		t.Fatal("download packet_samples is empty, want a time series from the concurrent poller")
+	}
+	if len(upSamples) == 0 {
+		t.Fatal("upload packet_samples is empty, want a time series from the concurrent poller")
+	}
+	checkSeries := func(name string, samples []any, want float64) {
+		lastT := -1.0
+		for i, raw := range samples {
+			s, _ := raw.(map[string]any)
+			tv, _ := s["t"].(float64)
+			pv, _ := s["pps"].(float64)
+			if tv <= lastT {
+				t.Errorf("%s sample %d: t=%v did not increase from %v", name, i, tv, lastT)
+			}
+			lastT = tv
+			if pv < 0 {
+				t.Errorf("%s sample %d: negative pps %v", name, i, pv)
+			}
+			// A broad band, not a tight one: real ticker timing jitters, so
+			// individual samples land near the average rate, not exactly on
+			// it — this is a check against something structurally wrong
+			// (wrong counter, double-counted growth), not a precision check.
+			if ratio := pv / want; pv > 0 && (ratio < 0.2 || ratio > 5) {
+				t.Errorf("%s sample %d: pps=%v, want within a broad band of %v", name, i, pv, want)
+			}
+		}
+	}
+	checkSeries("download", downSamples, wantDown)
+	checkSeries("upload", upSamples, wantUp)
+}
+
+// tickingPeerBackend is countingPeerBackend's cousin for pktSampleLoop:
+// embeds *stubBackend and overrides only ListPeers, returning a packet count
+// that has grown by a fixed step on every call — standing in for
+// pktSampleLoop's own ticker calling it once per stSampleEvery against a
+// session that's genuinely accumulating traffic.
+type tickingPeerBackend struct {
+	*stubBackend
+	overlay string
+	callN   int
+	step    uint64
+	// missOnCall, if set, makes that one call report the peer as absent
+	// (an empty ListPeers result), exercising pktSampleLoop's "resume from a
+	// fresh baseline" path rather than treating the gap as zero traffic.
+	missOnCall int
+}
+
+func (c *tickingPeerBackend) ListPeers(id uint64) []mesh.PeerInfo {
+	c.callN++
+	if c.callN == c.missOnCall {
+		return nil
+	}
+	n := uint64(c.callN) * c.step
+	return []mesh.PeerInfo{{NodeID: "peerB", Overlay4: c.overlay, TxPackets: n, RxPackets: n}}
+}
+
+// TestPktSampleLoop proves the time-series poller behind the packets/sec
+// chart: it produces increasing-T samples at roughly stSampleEvery spacing,
+// each Pps close to (step/interval), and a miss mid-run doesn't panic, emit
+// a negative/garbage sample, or corrupt the samples that follow it.
+func TestPktSampleLoop(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real ticker timing; skipped under -short")
+	}
+	const step = 500 // packets added per tick
+	be := &tickingPeerBackend{
+		stubBackend: &stubBackend{},
+		overlay:     "10.7.0.2",
+		step:        step,
+		missOnCall:  3, // the 3rd tick reports the peer absent
+	}
+	overlay := netip.MustParseAddr("10.7.0.2")
+	start := time.Now()
+	done := make(chan struct{})
+	out := make(chan []stPktSample, 1)
+	go pktSampleLoop(be, overlay, true, start, done, out)
+	time.Sleep(6 * stSampleEvery) // enough ticks to cross the missed one and recover after it
+	close(done)
+	samples := <-out
+
+	if len(samples) < 2 {
+		t.Fatalf("got %d samples, want at least 2 (one miss among ~6 ticks should still leave several)", len(samples))
+	}
+	lastT := -1.0
+	for i, s := range samples {
+		if s.T <= lastT {
+			t.Fatalf("sample %d: T=%v did not increase from the previous %v", i, s.T, lastT)
+		}
+		lastT = s.T
+		if s.Pps < 0 {
+			t.Fatalf("sample %d: negative pps %v", i, s.Pps)
+		}
+		// A sample spanning the missed tick covers roughly 2*stSampleEvery of
+		// elapsed time for the same one-tick's worth of counter growth (step),
+		// so its rate is about half of an ordinary tick's; every other sample
+		// should land near step/stSampleEvery. Both are "roughly right", not
+		// exactly right, since real ticker timing jitters — this just rules
+		// out something wildly wrong, like counting the growth twice or using
+		// the wrong elapsed time.
+		want := step / stSampleEvery.Seconds()
+		if ratio := s.Pps / want; ratio < 0.3 || ratio > 2.5 {
+			t.Errorf("sample %d: pps=%v, want within a broad band of %v (step/interval)", i, s.Pps, want)
+		}
 	}
 }

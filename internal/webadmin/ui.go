@@ -5760,7 +5760,7 @@ function rateFmt(v){
 // originate one.
 function infoSpeedtest(c){
   const card = $('<div class="card"></div>');
-  card.appendChild($('<div class="hint" style="margin:0 0 10px">Measure overlay throughput between two managed peers. The first peer runs the test against the second; download and upload are each measured for ~4s, reporting average Mbps and, where available, the outer-datagram rate (packets/sec) that transfer drove between the two. Only peers in Manager mode can run a test as the first peer.</div>'));
+  card.appendChild($('<div class="hint" style="margin:0 0 10px">Measure overlay throughput between two managed peers. The first peer runs the test against the second; download and upload are each measured for ~4s, graphing Mbps over time plus, where available, the outer-datagram rate (packets/sec) that transfer drove between the two on its own chart below. Only peers in Manager mode can run a test as the first peer.</div>'));
 
   const bar = $('<div class="tbar"></div>');
   // Both pickers are buildListPicker listboxes, same as the header's node picker:
@@ -5892,23 +5892,36 @@ function renderSpeedResult(out, body){
 
 function speedGraph(title, result, color){
   const card = $('<div class="card metric-card"></div>');
-  // pps sits in the same metric-now chip as avg Mbps (the '·' separator is
-  // the same convention the bandwidth throttle display uses for combining
-  // related stats inline) rather than a second chip — metric-head is a
-  // two-slot flex row (title left, value right) everywhere else it's used,
-  // and this keeps that layout intact instead of introducing a new shape.
-  // Omitted entirely, not shown as "0 pkts/s", when the server couldn't
-  // attribute a rate to this run (result.packets_per_sec is unset — see
-  // packetsPerSec's doc comment in speedtest.go for exactly when that
-  // happens); a transfer that moved any bytes at all never legitimately
-  // has a real pps of zero, so an absent value means "not available", not
-  // "none moved".
+  // The avg figures both live in the one metric-now chip (the '·' separator
+  // is the same convention the bandwidth throttle display uses for combining
+  // related stats inline) — metric-head is a two-slot flex row (title left,
+  // value right) everywhere else it's used, and this keeps that layout
+  // intact instead of introducing a new shape. pps is left out of the chip
+  // entirely, not shown as "0 pkts/s", when the server couldn't attribute a
+  // rate to this run (result.packets_per_sec is unset — see packetsPerSec's
+  // doc comment in speedtest.go for exactly when that happens); a transfer
+  // that moved any bytes at all never legitimately has a real pps of zero,
+  // so an absent value means "not available", not "none moved". The chart
+  // below applies the same rule to the time series (packet_samples empty,
+  // not zero-filled).
   const now = 'avg '+esc(fmtMbps(result.avg_mbps||0)) + (result.packets_per_sec ? ' · '+esc(fmtPps(result.packets_per_sec)) : '');
   card.appendChild($('<div class="metric-head"><span class="metric-title">'+esc(title)+'</span><span class="metric-now">'+now+'</span></div>'));
   if (result.error){ card.appendChild($('<div class="hint" style="margin:0">'+esc(result.error)+'</div>')); return card; }
   const holder = $('<div class="chart-holder"></div>');
-  holder.innerHTML = speedChartSVG(result.samples||[], color);
+  holder.innerHTML = speedChartSVG(result.samples||[], color, s=>s.mbps, fmtMbps);
   card.appendChild(holder);
+  // Packets/sec gets its own chart, not a second line on the one above: Mbps
+  // sits in the tens to low hundreds here while pps runs into the thousands,
+  // so sharing one y-axis would flatten whichever of the two is smaller.
+  // Skipped entirely — no empty chart, no "no samples" placeholder — when
+  // the server never found the peer during this phase at all, since that
+  // reads as "not available" rather than an actual empty result.
+  if ((result.packet_samples||[]).length){
+    card.appendChild($('<div class="hint" style="margin:8px 0 4px">packets/sec</div>'));
+    const pktHolder = $('<div class="chart-holder"></div>');
+    pktHolder.innerHTML = speedChartSVG(result.packet_samples, color, s=>s.pps, fmtPps);
+    card.appendChild(pktHolder);
+  }
   return card;
 }
 
@@ -5920,10 +5933,14 @@ function speedGraph(title, result, color){
 function fmtPps(v){ return Math.round(v||0).toLocaleString()+' pkts/s'; }
 
 // speedChartSVG mirrors the Metrics chart style, with x = elapsed seconds.
-function speedChartSVG(samples, color){
+// valueOf pulls the plotted number out of each sample (samples.mbps for the
+// throughput chart, .pps for the packet-rate chart below) and fmtFn formats
+// axis labels — the two charts share every pixel of scaling/gridline/path
+// logic and differ only in which field they read and how they print it.
+function speedChartSVG(samples, color, valueOf, fmtFn){
   const W=CH.W, H=CH.H, padL=CH.padL, padR=CH.padR, padT=CH.padT, padB=CH.padB;
   let maxV=0, maxT=0;
-  for (const s of samples){ if (s.mbps>maxV) maxV=s.mbps; if (s.t>maxT) maxT=s.t; }
+  for (const s of samples){ const v=valueOf(s); if (v>maxV) maxV=v; if (s.t>maxT) maxT=s.t; }
   const yMax = maxV>0 ? maxV*1.15 : 1;
   const win = maxT>0 ? maxT : 1;
   const xs = t => padL + (W-padL-padR)*(t/win);
@@ -5932,13 +5949,13 @@ function speedChartSVG(samples, color){
   for (const f of [0,0.5,1]){
     const yy = padT + (H-padT-padB)*(1-f);
     g += '<line x1="'+padL+'" y1="'+yy.toFixed(1)+'" x2="'+(W-padR)+'" y2="'+yy.toFixed(1)+'" stroke="var(--line)" stroke-width="1"/>';
-    g += '<text x="'+(padL-8)+'" y="'+(yy+3).toFixed(1)+'" text-anchor="end" font-size="10" fill="var(--mut)">'+esc(fmtMbps(yMax*f))+'</text>';
+    g += '<text x="'+(padL-8)+'" y="'+(yy+3).toFixed(1)+'" text-anchor="end" font-size="10" fill="var(--mut)">'+esc(fmtFn(yMax*f))+'</text>';
   }
   g += '<text x="'+padL+'" y="'+(H-6)+'" font-size="10" fill="var(--mut)">0s</text>';
   g += '<text x="'+(W-padR)+'" y="'+(H-6)+'" text-anchor="end" font-size="10" fill="var(--mut)">'+win.toFixed(1)+'s</text>';
   if (samples.length){
     let d='';
-    for (let i=0;i<samples.length;i++){ d += (i?'L':'M')+xs(samples[i].t).toFixed(1)+' '+ys(samples[i].mbps).toFixed(1)+' '; }
+    for (let i=0;i<samples.length;i++){ d += (i?'L':'M')+xs(samples[i].t).toFixed(1)+' '+ys(valueOf(samples[i])).toFixed(1)+' '; }
     g += '<path d="'+d+'" fill="none" stroke="'+color+'" stroke-width="1.5" stroke-linejoin="round"/>';
   } else {
     g += '<text x="'+(W/2)+'" y="'+(H/2)+'" text-anchor="middle" font-size="11" fill="var(--mut)">no samples</text>';
