@@ -211,10 +211,17 @@ func (d *Device) ReadSuper(p []byte) (int, vnetHdr, error) {
 // case (h is the zero value: gsoType none, i.e. exactly what plain Write
 // sends once vnetHdr framing is on) and for a genuinely coalesced buffer
 // built by grocoalesce.go.
+//
+// Safe for concurrent callers (see Device.writeMu's doc comment for why
+// that's load-bearing, not defensive): each call holds writeMu for exactly
+// the build-frame-then-syscall section, so two goroutines racing to write
+// never see a partially-overwritten txScratch.
 func (d *Device) WriteSuper(h vnetHdr, p []byte) (int, error) {
 	if !d.vnetHdr {
 		return d.f.Write(p)
 	}
+	d.writeMu.Lock()
+	defer d.writeMu.Unlock()
 	if len(d.txScratch) < vnetHdrLen+len(p) {
 		d.txScratch = make([]byte, vnetHdrLen+len(p))
 	}

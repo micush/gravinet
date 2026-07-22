@@ -38,6 +38,102 @@ assuming it didn't happen.
 
 ---
 
+## v574 — 2026-07-22
+
+**Critical fix: a data race on the TUN write path corrupted TCP traffic
+under real load — SSH (and any other sustained TCP flow) broke while ping
+kept working, exactly the signature of a bug specific to the TCP fast path.
+Root-caused, reproduced, and fixed.**
+
+Reported directly: "ping works, ssh does not." That split is the whole
+diagnosis in miniature — `isPlainIPv4TCP` (gsomath_linux.go) gates every
+GSO/GRO code path this repo added in v572/v573 to plain TCPv4 only, so ICMP
+never touched any of it, while SSH's traffic (many small packets, terminal
+echo, ACKs, sustained enough to matter) went straight through the part that
+was actually broken.
+
+**The bug.** `Device.WriteSuper` (vnethdr_linux.go) builds every outbound
+frame into a single reused buffer, `d.txScratch`, before the `write()`
+syscall — reused deliberately, the same amortize-the-allocation pattern
+`sendring.go` uses for the UDP side. That's safe as long as exactly one
+goroutine ever calls it at a time. It wasn't: `deliverInner`
+(mesh/engine.go) enqueues into the write-side ring on the fast path, but
+falls back to calling `dev.Write` *directly, from whichever goroutine hit a
+full ring* — a deliberate backpressure-relief design, not a bug in itself —
+while the flusher goroutine can simultaneously be mid-write for a different
+packet. Two goroutines racing into the same `txScratch` interleave each
+other's header and payload bytes. The result isn't a crash or an error
+return; it's a plausible-looking but corrupted packet — wrong length field,
+wrong payload, checksum computed over one goroutine's data and shipped
+attached to another's. The kernel or the remote TCP stack just drops it
+silently. Under ping's traffic pattern (low rate, essentially never fills a
+256-slot ring, so the racy fallback path almost never executes) this is
+invisible. Under SSH's (frequent small packets, real chance of transiently
+filling the ring) it's frequent enough to prevent the connection from ever
+making progress.
+
+Confirmed directly rather than inferred from the report alone:
+`internal/tun/concurrent_write_race_test.go` (new) opens a real
+`/dev/net/tun` and hammers `Write` from 8 goroutines concurrently —
+failed under `-race` on the pre-fix tree, every run. A second test in the
+same file, `TestConcurrentCoalesceAndDirectWriteRace`, reproduces the exact
+mixed call pattern production hits — one goroutine playing the flusher
+(`CoalesceWrite`/`FlushCoalesced`) against several playing `deliverInner`'s
+fallback (plain `Write`) — same result pre-fix.
+
+**The fix.** `Device` gets a `writeMu sync.Mutex` (tun_linux.go), held for
+exactly the build-frame-then-`write()` section of `WriteSuper`
+(vnethdr_linux.go) — the one function every write path (`Write`,
+`WriteCoalesced`, and therefore `CoalesceWrite`/`FlushCoalesced`) already
+funneled through. This was not a pre-existing property that regressed:
+before v572, `Write` called `d.f.Write(p)` directly with no shared buffer at
+all, and concurrent calls were safe because the underlying `write(2)`
+syscall doesn't interleave two calls' bytes on its own — introducing
+`txScratch` for vnet_hdr framing is what created the shared mutable state,
+and this is the fix that should have shipped alongside it. Read-side
+buffers (`rxScratch`, `splitScratch`) don't need the same treatment: exactly
+one goroutine reads a given `Device` — `tunLoop` owns it, and
+`tunLoopPooled`'s own doc comment already documents why concurrent `Read`
+was never supported — so there was nothing to race there.
+
+**Why v572/v573's own `-race` testing didn't catch this.** Every test run
+so far used traffic light enough that the write-side ring never actually
+filled — the racy fallback path was simply never executed, so `-race` had
+nothing to observe. This is the general shape of the risk the v572
+changelog entry's "Not verified, and not safe to assume from what is"
+section was already trying to flag (no real bulk/sustained TCP flow had
+exercised this code), just manifesting one layer up from where that entry
+guessed it might: not in the segmentation math itself, but in the
+concurrency around delivering it. `internal/mesh`'s existing fakeDev-based
+tests couldn't have caught this either way — `fakeDev.Write` has no shared
+buffer to race on, so this class of bug is invisible to every test that
+uses it, which is exactly why the new tests open a real device instead.
+
+**A related, lower-severity property this does not change, worth being
+explicit about:** the ring-full fallback can still write a packet *out of
+turn* relative to packets already sitting in the ring for the same flow —
+the mutex makes concurrent writes safe, not ordered. A flow that transiently
+fills the ring can see a locally-reordered segment reach the kernel, which
+TCP tolerates (out-of-order delivery, not corruption or loss), but it isn't
+nothing. Left as-is for now rather than redesigned under time pressure;
+worth watching for during field testing and revisiting if it turns out to
+matter in practice.
+
+**Verified.** `go build ./...` and `go vet ./...` clean.
+`internal/tun/concurrent_write_race_test.go`'s two tests: failed reliably
+under `-race` before the fix, pass reliably (3+ consecutive runs) after.
+Full `internal/tun` suite passes with `-race`. Re-ran every mesh test that
+had shown load-flakiness under `-race`+`GOMAXPROCS=2` in v573's verification
+(`TestFirewallLiveReload`, `TestKeyDisableReconnects`, `TestPeerLocalDisable`,
+`TestDistributedBan`, `TestEgressThrottle`) three times each: the two that
+touch TUN write traffic at all now pass consistently; the others' occasional
+flakiness persists and reproduces even with `-run` isolating just them,
+confirming (as v573 already concluded) it's `-race`-overhead-plus
+core-starvation timing noise unrelated to the data plane, not a symptom of
+this bug or its fix.
+
+---
+
 ## v573 — 2026-07-22
 
 **`GRAVINET_TUN_GSO` now defaults on (still gated on `GOMAXPROCS>=2`);

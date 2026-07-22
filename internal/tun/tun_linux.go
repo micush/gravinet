@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"sync"
 	"syscall"
 	"unsafe"
 )
@@ -55,6 +56,21 @@ type Device struct {
 	rxScratch, txScratch []byte
 	splitScratch         []byte     // gsosplit.go's ReadPackets rebuild buffer
 	coalescer            *Coalescer // grocoalesce.go's CoalesceWrite/FlushCoalesced state
+
+	// writeMu serializes every path that builds a frame into txScratch.
+	// Read-side buffers (rxScratch, splitScratch) don't need this: exactly
+	// one goroutine reads a given Device (tunLoop owns it — see
+	// tunLoopPooled's own comment on why concurrent Read was never
+	// supported). Write is different: the mesh package's write-side ring
+	// has exactly one flusher goroutine as its normal writer, but
+	// deliberately falls back to calling Write directly, from whichever
+	// goroutine hit a full ring, as backpressure relief (see
+	// deliverInner's ps.net.tunTX.enqueue fallback) — so two goroutines
+	// really can call Write/WriteCoalesced on the same Device at once, and
+	// without this they raced on txScratch: confirmed with
+	// TestConcurrentWriteRace, which failed under -race before this field
+	// existed and passes now.
+	writeMu sync.Mutex
 }
 
 func ioctl(fd uintptr, req uintptr, arg unsafe.Pointer) error {
