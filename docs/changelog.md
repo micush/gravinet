@@ -38,6 +38,60 @@ assuming it didn't happen.
 
 ---
 
+## v568 — 2026-07-21
+
+**PPS chart's y-axis labels were cut off on the left ("60,873 pkts/s"
+rendering as ",873 pkts/s") — the fixed left padding every chart in this
+app shares was sized for shorter Mbps/percentage-scale labels, and pps
+values with thousands separators didn't fit in it.**
+
+Every chart on this page (Metrics, Mbps, and now PPS) uses `CH.padL = 76`
+as its left margin, with the y-axis label's right edge anchored at
+`padL-8`. That's comfortably wide for "2559 Mbps" (9 characters) or "100%"
+(4 characters) — the labels every existing chart before this one actually
+produces — but a pps value like the reported one formats as "60,873
+pkts/s" (13 characters), and 76px isn't enough room for that at font-size
+10. The leading "60," rendered past x=0 and was clipped by the chart
+holder. Verified the math against the reported screenshot before writing
+the fix, not just after: `yMax` for that run computes to ~60,198, which
+formats to the same 13-character label and needs ~88.6px — confirming
+CH.padL's 76px was short by almost exactly the amount of leading digits
+the screenshot shows missing.
+
+**Fix:** left padding is now computed from the actual label text, not
+assumed. New `chartPadL(labels, fontSize)` takes the widest of the chart's
+own y-axis labels and returns `max(CH.padL, charCount*fontSize*0.62+8)` —
+exact, not a guess, because this UI's font is monospace end to end (see
+`body`'s own `font-family`), so character width at a given font-size is a
+fixed, known constant rather than something that would need a live DOM
+measurement to get right. Applied to both `speedComboChartSVG` (the PPS
+chart, where this was reported) and `speedChartSVG` (the Mbps charts,
+which were never observed to clip — `fmtMbps` never adds thousands
+separators, so its labels stay short at any realistic value — fixed
+anyway rather than left as an unverified assumption that happens to hold
+today).
+
+New `TestChartPadLFixesLabelClipping` pins it: both chart functions must
+call `chartPadL`, and neither may hardcode `padL=CH.padL` directly.
+Verified the test actually catches the bug: reverted both functions to the
+old fixed-padL shape locally, confirmed the test failed with both exact
+messages naming each function, restored the fix, confirmed green again —
+matching the same discipline every test added this session has been held
+to, after an editing slip while writing this test's placement briefly
+corrupted the neighboring `TestSpeedtestPpsIsOneCombinedChart` (a stray
+replace deleted its function signature, leaving its body orphaned under
+the wrong function). Caught immediately by `go build` failing and a
+function-listing grep, fixed before it reached this commit — worth naming
+plainly rather than quietly folding into "wrote a test."
+
+Verified: `go build ./...`, `go vet ./...` clean; full test set for both
+the peer-picker/speedtest UI assertions and the wider `internal/webadmin`
+suite (105s) pass; cross-compiles for darwin/amd64, darwin/arm64,
+windows/amd64, freebsd/amd64, openbsd/amd64, linux/arm, linux/386,
+linux/arm64.
+
+---
+
 ## v567 — 2026-07-21
 
 **Corrected v565's PPS layout: one combined third chart with download and

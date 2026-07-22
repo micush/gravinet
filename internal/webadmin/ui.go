@@ -5967,20 +5967,38 @@ function fmtPps(v){ return Math.round(v||0).toLocaleString()+' pkts/s'; }
 // established for the Mbps charts, so all three speedtest charts read the
 // same way. yMax/win are computed across BOTH series together, so one line
 // being much smaller than the other still renders at a legible scale.
+// chartPadL computes the left padding a Y-axis needs to fit its own widest
+// label without clipping, rather than assuming CH.padL — sized for the
+// Mbps/percentage-scale labels most charts in this app use — is wide enough
+// for every possible label. It wasn't: pps values run into 5-6 digits with
+// thousands separators ("60,873 pkts/s"), wider than CH.padL had room for,
+// clipping the leading digits off the left edge of the PPS chart. The font
+// is monospace end to end in this UI (see body's own font-family), so a
+// fixed per-character width at a given font-size is exact here — no live
+// DOM measurement needed to get this right, unlike a proportional font
+// where character width varies by glyph.
+function chartPadL(labels, fontSize){
+  const maxLen = Math.max(0, ...labels.map(s => s.length));
+  return Math.max(CH.padL, maxLen*fontSize*0.62 + 8);
+}
+
 function speedComboChartSVG(series, fmtY){
-  const W=CH.W, H=CH.H, padL=CH.padL, padR=CH.padR, padT=CH.padT, padB=CH.padB;
+  const W=CH.W, H=CH.H, padR=CH.padR, padT=CH.padT, padB=CH.padB;
   let maxV=0, maxT=0;
   for (const s of series) for (const p of (s.points||[])){ if (p.v>maxV) maxV=p.v; if (p.t>maxT) maxT=p.t; }
   const yMax = maxV>0 ? maxV*1.15 : 1;
   const win = maxT>0 ? maxT : 1;
+  const fracs = [0,0.5,1];
+  const labels = fracs.map(f => fmtY(yMax*f));
+  const padL = chartPadL(labels, 10);
   const xs = t => padL + (W-padL-padR)*(t/win);
   const ys = v => padT + (H-padT-padB)*(1 - Math.min(v,yMax)/yMax);
   let g='';
-  for (const f of [0,0.5,1]){
+  fracs.forEach((f,i) => {
     const yy = padT + (H-padT-padB)*(1-f);
     g += '<line x1="'+padL+'" y1="'+yy.toFixed(1)+'" x2="'+(W-padR)+'" y2="'+yy.toFixed(1)+'" stroke="var(--line)" stroke-width="1"/>';
-    g += '<text x="'+(padL-8)+'" y="'+(yy+3).toFixed(1)+'" text-anchor="end" font-size="10" fill="var(--mut)">'+esc(fmtY(yMax*f))+'</text>';
-  }
+    g += '<text x="'+(padL-8)+'" y="'+(yy+3).toFixed(1)+'" text-anchor="end" font-size="10" fill="var(--mut)">'+esc(labels[i])+'</text>';
+  });
   g += '<text x="'+padL+'" y="'+(H-6)+'" font-size="10" fill="var(--mut)">0s</text>';
   g += '<text x="'+(W-padR)+'" y="'+(H-6)+'" text-anchor="end" font-size="10" fill="var(--mut)">'+win.toFixed(1)+'s</text>';
   let any=false;
@@ -6001,21 +6019,28 @@ function speedComboChartSVG(series, fmtY){
 // labels — kept general (rather than hardcoded to Mbps) since speedComboChartSVG
 // above shares its gridline/scaling approach for the pps chart, even though
 // that one plots two series instead of one and so isn't built directly on
-// this function.
+// this function. Mbps labels stay short at any realistic value (fmtMbps
+// never adds thousands separators), so this was never observed to clip the
+// way the PPS chart did — chartPadL is applied here anyway, for the same
+// reason speedComboChartSVG needs it, rather than leaving this chart's
+// safety margin as an unverified assumption.
 function speedChartSVG(samples, color, valueOf, fmtFn){
-  const W=CH.W, H=CH.H, padL=CH.padL, padR=CH.padR, padT=CH.padT, padB=CH.padB;
+  const W=CH.W, H=CH.H, padR=CH.padR, padT=CH.padT, padB=CH.padB;
   let maxV=0, maxT=0;
   for (const s of samples){ const v=valueOf(s); if (v>maxV) maxV=v; if (s.t>maxT) maxT=s.t; }
   const yMax = maxV>0 ? maxV*1.15 : 1;
   const win = maxT>0 ? maxT : 1;
+  const fracs = [0,0.5,1];
+  const labels = fracs.map(f => fmtFn(yMax*f));
+  const padL = chartPadL(labels, 10);
   const xs = t => padL + (W-padL-padR)*(t/win);
   const ys = v => padT + (H-padT-padB)*(1 - Math.min(v,yMax)/yMax);
   let g='';
-  for (const f of [0,0.5,1]){
+  fracs.forEach((f,i) => {
     const yy = padT + (H-padT-padB)*(1-f);
     g += '<line x1="'+padL+'" y1="'+yy.toFixed(1)+'" x2="'+(W-padR)+'" y2="'+yy.toFixed(1)+'" stroke="var(--line)" stroke-width="1"/>';
-    g += '<text x="'+(padL-8)+'" y="'+(yy+3).toFixed(1)+'" text-anchor="end" font-size="10" fill="var(--mut)">'+esc(fmtFn(yMax*f))+'</text>';
-  }
+    g += '<text x="'+(padL-8)+'" y="'+(yy+3).toFixed(1)+'" text-anchor="end" font-size="10" fill="var(--mut)">'+esc(labels[i])+'</text>';
+  });
   g += '<text x="'+padL+'" y="'+(H-6)+'" font-size="10" fill="var(--mut)">0s</text>';
   g += '<text x="'+(W-padR)+'" y="'+(H-6)+'" text-anchor="end" font-size="10" fill="var(--mut)">'+win.toFixed(1)+'s</text>';
   if (samples.length){

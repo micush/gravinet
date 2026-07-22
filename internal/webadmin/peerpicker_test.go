@@ -188,6 +188,29 @@ func TestSpeedtestPpsIsOneCombinedChart(t *testing.T) {
 	}
 }
 
+// TestChartPadLFixesLabelClipping pins the fix for a reported bug: the PPS
+// chart's y-axis labels were cut off on the left ("60,873 pkts/s" rendering
+// as ",873 pkts/s"). Pps values run into 5-6 digits with thousands
+// separators, wider than the fixed CH.padL (76px, sized for the shorter
+// Mbps/percentage-scale labels every other chart in the app uses) had room
+// for, so the leading digits rendered past the left edge of the SVG and got
+// clipped. Both speed chart functions must compute their actual left
+// padding from the label text itself (chartPadL), not the fixed constant.
+func TestChartPadLFixesLabelClipping(t *testing.T) {
+	if !strings.Contains(indexHTML, "function chartPadL(") {
+		t.Fatal("chartPadL helper is missing")
+	}
+	for _, fn := range []string{"speedComboChartSVG", "speedChartSVG"} {
+		body := funcSource(t, fn)
+		if !strings.Contains(body, "chartPadL(") {
+			t.Errorf("%s doesn't call chartPadL — its left padding is still the fixed CH.padL, which is what clipped the PPS labels", fn)
+		}
+		if strings.Contains(body, "padL=CH.padL") || strings.Contains(body, "padL = CH.padL") {
+			t.Errorf("%s still hardcodes its left padding to CH.padL directly", fn)
+		}
+	}
+}
+
 // speedtestFn returns the source of infoSpeedtest, so the assertions above are
 // scoped to that function rather than matching something elsewhere in the file.
 func speedtestFn(t *testing.T) string {
