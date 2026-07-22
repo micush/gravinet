@@ -175,7 +175,6 @@ func (e *Engine) rebuildOverlayDevice(ns *netState) error {
 	}
 	old := ns.dev()
 	ns.setDev(newDev)
-	e.maybeEnableGSO(ns, newDev) // fresh fd: offload isn't negotiated on it yet, even if the old one had it
 	ns.dpRebuilds++
 	if ns.dpState == dpRebuilding {
 		ns.dpState = dpHealthy
