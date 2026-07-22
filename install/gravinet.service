@@ -1,0 +1,35 @@
+[Unit]
+Description=gravi[net] full-mesh encrypted overlay VPN daemon
+After=network-online.target
+Wants=network-online.target
+# Never stop trying to restart, even under a rapid crash/restart loop. The
+# default start-rate limiter would put the unit in a failed state after a few
+# quick restarts (e.g. 5 in 10s) and give up; a full-mesh VPN daemon should
+# keep coming back instead. StartLimitIntervalSec is a [Unit] directive (it is
+# ignored if placed under [Service]).
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/gravinet run -config /etc/gravinet/config.json
+# Restart on any exit, not just failures: combined with the shutdown watchdog
+# and TimeoutStopSec below, this makes "the daemon is always running unless an
+# operator explicitly stopped it" the invariant. A `systemctl stop` is still a
+# clean stop and does not loop-restart (systemd distinguishes operator stop
+# from the process dying).
+Restart=always
+RestartSec=8
+# Guarantee the stop phase terminates. This unit is Type=notify, so
+# `systemctl restart` waits for the old process to exit before starting the
+# replacement; without a bounded stop, a teardown step wedged on the kernel or
+# a subprocess hangs the restart indefinitely. The daemon's own shutdown
+# watchdog (shutdownGrace) is tuned to force-exit just under this timeout, so
+# in the normal stuck case the daemon exits cleanly (with a log line) first and
+# systemd never has to escalate; TimeoutStopSec is the outer backstop for when
+# even that can't run, after which systemd escalates SIGTERM -> SIGKILL, and
+# SendSIGKILL=yes ensures the final kill is never disabled.
+TimeoutStopSec=8
+SendSIGKILL=yes
+
+[Install]
+WantedBy=multi-user.target

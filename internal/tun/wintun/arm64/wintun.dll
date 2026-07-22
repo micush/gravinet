@@ -1,0 +1,7 @@
+GRAVINET WINTUN PLACEHOLDER (arm64)
+This is a build-time placeholder, NOT the real Wintun driver, so the tree
+compiles without shipping a binary blob. Replace it with the signed
+wintun.dll for this architecture from https://www.wintun.net/
+(wintun/bin/arm64/wintun.dll) to produce a self-contained Windows binary.
+With this placeholder, the build still works and loads wintun.dll from
+beside the .exe (or PATH) at runtime instead.

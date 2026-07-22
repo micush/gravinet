@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.gravinet.daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/gravinet</string>
+    <string>run</string>
+    <string>-config</string>
+    <string>/etc/gravinet/config.json</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardErrorPath</key>
+  <string>/var/log/gravinet.err.log</string>
+  <key>StandardOutPath</key>
+  <string>/var/log/gravinet.out.log</string>
+</dict>
+</plist>

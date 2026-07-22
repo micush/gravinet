@@ -1,0 +1,3 @@
+sc.exe create gravinet binPath= "\"C:\Program Files\gravinet\gravinet.exe\" run -config \"C:\ProgramData\gravinet\config.json\"" start= auto DisplayName= "gravinet"
+sc.exe description gravinet "gravi[net] full-mesh encrypted overlay VPN daemon"
+sc.exe start gravinet
