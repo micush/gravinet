@@ -3,6 +3,7 @@ package webadmin
 import (
 	"net/http/httptest"
 	"net/netip"
+	"strings"
 	"testing"
 )
 
@@ -47,6 +48,23 @@ func TestUpgradeEndpointsRejectOverlayBypass(t *testing.T) {
 		h.ServeHTTP(rec, req)
 		if rec.Code != 403 {
 			t.Errorf("%s %s: Manager-peer overlay source with no session got %d, want 403 (upgradeLocalOnly must be the first check)", ep.method, ep.path, rec.Code)
+			continue
+		}
+		// The body matters as much as the status here, and not just as a
+		// formality: this exact response — reached by a real Manager peer
+		// genuinely authenticated via the overlay bypass, which is the normal
+		// way to browse a managed node — used to render as a blank "Upgrades
+		// are unavailable on this node." in the web admin, because drawUpgrade
+		// read a "reason" field this 403 has never had; it has "error", the
+		// convention every other failed request in ui.go uses. That silently
+		// dropped a message that already said exactly what was wrong ("log in
+		// directly on this node") and left an operator looking at what read
+		// like a missing feature, or a platform restriction, instead of a
+		// one-more-login fix. Asserting on the message content — not just that
+		// some 403 came back — is what would have caught the client silently
+		// discarding it.
+		if !strings.Contains(rec.Body.String(), "error") || !strings.Contains(rec.Body.String(), "log in directly on this node") {
+			t.Errorf("%s %s: 403 body missing the actionable message: %s", ep.method, ep.path, rec.Body.String())
 		}
 	}
 }

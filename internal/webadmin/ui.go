@@ -5350,8 +5350,19 @@ async function drawUpgrade(host){
   const u = r.body || {};
   host.innerHTML = '';
   if (!u.enabled){
+    // Two different server-side failures land here, with two different JSON
+    // shapes: genuine init failure uses {enabled:false, reason:"..."} (see
+    // handleUpgradeHome), while being authenticated only via the Manager/
+    // managed-mode overlay bypass — not a real local login — gets rejected by
+    // upgradeLocalOnly's own separate check with {error:"..."}, the app-wide
+    // convention every other failed request here uses (see api() call sites
+    // elsewhere in this file). Reading only u.reason silently dropped that
+    // second, much more common case: its message already says exactly what's
+    // wrong ("log in directly on this node") and was never shown, leaving a
+    // blank card that reads exactly like a missing feature instead of an
+    // auth-path issue one more login fixes.
     const card = $('<div class="card"></div>');
-    card.appendChild($('<div class="empty">Upgrades are unavailable on this node.<br><br>' + esc(u.reason||'') + '</div>'));
+    card.appendChild($('<div class="empty">Upgrades are unavailable on this node.<br><br>' + esc(u.reason||u.error||'') + '</div>'));
     host.appendChild(card);
     return;
   }

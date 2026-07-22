@@ -38,6 +38,66 @@ assuming it didn't happen.
 
 ---
 
+## v563 — 2026-07-21
+
+**Not a Linux-only limitation — there is no platform check anywhere in this
+code path. "Upgrades are unavailable on this node" with a blank reason was
+a client-side bug: a real, specific, actionable server message ("log in
+directly on this node") was silently dropped because the page read the
+wrong JSON field name, and it happened to be the exact case a Manager
+managing a peer through the overlay hits every time.**
+
+The Upgrade page's `!u.enabled` branch read `u.reason`. Two different
+server-side failures land there, with two different shapes:
+
+- Genuine init failure (`s.upg == nil`): `{enabled:false, reason:"..."}`.
+  Rare — store/target resolution failed at daemon boot.
+- `upgradeLocalOnly`'s 403, hit whenever a request is authenticated only
+  through `authed()`'s Managed/Manager overlay bypass rather than a real
+  session cookie: `{error:"..."}` — the field name every *other* failed
+  request in this file already uses (`r.body.error`, at every other `api()`
+  call site), and the one this page alone didn't check.
+
+Browsing a managed node as its Manager is the normal way to look at it, and
+it authenticates through that overlay bypass — `authed()` accepts it for
+everything else, by design. Upgrades are the deliberate, correct exception:
+"no peer, not even a Manager, can start or control an upgrade here" is the
+page's own hint text, and `upgradeLocalOnly` enforces it with its own
+separate `validSession` check that the bypass doesn't satisfy. That part was
+never broken — `TestUpgradeEndpointsRejectOverlayBypass` already proved the
+403 fires correctly. What was broken is what the operator saw when it did:
+`u.reason` was `undefined` on a `{error:...}` body, so `esc(u.reason||'')`
+rendered nothing, leaving "Upgrades are unavailable on this node." with no
+explanation — which reads exactly like a missing feature or a platform
+restriction, not like "you're one login away from this working." Logging
+out and back in directly on that node creates a real session cookie,
+`validSession` then succeeds, and the page renders normally — which is
+what actually fixed it, not anything to do with the operating system.
+
+Fix: read `u.reason||u.error` — one line, since the 403's message was
+already correct and specific. Checked for the same pattern (a page reading
+`.reason` where its only local-only-style guard actually returns `.error`)
+elsewhere in ui.go and in the rest of the codebase for any other
+`*LocalOnly` guard shaped like this one; `upgradeLocalOnly` is the only one
+that exists, so this was a contained, single-instance bug, not a recurring
+shape.
+
+`TestUpgradeEndpointsRejectOverlayBypass` (already existed, already proved
+the status code) is extended to assert on the response body's actual
+message content, not just that some 403 came back — asserting on the status
+alone is exactly what let a message-content bug like this one go unnoticed
+on the backend side; a Go test can't reach the client-side rendering bug
+directly, but it can lock in that the message the backend sends stays
+specific and actionable, which is the thing this bug hinged on the page
+throwing away.
+
+Verified: `go build ./...`, `go vet ./...` clean; full `internal/webadmin`
+suite passes (116s), including the extended body-content assertion;
+cross-compiles for darwin/amd64, darwin/arm64, windows/amd64, freebsd/amd64,
+openbsd/amd64, linux/arm, linux/386, linux/arm64.
+
+---
+
 ## v562 — 2026-07-21
 
 **Correcting an overclaim from v558: "monitor mesh-peers" now actually
