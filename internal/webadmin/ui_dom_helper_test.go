@@ -221,3 +221,33 @@ func TestRedistributeFromBGPSubcard(t *testing.T) {
 		t.Error("the metric input no longer sends the current route selection alongside a metric edit")
 	}
 }
+
+// TestBgpNeighborMd5CellIsEditable guards the fix for "double-clicking a
+// neighbor's MD5 password does nothing, but double-clicking description then
+// lets me change the password and save." Root cause: only cells with class
+// .nbr-field got the startNbrEdit double-click handler, and the MD5 password
+// cell is .nbr-pw-cell (it holds a masked value plus a reveal button, so it
+// can't be a plain .nbr-field text cell). Double-clicking description started
+// the row edit, whose form happens to include the password input — hence the
+// odd workaround the user found. The fix wires startNbrEdit onto the pw cell
+// directly. This scans the served JS for that wiring so the trigger can't be
+// dropped again.
+func TestBgpNeighborMd5CellIsEditable(t *testing.T) {
+	// The password cell must carry an ondblclick that starts the row edit,
+	// the same startNbrEdit the other neighbor fields use.
+	if !strings.Contains(indexHTML, ".nbr-pw-cell')") {
+		t.Fatal("neighbor render no longer selects .nbr-pw-cell to wire its editor")
+	}
+	// Specifically: a double-click on the pw cell starts the shared row edit.
+	if !strings.Contains(indexHTML, "pwCell.ondblclick = () => startNbrEdit(tr)") {
+		t.Error("the MD5 password cell no longer starts a row edit on double-click — " +
+			"double-clicking it will do nothing, the exact bug this test guards against")
+	}
+	// The reveal button keeps its own single-click handler with
+	// stopPropagation, so revealing the password doesn't also trigger the
+	// cell's edit. If this regresses, single-click reveal and double-click
+	// edit would collide.
+	if !strings.Contains(indexHTML, "nbr-pw-toggle") || !strings.Contains(indexHTML, "e.stopPropagation()") {
+		t.Error("the MD5 reveal button lost its stopPropagation single-click handler")
+	}
+}

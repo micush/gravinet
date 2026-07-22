@@ -38,6 +38,40 @@ assuming it didn't happen.
 
 ---
 
+## v578 — 2026-07-22
+
+**Fix: in Traffic → BGP, double-clicking a neighbor's MD5 password cell did
+nothing. You could only edit the password by double-clicking a *different*
+field (e.g. description) first, which opened the row editor whose form
+happens to include the password input.**
+
+The neighbor table wires its double-click-to-edit handler onto cells with
+class `.nbr-field` (peer address, remote AS, description). The MD5 password
+cell is `.nbr-pw-cell` instead — it can't be a plain text cell because it
+holds a masked value plus a reveal (👁️) button — and it was never given the
+same `startNbrEdit` trigger, so double-clicking it was inert. The password
+input only appeared because `startNbrEdit`, once started from any field,
+rewrites the whole row including the password cell; that's why editing a
+neighbor via the description column let the user reach and save the password,
+and why the password column alone appeared frozen.
+
+The fix wires `startNbrEdit` onto `.nbr-pw-cell`'s double-click directly, so
+it behaves like every other column. The reveal button keeps its own
+single-click handler (with `stopPropagation`), so the two don't collide:
+single-click reveals or masks the password, double-click opens the row
+editor. `internal/webadmin/ui.go` only; no config, API, or FRR-generation
+change. Guarded by `TestBgpNeighborMd5CellIsEditable`
+(internal/webadmin/ui_dom_helper_test.go), which scans the served UI for the
+double-click wiring so the trigger can't be silently dropped again.
+
+**Verified.** `go build ./...` and `go vet ./...` clean; the new guard test
+and the full `internal/webadmin` suite pass (the one unrelated failure,
+`TestPingRTT`, fails identically on the pristine tree — it asserts a
+TEST-NET-1 address is unreachable, which depends on the host network, not on
+anything here).
+
+---
+
 ## v577 — 2026-07-22
 
 **Equal-cost multipath for redistributed routes: when two or more exit nodes

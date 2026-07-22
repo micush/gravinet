@@ -6606,6 +6606,15 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
 
     t.querySelectorAll('tr.nbrrow').forEach(tr => {
       tr.querySelectorAll('.nbr-field').forEach(td => { td.title = 'double-click to edit'; td.ondblclick = () => startNbrEdit(tr); });
+      // The MD5 password cell is not a .nbr-field (it holds the masked value
+      // plus its own reveal button, so it can't be a plain text cell), but it
+      // must still start a row edit on double-click like every other column —
+      // otherwise double-clicking the password does nothing and the only way
+      // to change it is to double-click a *different* field first. The reveal
+      // button keeps its own single-click (with stopPropagation) and is
+      // unaffected: single-click reveals/masks, double-click edits the row.
+      const pwCell = tr.querySelector('.nbr-pw-cell');
+      if (pwCell) { pwCell.title = 'double-click to edit'; pwCell.ondblclick = () => startNbrEdit(tr); }
     });
     t.querySelectorAll('[data-nbrbfd]').forEach(tag => {
       tag.ondblclick = (e) => {
