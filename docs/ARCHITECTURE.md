@@ -228,9 +228,10 @@ matrix — linux (amd64/arm64/arm), windows (amd64/arm64), darwin (amd64/arm64),
 freebsd/amd64 — with SHA-256 checksums, CGO disabled throughout.
 
 ## Status — roadmap complete
-All 15 steps are done. The tree is ~11.5k lines of dependency-free Go, passes
-`go vet` and the full suite under `-race`, is fuzzed at the network boundary,
-and cross-compiles to the whole release matrix.
+All 15 steps are done. The tree is ~62k lines of dependency-free Go (~98k
+including tests) as of v560, passes `go vet` and the full suite under
+`-race`, is fuzzed at the network boundary, and cross-compiles to the whole
+release matrix.
 
 ### Post-roadmap refinements
 - **Per-feature on/off switches.** The firewall, NAT, QoS, and bandwidth

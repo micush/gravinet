@@ -38,6 +38,50 @@ assuming it didn't happen.
 
 ---
 
+## v561 — 2026-07-21
+
+**One more pass looking specifically for stale front-facing claims (the
+gateway note and the CLI comment were both this shape) and for an
+unexercised risk in this session's own new code: goroutine leaks from the
+batch flushers.**
+
+**docs/ARCHITECTURE.md's headline line count was off by more than 5x.** Its
+"Status — roadmap complete" section — the first thing a reader hits after the
+roadmap — claimed *"the tree is ~11.5k lines of dependency-free Go."* Actual
+count: 61,655 non-test lines, 98,411 including tests. No generated or
+vendored code inflates that; it's genuine hand-written Go spread across the
+tree (`internal/webadmin/ui.go` alone, a whole embedded web UI with its JS as
+Go string literals, is 7,300 lines). The 11.5k figure is presumably accurate
+for wherever the roadmap stood when that line was written, and simply never
+got revisited across however many steps and sessions added the other ~50k
+lines since — the same failure mode as the gateway note and the CLI gap list:
+a specific, checkable claim that stopped being maintained once it stopped
+being wrong loudly. Updated to ~62k/~98k "as of v560," keeping the doc's own
+convention of stating these as snapshots rather than eternal truths. The
+neighboring "fuzzed at the network boundary" claim was checked too and is
+still accurate — `internal/protocol/fuzz_test.go` and `internal/mesh/
+fuzz_test.go` predate this session, joined now by v560's `FuzzUDPPorts`.
+grepped both README.md and ARCHITECTURE.md for every other "N lines" /
+"~Nk" claim; this was the only one.
+
+**Goroutine leak check on the batching flushers.** v556 added one flusher
+goroutine per outbound socket and changed the read-worker startup path; nothing
+in that work had an explicit leak check beyond `-race` correctness. New
+`TestNoGoroutineLeak` forces batching on, runs 30 open→send→close cycles (every
+socket's flusher actually has queued traffic to drain, not sitting idle at
+Close), and asserts goroutine count returns to baseline within a few hundred
+milliseconds — with a full stack dump on failure so a real leak wouldn't be a
+mystery. Passes clean under `-race`: `stopBatch`'s `close(stopFlush)` +
+`flushWG.Wait()` and the read workers unblocking via socket closure both
+unwind exactly as intended, 30/30 cycles, no stragglers.
+
+Verified: `go build ./...`, `go vet ./...` clean; `internal/transport` full
+suite passes under `-race` including the new leak test; cross-compiles for
+darwin/amd64, darwin/arm64, windows/amd64, freebsd/amd64, openbsd/amd64,
+linux/arm, linux/386, linux/arm64.
+
+---
+
 ## v560 — 2026-07-21
 
 **Went looking for the same class of bug the gateway note turned out to be —
