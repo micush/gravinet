@@ -883,6 +883,14 @@ type netState struct {
 	// RemoveNetwork can wait for a clean teardown without stopping the engine.
 	done chan struct{}
 	wg   sync.WaitGroup
+
+	// tunTX is the write-side GRO coalescing ring (see tungso.go) — nil
+	// unless GRAVINET_TUN_GSO isn't set to "0" (on by default as of v573)
+	// and this process has cores to spare (tunGSORequested/tunGSOWorthy).
+	// deliverInner enqueues into it instead of calling dev.Write directly
+	// whenever it's non-nil; a nil tunTX is exactly the pre-Phase-C
+	// behavior with nothing new in the path.
+	tunTX *tunRing
 }
 
 type banRecord struct {
@@ -1269,6 +1277,7 @@ func (e *Engine) newNetState(spec NetSpec) *netState {
 	}
 	if spec.Dev != nil {
 		ns.setDev(spec.Dev) // seed the live-device holder; swapped later by a rebuild
+		e.maybeEnableGSO(ns, spec.Dev)
 	}
 	ns.banTTL = spec.BanTTL
 	if ns.banTTL <= 0 {
@@ -1470,6 +1479,18 @@ func (e *Engine) startNetwork(ns *netState) {
 	go e.initLoop(ns)
 	go e.maintLoop(ns)
 	go e.pmtuLoop(ns)
+	// The write-side GRO ring/flusher is created once per network here,
+	// gated on the same static maybeEnableGSO checks (not on whether
+	// negotiation actually succeeded for the device open right now — that
+	// can change on a later rebuild in either direction, and this avoids
+	// tearing the goroutine down and back up to track it). A nil tunTX
+	// (GRAVINET_TUN_GSO=0, or GOMAXPROCS==1) means deliverInner never
+	// enqueues anything and this whole file stays cold.
+	if tunGSORequested() && tunGSOWorthy() {
+		ns.tunTX = newTunRing(tunRingSize)
+		ns.wg.Add(1)
+		go (&tunFlusher{e: e, ns: ns, ring: ns.tunTX}).run()
+	}
 	// Self-assign an overlay address right away so a lone/first node in a
 	// network doesn't sit address-less until the first maintenance tick.
 	e.maybeAssignAddress(ns)
@@ -1864,6 +1885,9 @@ func (e *Engine) deliverInner(ps *peerSession, ip []byte, outerLen int) {
 	if ig := ps.net.ingress.Load(); ig != nil && !ig.allowN(float64(outerLen)) {
 		return // ingress policing: over the down-rate, drop
 	}
+	if ps.net.tunTX != nil && ps.net.tunTX.enqueue(ip) {
+		return // handed to the write-side GRO flusher (tungso.go); it owns delivery from here
+	}
 	if _, err := ps.net.dev().Write(ip); err != nil {
 		e.log.Debugf("mesh: tun write: %v", err)
 	}
@@ -2065,7 +2089,7 @@ func (e *Engine) tunLoopSerial(ns *netState) {
 			return
 		default:
 		}
-		n, err := dev.Read(buf)
+		err := readTunPackets(dev, buf, func(seg []byte) { e.processOutbound(ns, seg) })
 		if err != nil {
 			if e.shuttingDown(ns) {
 				return // intentional: dev.Close() during teardown unblocked us
@@ -2082,7 +2106,6 @@ func (e *Engine) tunLoopSerial(ns *netState) {
 			buf = make([]byte, dev.MTU()+128)
 			continue
 		}
-		e.processOutbound(ns, buf[:n])
 	}
 }
 
@@ -2139,6 +2162,7 @@ type tunJob struct {
 func (e *Engine) tunLoopPooled(ns *netState) {
 	defer ns.wg.Done()
 	dev := ns.dev()
+	var readScratch []byte // only used once GSO is active — see the loop below
 
 	n := e.tunWorkerCount()
 	jobs := make(chan tunJob, n*4)
@@ -2174,46 +2198,109 @@ func (e *Engine) tunLoopPooled(ns *netState) {
 		default:
 		}
 		need := dev.MTU() + 128
-		bufp := pool.Get().(*[]byte)
-		if cap(*bufp) < need {
-			b := make([]byte, need)
-			bufp = &b
-		}
-		buf := (*bufp)[:need]
-		nRead, err := dev.Read(buf)
-		if err != nil {
-			pool.Put(bufp)
-			if e.shuttingDown(ns) {
-				return // intentional: dev.Close() during teardown unblocked us
+		gd, gsoActive := dev.(gsoDevice)
+		gsoActive = gsoActive && gd.GSOEnabled()
+
+		if !gsoActive {
+			// Exactly the original path: read straight into the pooled
+			// buffer, zero extra copies. This is what any deployment
+			// running with GRAVINET_TUN_GSO=0, or on a platform/kernel
+			// where negotiation didn't succeed, still runs.
+			bufp := pool.Get().(*[]byte)
+			if cap(*bufp) < need {
+				b := make([]byte, need)
+				bufp = &b
 			}
-			// The device itself failed on a live network — the interface was
-			// reset or destroyed under us (driver bounce, `ip link del`, VM/host
-			// network churn). Rebuild it in place rather than silently ending
-			// outbound delivery forever. Keeping the rebuild here, in the one
-			// goroutine that owns the read, means no extra goroutine for ns.wg
-			// to track and no race with teardown's Wait.
-			if ns.spec.NewDevice == nil {
-				// Recreation not wired: preserve the old behaviour (and its
-				// diagnostic WARN) — delivery stops until process restart.
-				e.log.Warnf("mesh: tun read (net %x, iface %s): %v — outbound packet delivery for this network has stopped until restart", ns.spec.ID, dev.Name(), err)
+			buf := (*bufp)[:need]
+			nRead, err := dev.Read(buf)
+			if err != nil {
+				pool.Put(bufp)
+				if !e.tunLoopHandleReadErr(ns, dev, err) {
+					return
+				}
+				dev = ns.dev()
+				continue
+			}
+			if !e.tunLoopDispatch(ns, jobs, tunJob{bufp: bufp, n: nRead}) {
+				pool.Put(bufp)
 				return
 			}
-			e.log.Warnf("mesh: tun read (net %x, iface %s): %v — overlay interface lost; rebuilding", ns.spec.ID, dev.Name(), err)
-			if !e.recoverDataplane(ns) {
-				return // gave up because the network is shutting down
-			}
-			dev = ns.dev()
 			continue
 		}
-		select {
-		case jobs <- tunJob{bufp: bufp, n: nRead}:
-		case <-e.stop:
-			pool.Put(bufp)
-			return
-		case <-ns.done:
-			pool.Put(bufp)
+
+		// GSO is active: a single read may yield several segments (see
+		// gsosplit.go), so it reads into a scratch buffer instead of a
+		// pooled one, and each emitted segment gets its own pooled buffer
+		// copied out of scratch before being dispatched — the extra copy
+		// only happens on this explicitly opted-into path.
+		if len(readScratch) < need {
+			readScratch = make([]byte, need)
+		}
+		var stopped bool
+		readErr := readTunPackets(dev, readScratch, func(seg []byte) {
+			if stopped {
+				return // already told to stop by an earlier segment from this same read; drain the rest without dispatching
+			}
+			bufp := pool.Get().(*[]byte)
+			if cap(*bufp) < len(seg) {
+				b := make([]byte, len(seg))
+				bufp = &b
+			}
+			buf := (*bufp)[:len(seg)]
+			copy(buf, seg)
+			if !e.tunLoopDispatch(ns, jobs, tunJob{bufp: bufp, n: len(seg)}) {
+				pool.Put(bufp)
+				stopped = true
+			}
+		})
+		if stopped {
 			return
 		}
+		if readErr != nil {
+			if !e.tunLoopHandleReadErr(ns, dev, readErr) {
+				return
+			}
+			dev = ns.dev()
+		}
+	}
+}
+
+// tunLoopHandleReadErr is tunLoopPooled's (and, in spirit, tunLoopSerial's —
+// see readTunPackets) shared response to a TUN read failing: try to rebuild
+// the interface and report whether the caller should keep looping (true, and
+// ns.dev() now returns the rebuilt device) or stop (false).
+func (e *Engine) tunLoopHandleReadErr(ns *netState, dev Device, err error) bool {
+	if e.shuttingDown(ns) {
+		return false // intentional: dev.Close() during teardown unblocked us
+	}
+	// The device itself failed on a live network — the interface was reset or
+	// destroyed under us (driver bounce, `ip link del`, VM/host network
+	// churn). Rebuild it in place rather than silently ending outbound
+	// delivery forever. Keeping the rebuild here, in the one goroutine that
+	// owns the read, means no extra goroutine for ns.wg to track and no race
+	// with teardown's Wait.
+	if ns.spec.NewDevice == nil {
+		// Recreation not wired: preserve the old behaviour (and its
+		// diagnostic WARN) — delivery stops until process restart.
+		e.log.Warnf("mesh: tun read (net %x, iface %s): %v — outbound packet delivery for this network has stopped until restart", ns.spec.ID, dev.Name(), err)
+		return false
+	}
+	e.log.Warnf("mesh: tun read (net %x, iface %s): %v — overlay interface lost; rebuilding", ns.spec.ID, dev.Name(), err)
+	return e.recoverDataplane(ns) // false only if the network is shutting down
+}
+
+// tunLoopDispatch hands job to the worker pool, respecting shutdown signals
+// exactly like the inline select tunLoopPooled's read step used to do.
+// Returns false if a shutdown was observed instead (the caller owns
+// returning job.bufp to the pool either way — this never does).
+func (e *Engine) tunLoopDispatch(ns *netState, jobs chan<- tunJob, job tunJob) bool {
+	select {
+	case jobs <- job:
+		return true
+	case <-e.stop:
+		return false
+	case <-ns.done:
+		return false
 	}
 }
 

@@ -38,6 +38,248 @@ assuming it didn't happen.
 
 ---
 
+## v573 — 2026-07-22
+
+**`GRAVINET_TUN_GSO` now defaults on (still gated on `GOMAXPROCS>=2`);
+`GRAVINET_TUN_GSO=0` is the new way back to v572's per-packet-only path.**
+
+Made at the operator's explicit request, with v572's unresolved verification
+gap already known going in, not because that gap closed: nothing about the
+split/coalesce code changed this entry, only `tunGSORequested`'s default
+(`internal/mesh/tungso.go`) and the doc comments across
+`internal/tun/{tun_linux,vnethdr_linux}.go` and `internal/mesh/engine.go`
+that described the old opt-in posture, updated so the code doesn't lie about
+its own default. See v572 for everything about what this path does and does
+not have verification for — that entry's "Not verified, and not safe to
+assume from what is" section is unchanged by this one and still applies: no
+genuine multi-segment GSO super-packet has been observed flowing through the
+mesh engine end to end, only through `internal/tun`'s own real-kernel
+framing test and synthetic split/coalesce round-trips.
+
+**One thing this flip's own verification pass surfaced, investigated, and
+attributes to test harness load, not the data-plane code:** running the
+full `internal/mesh` suite under `-race` with `GOMAXPROCS=2` (needed to
+reach the now-default-on code path at all, since this sandbox has one real
+core) intermittently failed a handful of tests — different ones each run
+(`TestFirewallLiveReload`/`TestKeyDisableReconnects`/`TestPeerLocalDisable`
+one pass, `TestDistributedBan`/`TestEgressThrottle` the next) — with no
+`DATA RACE` ever reported. Isolated, each failing test passed reliably
+(`TestFirewallLiveReload` 5/5 in isolation). The same full suite passed
+clean without `-race` (`ok`, 150s). The pattern points at `-race`'s
+substantial per-goroutine overhead, on top of an artificially
+core-constrained 2-CPU process running the whole suite's engines
+concurrently, delaying the new write-side flusher goroutine enough to
+occasionally collide with `fakeDev`'s test-only output channel — a 16-slot
+buffer with an explicitly non-blocking, drop-on-full `Write` (see
+`engine_test.go`; this is pre-existing test infrastructure, documented
+elsewhere in this codebase — see `tunpooled_integration_test.go`'s own
+comment — as "intentionally non-blocking/lossy" specifically so a test that
+forgets to drain it can't deadlock). A production `*tun.Device.Write` is an
+ordinary blocking syscall with no such drop-on-full behaviour, so this is a
+property of the fake test double under `-race`-amplified contention, not a
+data-loss path in the real one. Flagged here rather than quietly worked
+around, since "flaky specifically under `-race` plus artificial core
+starvation, never outside it" is a real characteristic of adding an
+asynchronous hop to the write path worth knowing about — the same kind of
+latency-for-throughput tradeoff Phase A's batching already makes, just
+newly visible here because this is the first time the write side has had
+any queueing at all.
+
+**Verified.** `go build ./...` and `go vet ./...` clean. `internal/mesh`
+with `GOMAXPROCS=2` and `GRAVINET_TUN_GSO` unset (i.e. the new default):
+`TestTunLoopPooledDeliversAllPackets` and `TestProcessOutboundConcurrentSameDest`
+pass under `-race`; the full suite (minus the three real-time-backoff tests,
+unaffected by this change and already verified individually under v572)
+passes clean without `-race`; under `-race` it passes on some runs and
+shows the load-flakiness described above on others, never a `DATA RACE`.
+
+---
+
+## v572 — 2026-07-22
+
+**TUN-side batching is implemented on 64-bit Linux (gravinet's Phase C,
+named and deliberately deferred in v556): `IFF_VNET_HDR` GSO/GRO replaces
+the syscall-per-packet path on both the outbound (TUN read) and inbound
+(TUN write) sides — but unlike Phase A, this defaults off.**
+
+v556 amortised the UDP socket's syscall boundary with `recvmmsg`/`sendmmsg`
+and explicitly left the TUN device's own one-syscall-per-packet path alone,
+naming it Phase C and noting it as future work. There is no
+`recvmmsg`/`sendmmsg` equivalent for a character device — one read()/write()
+on `/dev/net/tun` always carries exactly one packet — so the only real
+batching mechanism available here is virtio_net_hdr-framed GSO/TSO: a read()
+can return one coalesced super-packet standing in for several same-flow TCP
+segments, and a write() can submit one for the kernel to re-segment
+downstream, each replacing several syscalls with one.
+
+**Why this defaults off and Phase A didn't.** Phase A only ever changed how
+many syscalls carried the same bytes — pure batching, no data-dependence, so
+a bug in it could cost throughput but not correctness. This changes the
+bytes: splitting a super-packet into individually valid segments, or merging
+several into one, both require correct IPv4/TCP checksum and sequence-number
+arithmetic. A mistake here corrupts tunneled traffic, not just throughput,
+and this repo's sandbox cannot originate real NIC-driven bulk TCP flows to
+field-profile against the way v556's `sendto()` profile motivated Phase A.
+That is the same standard v556 used to cut Phase B (UDP GSO/GRO) outright
+rather than ship it unverified — this is the TUN-side analogue, but built
+rather than cut, because unlike Phase B it doesn't depend on real NIC
+offload: `IFF_VNET_HDR` is a software feature of the tun driver itself,
+testable without special hardware, which is what made this tractable to
+implement and verify without hardware this environment doesn't have. Set
+`GRAVINET_TUN_GSO=1` to turn it on; it also stays off below `GOMAXPROCS=2`,
+same reasoning as Phase A's batching gate — a coalesce-then-write pipeline
+has nothing to run concurrently with on one core.
+
+**Scope of this first cut: plain TCPv4 only, no IP or TCP options.** Any
+packet outside that shape — IPv6, UDP, TCP with options, IP with options —
+takes the untouched per-packet path, unconditionally. `isPlainIPv4TCP`
+(internal/tun/gsomath_linux.go) is the single gate every entry point checks
+before touching a packet's bytes.
+
+**internal/tun (new files): vnethdr_linux.go, gsomath_linux.go,
+gsosplit.go, grocoalesce.go, gso_stub_linux.go.**
+
+`vnethdr_linux.go` negotiates `IFF_VNET_HDR` at `TUNSETIFF` time (falling
+back to the original request if a kernel rejects the flag), pins the header
+size with `TUNSETVNETHDRSZ`, and adds `EnableGSO` (`TUNSETOFFLOAD`) as a
+separate, explicit opt-in — framing and offload are different knobs.
+`Read`/`Write` now always route through `ReadSuper`/`WriteSuper`, so every
+existing call site keeps working unchanged whether or not GSO is ever
+turned on: with vnetHdr negotiated but `EnableGSO` never called, the 10-byte
+header is present on the wire but always carries `gsoType=NONE`, which is
+functionally identical to no header at all.
+
+One real bug caught only by testing against a live kernel, not by
+inspection: `TUNSETOFFLOAD` takes its flags as the raw ioctl argument value
+(`tun_set_offload(tun, arg)` reads `arg` directly), not a pointer to a
+buffer, unlike `TUNSETVNETHDRSZ` right above it in the same file. The
+pointer form — the natural-looking thing to write, matching every other
+ioctl in the file — failed with EINVAL every time; confirmed by opening a
+real tun device in this environment (root, `CAP_NET_ADMIN`, `/dev/net/tun`
+present) and actually calling `EnableGSO`, not by reading the kernel source
+and assuming the calling convention matched its neighbor.
+
+`gsomath_linux.go` holds the checksum/header arithmetic both directions
+share: RFC 1071 checksum folding, the IPv4 header checksum, the TCP
+pseudo-header checksum, and `isPlainIPv4TCP`'s shape gate.
+
+`gsosplit.go`'s `splitGSO` turns one coalesced super-packet into individually
+valid segments: each gets its own IP ID (original + segment index, matching
+`tcp_gso_segment`), its own sequence number, FIN/PSH cleared on every
+segment but the last, and freshly computed IP/TCP checksums.
+`Device.ReadPackets` wraps it for callers that just want "one call per
+resulting packet" without thinking about super-packets themselves.
+
+`grocoalesce.go`'s `Coalescer` is the write-side mirror: `TryAdd` folds a
+run of contiguous same-flow segments together (same 4-tuple, exact
+sequence continuity, no SYN/RST, a short segment only ever accepted as the
+run's last), `Flush` finalises whatever's pending and always hands it back
+— including a lone unmerged packet, byte-identical to what was offered, so
+nothing is ever silently dropped (an earlier draft of `Flush` did exactly
+that for the single-segment case; caught by a round-trip test, not
+review). Merged output re-uses the newest segment's ack/window/flags, the
+same tradeoff Linux's own `inet_gro_receive` makes and safe for the same
+reason: a slightly-stale ack is ordinary TCP reordering tolerance, not a
+correctness violation. `Device.CoalesceWrite`/`FlushCoalesced` expose this
+through the Device itself (an internal, lazily-created `*Coalescer`) rather
+than the mesh package importing `Coalescer` directly, keeping intact the
+"engine stays decoupled from internal/tun" property `NewDevice`'s doc
+comment already describes for testability.
+
+`gso_stub_linux.go` is 32-bit Linux's counterpart, the same split
+`batch_linux.go`/`batch_other.go` established for Phase A — except
+`tun_linux.go` (unlike `transport.go`) is a single shared file across every
+Linux architecture and references GSO names directly (the `vnetHdr` type,
+`cIFF_VNET_HDR`, `enableVnetHdr`, `ReadSuper`, `WriteSuper`, `Coalescer` for
+a struct field), so this provides inert stubs for exactly those names rather
+than a parallel implementation. Caught by cross-compiling for every target
+platform, which is part of this repo's own standing verification bar (see
+v556) and which a same-architecture-only test run does not exercise:
+`linux/arm` and `linux/386` failed to build the first time this was
+cross-compiled, with the base file referencing symbols that only existed
+behind the 64-bit build tag.
+
+**internal/mesh (new files): tungso.go, tunring.go; changes to engine.go,
+dataplane.go.**
+
+`gsoDevice` is an optional capability of the attached `Device` — same
+pattern as the existing `fallbackDialer` — implemented by `*tun.Device` on
+64-bit Linux, absent everywhere else including every test fake. `setDev`'s
+two call sites (`newNetState`'s initial device, `recoverDataplane`'s rebuilt
+one) each call `maybeEnableGSO` right after, so a torn-down-and-recreated
+tun gets offload renegotiated on its fresh fd rather than silently staying
+off after a rebuild.
+
+Read side: `tunLoopSerial` and `tunLoopPooled` both route through a new
+`readTunPackets` helper that only takes the GSO path when
+`gd.GSOEnabled()` is actually true — with GSO off (the default), it's a
+plain `Read` plus one `emit`, zero behavioural difference from before this
+existed. `tunLoopPooled` specifically keeps its original zero-copy
+read-straight-into-the-pooled-buffer path as the primary branch and only
+pays an extra per-segment copy (scratch buffer → pooled buffer) on the
+explicitly-opted-into GSO branch, so the default path's hot loop is
+unchanged.
+
+Write side: `deliverInner`'s final `dev.Write(ip)` is now conditional on a
+new per-network `tunTX *tunRing` (nil unless the operator opted in and
+`GOMAXPROCS>=2`) — `tunring.go` is `sendring.go`'s MPSC-ring shape, mirrored
+rather than reused because it carries plain byte-slice payloads with no
+per-slot address. A `tunFlusher` goroutine per network drains it, folding
+what it can through the device's `Coalescer` and falling back to plain
+per-packet writes (`drainDirect`) whenever the live device doesn't currently
+report GSO active — covering both "this platform never supports it" and
+"the device was just rebuilt and hasn't renegotiated yet."
+
+One real concurrency bug, caught by `TestTunLoopPooledDeliversAllPackets`
+timing out on teardown rather than by review: the first version of
+`tunFlusher.run` only selected on `ns.done`, but `Engine.Stop()` only closes
+`e.stop` — `ns.done` is closed solely by `RemoveNetwork`. A plain `Stop()`
+therefore left the flusher goroutine parked forever, hanging `ns.wg.Wait()`.
+`tunLoop`'s own top-of-loop select already covers both signals for exactly
+this reason; `tunFlusher.run` now does too.
+
+**Verified.** `go build ./...` and `go vet ./...` clean; cross-compiles
+clean for darwin/amd64, darwin/arm64, windows/amd64, freebsd/amd64,
+openbsd/amd64, linux/arm, linux/386, linux/arm64 (linux/arm and linux/386
+failed on the first pass — see gso_stub_linux.go above — and pass now).
+`internal/tun` passes with and without `-race`, including a real-kernel
+test (not just synthetic buffers): opening an actual `/dev/net/tun` device
+in this environment, negotiating `IFF_VNET_HDR` and `EnableGSO` against the
+live kernel, and round-tripping a real ICMP echo through the vnet_hdr-framed
+`Read`/`Write` path (`ping` got a genuine reply). Unit/round-trip coverage
+in `internal/tun/gso_linux_test.go`: checksum self-check (RFC 1071 fold
+property, including the odd-payload-length path), `isPlainIPv4TCP`'s shape
+gate, `splitGSO` producing correctly-fielded segments from a synthetic
+super-packet, and — the strongest single guarantee here — feeding a
+`Coalescer`'s own merged output straight back into `splitGSO` and confirming
+byte-identical payload recovery, plus the `Coalescer` rejection cases
+(different flow, non-contiguous sequence, a short segment followed by
+another, SYN/RST, a bare ack). `internal/mesh` passes with and without
+`-race`, with `GRAVINET_TUN_GSO=1`/`GOMAXPROCS=2` forced (this environment
+otherwise has one core, meaning without forcing this, nothing in the
+package's existing test run ever reaches the new code at all) and
+separately with GSO not set (the default, common-case configuration,
+confirming zero regression there) — including the three real-time-backoff
+tests (`TestDeadSeedRetryDoesNotDegradeOtherPeers`,
+`TestDeadSeedWithTCPFallbackDoesNotDegrade`,
+`TestSelfSeedDoesNotDegradeOtherPeers`), run individually given their
+combined real-time cost.
+
+**Not verified, and not safe to assume from what is.** Nothing here has
+exercised a genuine multi-segment GSO super-packet inside the mesh engine
+end to end — every mesh-level test uses a `fakeDev` that doesn't implement
+`gsoDevice`, so those tests confirm the ring/flusher/fallback machinery
+under real concurrency, not real coalescing. `internal/tun`'s own real-kernel
+test covers the framing (`IFF_VNET_HDR` on, offload negotiated, a
+single-packet round trip) but not a real bulk TCP flow large enough to make
+the kernel actually emit or accept a multi-segment super-packet. Given that
+gap, and following the same reasoning that kept this off by default in the
+first place: this needs a real bulk-transfer field test on actual hardware
+before `GRAVINET_TUN_GSO=1` should be trusted, the same bar Phase B was held
+to and didn't clear.
+
+---
+
 ## v571 — 2026-07-21
 
 **The speedtest's two source/destination pickers had the same resize bug

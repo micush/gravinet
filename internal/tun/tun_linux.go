@@ -42,6 +42,19 @@ type Device struct {
 	f    *os.File
 	name string
 	mtu  int
+
+	// vnetHdr, gso, rxScratch, txScratch belong to the GSO/GRO fast path —
+	// see vnethdr_linux.go and gsosplit.go/grocoalesce.go. vnetHdr is set in
+	// New once IFF_VNET_HDR is confirmed on this fd; every Read/Write call
+	// after that must include the 10-byte header regardless of whether GSO
+	// itself (gso) is ever turned on, which is why the plain Read/Write
+	// below always route through ReadSuper/WriteSuper rather than only doing
+	// so conditionally on gso.
+	vnetHdr              bool
+	gso                  bool
+	rxScratch, txScratch []byte
+	splitScratch         []byte     // gsosplit.go's ReadPackets rebuild buffer
+	coalescer            *Coalescer // grocoalesce.go's CoalesceWrite/FlushCoalesced state
 }
 
 func ioctl(fd uintptr, req uintptr, arg unsafe.Pointer) error {
@@ -64,12 +77,28 @@ func New(name string, mtu int) (*Device, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open /dev/net/tun: %w (need CAP_NET_ADMIN)", err)
 	}
+	// Try with IFF_VNET_HDR first so Read/Write can carry virtio_net_hdr
+	// framing (see vnethdr_linux.go) — this only sets up the framing; GSO
+	// offload itself is negotiated separately via EnableGSO, gated by
+	// mesh/tungso.go's tunGSORequested (default on as of v573; see that
+	// file for the override). A kernel or tun implementation that rejects
+	// the extra flag bit falls back to the exact request this file has
+	// always made; wantVnetHdr stays false and Read/Write behave exactly
+	// as before this existed.
 	var req [ifreqSize]byte
 	copy(req[:ifnameSize], name)
-	binary.NativeEndian.PutUint16(req[ifnameSize:], cIFF_TUN|cIFF_NO_PI)
+	binary.NativeEndian.PutUint16(req[ifnameSize:], cIFF_TUN|cIFF_NO_PI|cIFF_VNET_HDR)
+	wantVnetHdr := true
 	if err := ioctl(uintptr(fd), cTUNSETIFF, unsafe.Pointer(&req[0])); err != nil {
-		syscall.Close(fd)
-		return nil, fmt.Errorf("TUNSETIFF: %w", err)
+		wantVnetHdr = false
+		var req2 [ifreqSize]byte
+		copy(req2[:ifnameSize], name)
+		binary.NativeEndian.PutUint16(req2[ifnameSize:], cIFF_TUN|cIFF_NO_PI)
+		if err2 := ioctl(uintptr(fd), cTUNSETIFF, unsafe.Pointer(&req2[0])); err2 != nil {
+			syscall.Close(fd)
+			return nil, fmt.Errorf("TUNSETIFF: %w (also failed without IFF_VNET_HDR: %v)", err, err2)
+		}
+		req = req2
 	}
 	// Non-blocking + os.NewFile registers the fd with Go's network poller, so a
 	// blocked Read is interruptible by Close (clean shutdown).
@@ -81,6 +110,13 @@ func New(name string, mtu int) (*Device, error) {
 
 	assigned := string(trimZero(req[:ifnameSize]))
 	d := &Device{f: f, name: assigned, mtu: mtu}
+	if wantVnetHdr {
+		// Best-effort, matching setTxQueueLen below: TUNSETIFF accepting the
+		// flag doesn't guarantee TUNSETVNETHDRSZ succeeds on every kernel. A
+		// failure here just means Read/Write stay in their original,
+		// unframed shape (d.vnetHdr stays false) — not a fatal New() error.
+		_ = d.enableVnetHdr()
+	}
 	if err := d.setMTU(mtu); err != nil {
 		f.Close()
 		return nil, err
@@ -234,11 +270,23 @@ func (d *Device) AddIPv6(addr netip.Addr, prefixLen int) error {
 	return nil
 }
 
-// Read returns one IP packet from the interface.
-func (d *Device) Read(p []byte) (int, error) { return d.f.Read(p) }
+// Read returns one IP packet from the interface. If GSOEnabled, the kernel
+// may occasionally have a coalesced super-packet waiting; Read silently
+// accepts it as long as it fits p (same contract as any other packet). Call
+// ReadSuper directly to get the segment count/size back and split it — see
+// gsosplit.go — instead of just reading whatever the buffer happens to fit.
+func (d *Device) Read(p []byte) (int, error) {
+	n, _, err := d.ReadSuper(p)
+	return n, err
+}
 
-// Write injects one IP packet into the interface.
-func (d *Device) Write(p []byte) (int, error) { return d.f.Write(p) }
+// Write injects one IP packet into the interface. Always sends a
+// non-GSO-tagged frame (or, if vnet header framing isn't on for this fd at
+// all, exactly the plain write this method has always done) — see
+// WriteSuper for submitting an actually-coalesced buffer.
+func (d *Device) Write(p []byte) (int, error) {
+	return d.WriteSuper(vnetHdr{}, p)
+}
 
 // Name reports the interface name.
 func (d *Device) Name() string { return d.name }
