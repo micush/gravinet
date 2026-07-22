@@ -44,6 +44,18 @@ const indexHTML = `<!doctype html>
   /* Compact variant for pickers inside a card's toolbar (the speedtest pair),
      matching the sizing the inline-styled <select>s there used to have. */
   .peer-sel-sm { padding:5px 9px; font-size:12px; background:var(--bg); }
+  /* Same fix as #peerSel above, same reason: no width of its own meant the
+     button sized itself to whichever peer's name happened to be selected —
+     "This node (local)" is a different length than "gn-openbsd" is a
+     different length than the next peer picked, so the toolbar visibly
+     resized on every pick. .peer-sel-sm is exclusively these two pickers
+     (buildPeerPicker, the header's, never passes compact:true), so fixing
+     the shared class is precisely scoped here — unlike #peerSel, there's no
+     third user of this class it could accidentally widen. Narrower than the
+     header's 220px on purpose: two of these plus an arrow and a Run button
+     share one toolbar row, where 220px each would be the wrong call. */
+  .peer-sel-sm { width:180px; }
+  .peer-sel-sm .peer-sel-label { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   body.remote .content { border-color: var(--acc); border-radius:8px; }
   body.remote .peer-sel { border-color:var(--acc); font-weight:600; }
   /* search-select: a text input + filtered dropdown list standing in for a

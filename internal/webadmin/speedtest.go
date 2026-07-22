@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -23,6 +24,14 @@ import (
 // pushes bytes to B's /sink (upload), sampling throughput over time, and returns
 // the series for the UI to graph. Peer-to-peer requests are accepted the same
 // way the management proxy is: over the overlay from a managed node.
+//
+// GRAVINET_NO_SPEEDTEST_PPS=1 disables the packets/sec instrumentation
+// (handleSpeedtestRun's concurrent pktSampleLoop poller and its before/after
+// snapshots) — see the flag's own comment in handleSpeedtestRun for why it
+// exists: it turns a "does the packet-rate poller affect the Mbps result"
+// question into something answerable by A/B testing, rather than by
+// reasoning about locks neither side of the conversation can observe
+// directly on the box that actually saw the problem.
 
 const (
 	stDuration     = 4 * time.Second        // measured window per direction
@@ -183,6 +192,41 @@ func (s *Server) handleSpeedtestRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	base := "https://" + net.JoinHostPort(ip.String(), strconv.Itoa(req.TargetPort))
+
+	// GRAVINET_NO_SPEEDTEST_PPS=1 skips the packets/sec instrumentation
+	// entirely — no concurrent pktSampleLoop poller, no before/after
+	// findPeerByOverlay snapshots — falling back to exactly the pre-PPS
+	// behavior (Bytes/AvgMbps/DurationSec/Samples only, no PacketsPerSec or
+	// PacketSamples in the response).
+	//
+	// This exists to let a reported "the Mbps result changed after PPS was
+	// added" claim actually be tested, not just argued about. The suspect
+	// mechanism would be the poller's ListPeers calls, on a fixed 250ms
+	// cadence for the whole transfer — but ListPeers takes ns.mu.RLock, and
+	// the data-plane's actual receive path (onData) never touches ns.mu at
+	// all; it resolves the session under a different lock (e.mu) and checks
+	// the source address against a lock-free atomic snapshot
+	// (sourceAllowedFrom reads ps.net.fwd.Load(), not the mutex) — so lock
+	// contention between the poller and a concurrent download isn't a real
+	// path. What isn't ruled out is plain CPU/scheduler cost: a goroutine
+	// doing real work several times a second competes for scheduler time
+	// even without blocking on anything, and this codebase has already
+	// measured that mattering once before on low-core-count hardware (see
+	// the UDP batching GOMAXPROCS gate in internal/transport). This flag is
+	// the fast way to find out whether that's what's happening here, rather
+	// than trusting a code-reading argument about a mechanism neither of us
+	// can observe directly on the box actually seeing the problem.
+	if os.Getenv("GRAVINET_NO_SPEEDTEST_PPS") == "1" {
+		s.log.Infof("speedtest: GRAVINET_NO_SPEEDTEST_PPS=1 — running without packet-rate instrumentation")
+		down := measureDownload(base + "/api/speedtest/source")
+		up := measureUpload(base + "/api/speedtest/sink")
+		writeJSON(w, http.StatusOK, map[string]any{
+			"target_hostname": req.TargetHostname,
+			"download":        down,
+			"upload":          up,
+		})
+		return
+	}
 
 	// Snapshot the target's own packet counters immediately around each
 	// phase — as close to the actual measured window as this can get without

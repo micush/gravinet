@@ -127,7 +127,27 @@ func TestHeaderPeerPickerHasFixedWidth(t *testing.T) {
 	}
 }
 
-// funcSource returns the source of the top-level function starting at
+// TestSpeedtestPickersHaveFixedWidth pins the fix for the same bug
+// TestHeaderPeerPickerHasFixedWidth fixed for the header, reported
+// separately for the speedtest's two pickers: no width of their own meant
+// they resized on every pick, since "This node (local)" and a peer's
+// hostname are rarely the same length. v566 deliberately left .peer-sel-sm
+// alone when fixing #peerSel — nothing about these two was reported broken
+// at the time, and a bare width on the shared .peer-sel base class would
+// have widened them without being asked. Now it has been reported, fixed by
+// widening .peer-sel-sm specifically (the class buildListPicker's
+// compact:true gives these two, and only these two — see
+// TestSpeedtestPickersAreListboxes's own comment on there being exactly
+// three buildListPicker call sites total), not the shared base class.
+func TestSpeedtestPickersHaveFixedWidth(t *testing.T) {
+	if !strings.Contains(indexHTML, ".peer-sel-sm { width:") {
+		t.Error("no fixed width rule for .peer-sel-sm — the speedtest pickers can still resize on every pick")
+	}
+	if !strings.Contains(indexHTML, ".peer-sel-sm .peer-sel-label") || !strings.Contains(indexHTML, "text-overflow:ellipsis") {
+		t.Error(".peer-sel-sm's label isn't set to truncate — a long hostname would overflow the fixed-width button instead of ellipsizing")
+	}
+}
+
 // "function "+name+"(", up to (not including) the next top-level function —
 // the same bounded-extraction approach speedtestFn already used, generalized
 // so other tests can scope an assertion to one function's body instead of

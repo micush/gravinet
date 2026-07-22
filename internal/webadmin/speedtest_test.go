@@ -514,3 +514,72 @@ func TestPktSampleLoop(t *testing.T) {
 		}
 	}
 }
+
+// TestSpeedtestRunPpsEscapeHatch proves GRAVINET_NO_SPEEDTEST_PPS=1 actually
+// disables the PPS instrumentation — not just omits the fields from the
+// response, but never starts the poller or calls ListPeers at all. This is
+// the tool a report like "the Mbps result looks different since PPS was
+// added" gets tested against: if the env var makes the difference go away,
+// the poller is implicated; if it doesn't, it wasn't the poller.
+func TestSpeedtestRunPpsEscapeHatch(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping timed transfer in -short mode")
+	}
+	t.Setenv("GRAVINET_NO_SPEEDTEST_PPS", "1")
+
+	targetSrv := testServer()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/speedtest/source", targetSrv.handleSpeedtestSource)
+	mux.HandleFunc("/api/speedtest/sink", targetSrv.handleSpeedtestSink)
+	ts := httptest.NewTLSServer(mux)
+	defer ts.Close()
+	host := strings.TrimPrefix(ts.URL, "https://")
+	_, portStr, err := net.SplitHostPort(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var port int
+	if _, err := fmt.Sscan(portStr, &port); err != nil {
+		t.Fatal(err)
+	}
+
+	be := &countingPeerBackend{
+		stubBackend: &stubBackend{overlayAddr: netip.MustParseAddr("127.0.0.1")},
+		overlay:     "127.0.0.1",
+		txPerCall:   3000,
+		rxPerCall:   5000,
+	}
+	srv := New(config.WebAdmin{AuthMode: "local"}, be, logx.Default())
+	runTs := httptest.NewServer(http.HandlerFunc(srv.handleSpeedtestRun))
+	defer runTs.Close()
+
+	out := postRun(t, runTs.URL, fmt.Sprintf(`{"target_ip":"127.0.0.1","target_port":%d,"target_hostname":"peerB"}`, port))
+	if e, _ := out["error"].(string); e != "" {
+		t.Fatalf("run failed: %s", e)
+	}
+	down, _ := out["download"].(map[string]any)
+	up, _ := out["upload"].(map[string]any)
+	if down == nil || up == nil {
+		t.Fatalf("response missing download/upload: %v", out)
+	}
+	// The throughput measurement itself must still work — this flag disables
+	// only the packet-rate instrumentation layered on top of it.
+	if b, _ := down["bytes"].(float64); b <= 0 {
+		t.Errorf("download bytes = %v, want > 0 — the escape hatch broke the underlying transfer, not just PPS", b)
+	}
+	for _, name := range []string{"packets_per_sec", "packet_samples"} {
+		if _, present := down[name]; present {
+			t.Errorf("download response still has %q with the escape hatch on", name)
+		}
+		if _, present := up[name]; present {
+			t.Errorf("upload response still has %q with the escape hatch on", name)
+		}
+	}
+	// The decisive check: ListPeers must never have been called at all. Not
+	// "called but the result was discarded" — never invoked, which is what
+	// actually removes the poller's CPU/scheduling cost from the run, the
+	// whole point of the flag.
+	if be.callN != 0 {
+		t.Errorf("ListPeers was called %d times with the escape hatch on, want 0 — the poller ran anyway", be.callN)
+	}
+}

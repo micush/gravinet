@@ -38,6 +38,109 @@ assuming it didn't happen.
 
 ---
 
+## v571 — 2026-07-21
+
+**The speedtest's two source/destination pickers had the same resize bug
+v566 fixed for the header picker — deliberately left unfixed at the time
+since nothing about them had been reported broken. Now it has been.**
+
+`.peer-sel-sm` (the class `buildListPicker`'s `compact:true` gives these
+two pickers, and — confirmed by grepping every `buildListPicker` call site
+in the file — only these two) had no width of its own, same root cause as
+the header: the button sized itself to whatever text was inside it, and
+"This node (local)" is rarely the same length as a peer's hostname, or as
+the next peer's hostname after that. Every pick reflowed the toolbar.
+
+Fixed by widening `.peer-sel-sm` directly, not the shared `.peer-sel` base
+class — v566 already established why that distinction matters (the header
+fix is scoped to `#peerSel` specifically for the same reason, in reverse:
+neither picker's fix should leak into the other's layout). Sized at 180px,
+narrower than the header's 220px on purpose: two of these plus an arrow
+and a Run button share one toolbar row, where 220px each would crowd it.
+Same label-truncation treatment (`text-overflow:ellipsis`) as the header
+got.
+
+New `TestSpeedtestPickersHaveFixedWidth` mirrors
+`TestHeaderPeerPickerHasFixedWidth`'s own pattern exactly. Verified it
+actually catches the bug, not just passes trivially: reverted the two new
+CSS lines locally, confirmed the test failed with both exact messages,
+restored the fix, confirmed green again — same discipline as every UI fix
+this session, and this time the test insertion itself was double-checked
+against the file's function list immediately after editing, before
+building, specifically because of the two insertion mistakes made earlier
+in this same conversation while adding similar tests.
+
+Verified: `go build ./...`, `go vet ./...` clean; the full 11-test UI-source
+set and the full `internal/webadmin` suite (114s) pass; cross-compiles for
+darwin/amd64, darwin/arm64, windows/amd64, freebsd/amd64, openbsd/amd64,
+linux/arm, linux/386, linux/arm64.
+
+---
+
+## v570 — 2026-07-21
+
+**A user reported the Download speedtest chart against a specific OpenBSD
+peer stalling to a flat zero for close to a second mid-transfer, and said
+it started after the PPS feature (v564-v569) landed. Checked the concrete
+mechanism that would make the PPS poller responsible for that — it doesn't
+hold up on inspection — but rather than argue the point from a source
+reading neither side can verify against the actual box, added a real A/B
+switch: `GRAVINET_NO_SPEEDTEST_PPS=1`.**
+
+The suspect mechanism was lock contention: the PPS poller
+(`pktSampleLoop`) calls `ListPeers` on a fixed 250ms cadence for the whole
+transfer, and `ListPeers` takes `ns.mu.RLock()`. If the actual data-plane
+receive path also needed that lock, a pending writer somewhere could stall
+both. Checked `onData` (the real receive path) directly: it resolves the
+session under a *different* lock (`e.mu`) and checks the source address
+against a lock-free atomic snapshot (`sourceAllowedFrom` reads
+`ps.net.fwd.Load()`, not a mutex) — deliberately built that way in earlier
+work specifically so the data plane never blocks on `ns.mu`. The poller
+cannot be blocking the download's receive path through that lock; it
+doesn't touch it.
+
+That rules out the mechanism, not the correlation. What it doesn't rule
+out: plain CPU/scheduler cost. A goroutine doing real work several times a
+second competes for scheduler time even without blocking on anything, and
+this codebase has already measured that mattering once before on
+low-core-count hardware (the UDP batching work's `GOMAXPROCS` gate,
+v556/v557). Rather than assert confidence about a mechanism that can only
+really be confirmed on the hardware that saw the problem, the honest move
+is giving the person who reported it a way to test the actual claim.
+
+**`GRAVINET_NO_SPEEDTEST_PPS=1`**, checked in `handleSpeedtestRun`,
+mirrors the existing `GRAVINET_NO_UDP_BATCH` precedent exactly: when set,
+the handler skips starting `pktSampleLoop` entirely, skips the before/after
+`findPeerByOverlay` snapshots, and returns exactly the pre-PPS response
+shape (`Bytes`/`AvgMbps`/`DurationSec`/`Samples`, no `PacketsPerSec` or
+`PacketSamples`). Logged once per run when active, matching how the
+batching flag reports its mode.
+
+New `TestSpeedtestRunPpsEscapeHatch` proves the flag genuinely stops the
+poller, not just hides its output: with the flag set, the underlying
+transfer still completes and reports real bytes moved (this only disables
+the *instrumentation* layered on top, not the measurement itself), neither
+response carries `packets_per_sec`/`packet_samples`, and — the decisive
+check — the fake backend's `ListPeers` call counter is asserted at exactly
+zero, confirming the poller was never started at all rather than started
+and its result discarded.
+
+Verified: `go build ./...`, `go vet ./...` clean; the full speedtest test
+set and the full `internal/webadmin` suite (114s) pass; cross-compiles for
+darwin/amd64, darwin/arm64, windows/amd64, freebsd/amd64, openbsd/amd64,
+linux/arm, linux/386, linux/arm64.
+
+**Still open:** whether the OpenBSD peer's stall is actually caused by the
+PPS poller's CPU cost, or is a pre-existing network-path issue (PMTU
+blackhole, TCP RTO from packet loss) that simply hadn't been observed
+before this feature gave a reason to look closely at that peer's graphs —
+this flag is what would answer that, not this changelog entry. Re-run the
+same test with the flag set; if the stall persists, the poller isn't the
+cause and `PathMTU`/`FragSendDrop` on that peer (available via `gravinet
+mesh peers`, added v562) are the next thing to check.
+
+---
+
 ## v569 — 2026-07-21
 
 **Speedtest charts get the same hover crosshair the Metrics dashboard has:
