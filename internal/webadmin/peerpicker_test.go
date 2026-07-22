@@ -127,19 +127,70 @@ func TestHeaderPeerPickerHasFixedWidth(t *testing.T) {
 	}
 }
 
-// speedtestFn returns the source of infoSpeedtest, so the assertions above are
-// scoped to that function rather than matching something elsewhere in the file.
-func speedtestFn(t *testing.T) string {
+// funcSource returns the source of the top-level function starting at
+// "function "+name+"(", up to (not including) the next top-level function —
+// the same bounded-extraction approach speedtestFn already used, generalized
+// so other tests can scope an assertion to one function's body instead of
+// matching (or, for a negative assertion, risking a false pass against)
+// anywhere else in indexHTML.
+func funcSource(t *testing.T, name string) string {
 	t.Helper()
-	const start = "function infoSpeedtest(c){"
+	start := "function " + name + "("
 	i := strings.Index(indexHTML, start)
 	if i < 0 {
-		t.Fatal("infoSpeedtest not found in indexHTML")
+		t.Fatalf("%s not found in indexHTML", start)
 	}
 	rest := indexHTML[i:]
-	// Functions here are top-level, so the next one begins at a column-0 "function".
 	if j := strings.Index(rest[1:], "\nfunction "); j >= 0 {
 		return rest[:j+1]
 	}
 	return rest
+}
+
+// TestSpeedtestPpsIsOneCombinedChart pins the corrected layout: download and
+// upload packets/sec share one third chart (speedPpsCard), not a fourth
+// chart bolted onto each of the Download/Upload cards individually. The
+// first version of this did exactly that — a small pps sub-chart appended
+// inside speedGraph, once per direction — which is the wrong shape this
+// test exists to keep from coming back.
+func TestSpeedtestPpsIsOneCombinedChart(t *testing.T) {
+	rsr := funcSource(t, "renderSpeedResult")
+	if !strings.Contains(rsr, "speedPpsCard(") {
+		t.Error("renderSpeedResult doesn't build a speedPpsCard — packets/sec has no combined chart")
+	}
+	// Exactly two speedGraph calls (Download, Upload) and nothing else
+	// building a per-direction pps chart alongside them.
+	if n := strings.Count(rsr, "speedGraph("); n != 2 {
+		t.Errorf("renderSpeedResult calls speedGraph %d times, want exactly 2 (Download, Upload)", n)
+	}
+
+	// speedGraph itself must be back to a single chart — no packet_samples
+	// reference in its own body, which is what would mean a pps chart is
+	// still being embedded per-direction.
+	sg := funcSource(t, "speedGraph")
+	if strings.Contains(sg, "packet_samples") {
+		t.Error("speedGraph still references packet_samples — a per-direction pps chart is back instead of one combined chart")
+	}
+
+	// speedPpsCard must plot both directions on the one chart it builds,
+	// using each direction's own established color (matching the Download/
+	// Upload cards above it) and passing both series into a single
+	// speedComboChartSVG call, not one call each.
+	spc := funcSource(t, "speedPpsCard")
+	if !strings.Contains(spc, "var(--acc)") || !strings.Contains(spc, "#e0883b") {
+		t.Error("speedPpsCard doesn't use both the Download (var(--acc)) and Upload (#e0883b) colors")
+	}
+	if n := strings.Count(spc, "speedComboChartSVG("); n != 1 {
+		t.Errorf("speedPpsCard calls speedComboChartSVG %d times, want exactly 1 (both series on one chart)", n)
+	}
+	if !strings.Contains(spc, "down.packet_samples") || !strings.Contains(spc, "up.packet_samples") {
+		t.Error("speedPpsCard doesn't feed both down and up's packet_samples into the chart")
+	}
+}
+
+// speedtestFn returns the source of infoSpeedtest, so the assertions above are
+// scoped to that function rather than matching something elsewhere in the file.
+func speedtestFn(t *testing.T) string {
+	t.Helper()
+	return funcSource(t, "infoSpeedtest")
 }

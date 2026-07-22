@@ -5773,7 +5773,7 @@ function rateFmt(v){
 // originate one.
 function infoSpeedtest(c){
   const card = $('<div class="card"></div>');
-  card.appendChild($('<div class="hint" style="margin:0 0 10px">Measure overlay throughput between two managed peers. The first peer runs the test against the second; download and upload are each measured for ~4s, graphing Mbps over time plus, where available, the outer-datagram rate (packets/sec) that transfer drove between the two on its own chart below. Only peers in Manager mode can run a test as the first peer.</div>'));
+  card.appendChild($('<div class="hint" style="margin:0 0 10px">Measure overlay throughput between two managed peers. The first peer runs the test against the second; download and upload are each measured for ~4s and graphed separately, with a third chart below them showing both directions\' packets/sec together, where available. Only peers in Manager mode can run a test as the first peer.</div>'));
 
   const bar = $('<div class="tbar"></div>');
   // Both pickers are buildListPicker listboxes, same as the header's node picker:
@@ -5899,42 +5899,52 @@ function infoSpeedtest(c){
 function renderSpeedResult(out, body){
   out.innerHTML = '';
   const to = body.target_hostname ? esc(body.target_hostname) : 'peer';
-  out.appendChild(speedGraph('Download (from '+to+')', body.download||{}, 'var(--acc)'));
-  out.appendChild(speedGraph('Upload (to '+to+')', body.upload||{}, '#e0883b'));
+  const down = body.download||{}, up = body.upload||{};
+  out.appendChild(speedGraph('Download (from '+to+')', down, 'var(--acc)'));
+  out.appendChild(speedGraph('Upload (to '+to+')', up, '#e0883b'));
+  // A third card, not a chart bolted onto each direction's own: pps is its
+  // own metric with its own scale (thousands, versus Mbps' tens to low
+  // hundreds), and download/upload pps are more useful seen together on one
+  // shared axis than as two separate single-line charts repeating the same
+  // shape twice. Skipped entirely — not an empty card — when neither
+  // direction ever found the peer to attribute a rate to.
+  if ((down.packet_samples||[]).length || (up.packet_samples||[]).length){
+    out.appendChild(speedPpsCard(down, up));
+  }
 }
 
 function speedGraph(title, result, color){
   const card = $('<div class="card metric-card"></div>');
-  // The avg figures both live in the one metric-now chip (the '·' separator
-  // is the same convention the bandwidth throttle display uses for combining
-  // related stats inline) — metric-head is a two-slot flex row (title left,
-  // value right) everywhere else it's used, and this keeps that layout
-  // intact instead of introducing a new shape. pps is left out of the chip
-  // entirely, not shown as "0 pkts/s", when the server couldn't attribute a
-  // rate to this run (result.packets_per_sec is unset — see packetsPerSec's
-  // doc comment in speedtest.go for exactly when that happens); a transfer
-  // that moved any bytes at all never legitimately has a real pps of zero,
-  // so an absent value means "not available", not "none moved". The chart
-  // below applies the same rule to the time series (packet_samples empty,
-  // not zero-filled).
-  const now = 'avg '+esc(fmtMbps(result.avg_mbps||0)) + (result.packets_per_sec ? ' · '+esc(fmtPps(result.packets_per_sec)) : '');
-  card.appendChild($('<div class="metric-head"><span class="metric-title">'+esc(title)+'</span><span class="metric-now">'+now+'</span></div>'));
+  card.appendChild($('<div class="metric-head"><span class="metric-title">'+esc(title)+'</span><span class="metric-now">avg '+esc(fmtMbps(result.avg_mbps||0))+'</span></div>'));
   if (result.error){ card.appendChild($('<div class="hint" style="margin:0">'+esc(result.error)+'</div>')); return card; }
   const holder = $('<div class="chart-holder"></div>');
   holder.innerHTML = speedChartSVG(result.samples||[], color, s=>s.mbps, fmtMbps);
   card.appendChild(holder);
-  // Packets/sec gets its own chart, not a second line on the one above: Mbps
-  // sits in the tens to low hundreds here while pps runs into the thousands,
-  // so sharing one y-axis would flatten whichever of the two is smaller.
-  // Skipped entirely — no empty chart, no "no samples" placeholder — when
-  // the server never found the peer during this phase at all, since that
-  // reads as "not available" rather than an actual empty result.
-  if ((result.packet_samples||[]).length){
-    card.appendChild($('<div class="hint" style="margin:8px 0 4px">packets/sec</div>'));
-    const pktHolder = $('<div class="chart-holder"></div>');
-    pktHolder.innerHTML = speedChartSVG(result.packet_samples, color, s=>s.pps, fmtPps);
-    card.appendChild(pktHolder);
-  }
+  return card;
+}
+
+// speedPpsCard is the third card: download and upload packets/sec together on
+// one chart, download in the same blue as its own Mbps card above, upload in
+// the same orange as its own — so the color coding a reader already learned
+// from the two cards above carries straight through, rather than a chart
+// legend being the only place colors are defined. The legend shows the same
+// average packetsPerSec each direction's own card would have shown (not the
+// series' last sample, which is a different, noisier number) — one
+// definition of "the pps figure" for a given run, not two that could read
+// differently for the same test.
+function speedPpsCard(down, up){
+  const card = $('<div class="card metric-card"></div>');
+  const series = [
+    { name:'Download', color:'var(--acc)', points:(down.packet_samples||[]).map(s=>({t:s.t, v:s.pps})) },
+    { name:'Upload',   color:'#e0883b',    points:(up.packet_samples||[]).map(s=>({t:s.t, v:s.pps})) },
+  ];
+  const avgFor = (r) => r.packets_per_sec ? fmtPps(r.packets_per_sec) : 'n/a';
+  const lg = '<b style="color:'+series[0].color+'">&#9660; '+esc(series[0].name)+'</b> '+esc(avgFor(down))
+    + ' &nbsp; <b style="color:'+series[1].color+'">&#9650; '+esc(series[1].name)+'</b> '+esc(avgFor(up));
+  card.appendChild($('<div class="metric-head"><span class="metric-title">PPS</span><span class="metric-legend">'+lg+'</span></div>'));
+  const holder = $('<div class="chart-holder"></div>');
+  holder.innerHTML = speedComboChartSVG(series, fmtPps);
+  card.appendChild(holder);
   return card;
 }
 
@@ -5945,11 +5955,53 @@ function speedGraph(title, result, color){
 // only obscure).
 function fmtPps(v){ return Math.round(v||0).toLocaleString()+' pkts/s'; }
 
+// speedComboChartSVG draws two series sharing one y-axis and one x-axis — the
+// PPS card's download+upload chart. Modeled closely on chartLayers/chartSVG
+// (same padding constants, same one-<path>-per-series approach, same
+// gridline styling), deliberately not reusing them directly: those are built
+// for a live rolling "-Nm .. now" window (chartLayers takes a nowRef and
+// counts backward from it), which is the right framing for the Metrics
+// dashboard's continuously-polled charts but the wrong one here — a finished
+// ~4s test isn't a live window, so an axis ending in "now" would misdescribe
+// it. This keeps the "0s .. Ns" elapsed-time framing speedChartSVG already
+// established for the Mbps charts, so all three speedtest charts read the
+// same way. yMax/win are computed across BOTH series together, so one line
+// being much smaller than the other still renders at a legible scale.
+function speedComboChartSVG(series, fmtY){
+  const W=CH.W, H=CH.H, padL=CH.padL, padR=CH.padR, padT=CH.padT, padB=CH.padB;
+  let maxV=0, maxT=0;
+  for (const s of series) for (const p of (s.points||[])){ if (p.v>maxV) maxV=p.v; if (p.t>maxT) maxT=p.t; }
+  const yMax = maxV>0 ? maxV*1.15 : 1;
+  const win = maxT>0 ? maxT : 1;
+  const xs = t => padL + (W-padL-padR)*(t/win);
+  const ys = v => padT + (H-padT-padB)*(1 - Math.min(v,yMax)/yMax);
+  let g='';
+  for (const f of [0,0.5,1]){
+    const yy = padT + (H-padT-padB)*(1-f);
+    g += '<line x1="'+padL+'" y1="'+yy.toFixed(1)+'" x2="'+(W-padR)+'" y2="'+yy.toFixed(1)+'" stroke="var(--line)" stroke-width="1"/>';
+    g += '<text x="'+(padL-8)+'" y="'+(yy+3).toFixed(1)+'" text-anchor="end" font-size="10" fill="var(--mut)">'+esc(fmtY(yMax*f))+'</text>';
+  }
+  g += '<text x="'+padL+'" y="'+(H-6)+'" font-size="10" fill="var(--mut)">0s</text>';
+  g += '<text x="'+(W-padR)+'" y="'+(H-6)+'" text-anchor="end" font-size="10" fill="var(--mut)">'+win.toFixed(1)+'s</text>';
+  let any=false;
+  for (const s of series){
+    const pts = s.points||[];
+    if (!pts.length) continue;
+    any = true;
+    let d='';
+    for (let i=0;i<pts.length;i++){ d += (i?'L':'M')+xs(pts[i].t).toFixed(1)+' '+ys(pts[i].v).toFixed(1)+' '; }
+    g += '<path d="'+d+'" fill="none" stroke="'+s.color+'" stroke-width="1.5" stroke-linejoin="round"/>';
+  }
+  if (!any) g += '<text x="'+(W/2)+'" y="'+(H/2)+'" text-anchor="middle" font-size="11" fill="var(--mut)">no samples</text>';
+  return '<svg class="chart" viewBox="0 0 '+W+' '+H+'">'+g+'</svg>';
+}
+
 // speedChartSVG mirrors the Metrics chart style, with x = elapsed seconds.
-// valueOf pulls the plotted number out of each sample (samples.mbps for the
-// throughput chart, .pps for the packet-rate chart below) and fmtFn formats
-// axis labels — the two charts share every pixel of scaling/gridline/path
-// logic and differ only in which field they read and how they print it.
+// valueOf pulls the plotted number out of each sample and fmtFn formats axis
+// labels — kept general (rather than hardcoded to Mbps) since speedComboChartSVG
+// above shares its gridline/scaling approach for the pps chart, even though
+// that one plots two series instead of one and so isn't built directly on
+// this function.
 function speedChartSVG(samples, color, valueOf, fmtFn){
   const W=CH.W, H=CH.H, padL=CH.padL, padR=CH.padR, padT=CH.padT, padB=CH.padB;
   let maxV=0, maxT=0;

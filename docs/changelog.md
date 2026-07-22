@@ -38,6 +38,72 @@ assuming it didn't happen.
 
 ---
 
+## v567 — 2026-07-21
+
+**Corrected v565's PPS layout: one combined third chart with download and
+upload plotted together, not a duplicate chart embedded under each of the
+Download/Upload cards.**
+
+v565 read "graphed as its own chart" as "each direction gets its own pps
+chart appended below its own Mbps chart" — download's pps chart under the
+Download card, upload's under the Upload card, each in its own single
+color. That's not what was asked for: a third, standalone "PPS" chart, with
+both directions' packets/sec on one shared axis, blue and yellow like the
+existing Download/Upload cards. Screenshot feedback caught it immediately.
+
+**Reused, not reinvented, the pattern already in the file for this.** The
+Metrics dashboard's `graphCard`/`chartSVG`/`chartLayers` already draw
+multi-series charts with a colored legend (`▼ name value  ▲ name value`,
+`.metric-legend`) — exactly the shape a two-line pps chart needs. Not
+reused directly, though: those are built for a live rolling "-Nm .. now"
+window (`chartLayers` takes a `nowRef` and counts backward from it), the
+right framing for a continuously-polled dashboard and the wrong one for a
+finished ~4s test — an axis ending in "now" would misdescribe a result
+that finished seconds ago. New `speedComboChartSVG` keeps the "0s .. Ns"
+elapsed-time framing the Mbps charts already use (so a reader doesn't have
+to learn a second axis convention for one chart on the same page), while
+copying `chartLayers`' actual approach: one `<path>` per series, computing
+`yMax`/`win` across *both* series together so neither line gets flattened
+by sharing a scale with the other.
+
+**`speedGraph` reverted** to a single Mbps chart, no embedded pps sub-chart
+and no `· N pkts/s` in its header chip — that number is now the PPS card's
+legend instead of appearing in two places that could (subtly, since one
+was an average and the other risked being a last-sample figure) disagree
+about the same run. New `speedPpsCard(down, up)` builds the third card:
+title "PPS", a legend showing each direction's average pps (the same
+average `packetsPerSec` already computed server-side, not the series' last
+sample — one definition of "the pps figure" per run) in that direction's
+established color, and one `speedComboChartSVG` call carrying both series.
+Skipped entirely, not an empty card, when neither direction ever found the
+peer to attribute a rate to.
+
+**Tests.** New `TestSpeedtestPpsIsOneCombinedChart` pins the corrected
+shape: `renderSpeedResult` calls `speedGraph` exactly twice and
+`speedPpsCard` once; `speedGraph`'s own body no longer mentions
+`packet_samples` at all; `speedPpsCard` uses both established colors and
+feeds both directions into a single `speedComboChartSVG` call. Verified
+this actually catches the bug it's named for, not just passing trivially:
+reconstructed v565's shape locally (no `speedPpsCard` call, `packet_samples`
+referenced inside `speedGraph`), confirmed the test fails with both exact
+messages, restored the fix, confirmed green again. `speedtestFn` (existing)
+is refactored onto a new general `funcSource(t, name)` helper rather than
+duplicating the same function-source-extraction logic a second time for
+this test.
+
+Backend untouched — `speedtest.go`'s data (`PacketsPerSec`, `PacketSamples`,
+`DurationSec`) already had everything this needed; this was purely a UI
+restructuring. Every existing Go-side pps test (`TestPacketsPerSec`,
+`TestFindPeerByOverlay`, `TestPktSampleLoop`,
+`TestSpeedtestRunReportsPacketsPerSec`) passes unchanged.
+
+Verified: `go build ./...`, `go vet ./...` clean; full speedtest test set
+and full `internal/webadmin` suite (106s) pass; cross-compiles for
+darwin/amd64, darwin/arm64, windows/amd64, freebsd/amd64, openbsd/amd64,
+linux/arm, linux/386, linux/arm64.
+
+---
+
 ## v566 — 2026-07-21
 
 **Header peer picker no longer resizes when a peer is picked.**
