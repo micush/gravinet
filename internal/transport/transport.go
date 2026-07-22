@@ -119,6 +119,14 @@ type Transport struct {
 	rings4    []*sendRing   // outbound queue per conns4 socket; nil entry => direct writes
 	rings6    []*sendRing   // ditto for conns6
 	stopFlush chan struct{} // closed to stop the flushers
+	// gsoTX/batchGRO are Phase B (see gso_linux.go): UDP_SEGMENT sends and
+	// UDP_GRO receives, layered on the batching above. Both stay false — the
+	// exact v571 data path — unless GRAVINET_UDP_GSO=1 AND the kernel probes
+	// support AND batching itself is on; see initBatch. gsoTX seeds each
+	// flusher's own per-socket flag, which can further self-disable on a
+	// driver error without affecting other sockets.
+	gsoTX     bool
+	batchGRO  bool
 	flushWG   sync.WaitGroup
 	onMsgSize func(netip.AddrPort, int)
 

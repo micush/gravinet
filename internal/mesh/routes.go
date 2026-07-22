@@ -8,34 +8,137 @@ import (
 // redistRoute resolves a destination to a peer session via a redistributed
 // route (longest-prefix match whose origin currently has a session). Used as a
 // fallback when no exact host route matches.
+//
+// This is the single-winner form, kept for callers that only have a
+// destination address (and for the equivalence it still expresses: with one
+// tied origin, it and redistRouteFlow return the same session). The data path
+// uses redistRouteFlow, which spreads flows across equal-cost siblings; see
+// its doc comment for the ECMP semantics.
 func (e *Engine) redistRoute(ns *netState, dst netip.Addr) *peerSession {
+	if origins, snap := ns.bestRedistOrigins(dst); len(origins) > 0 {
+		return snap.byNode[origins[0]]
+	}
+	return nil
+}
+
+// redistRouteFlow is redistRoute with equal-cost multipath: when two or more
+// origins advertise the winning prefix at the same metric — redundant exit
+// nodes for one external CIDR, the setup TestSelfBGPRedistributionShadowsSiblingGossip
+// exercises across the mesh — traffic is spread across them by flow rather
+// than all pinned to whichever happened to sort first (the old
+// `re.metric >= bestMetric` kept the first-iterated winner and ignored the
+// rest).
+//
+// The split is per-FLOW, not per-packet: the selector is a hash of the packet's
+// 5-tuple (src/dst address, protocol, src/dst port via parseL4), so every
+// packet of a given connection deterministically lands on the same exit. That
+// is what makes this safe for stateful traffic — no intra-connection
+// reordering, and return traffic stays symmetric per flow — and it is the same
+// contract Linux fib_multipath and ordinary router ECMP provide. Perfectly even
+// per-packet striping was considered and rejected: it reorders every TCP
+// connection and breaks outright when sibling exits NAT to different upstreams.
+// A packet with no L4 ports (non-TCP/UDP, or truncated) still hashes on its
+// addresses and protocol, so it is assigned a stable exit too, just at
+// address granularity.
+//
+// Correctness note that lives outside this code: ECMP across two exits only
+// works if both are genuinely equivalent egresses for the prefix (same
+// upstream, or NAT that doesn't pin a flow to one box). If they are not,
+// return traffic for a flow pinned to the "wrong" sibling can be dropped —
+// that is inherent to load-sharing across independent exits, not something
+// the selector can repair. Advertise siblings at equal metric only when they
+// really are interchangeable; give the preferred exit a lower metric
+// otherwise, and this falls back to pinning that single winner.
+func (e *Engine) redistRouteFlow(ns *netState, dst netip.Addr, pkt []byte) *peerSession {
+	origins, snap := ns.bestRedistOrigins(dst)
+	switch len(origins) {
+	case 0:
+		return nil
+	case 1:
+		return snap.byNode[origins[0]]
+	}
+	return snap.byNode[origins[flowIndex(pkt, len(origins))]]
+}
+
+// bestRedistOrigins returns every origin tied for the best redistributed
+// route to dst — most specific prefix first, then lowest metric — along with
+// the snapshot they were read from (so the caller resolves origins→sessions
+// against the same consistent view). Origins are returned in a deterministic
+// order: ns.redist is appended in advertisement-arrival order and copied
+// verbatim into the snapshot, and this preserves that order among ties, so
+// the flow-hash's mapping from a given flow to a given exit is stable as long
+// as the set of advertising siblings is. The returned slice is freshly
+// allocated per call and small (one entry unless sibling exits exist), never
+// retained.
+func (ns *netState) bestRedistOrigins(dst netip.Addr) ([]string, *fwdSnap) {
 	snap := ns.fwd.Load()
 	if snap == nil {
-		return nil
+		return nil, nil
 	}
-	var best *peerSession
 	bestBits := -1
 	bestMetric := 0
+	var origins []string
 	for _, re := range snap.redist {
 		if !re.prefix.Contains(dst) {
 			continue
 		}
+		if snap.byNode[re.origin] == nil {
+			continue // origin has no live session; not a usable next hop
+		}
 		bits := re.prefix.Bits()
-		// Prefer the most specific prefix; among equally specific ones, the
-		// lowest metric wins.
-		if bits < bestBits {
-			continue
-		}
-		if bits == bestBits && best != nil && re.metric >= bestMetric {
-			continue
-		}
-		if ps := snap.byNode[re.origin]; ps != nil {
-			best = ps
-			bestBits = bits
+		switch {
+		case bits > bestBits:
+			// Strictly more specific: it alone defines the new best; any
+			// previously collected (less specific) ties are discarded.
+			bestBits, bestMetric = bits, re.metric
+			origins = append(origins[:0], re.origin)
+		case bits < bestBits:
+			// Less specific than the best seen; ignore.
+		case re.metric < bestMetric:
+			// Same specificity, strictly better metric: new sole winner.
 			bestMetric = re.metric
+			origins = append(origins[:0], re.origin)
+		case re.metric == bestMetric:
+			// Same specificity and metric: a co-equal ECMP sibling.
+			origins = append(origins, re.origin)
 		}
 	}
-	return best
+	return origins, snap
+}
+
+// flowIndex hashes a packet's 5-tuple to a stable bucket in [0, n). FNV-1a,
+// hand-rolled to keep internal/mesh dependency-free like the rest of the
+// module; the exact hash function doesn't matter for correctness, only that
+// it is deterministic and spreads flows, so avalanche quality is a
+// nice-to-have, not a requirement. src/dst addresses always contribute;
+// protocol and ports contribute when parseL4 can read them (TCP/UDP), so
+// different connections between the same pair of hosts still split across
+// siblings while each individual connection stays pinned.
+func flowIndex(pkt []byte, n int) int {
+	const (
+		offset = 1469598103934665603
+		prime  = 1099511628211
+	)
+	h := uint64(offset)
+	mix := func(b byte) { h ^= uint64(b); h *= prime }
+	if src, ok := parseSrc(pkt); ok {
+		for _, b := range src.AsSlice() {
+			mix(b)
+		}
+	}
+	if dst, ok := parseDst(pkt); ok {
+		for _, b := range dst.AsSlice() {
+			mix(b)
+		}
+	}
+	if proto, sport, dport, _, ok := parseL4(pkt); ok {
+		mix(proto)
+		mix(byte(sport >> 8))
+		mix(byte(sport))
+		mix(byte(dport >> 8))
+		mix(byte(dport))
+	}
+	return int(h % uint64(n))
 }
 
 // rejected reports whether an advertised prefix is refused by a reject rule. By

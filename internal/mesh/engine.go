@@ -2275,7 +2275,7 @@ func (e *Engine) processOutbound(ns *netState, buf []byte) {
 	}
 	ps := ns.routeTo(dst)
 	if ps == nil {
-		ps = e.redistRoute(ns, dst) // redistributed CIDR routes
+		ps = e.redistRouteFlow(ns, dst, pkt) // redistributed CIDR routes, ECMP across equal-cost exits
 	}
 	if ps == nil {
 		return // no peer for this destination yet (relay later)
