@@ -241,7 +241,7 @@ var namingGroup = []groupLeaf{
 
 var monitorGroup = []groupLeaf{
 	{"metrics", "live CPU, memory, disk, and per-overlay-interface throughput", cmdMonitorMetrics},
-	{"mesh-peers", "live connection health for every peer (partial — see -h)", cmdMonitorMeshPeers},
+	{"mesh-peers", "live connection health for every peer", cmdMonitorMeshPeers},
 	{"capture", "live packet capture on an overlay interface (runs tcpdump)", cmdMonitorCapture},
 	{"speedtest", "measure throughput between this node and a managed peer", speedtestNotYetInCLI},
 	{"latency", "round-trip time from this host to every other mesh peer", cmdLatency},
@@ -300,17 +300,28 @@ func cmdMeshPeers(args []string) {
 }
 
 // cmdMonitorMeshPeers is "gravinet monitor mesh-peers" — the same list as
-// "gravinet mesh peers". A long-standing note here claimed transport and
-// tx/rx counters "need protocol fields first"; that was doubly stale.
-// Transport was already on PeerInfo, and PeerInfo travels as JSON over the
-// control socket, so adding tx/rx (v558) needed no protocol change at all —
-// old daemons simply omit the fields and the CLI renders zeros.
+// "gravinet mesh peers", now matching the web admin's Monitor > Mesh Peers
+// page field-for-field (see infoMeshPeers in internal/webadmin/ui.go): key
+// label, session age, protocol, path MTU, fragment tx/rx counts, and
+// clean/drops health, plus cumulative tx/rx wire bytes, which the web admin
+// doesn't show at all.
+//
+// v558 added the wire-byte counters and called the CLI gap closed; that
+// undersold it — key/session-age/MTU/fragment-counts/health were the actual
+// gap the original note meant, and like the byte counters, none of them
+// needed protocol work: KeyLabel, EstablishedAt, PathMTU, FragsSent,
+// FragSendDrop, FragsRcvd, and ReasmDrop were all already on PeerInfo from
+// day one, just never rendered here.
 func cmdMonitorMeshPeers(args []string) {
 	for _, a := range args {
 		if a == "-h" || a == "--help" {
 			fmt.Println(`gravinet monitor mesh-peers: live peer list — node id, hostname, overlay
-addresses, endpoint, direct/relayed, transport (udp/tcp), and cumulative
-tx/rx wire bytes for each peer's current session.`)
+addresses, endpoint, direct/relayed, the label of the key currently
+authenticating each session, how long that session has been established,
+transport (udp/tcp), discovered path MTU, fragment send/receive counts,
+fragment-loss health (clean, or drops send/reassembly — a climbing count
+localizes packet loss to the underlay path to that specific peer), and
+cumulative tx/rx wire bytes for the current session.`)
 			return
 		}
 	}

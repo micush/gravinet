@@ -48,7 +48,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "561"
+	version = "562"
 	commit  = "none"
 )
 
@@ -1708,6 +1708,7 @@ func splitPositional(args []string) (positional string, rest []string) {
 // drift.
 func printPeers(peers []mesh.PeerInfo) {
 	fmt.Printf("Peers (%d):\n", len(peers))
+	now := time.Now()
 	for _, p := range peers {
 		reach := "direct"
 		if p.Relayed {
@@ -1717,8 +1718,33 @@ func printPeers(peers []mesh.PeerInfo) {
 		if xport == "" {
 			xport = "udp" // daemon predating the field; udp was the only answer then
 		}
-		fmt.Printf("  %-18s %-20s v4=%s v6=%s  public=%s (%s/%s)  tx=%s rx=%s\n",
+		mtu := "probing"
+		if p.PathMTU > 0 {
+			mtu = fmt.Sprintf("%dB", p.PathMTU)
+		}
+		// health mirrors the web admin's Monitor > Mesh Peers "transport"
+		// column exactly (see infoMeshPeers in internal/webadmin/ui.go): a
+		// non-zero drop count on either side means lost fragments, localizing
+		// packet loss to the underlay path to this specific peer.
+		health := "clean"
+		if p.FragSendDrop+p.ReasmDrop > 0 {
+			health = fmt.Sprintf("drops %d/%d", p.FragSendDrop, p.ReasmDrop)
+		}
+		key := p.KeyLabel
+		if key == "" {
+			key = "-"
+		}
+		up := "-"
+		if p.EstablishedAt > 0 {
+			secs := now.Sub(time.Unix(0, p.EstablishedAt)).Seconds()
+			if secs < 0 {
+				secs = 0 // clock skew between daemon and this read; don't print a negative age
+			}
+			up = formatUptime(uint64(secs))
+		}
+		fmt.Printf("  %-18s %-20s v4=%s v6=%s  public=%s (%s/%s)  key=%-10s up=%-10s mtu=%-8s frags-tx=%d frags-rx=%d %-14s bytes-tx=%s bytes-rx=%s\n",
 			p.NodeID, p.Hostname, p.Overlay4, p.Overlay6, p.Endpoint, reach, xport,
+			key, up, mtu, p.FragsSent, p.FragsRcvd, health,
 			humanBytes(p.TxBytes), humanBytes(p.RxBytes))
 	}
 }

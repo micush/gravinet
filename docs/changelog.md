@@ -38,6 +38,51 @@ assuming it didn't happen.
 
 ---
 
+## v562 — 2026-07-21
+
+**Correcting an overclaim from v558: "monitor mesh-peers" now actually
+matches the web admin's Mesh Peers page, not just a differently-named
+metric that happened to share a label.**
+
+v558 added `TxBytes`/`RxBytes` to `PeerInfo` and the CLI, and called that
+closing the CLI's gap against the web admin's Monitor > Mesh Peers page.
+Checking the two side by side while answering a question about what else was
+worth reviewing found that undersold it: the web admin's "transport" column
+— the thing the original note actually measured the CLI against — shows
+**path MTU, fragment send/receive counts, and clean/drops health**, not wire
+bytes. Wire-byte counters are a genuinely useful, separate metric that
+happens to share the name "tx/rx." The CLI still showed none of MTU,
+fragment counts, health, the authenticating key's label, or session age —
+all real gaps in the actual thing the note meant.
+
+All five of those were, like the byte counters, **already on `PeerInfo` with
+zero protocol work needed** — `PathMTU`, `FragsSent`, `FragSendDrop`,
+`FragsRcvd`, `ReasmDrop`, `KeyLabel`, `EstablishedAt` all predate this
+session; they were simply never rendered by `printPeers`. This is now:
+
+    node-a  host-a  v4=10.5.0.2 v6=  public=203.0.113.9:51820 (direct/udp)  key=prod-2026  up=1h 30m     mtu=1332B    frags-tx=40 frags-rx=38 drops 2/0      bytes-tx=1.2M bytes-rx=48.3M
+
+— field-for-field what the web admin's page shows, plus the byte counters
+the web admin doesn't have. `mesh-peers`' leaf description drops the
+"(partial — see -h)" qualifier it's carried since v558, since it's no
+longer true; `-h` documents every column and the health semantics (a
+climbing drop count localizes packet loss to the underlay path to that
+specific peer, mirroring the web admin's own tooltip). Fresh, not-yet-probed
+peers render their zero-value fields as `key=-`, `up=-`, `mtu=probing`, never
+as a blank column or a zero that could be misread as real data.
+
+New `TestPrintPeersRendersAllFields` captures actual stdout against synthetic
+`PeerInfo` values — a populated peer and, deliberately, an all-zero-value one
+(including `Transport` left empty, simulating a daemon predating that field)
+— and asserts on the rendered text itself, not just that the code compiles.
+
+Verified: `go build ./...`, `go vet ./...` clean; full `cmd/gravinet` suite
+passes including the new rendering test; cross-compiles for darwin/amd64,
+darwin/arm64, windows/amd64, freebsd/amd64, openbsd/amd64, linux/arm,
+linux/386, linux/arm64.
+
+---
+
 ## v561 — 2026-07-21
 
 **One more pass looking specifically for stale front-facing claims (the
