@@ -5733,14 +5733,29 @@ function chartLayers(series, yMax, win, fmtY, nowRef){
 // chartSVG draws a fixed-viewBox line chart (scales to the card width via CSS),
 // with the grid and data in their own groups, plus a hover crosshair and a
 // transparent capture rect on top.
-function chartSVG(series, yMax, win, fmtY, nowRef){
-  const W=CH.W, H=CH.H, padL=CH.padL, padR=CH.padR, padT=CH.padT, padB=CH.padB;
-  const L = chartLayers(series, yMax, win, fmtY, nowRef);
+// hoverScaffold builds the markup attachChartHover/attachSpeedChartHover both
+// rely on: a transparent capture rect spanning the plot area that receives
+// pointer events, a hidden vertical guide line, and one hidden dot per
+// series — shown and repositioned on mousemove rather than rebuilt per
+// frame. Shared by chartSVG (Metrics) and the speedtest charts so this
+// markup, and the class names the hover handlers query for, can't drift
+// apart between the two. padL is a parameter rather than reading CH.padL
+// directly, since the speedtest charts compute their own left padding (see
+// chartPadL) instead of assuming the fixed constant fits their labels.
+function hoverScaffold(colors, padL){
+  const W=CH.W, H=CH.H, padR=CH.padR, padT=CH.padT, padB=CH.padB;
   let dots='';
-  for (const s of series){ dots += '<circle class="hover-dot" r="3.2" fill="'+s.color+'" cx="0" cy="0" style="display:none"/>'; }
-  let g = '<g class="grid">'+L.grid+'</g><g class="data">'+L.data+'</g>';
-  g += '<g class="hover" style="display:none"><line class="hover-x" x1="0" y1="'+padT+'" x2="0" y2="'+(H-padB)+'" stroke="var(--mut)" stroke-width="1" stroke-dasharray="3 3"/>'+dots+'</g>';
+  for (const c of colors){ dots += '<circle class="hover-dot" r="3.2" fill="'+c+'" cx="0" cy="0" style="display:none"/>'; }
+  let g = '<g class="hover" style="display:none"><line class="hover-x" x1="0" y1="'+padT+'" x2="0" y2="'+(H-padB)+'" stroke="var(--mut)" stroke-width="1" stroke-dasharray="3 3"/>'+dots+'</g>';
   g += '<rect class="capture" x="'+padL+'" y="'+padT+'" width="'+(W-padL-padR)+'" height="'+(H-padT-padB)+'" fill="transparent" pointer-events="all"/>';
+  return g;
+}
+
+function chartSVG(series, yMax, win, fmtY, nowRef){
+  const W=CH.W, H=CH.H;
+  const L = chartLayers(series, yMax, win, fmtY, nowRef);
+  let g = '<g class="grid">'+L.grid+'</g><g class="data">'+L.data+'</g>';
+  g += hoverScaffold(series.map(s=>s.color), CH.padL);
   return '<svg class="chart" viewBox="0 0 '+W+' '+H+'">'+g+'</svg>';
 }
 
@@ -5900,8 +5915,8 @@ function renderSpeedResult(out, body){
   out.innerHTML = '';
   const to = body.target_hostname ? esc(body.target_hostname) : 'peer';
   const down = body.download||{}, up = body.upload||{};
-  out.appendChild(speedGraph('Download (from '+to+')', down, 'var(--acc)'));
-  out.appendChild(speedGraph('Upload (to '+to+')', up, '#e0883b'));
+  out.appendChild(speedGraph('Download (from '+to+')', 'Download', down, 'var(--acc)'));
+  out.appendChild(speedGraph('Upload (to '+to+')', 'Upload', up, '#e0883b'));
   // A third card, not a chart bolted onto each direction's own: pps is its
   // own metric with its own scale (thousands, versus Mbps' tens to low
   // hundreds), and download/upload pps are more useful seen together on one
@@ -5913,13 +5928,21 @@ function renderSpeedResult(out, body){
   }
 }
 
-function speedGraph(title, result, color){
+// speedGraph builds one direction's Mbps card. label is the short name shown
+// in the hover tooltip (distinct from title, the card's own fuller heading
+// like "Download (from gn-cush2)") — a tooltip popping up near the cursor,
+// possibly far from the card header, still needs its own short "which line
+// is this" text, the same way the PPS chart's tooltip names its two lines.
+function speedGraph(title, label, result, color){
   const card = $('<div class="card metric-card"></div>');
   card.appendChild($('<div class="metric-head"><span class="metric-title">'+esc(title)+'</span><span class="metric-now">avg '+esc(fmtMbps(result.avg_mbps||0))+'</span></div>'));
   if (result.error){ card.appendChild($('<div class="hint" style="margin:0">'+esc(result.error)+'</div>')); return card; }
   const holder = $('<div class="chart-holder"></div>');
-  holder.innerHTML = speedChartSVG(result.samples||[], color, s=>s.mbps, fmtMbps);
+  const series = [{ name:label, color:color, points:(result.samples||[]).map(s=>({t:s.t, v:s.mbps})) }];
+  const ch = speedComboChartSVG(series, fmtMbps);
+  holder.innerHTML = ch.svg;
   card.appendChild(holder);
+  attachSpeedChartHover(holder, { series:series, yMax:ch.yMax, win:ch.win, fmtY:fmtMbps, padL:ch.padL });
   return card;
 }
 
@@ -5943,8 +5966,10 @@ function speedPpsCard(down, up){
     + ' &nbsp; <b style="color:'+series[1].color+'">&#9650; '+esc(series[1].name)+'</b> '+esc(avgFor(up));
   card.appendChild($('<div class="metric-head"><span class="metric-title">PPS</span><span class="metric-legend">'+lg+'</span></div>'));
   const holder = $('<div class="chart-holder"></div>');
-  holder.innerHTML = speedComboChartSVG(series, fmtPps);
+  const ch = speedComboChartSVG(series, fmtPps);
+  holder.innerHTML = ch.svg;
   card.appendChild(holder);
+  attachSpeedChartHover(holder, { series:series, yMax:ch.yMax, win:ch.win, fmtY:fmtPps, padL:ch.padL });
   return card;
 }
 
@@ -5955,18 +5980,23 @@ function speedPpsCard(down, up){
 // only obscure).
 function fmtPps(v){ return Math.round(v||0).toLocaleString()+' pkts/s'; }
 
-// speedComboChartSVG draws two series sharing one y-axis and one x-axis — the
-// PPS card's download+upload chart. Modeled closely on chartLayers/chartSVG
-// (same padding constants, same one-<path>-per-series approach, same
-// gridline styling), deliberately not reusing them directly: those are built
-// for a live rolling "-Nm .. now" window (chartLayers takes a nowRef and
-// counts backward from it), which is the right framing for the Metrics
-// dashboard's continuously-polled charts but the wrong one here — a finished
-// ~4s test isn't a live window, so an axis ending in "now" would misdescribe
-// it. This keeps the "0s .. Ns" elapsed-time framing speedChartSVG already
-// established for the Mbps charts, so all three speedtest charts read the
-// same way. yMax/win are computed across BOTH series together, so one line
-// being much smaller than the other still renders at a legible scale.
+// speedComboChartSVG draws one or more series sharing a y-axis and an
+// elapsed-time x-axis — used for both the single-line Download/Upload Mbps
+// charts and the two-line PPS chart, so there is exactly one chart-drawing
+// function for the whole speedtest page rather than two that could drift
+// apart. Modeled closely on chartLayers/chartSVG (same one-<path>-per-series
+// approach, same gridline styling, same hoverScaffold), deliberately not
+// built directly on them: those assume a live rolling "-Nm .. now" window
+// (chartLayers takes a nowRef and counts backward from it), the right
+// framing for the Metrics dashboard's continuously-polled charts and the
+// wrong one here — a finished ~4s test isn't a live window, so an axis
+// ending in "now" would misdescribe it. This keeps a "0s .. Ns" elapsed-time
+// framing throughout. yMax/win are computed across every series together, so
+// one line being much smaller than another still renders at a legible scale.
+// Returns {svg, yMax, win, padL} rather than a bare string: the caller needs
+// those same three values to drive attachSpeedChartHover, and recomputing
+// them separately would risk the hover's scale silently drifting from what
+// was actually drawn.
 // chartPadL computes the left padding a Y-axis needs to fit its own widest
 // label without clipping, rather than assuming CH.padL — sized for the
 // Mbps/percentage-scale labels most charts in this app use — is wide enough
@@ -6010,47 +6040,84 @@ function speedComboChartSVG(series, fmtY){
     for (let i=0;i<pts.length;i++){ d += (i?'L':'M')+xs(pts[i].t).toFixed(1)+' '+ys(pts[i].v).toFixed(1)+' '; }
     g += '<path d="'+d+'" fill="none" stroke="'+s.color+'" stroke-width="1.5" stroke-linejoin="round"/>';
   }
-  if (!any) g += '<text x="'+(W/2)+'" y="'+(H/2)+'" text-anchor="middle" font-size="11" fill="var(--mut)">no samples</text>';
-  return '<svg class="chart" viewBox="0 0 '+W+' '+H+'">'+g+'</svg>';
+  if (!any){
+    g += '<text x="'+(W/2)+'" y="'+(H/2)+'" text-anchor="middle" font-size="11" fill="var(--mut)">no samples</text>';
+  } else {
+    // Only wire up hover when there's something to hover over — matches "no
+    // samples" getting no capture rect either, so a dead chart doesn't offer
+    // a crosshair with nothing for it to snap to.
+    g += hoverScaffold(series.map(s=>s.color), padL);
+  }
+  return { svg: '<svg class="chart" viewBox="0 0 '+W+' '+H+'">'+g+'</svg>', yMax:yMax, win:win, padL:padL };
 }
 
-// speedChartSVG mirrors the Metrics chart style, with x = elapsed seconds.
-// valueOf pulls the plotted number out of each sample and fmtFn formats axis
-// labels — kept general (rather than hardcoded to Mbps) since speedComboChartSVG
-// above shares its gridline/scaling approach for the pps chart, even though
-// that one plots two series instead of one and so isn't built directly on
-// this function. Mbps labels stay short at any realistic value (fmtMbps
-// never adds thousands separators), so this was never observed to clip the
-// way the PPS chart did — chartPadL is applied here anyway, for the same
-// reason speedComboChartSVG needs it, rather than leaving this chart's
-// safety margin as an unverified assumption.
-function speedChartSVG(samples, color, valueOf, fmtFn){
-  const W=CH.W, H=CH.H, padR=CH.padR, padT=CH.padT, padB=CH.padB;
-  let maxV=0, maxT=0;
-  for (const s of samples){ const v=valueOf(s); if (v>maxV) maxV=v; if (s.t>maxT) maxT=s.t; }
-  const yMax = maxV>0 ? maxV*1.15 : 1;
-  const win = maxT>0 ? maxT : 1;
-  const fracs = [0,0.5,1];
-  const labels = fracs.map(f => fmtFn(yMax*f));
-  const padL = chartPadL(labels, 10);
-  const xs = t => padL + (W-padL-padR)*(t/win);
-  const ys = v => padT + (H-padT-padB)*(1 - Math.min(v,yMax)/yMax);
-  let g='';
-  fracs.forEach((f,i) => {
-    const yy = padT + (H-padT-padB)*(1-f);
-    g += '<line x1="'+padL+'" y1="'+yy.toFixed(1)+'" x2="'+(W-padR)+'" y2="'+yy.toFixed(1)+'" stroke="var(--line)" stroke-width="1"/>';
-    g += '<text x="'+(padL-8)+'" y="'+(yy+3).toFixed(1)+'" text-anchor="end" font-size="10" fill="var(--mut)">'+esc(labels[i])+'</text>';
+function fmtMbps(v){ v = v||0; return (v>=100?v.toFixed(0):v>=10?v.toFixed(1):v.toFixed(2))+' Mbps'; }
+
+// attachSpeedChartHover is attachChartHover's counterpart for the speedtest
+// charts: same interaction — the capture rect tracks the pointer, snaps to
+// the nearest sample, draws a vertical guide line plus one dot per series,
+// and shows a tooltip — but for the "0s .. win" elapsed-time x-axis
+// speedComboChartSVG draws instead of attachChartHover's live rolling
+// "now-win .. now" one. That difference is why this isn't just a call to
+// attachChartHover: its tooltip header calls clockOf(t), formatting t as a
+// wall-clock HH:MM:SS by treating it as a Unix timestamp, which is the right
+// read for the Metrics dashboard's real timestamps and a meaningless one for
+// a speedtest's "seconds since this direction started" — the header here is
+// simply "2.3s" instead. hs: {series, yMax, win, fmtY, padL} — no "now",
+// since there is none for a run that already finished.
+function attachSpeedChartHover(holder, hs){
+  const svg = holder.querySelector('svg.chart');
+  if (!svg) return;
+  const cap = svg.querySelector('.capture');
+  if (!cap) return; // "no samples": speedComboChartSVG skipped the hover scaffold entirely
+  const hov = svg.querySelector('.hover');
+  const vline = svg.querySelector('.hover-x');
+  const dots = svg.querySelectorAll('.hover-dot');
+  const tip = $('<div class="chart-tip" style="display:none"></div>');
+  holder.appendChild(tip);
+  const W=CH.W, H=CH.H, padT=CH.padT, padB=CH.padB, padR=CH.padR;
+  const plotL=hs.padL, plotR=W-padR;
+  const nearest = (pts, t) => {
+    if (!pts || !pts.length) return -1;
+    let best=0, bd=Infinity;
+    for (let i=0;i<pts.length;i++){ const d=Math.abs(pts[i].t-t); if (d<bd){ bd=d; best=i; } }
+    return best;
+  };
+  cap.addEventListener('mouseleave', () => { hov.style.display='none'; tip.style.display='none'; });
+  cap.addEventListener('mousemove', (ev) => {
+    const series = hs.series, yMax = hs.yMax, win = hs.win, fmtY = hs.fmtY;
+    const ys = v => padT + (H-padT-padB)*(1 - Math.min(v,yMax)/yMax);
+    const xOf = t => plotL + (plotR-plotL)*Math.max(0,Math.min(1,t/win));
+    const rect = svg.getBoundingClientRect();
+    const vx = (ev.clientX-rect.left)/rect.width*W;
+    const frac = Math.max(0, Math.min(1, (vx-plotL)/(plotR-plotL)));
+    const t = frac*win;
+    let snapT=null;
+    for (const s of series){ const i=nearest(s.points,t); if (i>=0){ snapT=s.points[i].t; break; } }
+    if (snapT===null) return;
+    const sx = xOf(snapT);
+    vline.setAttribute('x1', sx.toFixed(1));
+    vline.setAttribute('x2', sx.toFixed(1));
+    let rows='';
+    dots.forEach((dot,di) => {
+      const pts = series[di] ? series[di].points : null;
+      const i = nearest(pts, snapT);
+      if (i<0){ dot.style.display='none'; return; }
+      const v = pts[i].v;
+      dot.style.display='';
+      dot.setAttribute('cx', sx.toFixed(1));
+      dot.setAttribute('cy', ys(v).toFixed(1));
+      rows += '<div class="tip-row"><span class="tip-dot" style="background:'+series[di].color+'"></span>'
+        + esc(series[di].name)+' <b>'+esc(fmtY(v))+'</b></div>';
+    });
+    hov.style.display='';
+    tip.innerHTML = '<div class="tip-t">'+snapT.toFixed(1)+'s</div>'+rows;
+    tip.style.display='';
+    tip.classList.toggle('flip', frac>0.6);
+    const hrect = holder.getBoundingClientRect();
+    tip.style.left = (ev.clientX-hrect.left)+'px';
+    tip.style.top = (ev.clientY-hrect.top)+'px';
   });
-  g += '<text x="'+padL+'" y="'+(H-6)+'" font-size="10" fill="var(--mut)">0s</text>';
-  g += '<text x="'+(W-padR)+'" y="'+(H-6)+'" text-anchor="end" font-size="10" fill="var(--mut)">'+win.toFixed(1)+'s</text>';
-  if (samples.length){
-    let d='';
-    for (let i=0;i<samples.length;i++){ d += (i?'L':'M')+xs(samples[i].t).toFixed(1)+' '+ys(valueOf(samples[i])).toFixed(1)+' '; }
-    g += '<path d="'+d+'" fill="none" stroke="'+color+'" stroke-width="1.5" stroke-linejoin="round"/>';
-  } else {
-    g += '<text x="'+(W/2)+'" y="'+(H/2)+'" text-anchor="middle" font-size="11" fill="var(--mut)">no samples</text>';
-  }
-  return '<svg class="chart" viewBox="0 0 '+W+' '+H+'">'+g+'</svg>';
 }
 
 function fmtMbps(v){ v = v||0; return (v>=100?v.toFixed(0):v>=10?v.toFixed(1):v.toFixed(2))+' Mbps'; }

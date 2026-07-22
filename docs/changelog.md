@@ -38,6 +38,86 @@ assuming it didn't happen.
 
 ---
 
+## v569 — 2026-07-21
+
+**Speedtest charts get the same hover crosshair the Metrics dashboard has:
+a vertical guide line, a dot per series, and a tooltip that snaps to the
+nearest sample — on all three charts (Download, Upload, PPS).**
+
+Rather than build a parallel implementation, this shares the actual markup
+and interaction code the Metrics dashboard already uses, factored out so
+the two can't drift apart:
+
+- New `hoverScaffold(colors, padL)` builds the capture rect + hidden guide
+  line + one hidden dot per series that both `chartSVG` (Metrics) and the
+  speedtest charts now share. `chartSVG` is refactored onto it with
+  byte-identical output — verified by tracing the concatenation by hand
+  before touching it, not just assumed safe because the diff looked small.
+
+- **Not** shared as-is: the interaction handler. `attachChartHover`
+  (Metrics) assumes a live rolling "-Nm .. now" x-axis and formats its
+  tooltip header with `clockOf(t)` — a wall-clock `HH:MM:SS` read of `t` as
+  a Unix timestamp. The speedtest's charts use a "0s .. Ns" elapsed-time
+  axis instead (a finished ~4s test isn't a live window), so reusing
+  `attachChartHover` directly would show a nonsense wall-clock time in the
+  tooltip. New `attachSpeedChartHover` mirrors its mouse-tracking and
+  nearest-sample snapping exactly, but with `t0=0` instead of `now-win` and
+  a tooltip header that's just `t` formatted as seconds.
+
+**Also collapsed two near-duplicate chart functions into one.**
+`speedComboChartSVG` already handled an arbitrary series count generically
+(the loop that draws paths and computes `yMax`/`win` never assumed exactly
+two), so the separate single-series `speedChartSVG` was redundant — deleted,
+and `speedGraph` (Download/Upload) now builds a one-element series array
+and calls the same function `speedPpsCard` does. One chart-drawing function
+for the whole page instead of two that could quietly diverge, and the
+hover/`chartPadL` fixes from the last two releases only need maintaining in
+one place going forward.`speedComboChartSVG` now returns
+`{svg, yMax, win, padL}` instead of a bare string, since the hover handler
+needs those same three values and recomputing them separately would risk
+the hover's scale silently drifting from what was actually drawn.
+
+**Two real mistakes made and caught while building this, both worth naming
+plainly:**
+
+1. A stray backtick inside a JS comment (`` `now` ``, meant as code-style
+   emphasis) terminated the Go raw string literal early and broke the
+   build — exactly the trap `TestUIRawStringHasNoStrayBackticks` exists to
+   catch, except the build failure happened first since the file didn't
+   compile at all. Caught by `go build` immediately, fixed by dropping the
+   backticks.
+2. Writing two of the new tests, an imprecise string-replacement anchor
+   deleted a neighboring test's function signature and left its body
+   orphaned under the wrong function — the same mistake made once already
+   in v568, made again while adding this session's tests. Caught both
+   times by grepping the file's function signatures immediately after each
+   edit, before building or running anything; the second time was caught
+   before it even reached a build attempt. Worth being explicit that this
+   is now twice, not once — a pattern in how these particular test
+   insertions were being made, not a one-off slip.
+
+New `TestSpeedtestChartsHaveHoverCrosshair` pins the wiring: both
+`speedGraph` and `speedPpsCard` call `attachSpeedChartHover`; both
+`speedComboChartSVG` and `chartSVG` call the shared `hoverScaffold`
+(catching a regression on either side of the refactor); and
+`attachSpeedChartHover`'s tooltip must not call `clockOf`. Verified the
+test actually catches what it claims: reverted the tooltip to `clockOf`
+locally, confirmed both relevant assertions failed with the right
+messages, restored the fix, confirmed green — same discipline applied to
+every test this session, including one where the first draft of the
+assertion itself was wrong (checked for `snapT.toFixed(1)+'s'` as one
+literal; the real code groups the concatenation as `snapT.toFixed(1)+'s
+</div>'`) and had to be corrected before it could tell truth from bug.
+Existing `TestChartPadLFixesLabelClipping` and `TestSpeedtestPpsIsOneCombinedChart`
+updated for the `speedChartSVG` deletion.
+
+Verified: `go build ./...`, `go vet ./...` clean; the full UI-source test
+set (10 tests) and the full `internal/webadmin` suite (107s) pass;
+cross-compiles for darwin/amd64, darwin/arm64, windows/amd64,
+freebsd/amd64, openbsd/amd64, linux/arm, linux/386, linux/arm64.
+
+---
+
 ## v568 — 2026-07-21
 
 **PPS chart's y-axis labels were cut off on the left ("60,873 pkts/s"

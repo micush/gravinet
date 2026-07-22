@@ -152,6 +152,11 @@ func funcSource(t *testing.T, name string) string {
 // chart bolted onto each of the Download/Upload cards individually. The
 // first version of this did exactly that — a small pps sub-chart appended
 // inside speedGraph, once per direction — which is the wrong shape this
+// TestSpeedtestPpsIsOneCombinedChart pins the corrected layout: download and
+// upload packets/sec share one third chart (speedPpsCard), not a fourth
+// chart bolted onto each of the Download/Upload cards individually. The
+// first version of this did exactly that — a small pps sub-chart appended
+// inside speedGraph, once per direction — which is the wrong shape this
 // test exists to keep from coming back.
 func TestSpeedtestPpsIsOneCombinedChart(t *testing.T) {
 	rsr := funcSource(t, "renderSpeedResult")
@@ -188,26 +193,70 @@ func TestSpeedtestPpsIsOneCombinedChart(t *testing.T) {
 	}
 }
 
+// TestSpeedtestChartsHaveHoverCrosshair pins the hover crosshair added to
+// all three speedtest charts: attachSpeedChartHover wired into both
+// speedGraph and speedPpsCard, sourced from the same hoverScaffold markup
+// the Metrics dashboard's own crosshair (attachChartHover/chartSVG) uses —
+// not a second, parallel implementation of the capture-rect/dot/line
+// markup that could drift from it. Also pins the one deliberate behavioral
+// difference from attachChartHover: its tooltip header must NOT be
+// clockOf(t) (a wall-clock HH:MM:SS, meaningless for a speedtest's elapsed-
+// time axis) — it formats t directly as seconds instead.
+func TestSpeedtestChartsHaveHoverCrosshair(t *testing.T) {
+	if !strings.Contains(indexHTML, "function attachSpeedChartHover(") {
+		t.Fatal("attachSpeedChartHover is missing")
+	}
+	if !strings.Contains(indexHTML, "function hoverScaffold(") {
+		t.Fatal("hoverScaffold helper is missing")
+	}
+
+	sg := funcSource(t, "speedGraph")
+	if !strings.Contains(sg, "attachSpeedChartHover(") {
+		t.Error("speedGraph doesn't wire up attachSpeedChartHover — no crosshair on the Download/Upload charts")
+	}
+	spc := funcSource(t, "speedPpsCard")
+	if !strings.Contains(spc, "attachSpeedChartHover(") {
+		t.Error("speedPpsCard doesn't wire up attachSpeedChartHover — no crosshair on the PPS chart")
+	}
+
+	scs := funcSource(t, "speedComboChartSVG")
+	if !strings.Contains(scs, "hoverScaffold(") {
+		t.Error("speedComboChartSVG doesn't call hoverScaffold — the charts have no capture rect or hover markup for a crosshair to attach to")
+	}
+
+	cs := funcSource(t, "chartSVG")
+	if !strings.Contains(cs, "hoverScaffold(") {
+		t.Error("chartSVG (Metrics) no longer builds its hover markup through the shared hoverScaffold — the refactor that shared it with the speedtest charts regressed")
+	}
+
+	ash := funcSource(t, "attachSpeedChartHover")
+	if strings.Contains(ash, "clockOf(") {
+		t.Error("attachSpeedChartHover's tooltip uses clockOf(t) — a wall-clock read of an elapsed-seconds value, meaningless for a finished speedtest")
+	}
+	if !strings.Contains(ash, "snapT.toFixed(1)") {
+		t.Error("attachSpeedChartHover's tooltip doesn't format the elapsed time as seconds")
+	}
+}
+
 // TestChartPadLFixesLabelClipping pins the fix for a reported bug: the PPS
 // chart's y-axis labels were cut off on the left ("60,873 pkts/s" rendering
 // as ",873 pkts/s"). Pps values run into 5-6 digits with thousands
 // separators, wider than the fixed CH.padL (76px, sized for the shorter
 // Mbps/percentage-scale labels every other chart in the app uses) had room
 // for, so the leading digits rendered past the left edge of the SVG and got
-// clipped. Both speed chart functions must compute their actual left
-// padding from the label text itself (chartPadL), not the fixed constant.
+// clipped. speedComboChartSVG — the one chart function every speedtest
+// chart uses, single-series or two — must compute its actual left padding
+// from the label text itself (chartPadL), not the fixed constant.
 func TestChartPadLFixesLabelClipping(t *testing.T) {
 	if !strings.Contains(indexHTML, "function chartPadL(") {
 		t.Fatal("chartPadL helper is missing")
 	}
-	for _, fn := range []string{"speedComboChartSVG", "speedChartSVG"} {
-		body := funcSource(t, fn)
-		if !strings.Contains(body, "chartPadL(") {
-			t.Errorf("%s doesn't call chartPadL — its left padding is still the fixed CH.padL, which is what clipped the PPS labels", fn)
-		}
-		if strings.Contains(body, "padL=CH.padL") || strings.Contains(body, "padL = CH.padL") {
-			t.Errorf("%s still hardcodes its left padding to CH.padL directly", fn)
-		}
+	body := funcSource(t, "speedComboChartSVG")
+	if !strings.Contains(body, "chartPadL(") {
+		t.Error("speedComboChartSVG doesn't call chartPadL — its left padding is still the fixed CH.padL, which is what clipped the PPS labels")
+	}
+	if strings.Contains(body, "padL=CH.padL") || strings.Contains(body, "padL = CH.padL") {
+		t.Error("speedComboChartSVG still hardcodes its left padding to CH.padL directly")
 	}
 }
 
