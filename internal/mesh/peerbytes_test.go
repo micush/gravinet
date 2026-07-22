@@ -8,10 +8,11 @@ import (
 	"gravinet/internal/crypto"
 )
 
-// TestPeerByteCounters proves PeerInfo's TxBytes/RxBytes actually count wire
-// traffic: two engines over real loopback UDP, a data packet each way, and
-// both sides must report non-zero, plausibly-sized counters for the other.
-func TestPeerByteCounters(t *testing.T) {
+// TestPeerByteAndPacketCounters proves PeerInfo's TxBytes/RxBytes and
+// TxPackets/RxPackets actually count wire traffic: two engines over real
+// loopback UDP, a data packet each way, and both sides must report
+// non-zero, plausibly-sized counters for the other.
+func TestPeerByteAndPacketCounters(t *testing.T) {
 	const netID = uint64(0xB17E5)
 	key, _ := crypto.GenerateKey()
 	A := spinNode(t, "A", netID, key, netip.MustParseAddr("10.5.0.1"))
@@ -55,24 +56,37 @@ func TestPeerByteCounters(t *testing.T) {
 		t.Fatal("B->A packet not delivered")
 	}
 
-	find := func(n *testNode, id string) (tx, rx uint64) {
+	type counters struct{ tx, rx, txPkts, rxPkts uint64 }
+	find := func(n *testNode, id string) counters {
 		for _, pi := range n.eng.ListPeers(netID) {
 			if pi.NodeID == id {
-				return pi.TxBytes, pi.RxBytes
+				return counters{pi.TxBytes, pi.RxBytes, pi.TxPackets, pi.RxPackets}
 			}
 		}
 		t.Fatalf("peer %s not listed", id)
-		return 0, 0
+		return counters{}
 	}
-	atx, arx := find(A, "B")
-	btx, brx := find(B, "A")
-	// Handshake bytes don't count (no session yet when they flow), but the
+	a, b := find(A, "B"), find(B, "A")
+	// Handshake traffic doesn't count (no session yet when it flows), but the
 	// data packet plus keepalives do; the floor is the sealed data packet
-	// (header + inner + tag > len(pkt)).
-	if atx == 0 || arx == 0 || btx == 0 || brx == 0 {
-		t.Fatalf("zero counter: A tx=%d rx=%d, B tx=%d rx=%d", atx, arx, btx, brx)
+	// (header + inner + tag > len(pkt)) and at least one datagram each way.
+	if a.tx == 0 || a.rx == 0 || b.tx == 0 || b.rx == 0 {
+		t.Fatalf("zero byte counter: A tx=%d rx=%d, B tx=%d rx=%d", a.tx, a.rx, b.tx, b.rx)
 	}
-	if atx < uint64(len(pkt)) || brx < uint64(len(pkt)) {
-		t.Fatalf("counters smaller than one sealed data packet: A tx=%d, B rx=%d, pkt=%d", atx, brx, len(pkt))
+	if a.tx < uint64(len(pkt)) || b.rx < uint64(len(pkt)) {
+		t.Fatalf("byte counters smaller than one sealed data packet: A tx=%d, B rx=%d, pkt=%d", a.tx, b.rx, len(pkt))
+	}
+	if a.txPkts == 0 || a.rxPkts == 0 || b.txPkts == 0 || b.rxPkts == 0 {
+		t.Fatalf("zero packet counter: A tx=%d rx=%d, B tx=%d rx=%d", a.txPkts, a.rxPkts, b.txPkts, b.rxPkts)
+	}
+	// The one overlay packet each way is a single unfragmented datagram (well
+	// under any underlay MTU), so byte and packet counts should move together:
+	// a byte count many datagrams' worth larger than its packet count would
+	// mean something other than "one send == one packet" is happening.
+	if a.tx/a.txPkts > 2000 {
+		t.Fatalf("A's tx bytes-per-packet (%d/%d) implausible for an unfragmented test packet", a.tx, a.txPkts)
+	}
+	if b.rx/b.rxPkts > 2000 {
+		t.Fatalf("B's rx bytes-per-packet (%d/%d) implausible for an unfragmented test packet", b.rx, b.rxPkts)
 	}
 }

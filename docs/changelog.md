@@ -38,6 +38,92 @@ assuming it didn't happen.
 
 ---
 
+## v564 — 2026-07-21
+
+**Speedtest now reports packets/sec alongside the existing upload/download
+Mbps and graph — backed by a real per-datagram counter, not a fabricated
+one. Getting an honest number required adding that counter: the field that
+looked like the obvious fit (fragment counts) would have read near-zero for
+almost every real transfer and actively misled.**
+
+The speedtest already measured and graphed download/upload Mbps; the ask was
+to add packets-per-second next to it. The first candidate — `FragsSent`/
+`FragsRcvd`, already on `PeerInfo` — turned out to be the wrong metric
+entirely: `frag.go`'s own package comment confirms those only increment when
+an *oversized* overlay packet gets split by gravinet's own application-layer
+fragmentation, which a speedtest's 64KB HTTP body chunks essentially never
+trigger (TCP segments them down to MSS-sized packets, comfortably under any
+underlay MTU, before they ever reach the TUN device). Using them would have
+shown "0 pkts/s" or a tiny number during transfers that were genuinely
+moving thousands of packets a second — worse than not showing the figure at
+all.
+
+**Added the real counter instead.** `peerSession` gets `txPkts`/`rxPkts`,
+incremented at the exact same two call sites as v558's `txBytes`/`rxBytes`
+(`deliver()` at transport handoff, `onData` on successful decrypt) so the
+byte and packet counts can never drift apart — this counts every outer
+datagram to or from a peer, fragmented or not, which is what a
+packets-per-second figure actually needs. Exposed on `PeerInfo` as
+`TxPackets`/`RxPackets`. Drive-by: fixed a comment on the `rxBytes` field
+that had clearly been misplaced from `spoofDrop` in a past edit, noticed
+while adding the new fields right next to it.
+
+**Wired into the speedtest.** `handleSpeedtestRun` snapshots the target
+peer's `TxPackets`/`RxPackets` (via a new `findPeerByOverlay` lookup —
+searches every configured network, since the caller only has the target's
+overlay IP) immediately before and after each phase, and divides the delta
+by that phase's actual measured duration — a new `stResult.DurationSec`
+field, populated from the same `dur` value `AvgMbps` was already computed
+from, so the two figures are scoped to an identical window. The result rides
+on `stResult.PacketsPerSec`, computed by a small `packetsPerSec` function
+that refuses to guess: it reports 0, never a negative or fabricated rate,
+when the peer wasn't found at one end of the snapshot, nothing was measured,
+or the counter went backwards (a mid-test re-handshake resets it, the same
+event that resets `EstablishedAt`).
+
+One accepted imprecision, documented in code rather than engineered around:
+the snapshot window includes connect time (up to `stConnectSlack`), which
+sits outside `DurationSec`, so a keepalive landing during a slow connect
+would nudge the packet delta without touching the duration it's divided by.
+Negligible in practice — the bulk transfer that dominates the window
+outweighs one incidental keepalive by orders of magnitude — and avoiding it
+would need threading the backend handle into `measureDownload`/
+`measureUpload` themselves, a more invasive change for a correction this
+small.
+
+**UI**: pps renders inline with the existing "avg Mbps" figure using the
+page's own `·`-separated convention for combining related stats (matching
+the bandwidth throttle display), omitted entirely — not shown as "0
+pkts/s" — when the server couldn't attribute a rate to the run, since a
+transfer that moved any bytes never legitimately has a real rate of zero.
+The page's hint text now says packets/sec is reported.
+
+**Tests.** `TestPeerByteAndPacketCounters` (mesh, extended from v558's byte-
+only version) proves the new counters move together with the byte counters
+for an unfragmented packet, under `-race`. `TestPacketsPerSec` is a
+9-case table covering every branch of the honesty rule. `TestFindPeerByOverlay`
+proves the lookup matches on either address family and searches every
+network, not just the first. `TestSpeedtestMeasure` and
+`TestMeasureDownloadSurvivesSlowConnect` gained `DurationSec > 0` assertions.
+New `TestSpeedtestRunReportsPacketsPerSec` is the one that actually matters
+most: a real download+upload against a real TLS peer, with a backend
+(`countingPeerBackend`, embedding `*stubBackend` and overriding only
+`ListPeers` so none of the 35 other files sharing `stubBackend` are
+affected) reporting packet counts that grow between calls the way a live
+session's would — proving `handleSpeedtestRun` wires the snapshots to the
+right direction (upload uses `TxPackets` growth, download uses `RxPackets`
+growth) and not, say, both to the same counter or neither at all. The unit
+tests above only prove `packetsPerSec` and `findPeerByOverlay` are each
+individually correct; this is the one that proves the handler calls them
+right.
+
+Verified: `go build ./...`, `go vet ./...` clean; full `internal/webadmin`
+suite passes (124s) and full `internal/mesh` under `-short` passes (153s);
+cross-compiles for darwin/amd64, darwin/arm64, windows/amd64, freebsd/amd64,
+openbsd/amd64, linux/arm, linux/386, linux/arm64.
+
+---
+
 ## v563 — 2026-07-21
 
 **Not a Linux-only limitation — there is no platform check anywhere in this

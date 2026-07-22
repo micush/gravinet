@@ -1000,7 +1000,7 @@ type peerSession struct {
 	fragsRcvd    atomic.Uint64 // fragment datagrams accepted for reassembly
 	reasmOK      atomic.Uint64 // overlay packets fully reassembled and delivered
 	reasmDrop    atomic.Uint64 // reassembly groups dropped incomplete (evicted, expired, inconsistent)
-	spoofDrop    atomic.Uint64
+	spoofDrop    atomic.Uint64 // inbound packets dropped: source address not owned by this peer (anti-spoofing)
 
 	// txBytes/rxBytes count outer-datagram bytes exchanged with this peer —
 	// encrypted wire bytes at the mesh layer, counted where the session is
@@ -1011,9 +1011,22 @@ type peerSession struct {
 	// actually carries it. Surfaced per peer via PeerInfo for
 	// `gravinet mesh peers` / monitor mesh-peers.
 	txBytes atomic.Uint64
-	rxBytes atomic.Uint64 // inbound packets dropped: source address not owned by this peer (anti-spoofing)
-	pmtuMu  sync.Mutex    // guards pmtu
-	pmtu    *pmtuState    // path-MTU discovery state (see pmtu.go)
+	rxBytes atomic.Uint64
+
+	// txPkts/rxPkts count outer datagrams the same way txBytes/rxBytes count
+	// their bytes — same two call sites, incremented once per call alongside
+	// the byte counter, so the two can never drift apart. This is the actual
+	// per-datagram rate: fragsSent/fragsRcvd above look similar but aren't —
+	// those only increment when frag.go's application-layer fragmentation
+	// splits an oversized overlay packet, which ordinary sub-MTU traffic
+	// (a speedtest's TCP-segmented HTTP body chunks, for instance) never
+	// triggers at all, so they'd read near-zero for exactly the traffic a
+	// packets-per-second figure is meant to describe. txPkts/rxPkts count
+	// every outer datagram to or from this peer, fragmented or not.
+	txPkts atomic.Uint64
+	rxPkts atomic.Uint64
+	pmtuMu sync.Mutex // guards pmtu
+	pmtu   *pmtuState // path-MTU discovery state (see pmtu.go)
 
 	// Round-trip time to this peer, derived from the existing ctrlPing/
 	// ctrlPong NAT keepalive (sendKeepalive, every keepaliveInterval) rather
@@ -1803,6 +1816,7 @@ func (e *Engine) onData(payload []byte, from netip.AddrPort, via *peerSession) {
 		return // replay or authentication failure
 	}
 	ps.rxBytes.Add(uint64(len(payload)))
+	ps.rxPkts.Add(1)
 	if roamed := ps.touch(from, via); roamed {
 		e.syncPeerBypassRoute(ps.net, ps)
 	}
@@ -1992,6 +2006,7 @@ func (e *Engine) deliver(ps *peerSession, outer []byte) error {
 		return e.sealAndSend(r, innerRelay, encodeRelay(e.nodeID, ps.nodeID, outer))
 	}
 	ps.txBytes.Add(uint64(len(outer)))
+	ps.txPkts.Add(1)
 	return e.send(ps.ep(), outer)
 }
 

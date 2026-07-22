@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"gravinet/internal/mesh"
 )
 
 // Speedtest measures overlay throughput between two managed peers. The browser
@@ -50,10 +52,48 @@ type stResult struct {
 	Samples []stSample `json:"samples"`
 	AvgMbps float64    `json:"avg_mbps"`
 	Bytes   int64      `json:"bytes"`
-	Error   string     `json:"error,omitempty"`
+	// DurationSec is the actual measured window this result covers — the
+	// same interval AvgMbps was computed over, in seconds since it's a
+	// wall-clock quantity computed from a time.Duration rather than a raw
+	// count. Zero when nothing was measured at all (a connection that failed
+	// before reading/writing began). handleSpeedtestRun divides a packet-count
+	// delta by this, not by the wall time around the whole request, so
+	// PacketsPerSec and AvgMbps are scoped to the identical interval.
+	DurationSec float64 `json:"duration_sec"`
+	// PacketsPerSec is the outer-datagram rate this transfer drove to the
+	// target peer, sourced from that peer's own TxPackets/RxPackets session
+	// counters (see peerSession's doc comment on why those, not
+	// FragsSent/FragsRcvd, are the honest choice here) snapshotted immediately
+	// before and after this phase by handleSpeedtestRun — set there, not in
+	// measureDownload/measureUpload, since only the caller has the backend
+	// handle needed to read peer counters. Omitted (stays 0) when the target
+	// couldn't be found in this node's own peer list at snapshot time, which
+	// the UI should treat as "not available" rather than "zero packets".
+	PacketsPerSec float64 `json:"packets_per_sec,omitempty"`
+	Error         string  `json:"error,omitempty"`
 }
 
-// handleSpeedtestSource streams bytes as fast as the connection allows until the
+// findPeerByOverlay looks up a peer's current PeerInfo by its overlay
+// address, searching every network this node has configured — the caller
+// (handleSpeedtestRun) only has the target's overlay IP, not which network
+// it's on, the same situation OverlayReachable is already used to resolve.
+// ok is false if no network's peer list has a matching entry right now
+// (the peer hasn't fully connected yet, or dropped between requests); the
+// caller treats that as "no packet counters available for this run" rather
+// than an error, since the throughput measurement itself doesn't depend on
+// finding it.
+func findPeerByOverlay(be Backend, overlay netip.Addr) (mesh.PeerInfo, bool) {
+	want := overlay.String()
+	for _, netID := range be.NetworkIDs() {
+		for _, p := range be.ListPeers(netID) {
+			if p.Overlay4 == want || p.Overlay6 == want {
+				return p, true
+			}
+		}
+	}
+	return mesh.PeerInfo{}, false
+}
+
 // client stops reading or the safety cap is hit. The reading peer measures the
 // download rate.
 func (s *Server) handleSpeedtestSource(w http.ResponseWriter, r *http.Request) {
@@ -125,13 +165,53 @@ func (s *Server) handleSpeedtestRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	base := "https://" + net.JoinHostPort(ip.String(), strconv.Itoa(req.TargetPort))
+
+	// Snapshot the target's own packet counters immediately around each
+	// phase — as close to the actual measured window as this can get without
+	// threading the backend handle into measureDownload/measureUpload
+	// themselves. The gap this leaves is connect time: a slow/cold connect
+	// (up to stConnectSlack) sits inside the snapshot window but outside
+	// DurationSec, so a keepalive that happens to land during a slow connect
+	// would count toward the packet delta without contributing to the
+	// duration it's divided by. In practice this is negligible — the bulk
+	// transfer that dominates the window (64KB chunks flooding for
+	// stDuration) vastly outnumbers one incidental keepalive — and not worth
+	// the more invasive refactor an exact fix would need.
+	beforeDown, haveBeforeDown := findPeerByOverlay(s.be, ip)
 	down := measureDownload(base + "/api/speedtest/source")
+	afterDown, haveAfterDown := findPeerByOverlay(s.be, ip)
+	// Download: this node is the receiver, so it's our RxPackets that moved.
+	down.PacketsPerSec = packetsPerSec(beforeDown.RxPackets, afterDown.RxPackets, haveBeforeDown, haveAfterDown, down.DurationSec)
+
+	beforeUp, haveBeforeUp := findPeerByOverlay(s.be, ip)
 	up := measureUpload(base + "/api/speedtest/sink")
+	afterUp, haveAfterUp := findPeerByOverlay(s.be, ip)
+	// Upload: this node is the sender, so it's our TxPackets that moved.
+	up.PacketsPerSec = packetsPerSec(beforeUp.TxPackets, afterUp.TxPackets, haveBeforeUp, haveAfterUp, up.DurationSec)
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"target_hostname": req.TargetHostname,
 		"download":        down,
 		"upload":          up,
 	})
+}
+
+// packetsPerSec turns a before/after outer-datagram count and a measured
+// duration into a rate, honestly: it reports 0 — never a negative or
+// fabricated number — whenever the inputs can't support a real answer. That
+// covers three cases: the peer wasn't in this node's own peer list at one end
+// of the snapshot (haveBefore/haveAfter false — it hadn't fully connected, or
+// dropped between requests), nothing was actually measured (durSec <= 0, the
+// connection failed before any read/write began), or the counter went
+// backwards (after < before) — which happens if the session re-handshook
+// between the two snapshots and its packet counters reset with it, the same
+// event that resets EstablishedAt. A reset invalidates the delta outright
+// rather than just meaning "very few packets," so this refuses to guess.
+func packetsPerSec(before, after uint64, haveBefore, haveAfter bool, durSec float64) float64 {
+	if !haveBefore || !haveAfter || durSec <= 0 || after < before {
+		return 0
+	}
+	return float64(after-before) / durSec
 }
 
 // ---- throughput sampling ----------------------------------------------------
@@ -264,7 +344,7 @@ func measureDownload(url string) stResult {
 	}
 	dur := time.Since(start)
 	close(done)
-	return stResult{Samples: <-out, Bytes: m.load(), AvgMbps: avgMbps(m.load(), dur)}
+	return stResult{Samples: <-out, Bytes: m.load(), AvgMbps: avgMbps(m.load(), dur), DurationSec: dur.Seconds()}
 }
 
 // timedReader yields payload bytes until its deadline, then EOF — used as the
@@ -304,7 +384,7 @@ func measureUpload(url string) stResult {
 	close(done)
 	samples := <-out
 	if err != nil {
-		return stResult{Samples: samples, Bytes: m.load(), AvgMbps: avgMbps(m.load(), dur), Error: "upload: " + err.Error()}
+		return stResult{Samples: samples, Bytes: m.load(), AvgMbps: avgMbps(m.load(), dur), DurationSec: dur.Seconds(), Error: "upload: " + err.Error()}
 	}
 	if resp.StatusCode != http.StatusOK {
 		msg := fmt.Sprintf("upload: peer returned %d", resp.StatusCode)
@@ -312,9 +392,9 @@ func measureUpload(url string) stResult {
 			msg += ": " + detail
 		}
 		resp.Body.Close()
-		return stResult{Samples: samples, Bytes: m.load(), AvgMbps: avgMbps(m.load(), dur), Error: msg}
+		return stResult{Samples: samples, Bytes: m.load(), AvgMbps: avgMbps(m.load(), dur), DurationSec: dur.Seconds(), Error: msg}
 	}
 	io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 	resp.Body.Close()
-	return stResult{Samples: samples, Bytes: m.load(), AvgMbps: avgMbps(m.load(), dur)}
+	return stResult{Samples: samples, Bytes: m.load(), AvgMbps: avgMbps(m.load(), dur), DurationSec: dur.Seconds()}
 }

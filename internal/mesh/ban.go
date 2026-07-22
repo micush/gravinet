@@ -43,6 +43,18 @@ type PeerInfo struct {
 	TxBytes uint64 `json:"tx_bytes,omitempty"`
 	RxBytes uint64 `json:"rx_bytes,omitempty"`
 
+	// TxPackets/RxPackets are the outer-datagram counterpart to TxBytes/
+	// RxBytes above: every datagram sent or received, not just the bytes in
+	// them, counted at the exact same two points so the pair can never drift.
+	// This is not the same thing as FragsSent/FragsRcvd elsewhere on this
+	// struct — those only count application-layer fragments (frag.go
+	// splitting an oversized overlay packet), which ordinary sub-MTU traffic
+	// never produces, so they read near zero for most sessions. TxPackets/
+	// RxPackets count every datagram, fragmented or not, which is what a
+	// packets-per-second figure (see the web admin's speedtest) needs.
+	TxPackets uint64 `json:"tx_packets,omitempty"`
+	RxPackets uint64 `json:"rx_packets,omitempty"`
+
 	// RelayVia is the relay's hostname (falling back to its node id if no
 	// hostname is known) when Relayed is true, empty otherwise. A relayed
 	// session has no direct underlay address of its own to report in
@@ -792,6 +804,8 @@ func (e *Engine) ListPeers(networkID uint64) []PeerInfo {
 			SpoofDrop:     ps.spoofDrop.Load(),
 			TxBytes:       ps.txBytes.Load(),
 			RxBytes:       ps.rxBytes.Load(),
+			TxPackets:     ps.txPkts.Load(),
+			RxPackets:     ps.rxPkts.Load(),
 			BGPASN:        ps.bgpASN,
 		}
 		if r := ps.getRelay(); r != nil {

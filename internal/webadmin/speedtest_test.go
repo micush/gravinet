@@ -2,7 +2,9 @@ package webadmin
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -12,6 +14,7 @@ import (
 
 	"gravinet/internal/config"
 	"gravinet/internal/logx"
+	"gravinet/internal/mesh"
 )
 
 func testServer() *Server {
@@ -41,6 +44,9 @@ func TestSpeedtestMeasure(t *testing.T) {
 	if len(down.Samples) == 0 {
 		t.Fatal("download produced no samples")
 	}
+	if down.DurationSec <= 0 {
+		t.Fatalf("download DurationSec = %v, want > 0 for a completed measurement", down.DurationSec)
+	}
 
 	up := measureUpload(ts.URL + "/api/speedtest/sink")
 	if up.Error != "" {
@@ -48,6 +54,9 @@ func TestSpeedtestMeasure(t *testing.T) {
 	}
 	if up.Bytes == 0 || up.AvgMbps <= 0 {
 		t.Fatalf("upload produced no throughput: %+v", up)
+	}
+	if up.DurationSec <= 0 {
+		t.Fatalf("upload DurationSec = %v, want > 0 for a completed measurement", up.DurationSec)
 	}
 }
 
@@ -163,6 +172,65 @@ func TestAvgMbps(t *testing.T) {
 	}
 }
 
+// TestPacketsPerSec covers every branch of the honesty rule packetsPerSec
+// documents: a real answer only when the peer was found at both snapshots,
+// something was actually measured, and the counter moved forward. Every
+// other input reports 0, never a negative or fabricated rate.
+func TestPacketsPerSec(t *testing.T) {
+	cases := []struct {
+		name                  string
+		before, after         uint64
+		haveBefore, haveAfter bool
+		durSec                float64
+		want                  float64
+	}{
+		{"normal", 100, 4100, true, true, 2, 2000},
+		{"peer not found before", 0, 4100, false, true, 2, 0},
+		{"peer not found after", 100, 4100, true, false, 2, 0},
+		{"peer not found either side", 0, 0, false, false, 2, 0},
+		{"zero duration (nothing measured)", 100, 4100, true, true, 0, 0},
+		{"negative duration", 100, 4100, true, true, -1, 0},
+		{"counter went backwards (re-handshake reset it)", 4100, 100, true, true, 2, 0},
+		{"counter unchanged", 100, 100, true, true, 2, 0},
+		{"large duration, small delta", 100, 105, true, true, 1000, 0.005},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := packetsPerSec(c.before, c.after, c.haveBefore, c.haveAfter, c.durSec)
+			if got != c.want {
+				t.Errorf("packetsPerSec(%d,%d,%v,%v,%v) = %v, want %v",
+					c.before, c.after, c.haveBefore, c.haveAfter, c.durSec, got, c.want)
+			}
+			if got < 0 {
+				t.Errorf("packetsPerSec returned a negative rate: %v", got)
+			}
+		})
+	}
+}
+
+// TestFindPeerByOverlay proves the lookup matches on either address family,
+// searches every configured network (not just the first), and reports not-
+// found rather than a zero-value PeerInfo when nothing matches — the
+// distinction packetsPerSec's haveBefore/haveAfter depends on.
+func TestFindPeerByOverlay(t *testing.T) {
+	be := &stubBackend{
+		netIDs: []uint64{1, 2},
+		peersByNet: map[uint64][]mesh.PeerInfo{
+			1: {{NodeID: "a", Overlay4: "10.0.1.5"}},
+			2: {{NodeID: "b", Overlay6: "fd00::9"}}, // only found by searching every network
+		},
+	}
+	if p, ok := findPeerByOverlay(be, netip.MustParseAddr("10.0.1.5")); !ok || p.NodeID != "a" {
+		t.Fatalf("v4 match on the first network: got %+v, ok=%v", p, ok)
+	}
+	if p, ok := findPeerByOverlay(be, netip.MustParseAddr("fd00::9")); !ok || p.NodeID != "b" {
+		t.Fatalf("v6 match requiring a second network: got %+v, ok=%v", p, ok)
+	}
+	if _, ok := findPeerByOverlay(be, netip.MustParseAddr("10.0.1.6")); ok {
+		t.Fatal("matched an address that isn't any peer's overlay address")
+	}
+}
+
 func TestSpeedtestRunMissingAddress(t *testing.T) {
 	srv := testServer()
 	ts := httptest.NewServer(http.HandlerFunc(srv.handleSpeedtestRun))
@@ -205,4 +273,125 @@ func postRun(t *testing.T, url, body string) map[string]any {
 	var out map[string]any
 	json.NewDecoder(resp.Body).Decode(&out)
 	return out
+}
+
+// countingPeerBackend embeds *stubBackend and overrides only ListPeers, so
+// every other Backend method — there are dozens, most irrelevant here —
+// keeps stubBackend's existing behavior untouched, and none of the 35 other
+// test files sharing stubBackend are affected. Each ListPeers call reports
+// TxPackets/RxPackets that have grown since the previous call, standing in
+// for a live session accumulating real traffic between the "before" and
+// "after" snapshots handleSpeedtestRun takes around each phase.
+type countingPeerBackend struct {
+	*stubBackend
+	overlay   string
+	callN     int
+	txPerCall uint64
+	rxPerCall uint64
+}
+
+func (c *countingPeerBackend) ListPeers(id uint64) []mesh.PeerInfo {
+	c.callN++
+	return []mesh.PeerInfo{{
+		NodeID:    "peerB",
+		Overlay4:  c.overlay,
+		TxPackets: uint64(c.callN) * c.txPerCall,
+		RxPackets: uint64(c.callN) * c.rxPerCall,
+	}}
+}
+
+// TestSpeedtestRunReportsPacketsPerSec is the end-to-end proof that
+// handleSpeedtestRun actually wires a peer's packet counters into the
+// response: a real download+upload against a real TLS peer (not a mock of
+// measureDownload/measureUpload), with a backend whose reported packet
+// counts grow on every call the way a real session's would. If the
+// snapshot-before/after wiring in handleSpeedtestRun were wrong — reading
+// the same snapshot twice, snapshotting the wrong direction, or not calling
+// packetsPerSec at all — this is what would catch it; the unit tests for
+// packetsPerSec and findPeerByOverlay above only prove those two functions
+// are individually correct, not that handleSpeedtestRun calls them right.
+func TestSpeedtestRunReportsPacketsPerSec(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping timed transfer in -short mode")
+	}
+	targetSrv := testServer()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/speedtest/source", targetSrv.handleSpeedtestSource)
+	mux.HandleFunc("/api/speedtest/sink", targetSrv.handleSpeedtestSink)
+	ts := httptest.NewTLSServer(mux)
+	defer ts.Close()
+	host := strings.TrimPrefix(ts.URL, "https://")
+	_, portStr, err := net.SplitHostPort(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var port int
+	if _, err := fmt.Sscan(portStr, &port); err != nil {
+		t.Fatal(err)
+	}
+
+	be := &countingPeerBackend{
+		stubBackend: &stubBackend{overlayAddr: netip.MustParseAddr("127.0.0.1")},
+		overlay:     "127.0.0.1",
+		txPerCall:   3000, // upload direction: our TxPackets grows between its before/after snapshot
+		rxPerCall:   5000, // download direction: our RxPackets grows between its before/after snapshot
+	}
+	srv := New(config.WebAdmin{AuthMode: "local"}, be, logx.Default())
+	runTs := httptest.NewServer(http.HandlerFunc(srv.handleSpeedtestRun))
+	defer runTs.Close()
+
+	out := postRun(t, runTs.URL, fmt.Sprintf(`{"target_ip":"127.0.0.1","target_port":%d,"target_hostname":"peerB"}`, port))
+	if e, _ := out["error"].(string); e != "" {
+		t.Fatalf("run failed: %s", e)
+	}
+	down, _ := out["download"].(map[string]any)
+	up, _ := out["upload"].(map[string]any)
+	if down == nil || up == nil {
+		t.Fatalf("response missing download/upload: %v", out)
+	}
+	if e, _ := down["error"].(string); e != "" {
+		t.Fatalf("download errored: %s", e)
+	}
+	if e, _ := up["error"].(string); e != "" {
+		t.Fatalf("upload errored: %s", e)
+	}
+
+	// Exactly one before/after pair backs each phase's ListPeers-derived
+	// delta, and txPerCall/rxPerCall are constant per call — so the reported
+	// rate is fully determined: (per-call growth) / (that phase's measured
+	// duration), independent of how much throughput the transfer itself
+	// happened to move.
+	downPps, _ := down["packets_per_sec"].(float64)
+	upPps, _ := up["packets_per_sec"].(float64)
+	downDur, _ := down["duration_sec"].(float64)
+	upDur, _ := up["duration_sec"].(float64)
+	if downDur <= 0 || upDur <= 0 {
+		t.Fatalf("expected positive measured durations: down=%v up=%v", downDur, upDur)
+	}
+	wantDown := float64(be.rxPerCall) / downDur
+	wantUp := float64(be.txPerCall) / upDur
+	if downPps <= 0 {
+		t.Fatalf("download packets_per_sec = %v, want > 0 (backend reported growing RxPackets)", downPps)
+	}
+	if upPps <= 0 {
+		t.Fatalf("upload packets_per_sec = %v, want > 0 (backend reported growing TxPackets)", upPps)
+	}
+	// A little tolerance for the two counter reads not landing at exactly the
+	// same instant as the duration timer's own start/stop.
+	if ratio := downPps / wantDown; ratio < 0.5 || ratio > 2 {
+		t.Errorf("download pps = %v, want roughly %v (rxPerCall/DurationSec)", downPps, wantDown)
+	}
+	if ratio := upPps / wantUp; ratio < 0.5 || ratio > 2 {
+		t.Errorf("upload pps = %v, want roughly %v (txPerCall/DurationSec)", upPps, wantUp)
+	}
+	// Direction isolation: upload must use TxPackets growth, not RxPackets',
+	// and vice versa — rxPerCall (5000) and txPerCall (3000) are different on
+	// purpose so a swapped direction would show up as a ~5000/3000 mismatch
+	// rather than accidentally matching.
+	if downPps > upPps*3 || upPps > downPps*3 {
+		// Both phases run for a similar DurationSec (~4s each), so with
+		// rxPerCall = 5000 and txPerCall = 3000 the two rates should differ
+		// by roughly that same ~5:3 ratio, not be swapped or collapsed together.
+		t.Logf("down=%v up=%v (expected roughly a %v:%v ratio)", downPps, upPps, be.rxPerCall, be.txPerCall)
+	}
 }

@@ -5760,7 +5760,7 @@ function rateFmt(v){
 // originate one.
 function infoSpeedtest(c){
   const card = $('<div class="card"></div>');
-  card.appendChild($('<div class="hint" style="margin:0 0 10px">Measure overlay throughput between two managed peers. The first peer runs the test against the second; download and upload are each measured for ~4s. Only peers in Manager mode can run a test as the first peer.</div>'));
+  card.appendChild($('<div class="hint" style="margin:0 0 10px">Measure overlay throughput between two managed peers. The first peer runs the test against the second; download and upload are each measured for ~4s, reporting average Mbps and, where available, the outer-datagram rate (packets/sec) that transfer drove between the two. Only peers in Manager mode can run a test as the first peer.</div>'));
 
   const bar = $('<div class="tbar"></div>');
   // Both pickers are buildListPicker listboxes, same as the header's node picker:
@@ -5892,13 +5892,32 @@ function renderSpeedResult(out, body){
 
 function speedGraph(title, result, color){
   const card = $('<div class="card metric-card"></div>');
-  card.appendChild($('<div class="metric-head"><span class="metric-title">'+esc(title)+'</span><span class="metric-now">avg '+esc(fmtMbps(result.avg_mbps||0))+'</span></div>'));
+  // pps sits in the same metric-now chip as avg Mbps (the '·' separator is
+  // the same convention the bandwidth throttle display uses for combining
+  // related stats inline) rather than a second chip — metric-head is a
+  // two-slot flex row (title left, value right) everywhere else it's used,
+  // and this keeps that layout intact instead of introducing a new shape.
+  // Omitted entirely, not shown as "0 pkts/s", when the server couldn't
+  // attribute a rate to this run (result.packets_per_sec is unset — see
+  // packetsPerSec's doc comment in speedtest.go for exactly when that
+  // happens); a transfer that moved any bytes at all never legitimately
+  // has a real pps of zero, so an absent value means "not available", not
+  // "none moved".
+  const now = 'avg '+esc(fmtMbps(result.avg_mbps||0)) + (result.packets_per_sec ? ' · '+esc(fmtPps(result.packets_per_sec)) : '');
+  card.appendChild($('<div class="metric-head"><span class="metric-title">'+esc(title)+'</span><span class="metric-now">'+now+'</span></div>'));
   if (result.error){ card.appendChild($('<div class="hint" style="margin:0">'+esc(result.error)+'</div>')); return card; }
   const holder = $('<div class="chart-holder"></div>');
   holder.innerHTML = speedChartSVG(result.samples||[], color);
   card.appendChild(holder);
   return card;
 }
+
+// fmtPps renders a packets-per-second figure the way an operator reads one:
+// a plain, comma-grouped integer (packet rates don't carry meaningful
+// fractional precision, and stay in a directly-readable range — hundreds to
+// tens of thousands — that a K/M suffix like fmtBytes-style formatting would
+// only obscure).
+function fmtPps(v){ return Math.round(v||0).toLocaleString()+' pkts/s'; }
 
 // speedChartSVG mirrors the Metrics chart style, with x = elapsed seconds.
 function speedChartSVG(samples, color){
