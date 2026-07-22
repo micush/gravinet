@@ -1,241 +1,182 @@
 # Upgrading a gravinet node
 
-`gravinet upgrade` replaces this node's own binary, in place, with a health
-check that reverts it automatically if the new one can't rejoin the mesh or
-crash-loops. As of v403, this is **per-node and local-only, no key
-required** — a real change from how this document used to describe it, and
-worth being upfront about since the two models don't blend:
+`gravinet upgrade` replaces this node's own binary with one **built here, from
+source you supply**, behind a health check that reverts it automatically if the
+new binary can't rejoin the mesh or crash-loops.
 
-- There is no remote trigger for an upgrade at all, from anywhere, under any
-  configuration. Not from a Manager peer, not through the peer picker in the
-  header, not even from a node that's otherwise fully entitled to administer
-  this one's config and firewall. There is no setting that turns this back
-  on: every upgrade endpoint checks, first, before anything else, that the
-  request is coming from a real session logged into *this* machine. The web
-  admin's Upgrade page reflects this visibly, not just underneath: select a
-  peer in the header and the upload controls grey out with an explanation,
-  rather than silently applying to whichever node you're actually logged
-  into while looking like it's targeting the selected one.
-- No release key is required to use it. A node with nothing configured under
-  `upgrade.trusted_keys` accepts a structurally sound, unsigned artifact —
-  safely, specifically *because* the point above means the only thing that
-  can ever hand it one is a session already logged into that exact node.
-  Signing is still available if you want it (see below), but it's an opt-in
-  layer on top, not a prerequisite for the feature to work at all.
+Source is not one option among several. It is the only one:
 
-The design is still shaped by the same fact that made the old model careful:
-**gravinet is the network you would otherwise use to fix a node you just
-broke.** That's why the self-protection machinery below — preflight, the
-confirm window, automatic revert, keeping a rollback copy — is unchanged.
-What changed is *who* can ever reach the button in the first place.
+- **gravinet publishes no prebuilt binary, for any platform.** Every fresh
+  checkout is source and nothing else, so a binary upload had no supply to draw
+  on even when it existed.
+- **A binary is only ever valid for the platform that built it.** A mesh
+  routinely spans Linux, FreeBSD, OpenBSD, macOS and Windows at once. One
+  source archive serves all of them; one binary serves a fraction of them and
+  bricks the rest if you get the targeting wrong.
+
+So there is nothing to sign, nothing to cross-compile, nothing to stage, and no
+artifact shelf to inspect. You hand a node an archive; it compiles it, checks
+the result against its own config, swaps it in, and watches it.
 
 ---
 
-## Trust: none required by default, one optional layer on top
+## Upgrading one node
 
-| | Default (no `trusted_keys`) | With `trusted_keys` configured |
-|---|---|---|
-| Who can trigger an upgrade | A session logged into this exact node. Nobody else, ever. | Same. |
-| What's required of the artifact | Structurally valid (right fields, a real digest) | A valid Ed25519 signature from a key in `trusted_keys` |
-| Where the release key lives | N/A — there isn't one | Offline. Never on a node. |
+**Web admin → Info → Upgrade → Upload.** Pick the source archive (`.tgz`,
+`.tar.gz` or `.zip` — the format is detected from the file's content, not its
+name, so GitHub's "Download ZIP" works as-is) and click **Upgrade**. One
+confirmation, one click, no staging step in between.
 
-The right-hand column still exists because signing verifies something the
-local-only guarantee doesn't: that a specific artifact is one you actually
-built and meant to ship, not just that whoever's uploading it is sitting at
-this node's own console. If that distinction matters to you — multiple
-people with local admin access, wanting a paper trail on what's actually
-been installed — turn it on:
+**CLI:**
 
 ```sh
-gravinet upgrade genkey          # on your laptop / build host, NOT on a node
+gravinet upgrade apply -src ./gravinet-src.tgz
+gravinet upgrade apply -src ./gravinet-src.tgz -dry-run   # build + preflight, no swap
+gravinet upgrade status
+gravinet upgrade rollback
 ```
 
-Put the **public** half in the node's config, keep the private half off any
-mesh node entirely:
+The build runs inside the daemon in both cases, so the terminal and the browser
+drive one implementation rather than two that can drift.
 
-```json
-"upgrade": {
-  "trusted_keys": ["103e7b3b…"],
-  "confirm_seconds": 90
-}
-```
+### What the node needs
 
-With that set, the node stops accepting the plain binary-only upload and the
-build-from-source upload (there's no coherent way to check a signature
-against either), and goes back to requiring a signed manifest alongside the
-binary — exactly the old flow:
+A Go toolchain. The platform installers (`install/install-*.sh`,
+`install-windows.ps1`) put one there via `ensure_go`, along with a C toolchain
+and PAM headers via `install_build_deps`, so a node installed normally is
+already equipped. A node **does not** fetch or install a toolchain on its own:
+doing that from an HTTP handler is a materially bigger capability than
+"compile the source I gave you". If `go` is missing the upgrade fails with a
+clear message instead.
 
-```sh
-go build -o gravinet ./cmd/gravinet
-gravinet upgrade sign -bin ./gravinet -key "$GRAVINET_RELEASE_KEY" -notes "v403"
-# -> gravinet.json (the signed manifest)
-```
-
-`sign` probes the binary (`gravinet version`) rather than trusting flags, so
-a manifest can't claim amd64 over an arm64 build. Cross-built artifacts need
-explicit `-os`/`-arch`.
+`go` is found on `PATH` first, then at `/usr/local/go/bin` (where the
+installers unpack the go.dev tarball) and `/usr/local/bin` (where FreeBSD's
+`pkg` and OpenBSD's `pkg_add` put it). That fallback matters because the build
+runs inside the daemon, which a service manager starts with its own minimal
+environment — not the shell PATH you had when you installed Go.
 
 ---
 
-## Getting a new binary onto a node
+## Upgrading a fleet
 
-**Default (no `trusted_keys`): one file, one button, source only.**
-Web admin → Info → Upgrade → Upload: pick the project's source archive
-(`.tgz`/`.tar.gz` — same format, whichever your copy happens to be named)
-and click **Upgrade**. It's built here — `go build`, cgo/PAM first, falling
-back to a static build if that fails, the same as the platform installers —
-then identified (`gravinet version`, the same probe `upgrade sign` uses on
-a build host), applied, and this node restarts into it. All of that behind
-one confirmation, one click. A pre-built binary isn't accepted in this mode
-at all; if you have one and want to skip the build step, that's what
-signed mode (below) is for.
+One upload, one archive, every platform. Each peer compiles its own native
+binary from the same bytes.
 
-The GUI is intentionally upload-and-apply only — it doesn't show what's
-sitting in the local artifact store, what phase a previous upgrade is in,
-or a way to roll one back; there's no separate "stage now, apply later"
-step to look at, and no status display that needs to stay in sync with
-what's actually happening. If a click is interrupted partway (built or
-uploaded, but the apply step didn't finish), the file is still in the
-store; finish it from the CLI: `gravinet upgrade list` to see it,
-`gravinet upgrade apply -id ID` to apply it. `gravinet upgrade rollback`
-is the same story — always available, CLI-only. The daemon still refuses a
-second real apply while one is already mid-trial (see below) regardless of
-what the page shows; that guard is server-side and isn't something the UI
-needs to display to be true.
+**Once per peer, on that peer:** turn on **Accept Manager-pushed upgrades**
+(`upgrade.accept_manager_upgrades`). It is off by default, and it is
+deliberately local-only — the switch that authorizes remote upgrades can never
+itself be flipped by a remote peer.
 
-Building from source needs a Go toolchain on `PATH` on that node (a C
-toolchain + PAM headers too, for PAM web-admin auth in the result) — this
-node does not fetch or install either on its own, since doing that from an
-HTTP handler is a materially bigger thing than "compile the source I gave
-you." A missing toolchain fails with a clear message instead.
+**Then, from the Manager:** Info → Upgrade → **Push to managed peers**. Pick
+the archive, tick the peers, push. Results come back per peer.
 
-There's no CLI equivalent of this today: `gravinet upgrade stage` always
-requires a manifest (`-manifest PATH`, or `<bin>.json` next to the binary)
-and fails without one, signed or not — it doesn't have the GUI's build-and-
-auto-identify path. Building from source and applying it with no key is
-currently a web-admin-only capability.
+A pushed archive is built and applied on a peer only if **all** of these hold,
+none of which the Manager controls:
 
-**With `trusted_keys` configured: binary + signed manifest, same as before.**
-The single-button flow above disappears — there's no coherent way to check a
-signature against uploaded source, so build-from-source isn't offered at
-all, and the binary upload goes back to requiring its manifest alongside it:
+| | |
+|---|---|
+| The peer opted in | `accept_manager_upgrades`, off by default |
+| The caller is a **directly-connected** Manager | a live handshake, not a gossip-labeled one — `IsManagerNeighborAddr` |
+| The bytes match | SHA-256 over the archive, declared before it and checked as it lands |
+| It compiles there | with that peer's own toolchain |
+| It survives preflight | the same checks a local upgrade runs, below |
+| It stays healthy | the same confirm-or-rollback guard, below |
 
-```sh
-go build -o gravinet ./cmd/gravinet
-gravinet upgrade sign -bin ./gravinet -key "$GRAVINET_RELEASE_KEY" -notes "v405"
-# -> gravinet.json (the signed manifest)
-```
+Note what a Manager never gets, even with the opt-in on: it does not supply
+executable bytes. It supplies source, which the peer chooses to compile.
 
-`sign` probes the binary (`gravinet version`) rather than trusting flags, so
-a manifest can't claim amd64 over an arm64 build. Cross-built artifacts need
-explicit `-os`/`-arch`. Upload binary + `.json` manifest together (both
-fields are back in the form once `trusted_keys` is configured), or
-`gravinet upgrade stage -bin ... -manifest ...` from the CLI.
+### Practical notes
 
----
-
-## Why this is per-node now, not fleet-wide
-
-This used to be a mesh-distributed rollout: stage once on a Manager, and it
-would fan out to every Managed peer in waves, each one pulling the binary
-from whichever peer already had it. That's gone. The reasoning, briefly: a
-Manager peer authorized to administer a Managed node's config and firewall
-was, by the same authorization, able to drive that node's upgrades too —
-stage an artifact, apply it, roll it back — with only the release-key
-signature check standing between "authorized peer" and "arbitrary code
-execution as root." For a node choosing to trust no release keys at all (now
-the default), that check doesn't exist, so there'd be nothing left standing
-between a Manager peer and unsigned root code execution on every node it
-manages. Closing that meant closing remote upgrade triggering entirely, not
-narrowing it — hence local-only, full stop, regardless of Managed/Manager
-state or whether keys are configured.
-
-The practical cost, worth having in view before you're mid-upgrade on node
-six of nine: there's no "stage once, push to the fleet" anymore. Each node's
-upgrade happens through a session logged into that node, with whatever file
-you're uploading reachable from that specific browser.
-
-## There is no fleet view or rollout anymore
-
-Earlier versions had Fleet and Rollout cards on the Upgrade page, and
-`gravinet upgrade fleet` / `rollout` on the CLI: stage once on a Manager,
-watch a canary wave, then a rollout that fanned the binary out peer-to-peer.
-All of it — the UI, the CLI subcommands, the peer-to-peer artifact-serving
-endpoint, the manifest+sources apply variant a Manager used to push with —
-has been removed outright, not just made unreachable. Once upgrades became
-local-only (the previous section), none of that machinery could still do
-anything: a rollout that stops at the first target, forever, isn't a feature
-running in a degraded mode, it's dead code with a UI on top of it. Deleted
-rather than left in place, on the reasoning that a control sitting on the
-page that cannot work is worse than no control at all — it's something to
-explain, not something a smaller deployment benefits from carrying.
-
-If per-node is ever not enough — a fleet genuinely too large to upgrade one
-browser tab at a time — that's a reason to reach for external tooling built
-for exactly that (config management, an orchestrator, a script driving the
-CLI over SSH), not a reason to bring this back.
+- **The Manager does not upgrade itself as part of a push.** Do the peers
+  first and the Manager last — it holds a connection open per peer for the
+  whole build-and-swap, so upgrading itself mid-push kills every in-flight
+  upgrade.
+- **Four peers build at a time.** Unbounded fan-out means every node in the
+  fleet running a Go build simultaneously, which on small boxes is a
+  self-inflicted outage.
+- **Expect the mesh view to churn.** Every peer drops its session while
+  restarting and reappears during its confirm window. Nodes vanishing from the
+  peer list mid-rollout is the process working.
+- **There is no CLI push.** Like the other fleet actions, pushing is driven
+  from the web admin of the node you're on.
+- If per-node is ever not enough, that's a reason to reach for tooling built
+  for fleets (config management, an orchestrator, a script driving the CLI over
+  SSH), not a reason to grow this.
 
 ---
 
 ## What a node does before it swaps anything
 
-Unchanged from before, and still worth being precise about, since these are
-what actually stand between a bad binary and a bricked node — the local-only
-change is about *who* can start this, not what it checks once started:
+The build is only half of it. Compiling successfully proves the source is
+valid; it does not prove the result will run *here*.
 
-- **arch/os match** against the running node;
-- **the candidate is executed** (`gravinet version`) — catches wrong
-  architecture, a truncated file, and a missing `libpam`, none of which a
-  digest alone can see;
-- **its self-reported version is recorded** against what's actually running;
+- **The candidate is executed** (`gravinet version`) — catches a truncated
+  build, a missing `libpam`, and anything else that produces a file that cannot
+  start. This is the single most valuable check, because the failures that
+  actually brick nodes are invisible to a digest: the digest of a broken binary
+  is perfectly valid.
 - **PAM parity** — replacing a `pam=yes` binary with a `pam=no` one starts
-  cleanly and then can't log anyone in. Refused unless `-allow-pam-downgrade`;
-- **`gravinet selftest -config …`** — the candidate loads *this node's
-  actual* config. A version that tightened validation or renamed a field can
-  be genuine, right architecture, and still crash-loop on a node whose only
-  remaining management path was the mesh it's no longer joining — this is
-  what catches that before the swap, not after.
+  cleanly and then can't log anyone in. Refused unless `-allow-pam-downgrade`.
+  This is a live risk here, because a missing C toolchain makes the build fall
+  back to `CGO_ENABLED=0` and produce exactly that binary.
+- **Downgrade check** — refused unless `-allow-downgrade`.
+- **`gravinet selftest -config …`** — the candidate loads *this node's actual*
+  config. A version that tightened validation or renamed a field can compile
+  perfectly and still crash-loop on a node whose only management path was the
+  mesh it's no longer joining. This is what catches that before the swap.
 
-Only then: two renames on one filesystem — `gravinet` → `gravinet.prev`,
-the candidate → `gravinet`. No window where a half-written binary occupies
-the installed path.
+Only then: two renames on one filesystem — `gravinet` → `gravinet.prev`, the
+candidate → `gravinet`. There is no window in which a half-written binary
+occupies the installed path.
 
 ## If the new binary is bad
 
-The node rescues itself; there is no manager to do it for you, by design,
-same as before:
+The node rescues itself; there is no manager to do it for you, by design.
 
 - **Crash loop.** Every start increments a boot counter, written before
   anything that can fail. After 3 failed starts the node restores
   `gravinet.prev` and restarts into it.
 - **Starts, but the mesh doesn't come back.** The node records how many peers
-  it had before the swap. If it had peers and has none when the confirm
-  window closes, that's a failed upgrade regardless of how clean the process
-  looks, and it reverts.
+  it had before the swap. If it had peers and has none when the confirm window
+  closes (`confirm_seconds`, default 90), that's a failed upgrade regardless of
+  how clean the process looks, and it reverts.
 - **A regression no health check can see.** `gravinet upgrade rollback` — the
   backup is kept even after a clean commit, because the 3am regression is the
   one nobody's automated check caught.
 
 The one failure this can't catch is a binary that dies before Go's runtime
-reaches `main()` — a corrupt file, a missing shared library. That's exactly
-what "the candidate is executed" in preflight refuses to let through the swap
-in the first place.
+reaches `main()`. That's exactly what executing the candidate during preflight
+refuses to let through the swap in the first place.
 
-## Inspecting
+---
 
-```sh
-gravinet upgrade status     # this node: version, phase, boots, peers
-gravinet upgrade list       # what's staged here
+## Configuration
+
+```json
+"upgrade": {
+  "confirm_seconds": 90,
+  "accept_manager_upgrades": false,
+  "state_dir": "/etc/gravinet/upgrades"
+}
 ```
 
-## Bootstrapping
+`state_dir` holds the guard's `state.json` — the record that lets a node back
+out a bad binary after a restart — and is where uploads are spooled and builds
+run. Created 0700. It was called `store_dir` back when it also held staged
+binaries; that spelling is still read, so a node that set it keeps its
+directory (and therefore its in-flight upgrade state) across the rename.
 
-A node running a version older than v403 doesn't have any of the above yet —
-its Upgrade page still describes and requires the old signed/mesh-distributed
-model, and a node with no `trusted_keys` configured on an old version simply
-refuses every upgrade rather than falling back to local-only-unsigned (that
-fallback is itself part of what v403 added). The first hop onto v403 has to
-happen by whatever means you'd use for any upgrade on an older version — the
-platform installers, rebuilding from source directly, or the old signed flow
-if you already had keys set up. From v403 on, the page and this document
-match what the code actually does.
+There is no `trusted_keys` and no `keep_artifacts`. Signing covered a built
+artifact's digest, which is meaningless when no built artifact is ever
+distributed; retention counted staged binaries, of which there are now none.
+
+## A note on what source-only costs
+
+Each node's binary is its own build, so "every node is running byte-identical
+code" is no longer a property you can check. `-trimpath` is set, which helps,
+but reproducible builds would be the thing that actually recovers it if that
+ever matters for audit.
+
+What you get in exchange is that one archive upgrades a mesh of five different
+operating systems, with no signing ceremony, no cross-compilation, and no
+possibility of sending arm64 to an amd64 box.

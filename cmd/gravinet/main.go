@@ -48,7 +48,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "578"
+	version = "580"
 	commit  = "none"
 )
 
@@ -416,18 +416,18 @@ func cmdRun(args []string) {
 		// that only runs on a *successful* startup path cannot rescue a node from
 		// a binary that never gets that far.
 		if cfg.UpgradeEnabled() {
-			if st, err := upgrade.NewStore(cfg.UpgradeStoreDir(), cfg.Upgrade.TrustedKeys); err == nil {
-				g := upgrade.NewGuard(st.Dir(), restartService, logx.Infof)
-				if act, gs := g.OnBoot(); act == upgrade.BootReverted {
-					logx.Errorf("upgrade: reverted %s -> %s (%s); restarting into the restored binary",
-						gs.To, gs.From, gs.LastError)
-					// The restart is already in flight (the guard asked the service
-					// manager for it). Stop here rather than continuing to bring up a
-					// mesh with a binary we have just decided is broken.
-					return
-				}
-			} else {
-				logx.Warnf("upgrade: %v", err)
+			// Read the state directory directly rather than creating it: this
+			// runs before anything may fail, and a node with no upgrade
+			// history has no state file and nothing to do here. Guard.Load
+			// treats a missing directory as "idle", which is correct.
+			g := upgrade.NewGuard(cfg.UpgradeStateDir(), restartService, logx.Infof)
+			if act, gs := g.OnBoot(); act == upgrade.BootReverted {
+				logx.Errorf("upgrade: reverted %s -> %s (%s); restarting into the restored binary",
+					gs.To, gs.From, gs.LastError)
+				// The restart is already in flight (the guard asked the service
+				// manager for it). Stop here rather than continuing to bring up a
+				// mesh with a binary we have just decided is broken.
+				return
 			}
 		}
 

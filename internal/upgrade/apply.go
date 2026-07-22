@@ -126,32 +126,31 @@ func BackupPath(target string) string { return target + ".prev" }
 
 // Preflight runs every check that can be run *without* touching the installed
 // binary, and returns what the candidate says it is. Split out from Apply so a
-// rollout can dry-run the entire fleet — "would this land?" — before it changes
-// anything anywhere.
-func Preflight(ctx context.Context, m Manifest, candidate string, o Options) (Probe, error) {
-	if m.OS != runtime.GOOS || m.Arch != runtime.GOARCH {
-		return Probe{}, fmt.Errorf("upgrade: artifact is %s/%s, this node is %s/%s", m.OS, m.Arch, runtime.GOOS, runtime.GOARCH)
-	}
-	if !o.AllowDowngrade && o.RunningVersion != "" && VersionLess(m.Version, o.RunningVersion) {
-		return Probe{}, fmt.Errorf("upgrade: %s is older than the running %s (pass -allow-downgrade to force)", m.Version, o.RunningVersion)
-	}
+// caller can dry-run — "would this land?" — before it changes anything.
+//
+// There is no manifest to cross-check against here, and deliberately so: the
+// candidate was compiled on this node moments ago, so the binary's own report
+// of itself is not one claim among several to be reconciled, it is the only
+// claim there is. What a manifest used to add — a second, independent
+// assertion about a file that arrived from elsewhere — has no counterpart when
+// nothing arrived from elsewhere. The os/arch check below therefore compares
+// the probe against this node's own runtime rather than against a document.
+func Preflight(ctx context.Context, candidate string, o Options) (Probe, error) {
 	p, err := ProbeBinary(ctx, candidate)
 	if err != nil {
 		return Probe{}, err
 	}
-	// The binary's own account of itself must match the signed manifest. If they
-	// disagree, something upstream is confused about which build this is — and a
-	// rollout that reports "all ten nodes now on 399" while three of them are
-	// running 397 is worse than a rollout that failed, because nobody goes
-	// looking for it.
-	if p.Version != m.Version {
-		return Probe{}, fmt.Errorf("upgrade: manifest says version %s but the binary reports %s", m.Version, p.Version)
+	// A locally-compiled binary is native by construction, so this should be
+	// unreachable — keep it anyway. It costs one comparison, and the failure it
+	// guards (a cross-compiling GOOS/GOARCH leaking in from the service
+	// manager's environment) produces a binary that cannot execute at all,
+	// which is the single most expensive mistake this package exists to
+	// prevent.
+	if p.OS != runtime.GOOS || p.Arch != runtime.GOARCH {
+		return Probe{}, fmt.Errorf("upgrade: candidate is %s/%s, this node is %s/%s", p.OS, p.Arch, runtime.GOOS, runtime.GOARCH)
 	}
-	if p.OS != m.OS || p.Arch != m.Arch {
-		return Probe{}, fmt.Errorf("upgrade: manifest says %s/%s but the binary reports %s/%s", m.OS, m.Arch, p.OS, p.Arch)
-	}
-	if p.PAM != m.PAM {
-		return Probe{}, fmt.Errorf("upgrade: manifest says pam=%v but the binary reports pam=%v", m.PAM, p.PAM)
+	if !o.AllowDowngrade && o.RunningVersion != "" && VersionLess(p.Version, o.RunningVersion) {
+		return Probe{}, fmt.Errorf("upgrade: %s is older than the running %s (pass -allow-downgrade to force)", p.Version, o.RunningVersion)
 	}
 	if o.RunningPAM && !p.PAM && !o.AllowPAMDowngrade {
 		return Probe{}, errors.New("upgrade: this node authenticates the web admin against PAM and the new binary has no PAM support — " +
@@ -163,10 +162,11 @@ func Preflight(ctx context.Context, m Manifest, candidate string, o Options) (Pr
 	return p, nil
 }
 
-// Apply stages the artifact next to the target, preflights it there (so what is
-// tested is byte-for-byte what will be executed, on the target's own filesystem
-// and mount flags — a store on a noexec mount would otherwise pass a preflight
-// run from somewhere else and then fail to start), and swaps it in.
+// Apply copies the freshly-built candidate next to the target, preflights it
+// there (so what is tested is byte-for-byte what will be executed, on the
+// target's own filesystem and mount flags — a build directory on a noexec
+// mount would otherwise pass a preflight run from somewhere else and then fail
+// to start), and swaps it in.
 //
 // The swap is two renames on one filesystem:
 //
@@ -180,22 +180,18 @@ func Preflight(ctx context.Context, m Manifest, candidate string, o Options) (Pr
 // binary occupies the target path, which is the failure mode a naive
 // "open target for writing and copy" has and which no amount of retrying fixes.
 //
-// Apply does not restart anything. Deciding when a node may drop off the mesh is
-// the caller's call (see rollout.go, which does it one wave at a time).
-func Apply(ctx context.Context, st *Store, m Manifest, o Options) (Probe, error) {
+// Apply does not restart anything. Deciding when a node may drop off the mesh
+// is the caller's call.
+func Apply(ctx context.Context, candidate string, o Options) (Probe, error) {
 	if o.Target == "" {
 		return Probe{}, errors.New("upgrade: no target path")
 	}
-	src, err := st.BinPath(m)
-	if err != nil {
-		return Probe{}, err
-	}
-	if !st.Have(m) {
-		return Probe{}, fmt.Errorf("upgrade: artifact %s is not staged on this node", m.ID())
+	if _, err := os.Stat(candidate); err != nil {
+		return Probe{}, fmt.Errorf("upgrade: candidate binary %s: %w", candidate, err)
 	}
 
 	staged := o.Target + ".new"
-	if err := copyFile(src, staged, 0o755); err != nil {
+	if err := copyFile(candidate, staged, 0o755); err != nil {
 		return Probe{}, err
 	}
 	// Any failure from here to the final rename must not leave .new behind: a
@@ -208,7 +204,7 @@ func Apply(ctx context.Context, st *Store, m Manifest, o Options) (Probe, error)
 		}
 	}()
 
-	p, err := Preflight(ctx, m, staged, o)
+	p, err := Preflight(ctx, staged, o)
 	if err != nil {
 		return Probe{}, err
 	}
@@ -246,8 +242,8 @@ func Revert(target string) error {
 		return fmt.Errorf("upgrade: no backup to revert to at %s: %w", backup, err)
 	}
 	// Keep the binary we're backing out, named so it is obviously not in use.
-	// Forensics on a node that crash-looped is a lot easier with the artifact
-	// still in hand, and the store copy may have been GC'd.
+	// Forensics on a node that crash-looped is a lot easier with the binary
+	// still in hand, and the build directory it came from is long gone.
 	failed := target + ".failed"
 	os.Remove(failed)
 	if err := os.Rename(target, failed); err != nil && !os.IsNotExist(err) {
@@ -279,12 +275,12 @@ func ResolveTarget(explicit string) (string, error) {
 }
 
 // copyFile writes src to dst with mode, syncing before close. Not a rename:
-// src is in the store and dst must be a sibling of the target binary, which is
-// very often a different filesystem (/var/lib vs /usr/local/bin).
+// src is in a build directory and dst must be a sibling of the target binary,
+// which is very often a different filesystem (/tmp vs /usr/local/bin).
 func copyFile(src, dst string, mode os.FileMode) error {
 	in, err := os.Open(src)
 	if err != nil {
-		return fmt.Errorf("upgrade: reading staged artifact: %w", err)
+		return fmt.Errorf("upgrade: reading built binary: %w", err)
 	}
 	defer in.Close()
 	// O_EXCL: if a .new is already sitting there, something else is mid-apply
@@ -307,12 +303,12 @@ func copyFile(src, dst string, mode os.FileMode) error {
 	if _, err := io.Copy(out, in); err != nil {
 		out.Close()
 		os.Remove(dst)
-		return fmt.Errorf("upgrade: copying artifact into place: %w", err)
+		return fmt.Errorf("upgrade: copying the new binary into place: %w", err)
 	}
 	if err := out.Sync(); err != nil {
 		out.Close()
 		os.Remove(dst)
-		return fmt.Errorf("upgrade: syncing artifact: %w", err)
+		return fmt.Errorf("upgrade: syncing the new binary: %w", err)
 	}
 	if err := out.Close(); err != nil {
 		os.Remove(dst)
@@ -326,4 +322,35 @@ func copyFile(src, dst string, mode os.FileMode) error {
 		return fmt.Errorf("upgrade: chmod staged binary: %w", err)
 	}
 	return nil
+}
+
+// VersionLess orders gravinet version strings. They are a monotonically
+// increasing integer counter ("398", "399"), so the fast path is numeric — but
+// this must not *assume* that, because a hand-built binary carrying "1.2.0-rc1"
+// or a git describe string would otherwise sort nonsensically and, worse, defeat
+// the downgrade guard in rollout.go (which asks exactly this question before it
+// agrees to replace a binary). Numeric when both sides are numeric; lexical
+// otherwise, which is at least stable and total.
+func VersionLess(a, b string) bool {
+	an, aok := atoiStrict(a)
+	bn, bok := atoiStrict(b)
+	if aok && bok {
+		return an < bn
+	}
+	return a < b
+}
+
+func atoiStrict(s string) (int64, bool) {
+	if s == "" || len(s) > 18 {
+		return 0, false
+	}
+	var n int64
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		n = n*10 + int64(c-'0')
+	}
+	return n, true
 }

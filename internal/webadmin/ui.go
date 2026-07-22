@@ -482,7 +482,13 @@ const LOCAL_API = ['/api/proxy','/api/cluster','/api/managed','/api/manager','/a
   // half, so the browser doesn't even try). Upgrades are local-only outright:
   // a peer's own Upgrade page is something you visit by logging into *that*
   // node directly.
-  '/api/upgrade','/api/upgrade/local-apply','/api/upgrade/stage','/api/upgrade/stage-source','/api/upgrade/rollback'];
+  '/api/upgrade','/api/upgrade/source','/api/upgrade/rollback',
+  // accept-manager is a local-only security toggle (like /api/managed): the
+  // switch that authorizes remote pushes must itself never be flippable from a
+  // remote peer. push is the manager-side fleet action, driven from the node
+  // you are on. remote-apply is deliberately NOT here — it is the single
+  // peer-facing upgrade endpoint, reached by a Manager over the overlay.
+  '/api/upgrade/accept-manager','/api/upgrade/push'];
 async function api(path, opts={}, target) {
   let url = path;
   const t = target !== undefined ? target : state.target;
@@ -974,6 +980,7 @@ function buildSearchIndex(){
     ['cluster-managed-row', 'Managed mode', 'Let Manager-mode peers in the cluster remotely configure this node.'],
     ['cluster-manager-row', 'Manager mode', 'Let this node browse and remotely configure other Managed-mode peers in the cluster.'],
     ['shell-allow-row', 'Remote shell', 'Let a Manager peer open a real OS shell on this node through the web admin.'],
+    ['accept-manager-upg-row', 'Accept Manager-pushed upgrades', 'Let a directly-connected Manager peer push and apply a new gravinet binary to this node. Off by default; local-only.'],
     ['loglevel-row', 'Log level', 'How much this node logs (error, warn, info, debug). Applied immediately, no restart.'],
     ['logsize-row', 'Log size', 'Maximum size of the log file; once full the oldest lines are dropped (FIFO). e.g. 200M, 1G, 99K.'],
     ['routeadv-row', 'Route advertisement interval', 'How often this node re-advertises the routes it originates.'],
@@ -1719,6 +1726,14 @@ function syncClusterModeRows(){
     shCb.disabled = remote;
     if (shRow) shRow.classList.toggle('local-only-disabled', remote);
   }
+  // Accept-Manager-upgrades is local-only too — you can't set it on a remote
+  // peer (its own node owns that switch), so disable it when one is selected.
+  const amCb = document.getElementById('accept-manager-upg-cb');
+  const amRow = document.getElementById('accept-manager-upg-row');
+  if (amCb) {
+    amCb.disabled = remote;
+    if (amRow) amRow.classList.toggle('local-only-disabled', remote);
+  }
 }
 
 // startPolling keeps the peers and bans views live: those change on their own
@@ -2442,6 +2457,39 @@ function secSettings(c) {
   };
   sh.appendChild(shLabel); sh.appendChild(shSw);
   card.appendChild(sh);
+
+  // Accept Manager-pushed upgrades — the opt-in that lets a directly-connected
+  // Manager peer push a source archive to this node, which this node builds
+  // and applies itself (off by default; see
+  // config.Upgrade.AcceptManagerUpgrades and handleUpgradeRemoteApply). Like
+  // Remote shell above, this is a local-only security toggle: it is the switch
+  // that authorizes running code here, so it must never be flippable from a
+  // remote peer, and /api/upgrade/accept-manager is in LOCAL_API and the proxy
+  // blocklist for exactly that reason. It fetches its own current value on
+  // render rather than riding the status blob, since it is a rarely-touched
+  // setting. No restart: the push gate reads the config live.
+  const am = $('<div class="settings-row" id="accept-manager-upg-row"></div>');
+  const amDesc = 'Let a directly-connected Manager peer push gravinet <b>source</b> to this node, which this node then compiles and applies itself. Off by default \\u2014 while off, upgrades here are strictly local-only. A Manager never sends executable code: it sends an archive, checked against its declared hash, that this node builds with its own toolchain and then puts through the same config self-test and confirm-or-rollback guard as a local upgrade. It backs out on its own if the new binary can\\u2019t rejoin the mesh, so a Manager cannot force a broken upgrade to stick. A Manager known only through gossip (not a direct session) is refused. Local-only; never remotely toggleable, even by an authorized Manager peer.';
+  const amLabel = $('<div><div class="settings-label">Accept Manager-pushed upgrades</div><div class="settings-desc" id="accept-manager-upg-desc">'+esc(amDesc)+'</div></div>');
+  const amSw = $('<label class="sw"><input type="checkbox" id="accept-manager-upg-cb"><span class="sw-slider"></span></label>');
+  const amCb = amSw.querySelector('input');
+  amCb.checked = false; // corrected by the fetch below
+  // Pull the live value (GET on the same endpoint). Local-only, so no target.
+  api('/api/upgrade/accept-manager').then(r => {
+    if (r.ok && r.body) { amCb.checked = !!r.body.accept_manager_upgrades; state.acceptManagerUpgrades = amCb.checked; }
+  });
+  amCb.onchange = () => {
+    const want = amCb.checked;
+    // Optimistic like the Managed/Manager toggles; a failure is logged and the
+    // checkbox reverted so it never shows an authorization it didn't get.
+    api('/api/upgrade/accept-manager', { method:'POST', body: JSON.stringify({ on: want }) })
+      .then(r => {
+        if (!r.ok) { console.warn('accept-manager-upgrades toggle failed:', (r.body&&r.body.error)||'failed'); amCb.checked = !want; }
+        else { state.acceptManagerUpgrades = want; }
+      });
+  };
+  am.appendChild(amLabel); am.appendChild(amSw);
+  card.appendChild(am);
 
   // Cluster card ends here. syncClusterModeRows looks its rows up via
   // document.getElementById, which can't find them while card is still a
@@ -5410,66 +5458,104 @@ async function drawUpgrade(host){
       + esc(peerName) + '\u2019, which is selected above. Disabled here so it can\u2019t look like it\u2019s upgrading that peer when it isn\u2019t. Select \u201cThis node\u201d to use this on the node you\u2019re actually on, or log into '
       + esc(peerName) + '\u2019s own web admin to upgrade it there.</div>'));
   }
-  stCard.appendChild($('<div class="hint" style="margin:0 0 10px">' + (u.signing_required
-    ? 'Upload a build and its signed manifest (make one with <b>gravinet upgrade sign</b>). The signature is checked before the upload is accepted.'
-    : 'Upload a source archive and it\u2019s built and applied automatically.'
-    ) + '</div>'));
+  stCard.appendChild($('<div class="hint" style="margin:0 0 10px">Upload a gravinet source archive. It\u2019s compiled here with this node\u2019s own Go toolchain, checked against this node\u2019s config, and applied \\u2014 all in one step. There is no binary to download: gravinet ships no prebuilt release, and a binary would only ever be valid for one platform anyway.</div>'));
 
   const up = $('<div class="tbar"></div>');
-  if (u.signing_required){
-    const binIn = $('<input type="file" class="up-bin">');
-    const manIn = $('<input type="file" class="up-man" accept=".json,application/json">');
-    const stageBtn = $('<button class="sm">Stage</button>');
-    up.appendChild($('<span class="hint">binary</span>')); up.appendChild(binIn);
-    up.appendChild($('<span class="hint">manifest</span>')); up.appendChild(manIn);
-    up.appendChild(stageBtn);
-    stageBtn.onclick = async () => {
-      if (!binIn.files[0] || !manIn.files[0]){ alert('Pick both the binary and its signed .json manifest.'); return; }
-      const fd = new FormData();
-      // Order matters: the manifest is read first so the artifact can be
-      // verified against it as it streams in, rather than after it has
-      // already been written somewhere it could be executed from.
-      fd.append('manifest', manIn.files[0]);
-      fd.append('artifact', binIn.files[0]);
-      stageBtn.disabled = true; stageBtn.textContent = 'Staging\u2026';
-      try {
-        const resp = await fetch('/api/upgrade/stage', { method:'POST', body: fd });
-        const body = await resp.json().catch(()=>({}));
-        if (!resp.ok){ alert(body.error || 'staging failed'); return; }
-        drawUpgrade(host);
-      } finally { stageBtn.disabled = false; stageBtn.textContent = 'Stage'; }
-    };
-  } else {
-    // Source only -- no binary upload, no format choice on this side either:
-    // .tgz/.tar.gz and .zip are both accepted, and which one a given upload
-    // is gets sniffed from its content server-side (extractSourceArchive),
-    // not from this accept list or the filename — the accept attribute below
-    // is just what makes the file picker's own dialog filter sensibly.
-    const fileIn = $('<input type="file" class="up-file" accept=".tgz,.tar.gz,.zip,application/gzip,application/zip">');
-    const upgradeBtn = $('<button class="sm" style="margin-left:16px">Upgrade</button>');
-    up.appendChild(fileIn);
-    up.appendChild(upgradeBtn);
-    upgradeBtn.onclick = async () => {
-      if (!fileIn.files[0]){ alert('Pick a source .tgz/.tar.gz or .zip first.'); return; }
-      if (!confirm('Upload this, build it, apply it, and restart into it?\n\nNothing is touched until the build succeeds. If the new binary can\u2019t rejoin the mesh, it reverts itself automatically.')) return;
-      upgradeBtn.disabled = true; upgradeBtn.textContent = 'Building\u2026';
-      try {
-        const resp = await fetch('/api/upgrade/stage-source', { method:'POST', body: fileIn.files[0] });
-        const body = await resp.json().catch(()=>({}));
-        if (!resp.ok){ alert(body.error || 'build failed'); return; }
-        upgradeBtn.textContent = 'Installing\u2026';
-        const ar = await api('/api/upgrade/local-apply', { method:'POST', body: JSON.stringify({ id: body.staged }) });
-        if (!ar.ok){ alert((ar.body && ar.body.error) || 'apply failed'); return; }
-        alert('Applied. This node is restarting into ' + body.staged + '.\n\nIf it cannot get its peers back within the confirm window, it will revert itself.');
-        drawUpgrade(host);
-      } finally { upgradeBtn.disabled = false; upgradeBtn.textContent = 'Upgrade'; }
-    };
-  }
+  // No format choice on this side: .tgz/.tar.gz and .zip are both accepted,
+  // and which one a given upload is gets sniffed from its content server-side
+  // (extractSourceArchive), not from this accept list or the filename \u2014 the
+  // accept attribute below is just what makes the file picker's own dialog
+  // filter sensibly.
+  const fileIn = $('<input type="file" class="up-file" accept=".tgz,.tar.gz,.zip,application/gzip,application/zip">');
+  const upgradeBtn = $('<button class="sm" style="margin-left:16px">Upgrade</button>');
+  up.appendChild(fileIn);
+  up.appendChild(upgradeBtn);
+  upgradeBtn.onclick = async () => {
+    if (!fileIn.files[0]){ alert('Pick a source .tgz/.tar.gz or .zip first.'); return; }
+    if (!confirm('Build this on this node, apply it, and restart into it?\n\nNothing is touched until the build succeeds and passes preflight. If the new binary can\u2019t rejoin the mesh, it reverts itself automatically.')) return;
+    upgradeBtn.disabled = true; upgradeBtn.textContent = 'Building\u2026';
+    try {
+      const resp = await fetch('/api/upgrade/source', { method:'POST', body: fileIn.files[0] });
+      const body = await resp.json().catch(()=>({}));
+      if (!resp.ok){ alert(body.error || 'build failed'); return; }
+      alert('Applied. This node is restarting into ' + (body.applied || 'the new build') + '.\n\nIf it cannot get its peers back within the confirm window, it will revert itself.');
+      drawUpgrade(host);
+    } finally { upgradeBtn.disabled = false; upgradeBtn.textContent = 'Upgrade'; }
+  };
   if (remote){
     up.querySelectorAll('input,button').forEach(el => { el.disabled = true; });
   }
   stCard.appendChild(up);
   host.appendChild(stCard);
+
+  // Push to managed peers — only meaningful on the node you're logged into
+  // (like every /api/upgrade/* action) and only when this node is a Manager.
+  // There is no staged-artifact picker: what gets pushed is a source archive
+  // uploaded here and now, because nothing is retained between a build and an
+  // apply anymore. One archive serves every peer regardless of platform —
+  // each compiles its own native binary — so there is no per-architecture
+  // selection to get wrong either.
+  //
+  // Each target peer independently decides whether to accept it (its own
+  // Accept-Manager-pushed-upgrades opt-in), so a peer that hasn't opted in
+  // shows a per-row error rather than silently failing the whole push.
+  if (!remote && state.manager){
+    const pushCard = $('<div class="card"></div>');
+    pushCard.appendChild($('<h3>Push to managed peers</h3>'));
+    pushCard.appendChild($('<div class="hint" style="margin:0 0 10px">Send a source archive to other Managed-mode peers; each one builds it locally and applies it. Every peer must have <b>Accept Manager-pushed upgrades</b> turned on in its own settings, or it will refuse \u2014 shown per peer below. Each peer needs a Go toolchain, verifies the archive against its digest, and reverts on its own if it can\u2019t rejoin the mesh. This node is not upgraded by a push; use Upload above for that, and do it last.</div>'));
+
+    const pickRow = $('<div class="tbar"></div>');
+    pickRow.appendChild($('<span class="hint">source</span>'));
+    const pushFile = $('<input type="file" class="up-push-file" accept=".tgz,.tar.gz,.zip,application/gzip,application/zip">');
+    pickRow.appendChild(pushFile);
+    pushCard.appendChild(pickRow);
+
+    // Managed peers this node can actually reach (manageable = overlay addr +
+    // web port known). Reuse the same list the header dropdown filters.
+    const targets = computeSortedManageablePeers();
+    if (!targets.length){
+      pushCard.appendChild($('<div class="hint" style="margin-top:8px">No managed peers are currently reachable to push to.</div>'));
+    } else {
+      const list = $('<div style="margin:8px 0"></div>');
+      for (const p of targets){
+        const name = p.hostname || p.node_id.slice(0,8);
+        const row = $('<label style="display:block;margin:3px 0"><input type="checkbox" class="up-push-peer" value="'+esc(p.node_id)+'"> '+esc(name)+' <span class="hint">'+esc(p.node_id.slice(0,12))+'</span> <span class="up-push-result" data-node="'+esc(p.node_id)+'"></span></label>');
+        list.appendChild(row);
+      }
+      pushCard.appendChild(list);
+
+      const pushBtn = $('<button class="sm">Push to selected</button>');
+      pushCard.appendChild(pushBtn);
+      pushBtn.onclick = async () => {
+        const nodes = Array.from(pushCard.querySelectorAll('.up-push-peer:checked')).map(c => c.value);
+        if (!nodes.length){ alert('Tick one or more peers to push to.'); return; }
+        if (!pushFile.files[0]){ alert('Pick a source .tgz/.tar.gz or .zip to push.'); return; }
+        if (!confirm('Push this source to '+nodes.length+' peer(s), build it there, and apply it?\n\nEach peer compiles it itself, which can take several minutes per node, and reverts on its own if it can\u2019t rejoin the mesh.')) return;
+        pushCard.querySelectorAll('.up-push-result').forEach(s => s.textContent = '');
+        pushBtn.disabled = true; pushBtn.textContent = 'Pushing\u2026';
+        try {
+          // Order matters: the peer list is read before the archive so the
+          // server knows the targets before it spends anything spooling.
+          const fd = new FormData();
+          fd.append('nodes', JSON.stringify(nodes));
+          fd.append('source', pushFile.files[0]);
+          const resp = await fetch('/api/upgrade/push', { method:'POST', body: fd });
+          const body = await resp.json().catch(()=>({}));
+          const results = body.results || [];
+          for (const res of results){
+            const span = pushCard.querySelector('.up-push-result[data-node="'+CSS.escape(res.node)+'"]');
+            if (span){
+              span.textContent = res.ok ? '\u2713 applied' : ('\u2717 ' + (res.error || 'failed'));
+              span.style.color = res.ok ? 'var(--ok,#2a2)' : 'var(--danger,#b33)';
+            }
+          }
+          if (!resp.ok && !results.length){ alert(body.error || 'push failed'); }
+        } finally { pushBtn.disabled = false; pushBtn.textContent = 'Push to selected'; }
+      };
+    }
+    host.appendChild(pushCard);
+  }
+  return;
 }
 
 // infoMetrics renders the Metrics tab: a duration selector plus live CPU,

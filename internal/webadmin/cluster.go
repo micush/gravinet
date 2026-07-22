@@ -71,6 +71,50 @@ func (s *Server) handleManager(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "manager": req.On, "restart": false})
 }
 
+// handleAcceptManagerUpgrades reports and toggles this node's opt-in to
+// remote upgrades pushed by a directly-authenticated Manager peer (config
+// Upgrade.AcceptManagerUpgrades). Same shape and same live-reload path as
+// handleManaged/handleManager.
+//
+// Like those two, this is a LOCAL-ONLY setting: it must never be flippable on
+// a remote peer through the management proxy, because "turn on the switch that
+// lets you run binaries on me" is precisely the switch a compromised or
+// mislabeled manager would want to flip remotely. handleProxy's blocklist
+// enforces that (it lists /api/upgrade/accept-manager alongside /api/managed
+// and /api/manager); this handler being reachable only with a genuine local
+// session — via authed() with no bypass path a peer can satisfy for a
+// non-managed node, and blocked at the proxy for a managed one — is the other
+// half of that guarantee.
+func (s *Server) handleAcceptManagerUpgrades(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		on := false
+		if s.upg != nil && s.upg.AcceptManagerUpgrades != nil {
+			on = s.upg.AcceptManagerUpgrades()
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"accept_manager_upgrades": on})
+		return
+	}
+	var req struct {
+		On bool `json:"on"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	err := s.mutateConfig(func(cfg *config.Config) error {
+		cfg.Upgrade.AcceptManagerUpgrades = req.On
+		return nil
+	})
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	// The remote-apply gate reads accept_manager_upgrades fresh from the
+	// config file on each push (see webadminCtl), so this change takes effect
+	// immediately — no restart required.
+	s.log.Infof("upgrade: accept_manager_upgrades set to %v (local operator)", req.On)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accept_manager_upgrades": req.On, "restart": false})
+}
+
 // clusterPeer is one row in the header dropdown.
 type clusterPeer struct {
 	NodeID     string `json:"node_id"`
@@ -237,11 +281,11 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// per-node upgrade endpoints (state, local-apply, rollback) proxy fine and
 	// are genuinely useful that way; the orchestration and the artifact upload
 	// that seeds it stay on the node the operator is actually looking at.
-	if pathBase == "/api/upgrade/rollout" || pathBase == "/api/upgrade/stage" || pathBase == "/api/upgrade/fleet" {
+	if pathBase == "/api/upgrade/rollout" || pathBase == "/api/upgrade/stage" || pathBase == "/api/upgrade/fleet" || pathBase == "/api/upgrade/push" {
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": "rollouts are driven from the node you are logged in to, not through a peer"})
 		return
 	}
-	if pathBase == "/api/managed" || pathBase == "/api/manager" || pathBase == "/api/shell/setting" {
+	if pathBase == "/api/managed" || pathBase == "/api/manager" || pathBase == "/api/shell/setting" || pathBase == "/api/upgrade/accept-manager" {
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": "this setting is local-only and cannot be changed on a remote peer"})
 		return
 	}

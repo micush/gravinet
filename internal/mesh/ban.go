@@ -771,6 +771,55 @@ func (e *Engine) IsManagerAddr(ip netip.Addr) bool {
 	return false
 }
 
+// IsManagerNeighborAddr is IsManagerAddr's strict sibling: it reports whether
+// ip belongs to a Manager this node holds a LIVE, DIRECT, handshake-
+// authenticated session with — a real entry in ns.byNode whose node also
+// advertises Manager mode — never one known only through gossip/relay.
+//
+// The distinction exists because of exactly the trust gap IsManagerAddr's own
+// comment documents: for a gossip-only peer, the manager flag rides untrusted
+// gossip, so a malicious peer could mis-tag an in-subnet address as a
+// manager's. IsManagerAddr tolerates that because the actions it gates
+// (ordinary remote management) are bounded — the far end still authorizes each
+// specific change. The remote-upgrade path is NOT bounded that way: it runs a
+// new binary as root. For that one grant, "the caller is genuinely a Manager"
+// must rest on this node's own authoritative handshake with it, not on a flag
+// a third party could have set. A direct neighbor's handshake can't be
+// overridden by gossip (learnPeers' "if !connected" gate), so requiring a live
+// session here closes the spoofing gap completely for the one path where it
+// would matter most.
+//
+// Note this is strictly stronger than IsManagerAddr: any address this returns
+// true for, IsManagerAddr also returns true for. A manager that manages this
+// node but happens to be reached only via relay will pass IsManagerAddr and be
+// rejected here — deliberately. Pushing a binary requires a direct session.
+func (e *Engine) IsManagerNeighborAddr(ip netip.Addr) bool {
+	if !ip.IsValid() {
+		return false
+	}
+	for _, ns := range e.netSnapshot() {
+		ns.mu.RLock()
+		hit := false
+		for id, ni := range ns.nodes {
+			if !ni.manager {
+				continue
+			}
+			if !((ni.overlay4.IsValid() && ip == ni.overlay4) || (ni.overlay6.IsValid() && ip == ni.overlay6)) {
+				continue
+			}
+			if _, connected := ns.byNode[id]; connected {
+				hit = true
+				break
+			}
+		}
+		ns.mu.RUnlock()
+		if hit {
+			return true
+		}
+	}
+	return false
+}
+
 // ListPeers returns the connected peers on a network.
 func (e *Engine) ListPeers(networkID uint64) []PeerInfo {
 	ns := e.network(networkID)

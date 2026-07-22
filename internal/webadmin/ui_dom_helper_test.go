@@ -251,3 +251,72 @@ func TestBgpNeighborMd5CellIsEditable(t *testing.T) {
 		t.Error("the MD5 reveal button lost its stopPropagation single-click handler")
 	}
 }
+
+// TestManagerUpgradeUIWired guards the remote-upgrade UI surface: the local
+// opt-in toggle and the manager push control must both be present and pointed
+// at the right endpoints, and the local-only security endpoints must be in
+// LOCAL_API so the browser never tries to run them against a selected peer.
+func TestManagerUpgradeUIWired(t *testing.T) {
+	// The opt-in toggle row, its endpoint, and its GET-on-render fetch.
+	if !strings.Contains(indexHTML, "accept-manager-upg-row") {
+		t.Error("the Accept-Manager-pushed-upgrades settings row is missing")
+	}
+	if !strings.Contains(indexHTML, "/api/upgrade/accept-manager") {
+		t.Error("the opt-in toggle no longer references /api/upgrade/accept-manager")
+	}
+	// The push control and its endpoint.
+	if !strings.Contains(indexHTML, "/api/upgrade/push") {
+		t.Error("the push control no longer references /api/upgrade/push")
+	}
+	if !strings.Contains(indexHTML, "Push to managed peers") {
+		t.Error("the Push-to-managed-peers card heading is missing")
+	}
+	// LOCAL_API must list the two local-only upgrade endpoints (accept-manager
+	// is a security toggle; push is a fleet action) and must NOT list
+	// remote-apply (the one peer-facing endpoint).
+	localIdx := strings.Index(indexHTML, "const LOCAL_API")
+	if localIdx < 0 {
+		t.Fatal("LOCAL_API list not found")
+	}
+	localBlock := indexHTML[localIdx : localIdx+1500]
+	if !strings.Contains(localBlock, "/api/upgrade/accept-manager") {
+		t.Error("LOCAL_API is missing /api/upgrade/accept-manager — the security toggle could be proxied to a peer")
+	}
+	if !strings.Contains(localBlock, "/api/upgrade/push") {
+		t.Error("LOCAL_API is missing /api/upgrade/push")
+	}
+	if strings.Contains(localBlock, "/api/upgrade/remote-apply") {
+		t.Error("LOCAL_API must NOT contain /api/upgrade/remote-apply — it is the one peer-facing upgrade endpoint")
+	}
+}
+
+// TestUpgradeUIHasNoDeadEndpoints catches the failure mode the test above
+// missed: every assertion there is a "this string is present" check, so the UI
+// kept passing while it called three endpoints that had been deleted from the
+// mux. A stale fetch() is invisible until an operator clicks the button and
+// gets a 404 mid-upgrade, which is the worst possible moment to discover it.
+//
+// Asserting absence is what makes route removal a compile-time-ish failure
+// rather than a runtime one, so this lists the routes that no longer exist and
+// fails if the UI still names any of them.
+func TestUpgradeUIHasNoDeadEndpoints(t *testing.T) {
+	gone := []string{
+		"/api/upgrade/stage-source", // folded into /api/upgrade/source
+		"/api/upgrade/stage",        // binary+manifest upload; binaries are never distributed
+		"/api/upgrade/local-apply",  // applied a staged artifact id; nothing is staged now
+	}
+	for _, path := range gone {
+		if strings.Contains(indexHTML, path+"'") || strings.Contains(indexHTML, path+"\"") {
+			t.Errorf("the UI still calls %s, which is no longer registered in handler()", path)
+		}
+	}
+	// The one it must call instead.
+	if !strings.Contains(indexHTML, "/api/upgrade/source") {
+		t.Error("the UI no longer references /api/upgrade/source — the source upload is the only local upgrade path")
+	}
+	// Signing is gone entirely; a UI branch keyed on it would render a form
+	// with no server behind it.
+	if strings.Contains(indexHTML, "signing_required") {
+		t.Error("the UI still branches on signing_required, which handleUpgradeHome no longer reports")
+	}
+}

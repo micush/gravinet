@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"gravinet/internal/config"
@@ -56,28 +57,23 @@ func cmdSelfTest(args []string) {
 // ---------------------------------------------------------------------------
 
 func usageUpgrade() {
-	fmt.Fprint(os.Stderr, `gravinet upgrade — apply a new binary to this node
+	fmt.Fprint(os.Stderr, `gravinet upgrade — build a source archive and apply it to this node
 
-Build host (only if you want signed provenance; not required):
-  gravinet upgrade genkey                       generate a release keypair
-  gravinet upgrade sign -bin PATH -key B64      sign a built binary -> PATH.json
+  gravinet upgrade apply -src ARCHIVE   build a gravinet source archive
+                                        (.tgz/.tar.gz/.zip) with this node's Go
+                                        toolchain and swap the result in
+  gravinet upgrade status               this node's upgrade state
+  gravinet upgrade rollback             back out the last applied upgrade
 
-On this node:
-  gravinet upgrade stage -bin PATH [-manifest P]  stage a built artifact locally
-  gravinet upgrade stage -src ARCHIVE             build a source archive (.tgz/.tar.gz/.zip)
-                                                  with the local Go toolchain and stage the
-                                                  result, no manifest needed (only with no
-                                                  trusted_keys configured)
-  gravinet upgrade list                           artifacts staged here
-  gravinet upgrade status                         this node's upgrade state
-  gravinet upgrade apply -id ID                   apply a staged artifact
-  gravinet upgrade rollback                       back out the last applied upgrade
+Upgrades are always from source: gravinet publishes no prebuilt binary for any
+platform, and building on the node that will run it is what lets one archive
+serve a mesh of Linux, BSD, macOS and Windows nodes at once. A Go toolchain
+must be present (the platform installers put one there).
 
-Upgrades are local-only: nothing here can be triggered by a peer, Manager or
-otherwise, from anywhere on the mesh, under any configuration. With no
-upgrade.trusted_keys configured (the default), 'stage' accepts an unsigned
-artifact; configure trusted_keys if you want the manifest signature checked.
-The web admin's Info -> Upgrade page does the same thing with a file picker.
+Upgrades are local-only by default: nothing here can be triggered by a peer.
+A node may opt in to accepting source pushed by a directly-connected Manager
+with upgrade.accept_manager_upgrades — off unless you set it. The web admin's
+Info -> Upgrade page does the same thing with a file picker.
 `)
 }
 
@@ -87,17 +83,9 @@ func cmdUpgrade(args []string) {
 		os.Exit(2)
 	}
 	if len(args) > 0 {
-		args[0] = expandVerb(args[0], v("genkey"), v("sign"), v("stage"), v("list"), v("status"), v("apply"), v("rollback"), v("help"))
+		args[0] = expandVerb(args[0], v("apply"), v("status"), v("rollback"), v("help"))
 	}
 	switch args[0] {
-	case "genkey":
-		cmdUpgradeGenKey(args[1:])
-	case "sign":
-		cmdUpgradeSign(args[1:])
-	case "stage":
-		cmdUpgradeStage(args[1:])
-	case "list":
-		cmdUpgradeCtl(args[1:], "list", nil)
 	case "status":
 		cmdUpgradeCtl(args[1:], "status", nil)
 	case "apply":
@@ -113,183 +101,6 @@ func cmdUpgrade(args []string) {
 	}
 }
 
-func cmdUpgradeGenKey(args []string) {
-	fs := flag.NewFlagSet("upgrade genkey", flag.ExitOnError)
-	fs.Parse(args)
-	pub, priv, err := upgrade.GenerateKey()
-	if err != nil {
-		fatal("genkey: %v", err)
-	}
-	fmt.Printf(`Release keypair generated.
-
-  PUBLIC  (goes in every node's config, under upgrade.trusted_keys):
-    %s
-
-  PRIVATE (keep this off every mesh node — a build host or a laptop, ideally
-  offline; anyone holding it can run code on every node that trusts it):
-    %s
-
-Add the public half on each node:
-  upgrade: { "trusted_keys": ["%s"] }
-`, pub, priv, pub)
-}
-
-func cmdUpgradeSign(args []string) {
-	fs := flag.NewFlagSet("upgrade sign", flag.ExitOnError)
-	bin := fs.String("bin", "", "path to the built gravinet binary")
-	key := fs.String("key", "", "base64 private key from 'upgrade genkey' (or set GRAVINET_RELEASE_KEY)")
-	ver := fs.String("version", "", "version string the binary reports (probed from the binary if empty)")
-	goos := fs.String("os", "", "target GOOS (probed if empty)")
-	arch := fs.String("arch", "", "target GOARCH (probed if empty)")
-	notes := fs.String("notes", "", "release note recorded in the manifest")
-	out := fs.String("out", "", "manifest path (default: <bin>.json)")
-	fs.Parse(args)
-
-	if *bin == "" {
-		fatal("usage: gravinet upgrade sign -bin PATH -key BASE64 [-notes ...]")
-	}
-	k := *key
-	if k == "" {
-		k = os.Getenv("GRAVINET_RELEASE_KEY")
-	}
-	if k == "" {
-		fatal("no signing key: pass -key or set GRAVINET_RELEASE_KEY")
-	}
-	priv, err := upgrade.ParsePrivateKey(k)
-	if err != nil {
-		fatal("%v", err)
-	}
-
-	v, o, a := *ver, *goos, *arch
-	pam := false
-	// Ask the binary what it is, rather than trusting flags. A manifest that
-	// claims amd64 over an arm64 binary is exactly the mistake that takes a
-	// fleet down, and here — on the build host, before anything is distributed —
-	// is the cheapest possible place to catch it. This only works when signing a
-	// binary for the host's own platform; a cross-built artifact needs the flags.
-	if p, perr := upgrade.ProbeBinary(context.Background(), *bin); perr == nil {
-		if v == "" {
-			v = p.Version
-		}
-		if o == "" {
-			o = p.OS
-		}
-		if a == "" {
-			a = p.Arch
-		}
-		pam = p.PAM
-		if (o != p.OS || a != p.Arch) && (*goos == "" || *arch == "") {
-			fatal("the binary reports %s/%s; pass -os/-arch explicitly if that is wrong", p.OS, p.Arch)
-		}
-	} else if v == "" || o == "" || a == "" {
-		fatal("could not probe %s (%v) — for a cross-built artifact pass -version, -os and -arch", *bin, perr)
-	}
-
-	m, err := upgrade.NewManifest(*bin, v, o, a, pam, *notes)
-	if err != nil {
-		fatal("%v", err)
-	}
-	if err := m.Sign(priv); err != nil {
-		fatal("%v", err)
-	}
-	b, err := m.Bytes()
-	if err != nil {
-		fatal("%v", err)
-	}
-	path := *out
-	if path == "" {
-		path = *bin + ".json"
-	}
-	if err := os.WriteFile(path, b, 0o644); err != nil {
-		fatal("%v", err)
-	}
-	fmt.Printf("signed %s (%s, %s/%s, pam=%v, %d bytes)\n  manifest: %s\n  signer:   %s\n",
-		m.ID(), m.Version, m.OS, m.Arch, m.PAM, m.Size, path, m.Signer)
-}
-
-// cmdUpgradeStage ingests an artifact into this node's store directly, without
-// going through the daemon: the store is a directory and Ingest is atomic and
-// self-verifying, so a root CLI writing into it races safely with a running
-// daemon reading from it. Two shapes:
-//
-//	-bin PATH [-manifest PATH]   a built binary + its manifest (signed or
-//	                             not, per Store.Verify's trust policy — see
-//	                             internal/upgrade/store.go)
-//	-src PATH                    a source archive (.tgz/.tar.gz or .zip):
-//	                             extracted, built with the local Go
-//	                             toolchain, probed, and staged unsigned —
-//	                             the exact pipeline the web admin's
-//	                             Info → Upgrade source upload runs
-//	                             (webadmin.StageFromSource), reached from
-//	                             the terminal. Like that upload, only
-//	                             offered in local-only-unsigned mode: with
-//	                             upgrade.trusted_keys configured there is
-//	                             no signature to check on source code even
-//	                             in principle, so it's refused — build and
-//	                             sign a binary yourself instead.
-func cmdUpgradeStage(args []string) {
-	fs := flag.NewFlagSet("upgrade stage", flag.ExitOnError)
-	cfgPath := fs.String("config", defaultConfigPath, "path to config file")
-	bin := fs.String("bin", "", "path to a built artifact (requires a manifest)")
-	manPath := fs.String("manifest", "", "path to its signed manifest (default: <bin>.json)")
-	src := fs.String("src", "", "path to a source archive (.tgz/.tar.gz/.zip) to build and stage, no manifest needed")
-	fs.Parse(args)
-	if (*bin == "") == (*src == "") {
-		fatal("usage: gravinet upgrade stage -bin PATH [-manifest PATH]\n       gravinet upgrade stage -src ARCHIVE.tgz  (build from a source archive, no manifest)")
-	}
-	cfg, err := config.Load(*cfgPath)
-	if err != nil {
-		fatal("config: %v", err)
-	}
-	st, err := upgrade.NewStore(cfg.UpgradeStoreDir(), cfg.Upgrade.TrustedKeys)
-	if err != nil {
-		fatal("%v", err)
-	}
-
-	if *src != "" {
-		// Mirror handleUpgradeStageSource's trust-policy refusal exactly —
-		// see webadmin.StageFromSource's doc comment for why the caller owns
-		// this check.
-		if len(cfg.Upgrade.TrustedKeys) > 0 {
-			fatal("this node trusts release keys (upgrade.trusted_keys) — building from a source archive has no signature to check and is only offered in local-only-unsigned mode; build and sign a binary yourself and use 'upgrade stage -bin ... -manifest ...' instead")
-		}
-		f, err := os.Open(*src)
-		if err != nil {
-			fatal("%v", err)
-		}
-		defer f.Close()
-		fmt.Printf("building %s (this runs a full 'go build'; a minute or two is normal)...\n", *src)
-		m, err := webadmin.StageFromSource(st, f, "built from source archive via CLI, unsigned (local-only mode)")
-		if err != nil {
-			fatal("%v", err)
-		}
-		fmt.Printf("built and staged %s (%s, %s/%s, pam=%v) in %s\napply it with: gravinet upgrade apply -id %s\n",
-			m.ID(), m.Version, m.OS, m.Arch, m.PAM, st.Dir(), m.ID())
-		return
-	}
-
-	if *manPath == "" {
-		*manPath = *bin + ".json"
-	}
-	mb, err := os.ReadFile(*manPath)
-	if err != nil {
-		fatal("manifest: %v", err)
-	}
-	m, err := upgrade.ParseManifest(mb)
-	if err != nil {
-		fatal("%v", err)
-	}
-	f, err := os.Open(*bin)
-	if err != nil {
-		fatal("%v", err)
-	}
-	defer f.Close()
-	if err := st.Ingest(m, f); err != nil {
-		fatal("%v", err)
-	}
-	fmt.Printf("staged %s in %s\n", m.ID(), st.Dir())
-}
-
 // cmdUpgradeCtl runs a simple control-socket op and prints the reply.
 func cmdUpgradeCtl(args []string, op string, body any) {
 	fs := flag.NewFlagSet("upgrade "+op, flag.ExitOnError)
@@ -298,21 +109,36 @@ func cmdUpgradeCtl(args []string, op string, body any) {
 	printUpgradeReply(op, upgradeCall(*sock, op, body))
 }
 
+// cmdUpgradeApply hands the daemon a path to a source archive; the daemon
+// extracts, builds, preflights and swaps. The build deliberately happens in the
+// daemon rather than here, even though this CLI is root on the same box: that
+// keeps one implementation of extract-build-preflight-apply behind the control
+// socket, reached identically from the terminal and from the web admin, rather
+// than two that can drift.
 func cmdUpgradeApply(args []string) {
 	fs := flag.NewFlagSet("upgrade apply", flag.ExitOnError)
 	sock := fs.String("sock", defaultControlSocket(), "control socket path")
-	id := fs.String("id", "", "artifact id (see 'gravinet upgrade list')")
-	dry := fs.Bool("dry-run", false, "preflight only: verify, probe and config-test the binary without swapping it")
+	src := fs.String("src", "", "path to a gravinet source archive (.tgz/.tar.gz/.zip)")
+	dry := fs.Bool("dry-run", false, "build and preflight the result without swapping it in")
 	down := fs.Bool("allow-downgrade", false, "permit replacing this binary with an older version")
 	pamDown := fs.Bool("allow-pam-downgrade", false, "permit replacing a PAM build with a non-PAM one")
 	fs.Parse(args)
-	if *id == "" {
-		fatal("usage: gravinet upgrade apply -id VERSION-OS-ARCH [-dry-run]")
+	if *src == "" {
+		fatal("usage: gravinet upgrade apply -src ARCHIVE.tgz [-dry-run]")
 	}
+	abs, err := filepath.Abs(*src)
+	if err != nil {
+		fatal("%v", err)
+	}
+	if _, err := os.Stat(abs); err != nil {
+		fatal("%v", err)
+	}
+	fmt.Printf("building %s (this runs a full 'go build'; a minute or two is normal)...\n", abs)
 	printUpgradeReply("apply", upgradeCall(*sock, "apply", map[string]any{
-		"id": *id, "dry_run": *dry, "allow_downgrade": *down, "allow_pam_downgrade": *pamDown,
+		"src_path": abs, "dry_run": *dry, "allow_downgrade": *down, "allow_pam_downgrade": *pamDown,
 	}))
 }
+
 func upgradeCall(sock, op string, body any) control.Response {
 	var raw json.RawMessage
 	if body != nil {
@@ -350,29 +176,33 @@ func printUpgradeReply(op string, resp control.Response) {
 // daemon side
 // ---------------------------------------------------------------------------
 
-// upgradeSvc is the daemon's upgrade machinery: the store, the guard, the fleet
-// handle, and the one in-flight rollout a manager may be running.
+// upgradeSvc is the daemon's upgrade machinery: the guard, the mesh handle it
+// asks about peer health, and the paths an upgrade needs.
 type upgradeSvc struct {
-	cfgPath string
-	store   *upgrade.Store
-	guard   *upgrade.Guard
-	engine  *mesh.Engine
-	target  string
-	version string
-	pam     bool
-	confirm int
-	keep    int
-	webPort int
+	cfgPath  string
+	stateDir string
+	guard    *upgrade.Guard
+	engine   *mesh.Engine
+	target   string
+	version  string
+	pam      bool
+	confirm  int
+	webPort  int
 }
 
 // newUpgradeSvc builds the machinery, or returns nil if it failed to
-// initialize (store directory couldn't be created, or this binary's own path
-// couldn't be resolved) — a genuine setup failure, not a missing key: upgrades
-// no longer need trusted_keys to be usable, only to be signature-checked.
+// initialize (the state directory couldn't be created, or this binary's own
+// path couldn't be resolved) — genuine setup failures. Nothing else is
+// required: there is no key to configure and nothing to stage.
+//
+// The state directory is created 0700 and doubles as the spool for uploaded
+// archives and the root for build temp dirs, so it must be a directory only
+// root can write to: everything under it is either a record the node trusts to
+// rescue itself or source it is about to compile and run.
 func newUpgradeSvc(cfg *config.Config, cfgPath string, engine *mesh.Engine, webPort int) *upgradeSvc {
-	st, err := upgrade.NewStore(cfg.UpgradeStoreDir(), cfg.Upgrade.TrustedKeys)
-	if err != nil {
-		logx.Errorf("upgrade: %v (upgrades disabled on this node)", err)
+	dir := cfg.UpgradeStateDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		logx.Errorf("upgrade: creating %s: %v (upgrades disabled on this node)", dir, err)
 		return nil
 	}
 	target, err := upgrade.ResolveTarget("")
@@ -381,16 +211,15 @@ func newUpgradeSvc(cfg *config.Config, cfgPath string, engine *mesh.Engine, webP
 		return nil
 	}
 	return &upgradeSvc{
-		cfgPath: cfgPath,
-		store:   st,
-		guard:   upgrade.NewGuard(st.Dir(), restartService, logx.Infof),
-		engine:  engine,
-		target:  target,
-		version: version,
-		pam:     webadmin.PAMCompiledIn,
-		confirm: cfg.UpgradeConfirmSeconds(),
-		keep:    cfg.UpgradeKeepArtifacts(),
-		webPort: webPort,
+		cfgPath:  cfgPath,
+		stateDir: dir,
+		guard:    upgrade.NewGuard(dir, restartService, logx.Infof),
+		engine:   engine,
+		target:   target,
+		version:  version,
+		pam:      webadmin.PAMCompiledIn,
+		confirm:  cfg.UpgradeConfirmSeconds(),
+		webPort:  webPort,
 	}
 }
 
@@ -432,43 +261,42 @@ func (u *upgradeSvc) healthy() (bool, string) {
 
 func (u *upgradeSvc) webadminCtl() *webadmin.UpgradeCtl {
 	return &webadmin.UpgradeCtl{
-		Store:          u.store,
 		Guard:          u.guard,
+		StateDir:       u.stateDir,
 		Target:         u.target,
 		ConfigPath:     u.cfgPath,
 		Version:        u.version,
 		PAM:            u.pam,
 		ConfirmSeconds: func() int { return u.confirm },
-		KeepArtifacts:  func() int { return u.keep },
 		Restart:        restartService,
 		Peers:          u.peersConnected,
 		Op:             u.controlOp,
+		// Read the opt-in fresh from the config file each time rather than from
+		// the value captured at startup: this endpoint is hit rarely (only when
+		// a Manager actually pushes), so the cost is irrelevant, and it means
+		// toggling accept_manager_upgrades in the web admin takes effect
+		// immediately on the next push without waiting for a daemon restart. A
+		// read error fails closed (false) — the safe default for a switch that
+		// authorizes running binaries.
+		AcceptManagerUpgrades: func() bool {
+			cfg, err := config.Load(u.cfgPath)
+			if err != nil {
+				return false
+			}
+			return cfg.Upgrade.AcceptManagerUpgrades
+		},
 	}
 }
 
-// controlOp dispatches a CLI `gravinet upgrade ...` command inside the daemon.
+// controlOp dispatches a `gravinet upgrade ...` command inside the daemon. The
+// web admin reaches the same switch through UpgradeCtl.Op, so the terminal and
+// the browser drive one implementation rather than two.
 func (u *upgradeSvc) controlOp(op string, body []byte) ([]byte, error) {
 	switch op {
-	case "list":
-		out := []map[string]any{}
-		for _, m := range u.store.List() {
-			// m.Signer is empty for an unsigned (local-only mode) artifact —
-			// slicing it like a signed one's key would panic.
-			signer := m.Signer
-			if len(signer) > 16 {
-				signer = signer[:16]
-			}
-			out = append(out, map[string]any{
-				"id": m.ID(), "version": m.Version, "os": m.OS, "arch": m.Arch,
-				"size": m.Size, "pam": m.PAM, "notes": m.Notes, "signer": signer,
-			})
-		}
-		return json.Marshal(out)
-
 	case "status":
 		st := u.guard.Load()
 		return json.Marshal(map[string]any{
-			"version": u.version, "target": u.target, "store": u.store.Dir(),
+			"version": u.version, "target": u.target, "state_dir": u.stateDir,
 			"phase": st.Phase, "from": st.From, "to": st.To, "boots": st.Boots,
 			"pre_peers": st.PrePeers, "last_error": st.LastError,
 			"peers_now": u.peersConnected(),
@@ -486,7 +314,7 @@ func (u *upgradeSvc) controlOp(op string, body []byte) ([]byte, error) {
 
 	case "apply":
 		var req struct {
-			ID                string `json:"id"`
+			SrcPath           string `json:"src_path"`
 			DryRun            bool   `json:"dry_run"`
 			AllowDowngrade    bool   `json:"allow_downgrade"`
 			AllowPAMDowngrade bool   `json:"allow_pam_downgrade"`
@@ -494,48 +322,67 @@ func (u *upgradeSvc) controlOp(op string, body []byte) ([]byte, error) {
 		if err := json.Unmarshal(body, &req); err != nil {
 			return nil, err
 		}
-		m, ok := u.store.Lookup(req.ID)
-		if !ok {
-			return nil, fmt.Errorf("no artifact %q staged on this node (see 'gravinet upgrade list')", req.ID)
+		if req.SrcPath == "" {
+			return nil, fmt.Errorf("no source archive given")
 		}
+		f, err := os.Open(req.SrcPath)
+		if err != nil {
+			return nil, err
+		}
+		defer f.Close()
+
+		// Refuse a second apply *before* spending ten minutes compiling for
+		// one. The check is repeated after the build too (the window is wide
+		// enough for another upgrade to start inside it), but failing here
+		// turns a long wait followed by a rejection into an immediate answer.
+		if st := u.guard.Load(); st.Phase == upgrade.PhasePending && !req.DryRun {
+			return nil, fmt.Errorf("an upgrade (%s \u2192 %s) is already mid-trial on this node \u2014 wait for it to confirm or revert, or roll it back, before starting another", st.From, st.To)
+		}
+
+		// The build gets its own generous timeout: it is a full `go build`,
+		// potentially on a small box, and the preflight and swap that follow
+		// are quick by comparison.
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+		defer cancel()
+
+		bin, probe, cleanup, err := upgrade.Build(ctx, f, u.stateDir)
+		if err != nil {
+			return nil, err
+		}
+		defer cleanup()
+
 		opts := upgrade.Options{
 			Target: u.target, ConfigPath: u.cfgPath, RunningPAM: u.pam, RunningVersion: u.version,
 			AllowDowngrade: req.AllowDowngrade, AllowPAMDowngrade: req.AllowPAMDowngrade,
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
 		if req.DryRun {
-			bin, err := u.store.BinPath(m)
-			if err != nil {
+			if _, err := upgrade.Preflight(ctx, bin, opts); err != nil {
 				return nil, err
 			}
-			p, err := upgrade.Preflight(ctx, m, bin, opts)
-			if err != nil {
-				return nil, err
-			}
-			return json.Marshal(map[string]any{"dry_run": true, "would_apply": p.Version, "ok": true})
+			return json.Marshal(map[string]any{
+				"dry_run": true, "would_apply": probe.Version, "pam": probe.PAM, "ok": true,
+			})
 		}
 		if st := u.guard.Load(); st.Phase == upgrade.PhasePending {
-			return nil, fmt.Errorf("an upgrade (%s \u2192 %s) is already mid-trial on this node \u2014 wait for it to confirm or revert, or roll it back, before starting another", st.From, st.To)
+			return nil, fmt.Errorf("an upgrade (%s \u2192 %s) started while this one was building \u2014 wait for it to confirm or revert before starting another", st.From, st.To)
 		}
 		if err := u.guard.Arm(upgrade.State{
-			Target: u.target, ArtifactID: m.ID(), From: u.version, To: m.Version,
+			Target: u.target, From: u.version, To: probe.Version,
 			PrePeers: u.peersConnected(), ConfirmSeconds: u.confirm,
 		}); err != nil {
 			return nil, err
 		}
-		if _, err := upgrade.Apply(ctx, u.store, m, opts); err != nil {
+		if _, err := upgrade.Apply(ctx, bin, opts); err != nil {
 			_ = u.guard.Clear()
 			return nil, err
 		}
-		u.store.GC(u.keep)
 		go func() {
 			time.Sleep(500 * time.Millisecond)
 			if err := restartService(); err != nil {
 				logx.Errorf("upgrade: binary replaced but restart failed: %v", err)
 			}
 		}()
-		return json.Marshal(map[string]any{"ok": true, "applied": m.Version, "restarting": true})
+		return json.Marshal(map[string]any{"ok": true, "applied": probe.Version, "restarting": true})
 	}
 	return nil, fmt.Errorf("unknown upgrade op %q", op)
 }

@@ -59,6 +59,7 @@ type stubBackend struct {
 	managed                 bool
 	manager                 bool
 	managerAddr             netip.Addr // stub: addresses matching this count as "caller is a manager"
+	managerNeighborAddr     netip.Addr // stub: addresses matching this count as a live DIRECT manager neighbor (strict)
 	hostname                string
 	managedPeers            []mesh.ManagedPeer
 	overlayAddr             netip.Addr
@@ -220,6 +221,14 @@ func (s *stubBackend) LogLevel() string { return "info" }
 func (s *stubBackend) Manager() bool    { return s.manager }
 func (s *stubBackend) IsManagerAddr(ip netip.Addr) bool {
 	return s.managerAddr.IsValid() && ip == s.managerAddr
+}
+
+// IsManagerNeighborAddr is the strict, direct-session-only manager check. The
+// stub treats managerNeighborAddr as the address that counts as a live,
+// directly-connected Manager; tests that want the looser gossip-manager case
+// to be rejected set managerAddr but leave managerNeighborAddr unset.
+func (s *stubBackend) IsManagerNeighborAddr(ip netip.Addr) bool {
+	return s.managerNeighborAddr.IsValid() && ip == s.managerNeighborAddr
 }
 func (s *stubBackend) Hostname() string        { return s.hostname }
 func (s *stubBackend) SelfID() string          { return "self-node-id" }

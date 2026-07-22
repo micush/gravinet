@@ -38,6 +38,157 @@ assuming it didn't happen.
 
 ---
 
+## v580 — 2026-07-22
+
+**Upgrades are now source-only, everywhere: nothing distributes or accepts a
+prebuilt binary, and the artifact store is gone.** v579's Manager push shipped
+binaries, which does not survive contact with this project's actual shape —
+gravinet publishes no prebuilt release for any platform, so a binary upload had
+no supply to draw on, and a binary is valid for exactly one OS/arch while a mesh
+routinely spans Linux, FreeBSD, OpenBSD, macOS and Windows at once. A push could
+therefore only ever reach the fraction of a fleet matching the Manager's own
+platform, and the documented workaround (cross-compile, then sign each artifact)
+required standing up release keys — the exact ceremony v579 existed to avoid.
+
+**What replaced it.** One source archive, uploaded once, built natively on every
+node that receives it. The OS/arch negotiation problem does not get handled; it
+stops existing, because nothing platform-specific crosses a wire. This is also
+what the platform installers have always done (`ensure_go` + `build_from_source`),
+so a node installed normally already has the toolchain.
+
+**Removed outright**, not deprecated: `internal/upgrade/store.go` (the staged
+artifact shelf), `internal/upgrade/manifest.go` (Ed25519 signing, manifests,
+artifact IDs), `upgrade.trusted_keys`, `upgrade.keep_artifacts`, the CLI's
+`genkey`/`sign`/`stage`/`list` verbs, and the `/api/upgrade/stage`,
+`/stage-source` and `/local-apply` endpoints. Signing covered a built artifact's
+digest, which is meaningless when no built artifact is ever distributed; the
+store held binaries between a stage and an apply that are now one step. A shelf
+with nothing to put on it is not a feature in a degraded mode.
+
+**Kept, unchanged, and still the point:** preflight (execute the candidate, PAM
+parity, downgrade check, `selftest` against this node's real config), the
+two-rename atomic swap, `gravinet.prev`, the boot counter, the confirm window,
+and automatic revert. `Preflight` and `Apply` now take a built binary path
+rather than a store lookup, and the three manifest cross-checks are gone: with
+the binary compiled locally moments earlier, its own report of itself is not one
+claim among several to reconcile, it is the only claim there is.
+
+**Surface.** Local: `POST /api/upgrade/source` (upload an archive; build and
+apply in one request) and `gravinet upgrade apply -src ARCHIVE`. Fleet:
+`POST /api/upgrade/push` (multipart, `nodes` then `source`; local-only) to each
+peer's `POST /api/upgrade/remote-apply`, which now takes `sha256` then `source`
+— digest first, because a hash compared after the bytes were accepted is not a
+check a substituted stream would fail. Peer gates are otherwise as v579 left
+them: opt-in via `accept_manager_upgrades`, a live *direct* Manager session
+(`IsManagerNeighborAddr`, gossip-only refused), then the local build and apply.
+Push fans out at 4 concurrent peers — unbounded means every node in the fleet
+compiling Go simultaneously.
+
+**Config.** `upgrade.store_dir` → `upgrade.state_dir`, holding the guard's
+`state.json`, the upload spool and build temp dirs. The old spelling is still
+read, deliberately: config parsing ignores unknown fields, so a node that set
+`store_dir` and upgraded *while an upgrade was pending* would have looked for
+`state.json` in the default location, found nothing, concluded nothing was in
+flight, and silently lost its own crash-loop revert. A rename would have
+disabled the guard on exactly the nodes that had customised it.
+
+**Verified.** `internal/upgrade` tests rewritten: preflight's brick-catching
+cases, apply/revert, the guard's boot-loop and confirm-window paths, plus new
+coverage for archive extraction (tgz and zip detected by content, path-traversal
+and symlink refusal, non-gravinet trees refused before any build) and
+`SourceVersion` — pinned against this repository's own `main.go`, so a
+reformatted version line fails a test rather than silently showing an operator
+an empty version mid-push. `internal/webadmin` remote tests rewritten around the
+new multipart shape, including the digest-ordering case. New
+`TestUpgradeUIHasNoDeadEndpoints`: the existing UI guard was all presence
+assertions, so it kept passing while the browser called three deleted routes —
+asserting *absence* is what makes a route removal fail a test instead of a
+click. New `TestBuildCompilesThisActualTree` tars this repository, runs it
+through the real Build pipeline, and requires the result to report the right
+version and pass Preflight — the end-to-end claim every other test stubs out.
+Full `internal/upgrade`, `internal/webadmin`, `internal/config`, `internal/control`
+and `cmd/gravinet` suites pass; `go build`/`go vet ./...` clean.
+
+**Not done in this cut:** the `internal/mesh` suite was not re-run (it is long,
+and mesh neither imports `internal/upgrade` nor reads any config field touched
+here; the one relevant test, `IsManagerNeighborAddrRequiresDirectSession`, was
+run and passes). Only linux/amd64 was built. And there is still no test of a
+real push between two live nodes — the build half is now covered end to end, but
+the swap-and-rejoin half is not, so exercise a test pair before this drives a
+production fleet.
+
+## v579 — 2026-07-22
+
+**New, opt-in: a Manager peer can push a binary upgrade to managed peers that
+have explicitly enabled it — without hand-signing tarballs. Off by default;
+when off, upgrades stay strictly local-only exactly as before.**
+
+The goal was "update gravinet on all managed peers" without per-tarball
+signing ceremony. This does that by leaning on trust the mesh already has —
+the authenticated session that gates every other Manager action — plus the
+artifact's own content hash, rather than inventing a new credential. (A
+buried-token scheme was explicitly rejected: a secret that ships in every
+copy of the software is not a secret, and would have been a remote-root
+channel authenticated by a string printed on the thing it's meant to
+protect.)
+
+**The trust model, which is the whole point:** a pushed binary is applied on
+a peer only if ALL of these hold, none of which the Manager controls:
+- the peer opted in (`upgrade.accept_manager_upgrades`, off by default — a
+  new local-only settings toggle, never flippable from a remote peer);
+- the push arrived from a Manager the peer holds a LIVE DIRECT
+  handshake-authenticated session with — not one known only through gossip.
+  This is a new, stricter check (`IsManagerNeighborAddr`) than ordinary
+  management uses: ordinary remote management tolerates gossip-level manager
+  identity because each action is separately authorized, but running a binary
+  as root is not bounded that way, so it demands the peer's own authoritative
+  handshake and closes the gossip-spoofing gap for this one path;
+- the artifact passes the peer's own trust policy (content digest always; a
+  valid signature too, if that peer has `trusted_keys` configured — the
+  opt-in never weakens an existing signing requirement), and its OS/arch
+  match;
+- it survives the same `selftest` config gate and the same
+  confirm-or-rollback guard a local upgrade does, so a bad push is backed out
+  on the peer's own authority within the confirm window — a Manager cannot
+  pin a peer onto a broken binary.
+
+**Surface.** Peer side: `POST /api/upgrade/remote-apply` (the one peer-facing
+upgrade endpoint; self-gates as above, deliberately not behind the general
+overlay-management bypass). Manager side: `POST /api/upgrade/push` (local-only,
+streams a staged artifact to selected peers). Settings toggle:
+`/api/upgrade/accept-manager` (local-only, in the client LOCAL_API list and
+the proxy blocklist). Web UI: an "Accept Manager-pushed upgrades" toggle in
+Settings, and a "Push to managed peers" card in the Upgrade tab that lists
+staged builds and reachable managed peers with per-peer push results (a peer
+that hasn't opted in shows a clean per-row refusal). No CLI push command:
+like the fleet actions before it, pushing is driven from the web admin of the
+node you're on.
+
+**Verified.** New tests: the peer-side accept/reject gates
+(`upgrade_remote_test.go`) — opt-out refuses even a genuine direct Manager; a
+gossip-only Manager is refused even when opted in; non-overlay source,
+digest mismatch, and wrong platform all refused; the one correct path
+(opted in + direct Manager neighbor, or a local session) reaches apply; push
+is local-only. The mesh trust anchor (`manager_neighbor_test.go`):
+`IsManagerNeighborAddr` accepts a direct-session Manager and rejects a
+gossip-only one. UI wiring guard (`TestManagerUpgradeUIWired`): the toggle and
+push control are present and point at the right endpoints, and remote-apply is
+kept out of LOCAL_API. Full `internal/webadmin`, `internal/mesh`, and
+`internal/config` suites pass (the pre-existing env-dependent `TestPingRTT`
+excluded — it fails identically on the pristine tree). `go build`/`go vet`
+clean; builds for linux/amd64, linux/arm64, darwin/amd64, windows/amd64.
+
+**Not done in this cut, and worth stating:** the full nine-platform
+cross-compile matrix was reduced to four under a session time limit (the four
+built clean; the other five are very likely fine since nothing here is
+platform-specific, but they were not checked this round), and there is no
+end-to-end test of an actual binary swap between two live nodes — the tests
+cover the gates and verification, which is where the security lives, but a
+real two-node push over real hardware should be exercised before this drives a
+production fleet. Given this project's history, do that on a test pair first.
+
+---
+
 ## v578 — 2026-07-22
 
 **Fix: in Traffic → BGP, double-clicking a neighbor's MD5 password cell did

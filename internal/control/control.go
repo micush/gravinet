@@ -79,19 +79,19 @@ type Request struct {
 
 // Response is the reply.
 type Response struct {
-	OK       bool                `json:"ok"`
-	Error    string              `json:"error,omitempty"`
-	Peers    []mesh.PeerInfo     `json:"peers,omitempty"`
-	Bans     []mesh.BanInfo      `json:"bans,omitempty"`
-	Routes   []mesh.RouteInfo    `json:"routes,omitempty"`
-	Nets     []string            `json:"nets,omitempty"`
-	Ifaces   []mesh.IfaceInfo    `json:"ifaces,omitempty"`
-	FW       []mesh.FirewallRule `json:"fw,omitempty"`
-	Count    int                 `json:"count,omitempty"`
-	NATClass string              `json:"nat_class,omitempty"`
-	Public   string              `json:"public,omitempty"`
-	LoopDrops uint64             `json:"loop_drops,omitempty"`
-	UpBody   json.RawMessage     `json:"up_body,omitempty"`
+	OK        bool                `json:"ok"`
+	Error     string              `json:"error,omitempty"`
+	Peers     []mesh.PeerInfo     `json:"peers,omitempty"`
+	Bans      []mesh.BanInfo      `json:"bans,omitempty"`
+	Routes    []mesh.RouteInfo    `json:"routes,omitempty"`
+	Nets      []string            `json:"nets,omitempty"`
+	Ifaces    []mesh.IfaceInfo    `json:"ifaces,omitempty"`
+	FW        []mesh.FirewallRule `json:"fw,omitempty"`
+	Count     int                 `json:"count,omitempty"`
+	NATClass  string              `json:"nat_class,omitempty"`
+	Public    string              `json:"public,omitempty"`
+	LoopDrops uint64              `json:"loop_drops,omitempty"`
+	UpBody    json.RawMessage     `json:"up_body,omitempty"`
 }
 
 // network/addr split: a path containing ':' and no '/' is treated as TCP.
@@ -193,7 +193,7 @@ func (s *Server) dispatch(req Request) Response {
 	switch req.Cmd {
 	case "upgrade":
 		if s.upgrade == nil {
-			return Response{Error: "upgrades are not enabled on this node: no trusted release keys are configured (upgrade.trusted_keys)"}
+			return Response{Error: "the upgrade machinery failed to initialize on this node (state directory or binary path) \u2014 check the daemon log"}
 		}
 		out, err := s.upgrade(req.UpOp, req.UpBody)
 		if err != nil {

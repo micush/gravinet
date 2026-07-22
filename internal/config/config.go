@@ -5,7 +5,6 @@
 package config
 
 import (
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -432,30 +431,38 @@ type BGPNeighbor struct {
 	Shutdown bool `json:"shutdown,omitempty"`
 }
 
-// Upgrade configures this node's own binary upgrades. It is strictly
-// local-only: nothing here, under any configuration, gives a peer — Manager
-// or otherwise — a way to trigger, drive, or observe an upgrade on this node.
-// Applying a new binary is something done at the machine, by whoever is
-// logged into its own web admin (or its own CLI). See docs/UPGRADES.md.
+// Upgrade configures this node's own upgrades. Upgrades are always from
+// source: an operator hands this node a gravinet source archive, it compiles
+// it with the local Go toolchain, and swaps the result in behind a
+// confirm-or-rollback guard. gravinet ships no prebuilt binary for any
+// platform, and a mesh routinely spans Linux, the BSDs, macOS and Windows at
+// once, so source is both the only artifact that exists and the only one that
+// can be distributed to every node from a single upload.
+//
+// By default this is strictly local-only: nothing here, in the default
+// configuration, gives a peer — Manager or otherwise — a way to trigger,
+// drive, or observe an upgrade on this node.
+//
+// The one exception is entirely opt-in and off by default: setting
+// AcceptManagerUpgrades below lets a directly-authenticated Manager peer
+// *offer* a source archive this node then independently verifies, builds and
+// applies. See that field's own comment for the full trust model, and
+// docs/UPGRADES.md.
 type Upgrade struct {
-	// TrustedKeys are hex-encoded Ed25519 public keys whose signatures this
-	// node will require on an upgrade manifest. Empty (the default) means
-	// this node accepts a structurally valid but unsigned artifact — safe
-	// specifically because the only thing that can ever reach the upload
-	// endpoint is a session already logged into this exact node. Configure
-	// this if you want signed provenance instead (multiple people with local
-	// admin access, wanting a record of what was actually built and shipped).
+	// StateDir is where the guard's state.json lives — the record of an
+	// in-flight upgrade that lets a node back out a bad binary on its own
+	// after a restart. Empty means "upgrades" next to the config file. It is
+	// created 0700.
 	//
-	// The private halves belong on a build host or a laptop, never on a mesh
-	// node: a release key on ten nodes is a release key an attacker only has
-	// to find once. `gravinet upgrade genkey` makes a pair and tells you
-	// which half goes where.
-	TrustedKeys []string `json:"trusted_keys,omitempty"`
-
-	// StoreDir is where staged artifacts live. Empty means "upgrades" next to
-	// the config file. It holds binaries this node will execute as root, so
-	// it is created 0700.
-	StoreDir string `json:"store_dir,omitempty"`
+	// LegacyStoreDir is the former name of this field, from when this
+	// directory also held staged binaries. It is still read, and must stay
+	// read: a node that set store_dir explicitly and is upgraded *while an
+	// upgrade is pending* would otherwise look for state.json in the default
+	// location, find nothing, conclude nothing is in flight, and quietly lose
+	// its own crash-loop revert — the exact failure the guard exists to
+	// prevent, introduced by a rename.
+	StateDir       string `json:"state_dir,omitempty"`
+	LegacyStoreDir string `json:"store_dir,omitempty"`
 
 	// ConfirmSeconds is how long a freshly-swapped binary has to prove it is
 	// healthy — up, on the mesh, with peers again — before this node backs it
@@ -464,28 +471,55 @@ type Upgrade struct {
 	// management path is the very mesh the bad binary is failing to join.
 	ConfirmSeconds int `json:"confirm_seconds,omitempty"`
 
-	// KeepArtifacts is how many staged artifacts to retain before the oldest are
-	// garbage-collected. 0 means the default (3). This does not affect rollback:
-	// the binary you would roll back *to* is kept next to the running one, not
-	// in the store.
-	KeepArtifacts int `json:"keep_artifacts,omitempty"`
+	// AcceptManagerUpgrades opts this node in to remote-initiated upgrades
+	// pushed by a Manager peer. Default false, which preserves the strictly
+	// local-only behaviour described above: with this off, no peer — Manager
+	// or otherwise — can stage or apply anything here, exactly as before.
+	//
+	// Turning it on lets a Manager *offer* a source archive over the mesh;
+	// this node then makes its own decision, and only proceeds if ALL of the
+	// following hold, none of which the Manager controls:
+	//   - the offer arrived from a Manager this node holds a live, directly
+	//     handshake-authenticated session with (not one known only through
+	//     gossip/relay — that flag is untrusted; see IsManagerAddr's caveat),
+	//   - the pushed archive's content hash matches the digest the Manager
+	//     declared alongside it,
+	//   - it compiles here, with this node's own toolchain, into a binary that
+	//     runs and reports itself,
+	//   - that binary passes the same `selftest` config gate a local upgrade
+	//     must pass,
+	//   - and the same confirm-or-rollback guard arms afterwards, so a bad
+	//     push is backed out on this node's own authority within
+	//     ConfirmSeconds — the Manager cannot hold this node on a broken binary.
+	//
+	// Note what a Manager does *not* get, even with this on: it never supplies
+	// executable bytes. It supplies source, which this node compiles itself.
+	//
+	// This is opt-in per node precisely because it converts "a Manager can
+	// manage my config" into "a Manager can cause code to be built and run as
+	// root here." That is a strictly larger grant and nobody should get it
+	// implicitly.
+	AcceptManagerUpgrades bool `json:"accept_manager_upgrades,omitempty"`
 }
 
-// UpgradeStoreDir resolves where artifacts are staged.
-func (c *Config) UpgradeStoreDir() string {
-	if c.Upgrade.StoreDir != "" {
-		return c.Upgrade.StoreDir
+// UpgradeStateDir resolves where the guard keeps its state file, honouring the
+// legacy store_dir spelling so a node that set it keeps using the same
+// directory across this rename (see Upgrade.LegacyStoreDir).
+func (c *Config) UpgradeStateDir() string {
+	if c.Upgrade.StateDir != "" {
+		return c.Upgrade.StateDir
+	}
+	if c.Upgrade.LegacyStoreDir != "" {
+		return c.Upgrade.LegacyStoreDir
 	}
 	return filepath.Join(c.dir(), "upgrades")
 }
 
 // UpgradeEnabled reports whether this node's upgrade machinery is available
-// at all. Always true — upgrades are local-only and unsigned by default, so
-// there is no key or other configuration required just to use the feature.
-// Whether an artifact must be signed to be accepted is a separate, still-real
-// question, answered by whether upgrade.trusted_keys is configured and
-// enforced where it actually matters: Store's ingest/list trust policy (see
-// internal/upgrade/store.go).
+// at all. Always true — there is no key or other configuration required just
+// to use the feature. What a node needs in practice is a Go toolchain, which
+// is a property of the host rather than of this config, and is reported as a
+// preflight failure at upgrade time rather than a config error at load time.
 func (c *Config) UpgradeEnabled() bool { return true }
 
 // UpgradeConfirmSeconds is the health-confirmation window, with its default.
@@ -494,14 +528,6 @@ func (c *Config) UpgradeConfirmSeconds() int {
 		return 90
 	}
 	return c.Upgrade.ConfirmSeconds
-}
-
-// UpgradeKeepArtifacts is how many staged artifacts to retain, with its default.
-func (c *Config) UpgradeKeepArtifacts() int {
-	if c.Upgrade.KeepArtifacts <= 0 {
-		return 3
-	}
-	return c.Upgrade.KeepArtifacts
 }
 
 // Network is a single overlay. Multiple networks coexist on one node, fully
@@ -1921,21 +1947,6 @@ func (c *Config) Validate() error {
 		if err := validateExempt(ex); err != nil {
 			return fmt.Errorf("firewall_exempt[%d]: %w", j, err)
 		}
-	}
-	// A malformed release key must be a loud config error, not a key that
-	// silently never matches. "Nothing verifies against this key" and "this node
-	// trusts no keys" look identical from the outside and mean very different
-	// things, and the difference only surfaces during an upgrade — which is the
-	// worst possible time to discover it.
-	for j, k := range c.Upgrade.TrustedKeys {
-		k = strings.ToLower(strings.TrimSpace(k))
-		if len(k) != 64 {
-			return fmt.Errorf("upgrade.trusted_keys[%d]: an Ed25519 public key is 64 hex characters, got %d", j, len(k))
-		}
-		if _, err := hex.DecodeString(k); err != nil {
-			return fmt.Errorf("upgrade.trusted_keys[%d]: not hex: %w", j, err)
-		}
-		c.Upgrade.TrustedKeys[j] = k
 	}
 	if c.Upgrade.ConfirmSeconds < 0 {
 		return fmt.Errorf("upgrade.confirm_seconds %d is negative", c.Upgrade.ConfirmSeconds)

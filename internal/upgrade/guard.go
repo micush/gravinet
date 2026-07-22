@@ -9,8 +9,9 @@ import (
 	"time"
 )
 
-// stateFile lives in the store directory and records an in-flight upgrade
-// across the process boundary the upgrade itself creates. Everything in this
+// stateFile lives in the upgrade state directory and records an in-flight
+// upgrade across the process boundary the upgrade itself creates. Everything
+// in this
 // file exists for one reason: a node that cannot rejoin the mesh cannot be
 // rescued *over* the mesh, so it has to be able to rescue itself, with no help,
 // while in whatever state the new binary left it.
@@ -45,11 +46,10 @@ const (
 // any type outside this file. A state file the new binary cannot parse is a
 // state file that cannot rescue the node from the new binary.
 type State struct {
-	Phase      Phase  `json:"phase"`
-	ArtifactID string `json:"artifact_id,omitempty"`
-	From       string `json:"from_version,omitempty"`
-	To         string `json:"to_version,omitempty"`
-	Target     string `json:"target,omitempty"` // binary path that was swapped
+	Phase  Phase  `json:"phase"`
+	From   string `json:"from_version,omitempty"`
+	To     string `json:"to_version,omitempty"`
+	Target string `json:"target,omitempty"` // binary path that was swapped
 
 	// Boots counts starts of the new binary since the swap. Incremented at the
 	// top of the daemon's run path, before anything that could plausibly fail,
@@ -83,7 +83,7 @@ type Guard struct {
 	logf    func(string, ...any)
 }
 
-// NewGuard binds a guard to a store directory. restart may be nil, in which
+// NewGuard binds a guard to the upgrade state directory. restart may be nil, in which
 // case a revert restores the binary and reports that a manual restart is needed
 // — better than pretending it recovered.
 func NewGuard(dir string, restart func() error, logf func(string, ...any)) *Guard {

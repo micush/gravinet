@@ -89,6 +89,11 @@ type Backend interface {
 	// LogLevel reports the daemon's current log level (see handleLogLevel).
 	LogLevel() string
 	IsManagerAddr(ip netip.Addr) bool
+	// IsManagerNeighborAddr is the strict, direct-session-only form of
+	// IsManagerAddr, used to gate the remote-upgrade (code-execution) path
+	// where gossip-level manager trust is insufficient. See its doc comment
+	// in the mesh engine.
+	IsManagerNeighborAddr(ip netip.Addr) bool
 	Hostname() string
 	SelfID() string
 	SelfOverlay() netip.Addr
@@ -367,14 +372,25 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/logsize", s.authed(s.handleLogSize))
 	mux.HandleFunc("/api/managed", s.authed(s.handleManaged))
 	mux.HandleFunc("/api/manager", s.authed(s.handleManager))
+	mux.HandleFunc("/api/upgrade/accept-manager", s.authed(s.handleAcceptManagerUpgrades))
 	// Upgrade surface: local-only, per-node. Every handler here enforces its
 	// own session check (upgradeLocalOnly) rather than relying on authed()'s
 	// Managed/Manager bypass — see that function's doc comment.
 	mux.HandleFunc("/api/upgrade", s.authed(s.handleUpgradeHome))
-	mux.HandleFunc("/api/upgrade/local-apply", s.authed(s.handleUpgradeLocalApply))
-	mux.HandleFunc("/api/upgrade/stage", s.authed(s.handleUpgradeStage))
-	mux.HandleFunc("/api/upgrade/stage-source", s.authed(s.handleUpgradeStageSource))
+	mux.HandleFunc("/api/upgrade/source", s.authed(s.handleUpgradeSource))
 	mux.HandleFunc("/api/upgrade/rollback", s.authed(s.handleUpgradeRollback))
+	// remote-apply is the one upgrade endpoint a peer may reach, and only a
+	// directly-connected Manager, and only when this node opted in
+	// (accept_manager_upgrades). It is registered WITHOUT authed() on purpose:
+	// authed()'s bypass would admit a gossip-only "manager", which is too weak
+	// to build and run code as root. The handler does its own stricter gating
+	// (opt-in + IsManagerNeighborAddr, or a genuine local session), so it must
+	// see the raw request rather than an authed()-filtered one.
+	mux.HandleFunc("/api/upgrade/remote-apply", s.handleUpgradeRemoteApply)
+	// push is the manager side: local-only (driven from the node you're on),
+	// streams one uploaded source archive to selected peers' remote-apply
+	// endpoints, which each build it natively.
+	mux.HandleFunc("/api/upgrade/push", s.authed(s.handleUpgradePush))
 	mux.HandleFunc("/api/routeadv", s.authed(s.handleRouteAdv))
 	mux.HandleFunc("/api/keepalive", s.authed(s.handleKeepalive))
 	mux.HandleFunc("/api/peertimeout", s.authed(s.handlePeerTimeout))

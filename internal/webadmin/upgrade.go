@@ -1,6 +1,11 @@
 package webadmin
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -11,20 +16,18 @@ import (
 
 // UpgradeCtl is the daemon's upgrade machinery, handed to the web admin so the
 // handlers below can drive it. Nil means the feature failed to initialize on
-// this node (its store directory couldn't be created, or the running
-// binary's own path couldn't be resolved) — genuine setup failures, not "no
-// trusted release keys configured": upgrades are on by default now and don't
-// need a key at all, see config.UpgradeEnabled.
+// this node (its state directory couldn't be created, or the running binary's
+// own path couldn't be resolved) — genuine setup failures. There is no
+// configuration required to use upgrades at all; see config.UpgradeEnabled.
 type UpgradeCtl struct {
-	Store      *upgrade.Store
 	Guard      *upgrade.Guard
+	StateDir   string // where the guard's state file lives, and where uploads are spooled
 	Target     string // installed binary path this node would replace
 	ConfigPath string
 	Version    string
 	PAM        bool
 
 	ConfirmSeconds func() int
-	KeepArtifacts  func() int
 
 	// Restart puts a freshly-swapped binary into service.
 	Restart func() error
@@ -32,11 +35,18 @@ type UpgradeCtl struct {
 	// snapshot the guard uses to decide what "healthy" means afterwards.
 	Peers func() int
 
-	// Op runs one of the daemon's upgrade operations (list, status, apply,
-	// rollback) and returns its JSON reply. It is the same entry point the CLI
-	// reaches over the control socket, deliberately: the web admin is a second
-	// front door onto one implementation, not a second implementation.
+	// Op runs one of the daemon's upgrade operations (status, apply, rollback)
+	// and returns its JSON reply. It is the same entry point the CLI reaches
+	// over the control socket, deliberately: the web admin is a second front
+	// door onto one implementation, not a second implementation.
 	Op func(op string, body []byte) ([]byte, error)
+
+	// AcceptManagerUpgrades reports this node's opt-in to source archives
+	// pushed by a directly-authenticated Manager peer (config
+	// Upgrade.AcceptManagerUpgrades). Nil or false-returning means the
+	// remote-apply endpoint stays fully closed, exactly as if the feature
+	// did not exist. Only handleUpgradeRemoteApply consults it.
+	AcceptManagerUpgrades func() bool
 }
 
 // SetUpgrade installs the upgrade machinery. Called by the daemon at startup.
@@ -125,11 +135,12 @@ func (s *Server) op(w http.ResponseWriter, name string, body []byte) {
 	w.Write(out)
 }
 
-// handleUpgradeHome is what the tab loads first: this node's own state, plus
-// everything it has staged. Reported even when upgrades are switched off, with
-// enabled=false and the reason — a tab that renders "not found" leaves the
-// operator guessing, and the actual answer ("this node trusts no release keys")
-// is one they can act on in about thirty seconds.
+// handleUpgradeHome is what the tab loads first: this node's own state. There
+// is nothing staged to report alongside it — a build and its apply are one
+// request now. Reported even when the machinery failed to initialize, with
+// enabled=false and the reason, because a tab that renders "not found" leaves
+// the operator guessing at something they could otherwise act on in about
+// thirty seconds.
 func (s *Server) handleUpgradeHome(w http.ResponseWriter, r *http.Request) {
 	if !s.upgradeLocalOnly(w, r) {
 		return
@@ -145,34 +156,73 @@ func (s *Server) handleUpgradeHome(w http.ResponseWriter, r *http.Request) {
 	st := s.upg.Guard.Load()
 	_, backupErr := os.Stat(upgrade.BackupPath(s.upg.Target))
 	writeJSON(w, http.StatusOK, map[string]any{
-		"enabled":         true,
-		"version":         s.upg.Version,
-		"target":          s.upg.Target,
-		"store":           s.upg.Store.Dir(),
-		"pam":             s.upg.PAM,
-		"phase":           st.Phase,
-		"from":            st.From,
-		"to":              st.To,
-		"boots":           st.Boots,
-		"pre_peers":       st.PrePeers,
-		"peers_now":       s.upg.Peers(),
-		"last_error":      st.LastError,
-		"confirm_seconds": s.upg.ConfirmSeconds(),
-		// signing_required tells the browser whether it may offer the plain
-		// binary-only upload (no manifest, no key) or must collect a signed
-		// manifest first — mirrors Store.Verify's own policy exactly, since it's
-		// read from the same trust set.
-		"signing_required":   len(s.upg.Store.Trusted()) > 0,
+		"enabled":            true,
+		"version":            s.upg.Version,
+		"target":             s.upg.Target,
+		"state_dir":          s.upg.StateDir,
+		"pam":                s.upg.PAM,
+		"phase":              st.Phase,
+		"from":               st.From,
+		"to":                 st.To,
+		"boots":              st.Boots,
+		"pre_peers":          st.PrePeers,
+		"peers_now":          s.upg.Peers(),
+		"last_error":         st.LastError,
+		"confirm_seconds":    s.upg.ConfirmSeconds(),
 		"rollback_available": backupErr == nil,
 	})
 }
 
-// handleUpgradeLocalApply applies an already-staged artifact to this node:
-// the request is just its id, since Upload already put the bytes in the
-// store. Runs through the daemon's "apply" op (see controlOp in
-// cmd/gravinet/upgrade.go), the same entry point the CLI reaches over the
-// control socket — one implementation, two front doors.
-func (s *Server) handleUpgradeLocalApply(w http.ResponseWriter, r *http.Request) {
+// spoolUpload streams an upload to a temp file under the state directory,
+// hashing as it goes, and returns the path and hex digest. Spooling rather
+// than streaming straight into a build is what lets one upload serve several
+// consumers: the push handler sends the same bytes to N peers, and every
+// consumer needs a digest computed over exactly what was written, not over
+// what a sender claimed.
+//
+// The caller owns the returned path and must remove it.
+func spoolUpload(dir string, r io.Reader) (path, sum string, err error) {
+	f, err := os.CreateTemp(dir, ".upload-*")
+	if err != nil {
+		return "", "", err
+	}
+	path = f.Name()
+	h := sha256.New()
+	n, copyErr := io.Copy(io.MultiWriter(f, h), io.LimitReader(r, upgrade.MaxSourceUploadSize+1))
+	closeErr := f.Close()
+	if copyErr != nil {
+		os.Remove(path)
+		return "", "", copyErr
+	}
+	if closeErr != nil {
+		os.Remove(path)
+		return "", "", closeErr
+	}
+	if n == 0 {
+		os.Remove(path)
+		return "", "", errors.New("the upload was empty")
+	}
+	if n > upgrade.MaxSourceUploadSize {
+		os.Remove(path)
+		return "", "", fmt.Errorf("upload exceeds the %d-byte size ceiling", int64(upgrade.MaxSourceUploadSize))
+	}
+	return path, hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// handleUpgradeSource is the whole local upgrade surface: upload a gravinet
+// source archive (.tgz/.tar.gz or .zip, detected by content rather than by
+// filename), and this node builds it with its own Go toolchain, preflights the
+// result against its own config, and swaps it in behind the confirm-or-
+// rollback guard.
+//
+// There is no binary upload alongside this, and no staging step before it.
+// gravinet publishes no prebuilt binary for any platform — every fresh
+// checkout is source and nothing else — so a binary upload had no supply to
+// draw on, and an artifact shelf had nothing to hold between a build and an
+// apply that now happen in one request. What replaced both is the thing the
+// platform installers have always done: compile it here, on the machine that
+// will run it.
+func (s *Server) handleUpgradeSource(w http.ResponseWriter, r *http.Request) {
 	if !s.upgradeLocalOnly(w, r) {
 		return
 	}
@@ -183,143 +233,14 @@ func (s *Server) handleUpgradeLocalApply(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "POST required"})
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	r.Body = http.MaxBytesReader(w, r.Body, upgrade.MaxSourceUploadSize)
+	path, sum, err := spoolUpload(s.upg.StateDir, r.Body)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
+	defer os.Remove(path)
+	s.log.Infof("upgrade: building uploaded source (sha256 %s) from the web admin", sum[:12])
+	body, _ := json.Marshal(map[string]any{"src_path": path})
 	s.op(w, "apply", body)
-}
-
-// handleUpgradeStage takes a build and its signed manifest as a multipart
-// upload and ingests them. This is how the first copy of a new build reaches
-// a node from the operator's browser, when they already have a built binary
-// (typically because trusted_keys is configured, so it needs to be signed) —
-// see handleUpgradeStageSource for the no-manifest, source-only path.
-//
-// The manifest is required and must arrive first (the form is ordered): the
-// artifact's bytes can only be verified against a manifest already held, and
-// Ingest refuses to write a single byte anywhere it could later be executed
-// from until it has one. Store.Verify decides whether that manifest actually
-// needs a valid signature (trusted_keys configured) or just needs to be
-// structurally sound (none configured) — this handler doesn't special-case
-// that itself, so it can't drift out of step with what Ingest decides a
-// moment later.
-func (s *Server) handleUpgradeStage(w http.ResponseWriter, r *http.Request) {
-	if !s.upgradeLocalOnly(w, r) {
-		return
-	}
-	if s.upgradeOff(w) {
-		return
-	}
-	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "POST required"})
-		return
-	}
-	mr, err := r.MultipartReader()
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "expected a multipart upload: " + err.Error()})
-		return
-	}
-	var man upgrade.Manifest
-	haveMan := false
-	for {
-		part, err := mr.NextPart()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-			return
-		}
-		switch part.FormName() {
-		case "manifest":
-			b, err := io.ReadAll(io.LimitReader(part, 64<<10))
-			if err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-				return
-			}
-			m, err := upgrade.ParseManifest(b)
-			if err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-				return
-			}
-			// Reject before accepting a single byte of the artifact — a manifest
-			// this node would not accept the binary for is not a manifest worth
-			// spending an upload on. Store.Verify applies this node's actual
-			// trust policy (signature-checked, or structural-only if this node
-			// trusts no release keys), so this can never drift out of step with
-			// what Ingest itself will decide a moment later.
-			if err := s.upg.Store.Verify(m); err != nil {
-				writeJSON(w, http.StatusForbidden, map[string]any{"error": err.Error()})
-				return
-			}
-			man, haveMan = m, true
-		case "artifact":
-			if !haveMan {
-				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "a manifest must be uploaded before the artifact \u2014 use /api/upgrade/stage-source instead if you don't have one (uploads a source .tgz/.tar.gz or .zip, no manifest needed)"})
-				return
-			}
-			if err := s.upg.Store.Ingest(man, part); err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-				return
-			}
-			s.log.Infof("upgrade: staged %s from the web admin", man.ID())
-			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "staged": man.ID()})
-			return
-		}
-	}
-	writeJSON(w, http.StatusBadRequest, map[string]any{"error": "the upload carried no artifact"})
-}
-
-// handleUpgradeStageSource takes an uploaded gravinet source tree as a single
-// request body — a gzip-compressed tar (.tgz/.tar.gz) or a zip (.zip),
-// whichever extractSourceArchive determines it to be from its content — builds
-// it (the same `go build` the platform installers run), and ingests the
-// result exactly like handleUpgradeStage's unsigned binary path does. This
-// exists for the case the raw-binary path doesn't cover: you don't have a
-// built gravinet binary at all, only source — which, for this project, is
-// *every* fresh checkout, since there is no separate prebuilt release
-// artifact anywhere. The installers already do this build step
-// automatically; this is the same step, offered from the browser.
-//
-// zip, alongside the tgz the installers themselves produce, matters here
-// specifically because it's what GitHub's own "Download ZIP" button hands
-// you — the most likely way to get this project's source onto a box that
-// doesn't already have a git client on it — and before this it simply
-// wasn't accepted as an upgrade source at all.
-//
-// Only available in local-only-unsigned mode (no trusted_keys), and for the
-// same reason handleUpgradeStage's unsigned path is: there is no key to check
-// a signature against here even in principle, since nothing about the signed
-// -manifest scheme covers source code, only a built artifact's digest. If you
-// want signed provenance, sign a binary you've already built and use the
-// ordinary binary+manifest upload instead — building from arbitrary uploaded
-// source under a node that trusts release keys would be a hole in that
-// promise, not an extension of it.
-func (s *Server) handleUpgradeStageSource(w http.ResponseWriter, r *http.Request) {
-	if !s.upgradeLocalOnly(w, r) {
-		return
-	}
-	if s.upgradeOff(w) {
-		return
-	}
-	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "POST required"})
-		return
-	}
-	if len(s.upg.Store.Trusted()) > 0 {
-		writeJSON(w, http.StatusForbidden, map[string]any{
-			"error": "this node trusts release keys (upgrade.trusted_keys) \u2014 building from uploaded source has no signature to check and is only offered in local-only-unsigned mode; build and sign a binary yourself and use the ordinary upload instead",
-		})
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxSourceUploadSize)
-	m, err := StageFromSource(s.upg.Store, r.Body, "built from uploaded source via web admin, unsigned (local-only mode)")
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-		return
-	}
-	s.log.Infof("upgrade: built and staged %s from uploaded source via the web admin", m.ID())
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "staged": m.ID(), "unsigned": true, "built_from_source": true})
 }
