@@ -48,7 +48,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "604"
+	version = "606"
 	commit  = "none"
 )
 
@@ -1399,6 +1399,7 @@ func cmdRun(args []string) {
 			webSrv.SetReadmePath(cfg.ReadmePath(*cfgPath, exeDir))
 			webSrv.SetLicensePath(cfg.LicensePath(*cfgPath, exeDir))
 			webSrv.SetGettingStartedPath(cfg.GettingStartedPath(*cfgPath, exeDir))
+			webSrv.SetAPIDocPath(cfg.APIDocPath(*cfgPath, exeDir))
 			webSrv.SetReload(reloadFn)
 			if upg != nil {
 				webSrv.SetUpgrade(upg.webadminCtl())

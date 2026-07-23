@@ -183,7 +183,7 @@ if ($Uninstall) {
   Start-Sleep -Milliseconds 250
   Remove-NetFirewallRule -DisplayName $ServiceName -ErrorAction SilentlyContinue
   $filesFailed = $false
-  foreach ($f in @("gravinet.exe", "wintun.dll", "wintun-prebuilt-binaries-license.txt", "README.md", "LICENSE", "getting-started.md", "meshping.bat")) {
+  foreach ($f in @("gravinet.exe", "wintun.dll", "wintun-prebuilt-binaries-license.txt", "README.md", "LICENSE", "getting-started.md", "API.md", "meshping.bat")) {
     $p = Join-Path $InstallDir $f
     if (Test-Path $p) {
       try { Remove-Item $p -Force -ErrorAction Stop }
@@ -547,13 +547,18 @@ if (Test-Path $meshpingSrc) {
   Write-Host "    note: meshping.bat not found in the package; skipping"
 }
 
-# Install the README, LICENSE, and getting-started.md beside the binary
-# so the web admin's Readme, License, and Getting Started pages can show
-# them.
-foreach ($doc in @("README.md", "LICENSE", "getting-started.md")) {
+# Install the README, LICENSE, getting-started.md, and API.md beside the
+# binary so the web admin's Readme, License, Getting Started, and API pages
+# can show them.
+foreach ($doc in @("README.md", "LICENSE", "getting-started.md", "API.md")) {
   $src = ""
+  # API.md lives under docs/ in the repo, unlike the other three at the repo
+  # root; checking both locations for every name is harmless (the ones that
+  # aren't there just miss) and keeps this one loop instead of a special case.
   foreach ($c in @((Join-Path $here $doc),
-                   (Join-Path (Split-Path -Parent $here) $doc))) {
+                   (Join-Path (Split-Path -Parent $here) $doc),
+                   (Join-Path $here (Join-Path "docs" $doc)),
+                   (Join-Path (Split-Path -Parent $here) (Join-Path "docs" $doc)))) {
     if (Test-Path $c) { $src = $c; break }
   }
   if ($src) {

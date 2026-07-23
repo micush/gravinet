@@ -416,7 +416,7 @@ if [ "$ACTION" = uninstall ]; then
   rm -f /etc/systemd/system/${SERVICE}.service
   systemctl daemon-reload 2>/dev/null || true
   rm -f "$BIN" "$PKGMAN" "$MESHPING" /etc/pam.d/gravinet
-  rm -f "$PREFIX/share/doc/gravinet/README.md" "$PREFIX/share/doc/gravinet/LICENSE" "$PREFIX/share/doc/gravinet/getting-started.md"; rmdir "$PREFIX/share/doc/gravinet" 2>/dev/null || true
+  rm -f "$PREFIX/share/doc/gravinet/README.md" "$PREFIX/share/doc/gravinet/LICENSE" "$PREFIX/share/doc/gravinet/getting-started.md" "$PREFIX/share/doc/gravinet/API.md"; rmdir "$PREFIX/share/doc/gravinet" 2>/dev/null || true
   # Close the ports this installer opened. Done while the config is still around,
   # since that's where the port numbers come from.
   echo "==> firewalld"
@@ -720,11 +720,14 @@ else
   echo "    note: meshping not found in the package; skipping"
 fi
 
-echo "==> installing docs (README, LICENSE, getting-started.md)"
+echo "==> installing docs (README, LICENSE, getting-started.md, API.md)"
 DOCDIR="$PREFIX/share/doc/gravinet"
-for doc in README.md LICENSE getting-started.md; do
+for doc in README.md LICENSE getting-started.md API.md; do
   src=""
-  for cand in "$REPO/$doc" "$SCRIPTDIR/$doc" "$SCRIPTDIR/../$doc"; do
+  # API.md lives under docs/ in the repo, unlike the other three at the repo
+  # root; checking both locations for every name is harmless (the ones that
+  # aren't there just miss) and keeps this one loop instead of a special case.
+  for cand in "$REPO/$doc" "$REPO/docs/$doc" "$SCRIPTDIR/$doc" "$SCRIPTDIR/../$doc" "$SCRIPTDIR/docs/$doc" "$SCRIPTDIR/../docs/$doc"; do
     [ -f "$cand" ] && { src="$cand"; break; }
   done
   if [ -n "$src" ]; then

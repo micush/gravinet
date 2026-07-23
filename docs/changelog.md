@@ -38,6 +38,179 @@ assuming it didn't happen.
 
 ---
 
+## v606 — 2026-07-23
+
+Four changes: fixed a double-popup on System > Power, added an Info > API
+page, documented the four `/api/system/*` and `/api/api-doc` endpoints in
+`docs/API.md`, and converted System > Time to autosave.
+
+**System > Power: one popup, not two.** Clicking Execute showed a `confirm()`
+("Restart this node now? ... You will lose access...") and then, on success,
+a second `alert()` announcing the node was restarting — two dialogs to
+dismiss for one click, the second one arriving right as the connection might
+already be dropping. The `confirm()` stays (it's the one that matters — it's
+what stops an accidental reboot); the post-action `alert()` is gone, replaced
+by an inline status line appended to the card, with Execute/Cancel disabled
+for the duration of the request.
+
+**New: Info > API**, reading `docs/API.md` from disk — deliberately not a
+second, in-app copy of the API reference that could drift from it. Mirrors
+the existing Readme/License/Getting-Started mechanism exactly, down to the
+config override name:
+
+- `config.APIDocFile` (`api_doc_path` in config JSON) +
+  `Config.APIDocPath()`, mirroring `GettingStartedFile`/`GettingStartedPath`.
+- `Server.apiDocPath` + `SetAPIDocPath()`, `handleAPIDoc` (reuses the existing
+  generic `serveDocFile` — reads fresh from disk every request), routed at
+  `GET /api/api-doc`, wired from `main.go` alongside the other `Set*Path`
+  calls.
+- All five install scripts (Linux, macOS, FreeBSD, OpenBSD, Windows) now
+  install **and uninstall** `API.md` alongside the other three docs. It
+  needed one extra thing the other three didn't: `API.md` lives at
+  `docs/API.md` in the repo, not the repo root, so every install script's doc
+  candidate-path search gained a `docs/` variant for all four filenames
+  (harmless for the three that aren't there) rather than a special case just
+  for this one file.
+- `secAPIDoc` (`ui.go`), added to `NAV_GROUPS['info']` between Getting
+  Started and License, dispatched as `api:secAPIDoc`. `label()` gained `api`
+  in its full-uppercase set (`NAT`/`QOS`/`DNS`/`BGP`/`API`) so the page title
+  reads "API", not "Api".
+- `TestHandleAPIDoc` added to `readme_test.go`, mirroring
+  `TestHandleGettingStarted` exactly (available/unavailable shapes).
+
+**`docs/API.md` updated** with everything the last few sessions had shipped
+without documenting: `POST /api/system/power`, `POST /api/system/time`,
+`POST /api/system/users` (all three: request/response shapes, the
+`restart`/`can_*`/`*_known` fields, validation rules, and — since all three
+follow the currently selected node rather than being local-only — a note
+tying them to the existing [management proxy](#the-management-proxy)
+section rather than re-explaining proxying from scratch), plus
+`GET /api/api-doc` alongside the other three doc endpoints. Added four rows
+to the Quick reference table and four new `curl` examples. The "Known gaps"
+section didn't need changes — the proxy's actual blocklist (checked against
+`cluster.go`) was already documented accurately and doesn't include any of
+these three.
+
+**System > Time: autosave, no Save buttons**, matching the convention every
+settings-page text field in this app already uses (`onblur` triggers the
+save; Enter blurs the field; an invalid or unchanged value reverts without a
+round trip) — see `internal/webadmin/ui.go`'s Settings section for the
+pre-existing `saveLZ`/`saveRA`/`saveKA` examples this mirrors.
+
+- **Timezone**: saves on blur; reverts to the last-known value on an empty
+  or rejected entry.
+- **Time servers**: saves on blur. The confirm-before-disabling-sync dialog
+  is preserved, but now fires only when the edit actually turns sync off (an
+  empty field where there were servers a moment ago) rather than on every
+  blur, so tabbing through an untouched or still-filled field never prompts.
+  The hint text now says explicitly what the field already silently accepted
+  — **commas or spaces both work** (`raw.split(/[\s,]+/)` was already doing
+  this; only the visible copy was silent about it) — with an example of each
+  form.
+- **Manual clock set kept its button, on purpose.** This isn't a persisted
+  setting — the code's own comments are explicit that nothing here is stored,
+  the clock is set once and left alone — so autofiring it on blur would mean
+  tabbing away from the field quietly reset the host's clock to whatever was
+  sitting in the box. That's a materially different kind of risk than an
+  unwanted timezone or NTP-server change, both of which just reapply the same
+  value again. The card's hint now says why it's the one exception on the
+  page, so the inconsistency with the two fields above doesn't read as a
+  leftover oversight.
+
+## v605 — 2026-07-23
+
+**New: System > Users** — the third of parapet's System items recreated, sitting
+between **Time** and **Power** in the rail (Power stays pinned last as the
+group's most destructive item). Local OS accounts permitted to sign in to this
+console under gravinet's system-auth modes.
+
+Scoped deliberately: this manages accounts for auth_mode **pam**
+(linux/macos/freebsd), **system** (openbsd's bsd_auth), and **windows** —
+never **local**. auth_mode "local" authenticates against `web_admin.users`, a
+list of PBKDF2 hashes gravinet owns directly (`gravinet genpass`,
+`GenerateCredential`) with no OS account behind any name at all, so this page
+never touches that list. It still works while a node is set to "local" — the
+GET reply's `auth_mode` field drives a passing note explaining that accounts
+managed here have no effect on login until the mode is switched — rather than
+refusing outright.
+
+`web_admin.allow_users` is the gate this page manages: empty/nil means
+"any account the authenticator accepts may sign in" (surfaced as an explicit
+"unrestricted" note, since an empty table would otherwise look broken or
+locked down), a populated list restricts sign-in to just those names. That's
+gravinet's equivalent of the Unix group parapet's Users page manages
+membership of — the same design decision already used for the QoS/Firewall
+catalog adaptations elsewhere in this UI.
+
+- **Backend** (`internal/service/sysusers.go`, new): `ListSystemUsers`,
+  `AddSystemUser`, `SetSystemUserPassword`, `SetSystemUserExpiry`,
+  `DeleteSystemUser`, structured like `hosttime.go`/`power.go` — typed reads,
+  one function per mutation, each `(ok, hint)`, each dispatching on
+  `runtime.GOOS`. New accounts are login-only: no home directory, nologin
+  shell where the platform has one. Per-platform tooling: linux uses
+  useradd/userdel/usermod + chpasswd (matching parapet exactly); freebsd uses
+  `pw(8)`; openbsd uses useradd/userdel/usermod plus `encrypt(1)` piped into
+  `usermod -p` for a bcrypt hash; macOS uses `dscl` (create/delete/password
+  only — no simple built-in account expiry, so `CanExpiry` is false there);
+  windows uses PowerShell's LocalAccounts module
+  (New-LocalUser/Set-LocalUser/Remove-LocalUser). Passwords never touch a
+  command line or argv on any platform: chpasswd/pw read them on stdin,
+  OpenBSD's `encrypt` reads one on stdin, and the Windows backend hands its
+  password to PowerShell through an environment variable rather than
+  `-Command` text.
+- **Validation**: `validUsername` mirrors parapet's `valid_username` exactly
+  (POSIX portable-filename style, 1–32 chars, lowercase, starts with a
+  letter/underscore) and refuses `root`/`administrator` outright; `validPassword`
+  rejects empty passwords and the characters (newline, CR, `:`) that could
+  break out of a `name:password` stdin line the Unix tools parse
+  field-by-field.
+- **Handler** (`handleSystemUsers`, `/api/system/users`): GET reads live state;
+  POST takes `{op, username, password, expires_unix}` for `add` / `password` /
+  `expiry` / `delete`. `add` creates-or-reuses (never recreates an existing
+  account, matching parapet's `add_user`) and appends to `allow_users`; `delete`
+  removes the OS account and drops the name from `allow_users`. Both carry
+  `restart:true` — `s.auth`'s allow-set is built once in `New()`, so an
+  `allow_users` change needs a restart to take hold, the same convention
+  `handleKey` and friends already use. Refuses to let the signed-in session
+  delete the account it's currently authenticated as (checked via
+  `validSession`), so a mistaken click can't orphan the very session that made
+  it. Like Power and Time, follows the currently selected node — not in
+  `LOCAL_API` — so a console account can be added or fixed on a remote peer
+  from here.
+- **UI** (`secUsers`): a table, not a card-per-setting form like Time — Users is
+  a list of entries, so it follows the same checkbox-select + `+`/`\u2212`
+  toolbar idiom as Allow List/Hosts/DNS/Routes rather than inventing a new
+  shape. Per-row expiry is dblclick-to-edit (date input, "never" to clear,
+  hidden entirely when `can_expiry` is false); a masked password field with the
+  same show/hide toggle the BGP neighbor password editor uses swaps in for a
+  "password\u2026" action, going through the `add` op so it doubles as
+  "create the OS account if it's listed but missing" without the operator
+  needing to know which case they're in. The add-row draft is name + password
+  + optional expiry in one row, matching `hostAddRow`'s shape.
+- **Tests**: `internal/service/sysusers_test.go` (validation/injection
+  refusals, plus the shadow/`pw usershow`/`userinfo`/`net user` expiry
+  parsers — writing these caught two real bugs, see below) and
+  `internal/webadmin/systemusers_handler_test.go` (GET reply shape,
+  validation-only rejections that never reach a real OS command, the
+  self-delete guard, LOCAL_API placement, nav ordering).
+
+Two real parsing bugs were caught by the new tests before shipping: the
+Windows and OpenBSD expiry readers were splitting on the *first* colon in the
+line to find the label/value separator, but the value itself (a timestamp
+like `12:00:00`) also contains colons — so a real "Account expires ...
+12:00:00 AM" line was being sliced into the middle of the time rather than
+after the label, silently reporting the expiry as unknown. Both now strip the
+known label text directly instead of guessing from colon position.
+
+A third, unrelated bug surfaced while writing this page: a literal backtick
+inside a Go doc comment in the new UI code would have terminated the
+Go-source raw string `indexHTML` is embedded in early, truncating the served
+page mid-file. Caught by parsing the extracted embedded JS as a standalone
+script before considering the change done, rather than assuming a clean `go
+build` alone proves the generated HTML/JS is intact.
+
+Remaining parapet System items: resolver and snmp.
+
 ## v604 — 2026-07-23
 
 **New: System > Time** — the second of parapet's System items recreated (after

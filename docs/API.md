@@ -285,10 +285,14 @@ cookie, or a qualifying fleet-manager mesh session — see
 | GET/POST | `/api/loglevel` | Read/set the daemon's log level |
 | GET/POST | `/api/logsize` | Read/set the log file's size cap |
 | POST | `/api/restart` | Restart the gravinet service |
+| POST | `/api/system/power` | Reboot or shut down the host (not just the service) |
+| GET/POST | `/api/system/time` | Read/set the host's clock, timezone, and NTP sync |
+| GET/POST | `/api/system/users` | Manage OS accounts permitted to sign in (pam/bsd_auth/windows auth modes) |
 | GET | `/api/about` | Version/OS/architecture/Go runtime info |
 | GET | `/api/readme` | This node's bundled README.md |
 | GET | `/api/license` | This node's bundled LICENSE |
 | GET | `/api/getting-started` | This node's bundled getting-started.md |
+| GET | `/api/api-doc` | This node's bundled API.md (this document, served to the web admin) |
 
 ## Status & configuration
 
@@ -1352,6 +1356,167 @@ disappear):
 or, if this platform/install has no way to self-restart,
 `{"error": "..."}` with a hint.
 
+### `POST /api/system/power`
+
+Reboots or shuts down the **host** — the whole machine gravinet runs on,
+not just the gravinet service (that's [`/api/restart`](#post-apirestart)
+above). Unlike every endpoint above, this follows the currently selected
+node like an ordinary proxied call (see [The management
+proxy](#the-management-proxy)) rather than being local-only, so a drifted
+or misbehaving peer can be rebooted from the console you're already
+logged into.
+
+```json
+{"action": "restart", "when": "in", "minutes": 5}
+```
+
+- `action`: `"restart"`, `"shutdown"`, or `"cancel"`.
+- `when` (ignored for `"cancel"`): `"now"`, `"in"`, or `"at"`.
+- `minutes`: required, positive, when `when` is `"in"` (capped at 10080,
+  i.e. 7 days).
+- `time`: required `"HH:MM"` (24-hour) when `when` is `"at"` — resolved to
+  the next occurrence of that wall-clock time in the host's own local
+  zone, so `"at 02:00"` at 09:00 local means ~17 hours out, never a
+  negative delay.
+
+```json
+{"ok": true, "action": "restart", "when": "in 5 minute(s)"}
+```
+
+`cancel` replies `{"ok": true, "action": "cancel"}` on success. Only Linux
+(`shutdown -c`) and Windows (`shutdown /a`) expose a first-class cancel;
+macOS and the BSDs don't, so `cancel` there fails with
+`{"error": "..."}` rather than pretending to have cancelled something.
+Any rejection (bad action/when, no delay given for `"in"`, this platform
+having no usable shutdown tooling at all) is `{"error": "..."}` with
+`400`.
+
+### `POST /api/system/time`
+
+Reads or changes the host's clock, timezone, and NTP settings — and,
+like Power, follows the currently selected node rather than being
+local-only. Nothing here is stored in gravinet's own config; the OS is
+always the source of truth, so a change made by hand with `timedatectl`
+(or the platform equivalent) between requests shows up on the next read
+rather than being silently overwritten.
+
+`GET` returns the live state:
+
+```json
+{"now": "2026-07-23T14:30:00-07:00", "now_ms": 1785000000000,
+ "timezone": "America/Phoenix", "timezone_style": "iana", "abbrev": "MST",
+ "offset_seconds": -25200, "ntp_enabled": true, "ntp_known": true,
+ "synchronized": true, "sync_known": true,
+ "servers": ["0.pool.ntp.org", "1.pool.ntp.org"], "manager": "systemd-timesyncd",
+ "can_timezone": true, "can_ntp": true, "can_clock": true, "hint": "",
+ "skew_tolerance_seconds": 120}
+```
+
+`timezone_style` is `"windows"` on Windows (a Windows zone id like
+`"US Mountain Standard Time"`, not an IANA name — `tzutil` rejects IANA
+names outright) and `"iana"` everywhere else. The `can_*` flags and
+`ntp_known`/`sync_known` distinguish "this host reports the setting is
+off" from "this host has no way to tell" — a false `can_*`/`*_known` is
+explained in `hint`, never silently treated as "off"/"no". Every `restart`
+this node rejects for being too far outside `skew_tolerance_seconds` of
+another node's clock (the mesh handshake's own replay-window bound) is
+the reason this page exists at all; the field is exported here rather
+than hardcoded client-side so it can never drift from what the engine
+actually enforces.
+
+`POST` takes one op at a time:
+
+```json
+{"op": "timezone", "timezone": "America/Phoenix"}
+{"op": "ntp", "enabled": true, "servers": ["0.pool.ntp.org", "1.pool.ntp.org"]}
+{"op": "clock", "datetime": "2026-07-23T14:30:00"}
+```
+
+- `timezone`: an IANA zone name (or, on Windows, a Windows zone id per
+  `timezone_style` above).
+- `ntp`: `enabled: false` turns sync off; `enabled: true` with an empty
+  `servers` array is rejected — **filling in the server list is the on
+  switch, clearing it is the off switch**, matching what the web UI's
+  single field does when you clear it. `datetime` for `clock` is
+  unzoned/local — parsed in the host's own timezone as shown by `GET`,
+  never UTC — and only accepted while NTP is off (a running sync daemon
+  would put the clock back within seconds, so this is refused outright
+  rather than silently overwritten a moment later).
+
+Every successful `POST` replies with the same shape `GET` does (freshly
+re-read from the host, not an echo of the request — a requested zone the
+host doesn't actually have, or a sync daemon overriding the clock a
+moment later, are both real possibilities this makes visible) plus
+`"ok": true` and, on a partial success, a `"note"`. A rejected request is
+`{"error": "..."}` with `400`.
+
+### `POST /api/system/users`
+
+Manages the local OS accounts permitted to sign in under gravinet's
+system-auth modes — `auth_mode` `"pam"` (linux/macos/freebsd), `"system"`
+(openbsd's bsd_auth), or `"windows"`. Never `auth_mode` `"local"`, which
+authenticates against `web_admin.users` (a list of PBKDF2 hashes gravinet
+owns directly — see `gravinet genpass`) and has no OS account behind any
+name at all; this endpoint never touches that list, and still
+works while a node is set to `"local"` (the `auth_mode` field in the `GET`
+reply is there so a caller can explain that accounts managed here have no
+effect on login until the mode is switched, rather than the endpoint
+refusing outright). Like Power and Time, follows the currently selected
+node.
+
+`web_admin.allow_users` is the gate this endpoint manages: empty/nil means
+any account the authenticator accepts may sign in; a populated list
+restricts sign-in to just those names. Changing it needs a restart to take
+effect (the allow-set is built once at startup), so `add` and `delete`
+both reply with `"restart": true`.
+
+`GET` returns the live state for every name currently in `allow_users`:
+
+```json
+{"users": [{"name": "bob", "exists": true, "expires_unix": 0,
+            "expiry_known": true, "expired": false}],
+ "unrestricted": false, "can_manage": true, "can_expiry": true,
+ "manage_hint": "", "expiry_hint": "", "auth_mode": "pam"}
+```
+
+`unrestricted: true` (with an empty-looking `users` list, or one shorter
+than you'd expect) means `allow_users` isn't set at all — not that
+nothing is configured. `expires_unix` is epoch seconds, `0` meaning
+never; `expiry_known: false` means this host has no way to report expiry
+at all (true on macOS, which has no simple built-in account-expiry
+mechanism — `can_expiry` is `false` there too) rather than the account
+having no expiry.
+
+`POST` takes one op at a time:
+
+```json
+{"op": "add", "username": "bob", "password": "hunter2", "expires_unix": 0}
+{"op": "password", "username": "bob", "password": "hunter2"}
+{"op": "expiry", "username": "bob", "expires_unix": 1800000000}
+{"op": "delete", "username": "bob"}
+```
+
+- `add`: creates a login-only OS account (no home directory, nologin
+  shell where the platform has one) if it doesn't already exist —
+  **never recreates one that does**, just resets its password and expiry
+  — and adds `username` to `allow_users`. One call covers both "first
+  password for a name that's listed but has no OS account behind it yet"
+  and "reset an existing account's password".
+- `password` / `expiry`: act only on an already-existing OS account;
+  `expiry`'s `expires_unix: 0` clears the expiry (never expires).
+- `delete`: removes the OS account and drops it from `allow_users`.
+  Refused with `400` if `username` is the account the calling session is
+  currently authenticated as — deleting your own account mid-session
+  would immediately orphan it.
+
+`username` is validated the same way on every op: 1–32 lowercase
+characters, starting with a letter or underscore, then
+letters/digits/underscore/hyphen — and `root`/`administrator` are always
+refused. Passwords are never placed on a command line or in argv on any
+platform. A rejected request (bad username/password, no such account for
+`password`/`expiry`/`delete`, this host having no usable account-management
+tooling at all) is `{"error": "..."}` with `400`.
+
 ### `GET /api/about`
 
 ```json
@@ -1362,15 +1527,19 @@ or, if this platform/install has no way to self-restart,
 
 ## Documentation endpoints
 
-Three endpoints serve this node's own bundled documentation files as
+Four endpoints serve this node's own bundled documentation files as
 JSON, read fresh from disk each request (so an updated file shows without
 a restart):
 
 - **`GET /api/readme`** — the project README.
 - **`GET /api/license`** — the project LICENSE.
 - **`GET /api/getting-started`** — `getting-started.md`.
+- **`GET /api/api-doc`** — `API.md`, this document. The web admin's Info
+  → API page renders it natively rather than keeping a second, in-app
+  copy of the API surface that could quietly drift from what's actually
+  documented here.
 
-All three share one shape:
+All four share one shape:
 
 ```json
 {"text": "# gravinet\n\n...", "path": "/usr/local/share/gravinet/README.md", "available": true}
@@ -1642,6 +1811,29 @@ curl -sk -b cookies.txt -X POST $HOST/api/upgrade/push \
 ### Restart the service
 
 ```bash
+curl -sk -b cookies.txt -X POST $HOST/api/restart
+```
+
+### Reboot the host in 10 minutes
+
+```bash
+curl -sk -b cookies.txt -X POST $HOST/api/system/power \
+  -d '{"action":"restart","when":"in","minutes":10}'
+```
+
+### Turn on NTP with two servers
+
+```bash
+curl -sk -b cookies.txt -X POST $HOST/api/system/time \
+  -d '{"op":"ntp","enabled":true,"servers":["0.pool.ntp.org","1.pool.ntp.org"]}'
+```
+
+### Add a console user and let them sign in
+
+```bash
+curl -sk -b cookies.txt -X POST $HOST/api/system/users \
+  -d '{"op":"add","username":"bob","password":"hunter2"}'
+# allow_users now includes "bob"; restart for it to take effect
 curl -sk -b cookies.txt -X POST $HOST/api/restart
 ```
 

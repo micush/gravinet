@@ -135,6 +135,7 @@ type Server struct {
 	readmePath         string       // optional: enables the /api/readme view
 	licensePath        string       // optional: enables the /api/license view
 	gettingStartedPath string       // optional: enables the Info -> Getting Started page (markdown-rendered)
+	apiDocPath         string       // optional: enables the Info -> API page (reads API.md from disk, markdown-rendered)
 	reload             func() error // optional: re-applies config live after an edit
 	cfgMu              sync.Mutex   // serializes config-file read-modify-write
 
@@ -187,6 +188,15 @@ func (s *Server) SetLicensePath(path string) { s.licensePath = path }
 // same graceful-degradation shape as Readme/License — the sidebar item
 // itself is always present, matching those two.
 func (s *Server) SetGettingStartedPath(path string) { s.gettingStartedPath = path }
+
+// SetAPIDocPath enables the Info -> API page by pointing it at API.md, the
+// HTTP API reference, rendered natively via mdRender exactly like
+// Readme/Getting-Started. Reads the file from disk on every request rather
+// than embedding a copy of it in the UI, so there is exactly one place the
+// API surface is documented and it can't silently drift from what the
+// running binary actually serves. Empty shows the same graceful "not
+// installed" message as Readme/License/Getting-Started.
+func (s *Server) SetAPIDocPath(path string) { s.apiDocPath = path }
 
 // SetReload installs the callback that re-applies the config live after the web
 // UI edits it (firewall/NAT/QoS/bandwidth take effect immediately; structural
@@ -369,6 +379,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/restart", s.authed(s.handleRestart))
 	mux.HandleFunc("/api/system/power", s.authed(s.handleSystemPower)) // reboot/shut down the host (System > Power)
 	mux.HandleFunc("/api/system/time", s.authed(s.handleSystemTime))   // host clock / timezone / NTP (System > Time)
+	mux.HandleFunc("/api/system/users", s.authed(s.handleSystemUsers)) // console OS accounts (System > Users)
 	mux.HandleFunc("/api/cluster", s.authed(s.handleCluster))
 	mux.HandleFunc("/api/loglevel", s.authed(s.handleLogLevel))
 	mux.HandleFunc("/api/logsize", s.authed(s.handleLogSize))
@@ -410,6 +421,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/readme", s.authed(s.handleReadme))
 	mux.HandleFunc("/api/license", s.authed(s.handleLicense))
 	mux.HandleFunc("/api/getting-started", s.authed(s.handleGettingStarted))
+	mux.HandleFunc("/api/api-doc", s.authed(s.handleAPIDoc))
 	mux.HandleFunc("/api/about", s.authed(s.handleAbout))
 	mux.HandleFunc("/api/metrics", s.authed(s.handleMetrics))
 	mux.HandleFunc("/api/capture/interfaces", s.authed(s.handleCaptureInterfaces))

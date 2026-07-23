@@ -102,7 +102,7 @@ if [ "$ACTION" = uninstall ]; then
   FW=/usr/libexec/ApplicationFirewall/socketfilterfw
   [ -x "$FW" ] && "$FW" --remove "$BIN" >/dev/null 2>&1 || true
   rm -f "$PLIST" "$BIN" "$PKGMAN" "$MESHPING" /etc/pam.d/gravinet
-  rm -f "$PREFIX/share/doc/gravinet/README.md" "$PREFIX/share/doc/gravinet/LICENSE" "$PREFIX/share/doc/gravinet/getting-started.md"; rmdir "$PREFIX/share/doc/gravinet" 2>/dev/null || true
+  rm -f "$PREFIX/share/doc/gravinet/README.md" "$PREFIX/share/doc/gravinet/LICENSE" "$PREFIX/share/doc/gravinet/getting-started.md" "$PREFIX/share/doc/gravinet/API.md"; rmdir "$PREFIX/share/doc/gravinet" 2>/dev/null || true
   echo "==> removed $BIN, $PKGMAN, $MESHPING, $PLIST, the PAM file, and the docs (config at $CONFIG left in place)"
   exit 0
 fi
@@ -356,13 +356,16 @@ if [ -x "$FW" ]; then
   "$FW" --unblockapp "$BIN" >/dev/null 2>&1 || true
 fi
 
-echo "==> installing docs (README, LICENSE)"
+echo "==> installing docs (README, LICENSE, getting-started.md, API.md)"
 DOCDIR="$PREFIX/share/doc/gravinet"
 SCRIPTDIR="$(dirname "$0")"
 install -d -m 0755 "$DOCDIR"
-for doc in README.md LICENSE getting-started.md; do
+for doc in README.md LICENSE getting-started.md API.md; do
   src=""
-  for cand in "$REPO/$doc" "$SCRIPTDIR/$doc" "$SCRIPTDIR/../$doc"; do
+  # API.md lives under docs/ in the repo, unlike the other three at the repo
+  # root; checking both locations for every name is harmless and keeps this
+  # one loop instead of a special case.
+  for cand in "$REPO/$doc" "$REPO/docs/$doc" "$SCRIPTDIR/$doc" "$SCRIPTDIR/../$doc" "$SCRIPTDIR/docs/$doc" "$SCRIPTDIR/../docs/$doc"; do
     [ -f "$cand" ] && { src="$cand"; break; }
   done
   if [ -n "$src" ]; then

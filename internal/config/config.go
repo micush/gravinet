@@ -247,6 +247,14 @@ type Config struct {
 	// html version redundant, so it's gone rather than kept in sync forever).
 	GettingStartedFile string `json:"getting_started_path,omitempty"`
 
+	// APIDocFile overrides where the web admin reads API.md (the HTTP API
+	// reference shown under Info -> API) from; empty means search the
+	// install-standard locations (see APIDocPath). Same shape as
+	// ReadmeFile/LicenseFile/GettingStartedFile: the page renders this file's
+	// own markdown natively rather than keeping a second, in-app copy that
+	// could drift from it.
+	APIDocFile string `json:"api_doc_path,omitempty"`
+
 	// Networks are independent overlays multiplexed on this node.
 	Networks []Network `json:"networks"`
 
@@ -922,6 +930,15 @@ func (c *Config) LicensePath(configPath, exeDir string) string {
 // see GettingStartedFile's doc comment for why there's only one file now.)
 func (c *Config) GettingStartedPath(configPath, exeDir string) string {
 	return resolveDocPath("getting-started.md", c.GettingStartedFile, configPath, exeDir)
+}
+
+// APIDocPath resolves where API.md lives on disk, the same way as
+// ReadmePath/LicensePath/GettingStartedPath. An explicit api_doc_path
+// overrides the search. The Info -> API page reads this file fresh on every
+// request rather than embedding a copy in the UI, so it can never drift out
+// of date with the actual endpoint set the running binary exposes.
+func (c *Config) APIDocPath(configPath, exeDir string) string {
+	return resolveDocPath("API.md", c.APIDocFile, configPath, exeDir)
 }
 
 // resolveDocPath finds an installed doc file (README/LICENSE) on disk, trying the

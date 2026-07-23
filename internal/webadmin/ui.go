@@ -759,11 +759,13 @@ const NAV_GROUPS = [
   { name:'system', items: [
     ['upgrade', 'check and apply a new gravinet binary on this node; local only, no peer can trigger this'],
     ['time', 'this host\u2019s clock, timezone, and NTP synchronization'],
+    ['users', 'local OS accounts permitted to sign in to this console'],
     ['power', 'restart or shut down this host'],
   ]},
   { name:'info', items: [
     ['readme', 'project documentation'],
     ['getting-started', 'the full onboarding walkthrough'],
+    ['api', 'HTTP API reference'],
     ['license', 'license information'],
     ['about', 'build and host identity'],
   ]},
@@ -780,7 +782,7 @@ function label(s){
   if (s==='bgp-peers') return 'BGP Peers';
   if (s==='getting-started') return 'Getting Started';
   if (s==='capture') return 'Packet Capture';
-  return s==='nat'||s==='qos'||s==='dns'||s==='bgp' ? s.toUpperCase() : s.charAt(0).toUpperCase()+s.slice(1);
+  return s==='nat'||s==='qos'||s==='dns'||s==='bgp'||s==='api' ? s.toUpperCase() : s.charAt(0).toUpperCase()+s.slice(1);
 }
 
 // sectionVisible gates sections whose availability depends on a runtime
@@ -2305,8 +2307,8 @@ function renderSection() {
        upgrade:secUpgrade,
        metrics:infoMetrics, 'mesh-peers':infoMeshPeers, capture:infoCapture, speedtest:infoSpeedtest, latency:infoLatency,
        'route-table':infoRoutes, 'bgp-peers':secBgpPeers, 'hosts-file':infoHosts, 'dns-state':infoDNS,
-       time:secTime, power:secPower,
-       logs:secLogs, readme:secReadme, 'getting-started':secGettingStarted, license:secLicense, about:infoAbout }[state.section])(c, nets);
+       time:secTime, users:secUsers, power:secPower,
+       logs:secLogs, readme:secReadme, 'getting-started':secGettingStarted, api:secAPIDoc, license:secLicense, about:infoAbout }[state.section])(c, nets);
   }
   c.querySelectorAll('table').forEach(enhanceTable);
 }
@@ -5538,12 +5540,20 @@ function secPower(c){
       ? 'This reboots the entire host machine, not just gravinet.'
       : 'This powers off the entire host machine; it stays down, blocking all traffic, until powered on out of band.';
     if (!confirm(verb.charAt(0).toUpperCase()+verb.slice(1) + ' ' + nodeLabel() + ' ' + whenText + '?\n\n' + warn + '\n\nYou will lose access to this console' + (state.target ? ' for that node' : '') + '.')) return;
+    execBtn.disabled = true; cancelBtn.disabled = true;
     const r = await api('/api/system/power', { method:'POST', body: JSON.stringify(payload) });
-    if (!r.ok) { alert((r.body && r.body.error) || 'power action failed'); return; }
+    if (!r.ok) { alert((r.body && r.body.error) || 'power action failed'); execBtn.disabled = false; cancelBtn.disabled = false; return; }
+    // One popup (the confirm above) is enough for an action this disruptive;
+    // stack a second alert() on top of it and the operator has to dismiss a
+    // dialog for a connection that may already be on its way down. Status
+    // goes inline instead.
     const w = (r.body && r.body.when) || 'now';
-    alert(w === 'now'
-      ? nodeLabel() + ' is ' + (isRestart ? 'restarting' : 'shutting down') + '\u2026'
-      : nodeLabel() + ' will ' + verb + ' ' + w + '.');
+    const status = $('<div class="hint" style="margin-top:10px">'
+      + (w === 'now'
+          ? esc(nodeLabel()) + ' is ' + (isRestart ? 'restarting' : 'shutting down') + '\u2026'
+          : esc(nodeLabel()) + ' will ' + verb + ' ' + esc(w) + '.')
+      + '</div>');
+    card.appendChild(status);
   };
 
   cancelBtn.onclick = async () => {
@@ -5678,21 +5688,28 @@ function secTime(c){
         + '<input id="tz-in"'+(windowsZones?'':' list="tz-list"')+' value="'+esc(t.timezone||'')+'" placeholder="'
         + (windowsZones ? 'e.g. US Mountain Standard Time' : 'type to search \u2014 e.g. America/Phoenix, Europe/London')
         + '" style="flex:1;min-width:240px"></div>');
-      const save = $('<button class="sm">Save</button>');
-      row.appendChild(save);
       tzCard.appendChild(row);
       tzCard.appendChild($('<div class="hint" style="margin:8px 0 0">'
         + (windowsZones
             ? 'A Windows time-zone id, as listed by <code>tzutil /l</code>. IANA names like America/Phoenix are not accepted here.'
             : 'An IANA zone name. This changes the whole host\u2019s timezone, not just what this page displays.')
+        + ' Saves automatically when you click or tab away.'
         + '</div>'));
-      save.onclick = async () => {
-        const tz = row.querySelector('#tz-in').value.trim();
-        if (!tz){ alert('Enter a timezone.'); return; }
+      // Auto-saves on blur, the same convention every settings field in this
+      // app uses \u2014 no separate Save button. Reverts to the last-known-good
+      // value on an empty or rejected entry rather than leaving a dangling
+      // edit the page didn't actually apply.
+      const tzIn = row.querySelector('#tz-in');
+      let tzLast = t.timezone || '';
+      const saveTz = async () => {
+        const tz = tzIn.value.trim();
+        if (!tz || tz === tzLast){ tzIn.value = tzLast; return; }
         const r = await api('/api/system/time', { method:'POST', body: JSON.stringify({ op:'timezone', timezone: tz }) });
-        if (!r.ok){ alert((r.body && r.body.error) || 'could not set the timezone'); return; }
+        if (!r.ok){ alert((r.body && r.body.error) || 'could not set the timezone'); tzIn.value = tzLast; return; }
         load();
       };
+      tzIn.onblur = saveTz;
+      tzIn.onkeydown = (e) => { if (e.key === 'Enter'){ e.preventDefault(); tzIn.blur(); } };
     }
     body.appendChild(tzCard);
 
@@ -5708,20 +5725,30 @@ function secTime(c){
       // data deserves, and gravinet already reads server lists this way.
       const row = $('<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
         + '<input id="ntp-in" value="'+esc((t.servers||[]).join(', '))+'" placeholder="0.pool.ntp.org, 1.pool.ntp.org" style="flex:1;min-width:240px"></div>');
-      const save = $('<button class="sm">Save</button>');
-      row.appendChild(save);
       ntpCard.appendChild(row);
-      ntpCard.appendChild($('<div class="hint" style="margin:8px 0 0">Filling this in turns synchronization <b>on</b>; clearing it turns it <b>off</b>. Saving restarts the sync daemon so the change takes effect immediately.</div>'));
-      save.onclick = async () => {
-        const raw = row.querySelector('#ntp-in').value;
+      ntpCard.appendChild($('<div class="hint" style="margin:8px 0 0">Filling this in turns synchronization <b>on</b>; clearing it turns it <b>off</b>. Separate multiple servers with commas or spaces \u2014 either works, e.g. <code>0.pool.ntp.org, 1.pool.ntp.org</code> or <code>0.pool.ntp.org 1.pool.ntp.org</code>. Saves automatically when you click or tab away, and restarts the sync daemon so the change takes effect immediately.</div>'));
+      // Auto-saves on blur like every other settings field here. The
+      // confirm() only fires when the edit actually turns sync off (an empty
+      // field where there were servers before) \u2014 not on every blur \u2014 so
+      // tabbing through an unchanged or still-filled-in field never prompts.
+      const ntpIn = row.querySelector('#ntp-in');
+      let ntpLast = (t.servers||[]).join(', ');
+      const saveNtp = async () => {
+        const raw = ntpIn.value;
         const servers = raw.split(/[\s,]+/).filter(Boolean);
+        const joined = servers.join(', ');
+        if (joined === ntpLast){ ntpIn.value = ntpLast; return; }
         const enabled = servers.length > 0;
-        if (!enabled && !confirm('Turn time synchronization off on ' + (state.target ? 'the selected node' : 'this node') + '?\n\nIts clock will drift freely from here on. Once it drifts past the handshake tolerance, this node stops forming new mesh sessions.')) return;
+        if (!enabled && ntpLast && !confirm('Turn time synchronization off on ' + (state.target ? 'the selected node' : 'this node') + '?\n\nIts clock will drift freely from here on. Once it drifts past the handshake tolerance, this node stops forming new mesh sessions.')) {
+          ntpIn.value = ntpLast; return;
+        }
         const r = await api('/api/system/time', { method:'POST', body: JSON.stringify({ op:'ntp', enabled: enabled, servers: servers }) });
-        if (!r.ok){ alert((r.body && r.body.error) || 'could not change time synchronization'); return; }
+        if (!r.ok){ alert((r.body && r.body.error) || 'could not change time synchronization'); ntpIn.value = ntpLast; return; }
         if (r.body && r.body.note) alert(r.body.note);
         load();
       };
+      ntpIn.onblur = saveNtp;
+      ntpIn.onkeydown = (e) => { if (e.key === 'Enter'){ e.preventDefault(); ntpIn.blur(); } };
     }
     body.appendChild(ntpCard);
 
@@ -5741,7 +5768,7 @@ function secTime(c){
       const save = $('<button class="sm">Set</button>');
       row.appendChild(save);
       setCard.appendChild(row);
-      setCard.appendChild($('<div class="hint" style="margin:8px 0 0">One-shot, in this host\u2019s own timezone as shown above. Nothing is stored \u2014 the clock is set once and left alone.</div>'));
+      setCard.appendChild($('<div class="hint" style="margin:8px 0 0">One-shot, in this host\u2019s own timezone as shown above. Nothing is stored \u2014 the clock is set once and left alone. Unlike the fields above, this needs an explicit click: it\u2019s a one-time action applied at the moment you press it, not a setting that should fire just because the field lost focus.</div>'));
       save.onclick = async () => {
         const v = row.querySelector('#clk-in').value;
         if (!v){ alert('Pick a date and time.'); return; }
@@ -5754,6 +5781,206 @@ function secTime(c){
   };
 
   load();
+}
+
+// ---- Users (System -> Users) -----------------------------------------------
+//
+// Local OS accounts permitted to sign in under gravinet's system-auth modes
+// (pam on linux/macos/freebsd, bsd_auth on openbsd, LogonUser on windows).
+// web_admin.allow_users is the gate: this table *is* that list, each row
+// annotated with whether the OS account behind it actually exists right now
+// and, where the host supports it, its expiry. Deliberately says nothing
+// about auth_mode "local" beyond a passing note — that mode authenticates
+// gravinet's own web_admin.users credential list (via 'gravinet genpass'), which
+// has no OS account behind any name and isn't what this page manages.
+//
+// Follows the table idiom the rest of the admin UI uses for list-of-entries
+// sections (Allow List, Hosts, DNS, Routes, Seeds) — checkbox-select rows,
+// a +/\u2212 toolbar via _rowAdd/_rowRemove, dblclick to edit a cell \u2014 rather
+// than Time's card-per-setting form, since this is fundamentally a list of
+// entries, not a handful of independent settings.
+function secUsers(c){
+  secHint(c, 'Local OS accounts allowed to sign in to this console under gravinet\u2019s system-auth modes (pam, bsd_auth, or windows). Acts on the node you\u2019re currently managing; adding or removing an account here changes web_admin.allow_users, which takes effect on restart.');
+
+  const nodeLabel = () => {
+    if (!state.target) return 'this node';
+    const p = (state.cluster || []).find(x => x.node_id === state.target);
+    return p ? (p.hostname || p.node_id.slice(0,8)) : state.target.slice(0,8);
+  };
+
+  const notes = $('<div></div>');
+  c.appendChild(notes);
+
+  const card = $('<div class="card"></div>');
+  const t = $('<div></div>');
+  t.innerHTML = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>name</th><th>account</th><th>expires</th><th></th></tr></table>';
+  const table = t.querySelector('table');
+  card.appendChild(t);
+  selAllWire(t);
+  table._rowAdd = () => usersAddRow(table);
+  table._rowRemove = () => removeCheckedRows(table,
+    tr => api('/api/system/users', { method:'POST', body: JSON.stringify({ op:'delete', username: tr.dataset.name }) }),
+    false);
+  c.appendChild(card);
+
+  usersReload(table, notes, nodeLabel);
+}
+
+// usersReload fetches the allow_users list (with live per-account state) and
+// (re)builds the table rows plus the notes above it. Mirrors exemptReload's
+// shape for the same reasons that section's doc comment gives.
+async function usersReload(table, notes, nodeLabel){
+  const r = await api('/api/system/users');
+  const info = (r.ok && r.body) || {};
+  const list = info.users || [];
+  table._canManage = !!info.can_manage;
+  table._canExpiry = !!info.can_expiry;
+
+  notes.innerHTML = '';
+  if (!r.ok) {
+    notes.appendChild($('<div class="hint">could not read '+esc(nodeLabel())+'\u2019s account list.</div>'));
+  } else {
+    if (info.auth_mode === 'local') {
+      notes.appendChild($('<div class="hint" style="margin:0 0 10px">'+esc(nodeLabel())+' is currently using <b>auth_mode \u201clocal\u201d</b>, which signs in against its own credential list (<code>gravinet genpass</code>), not OS accounts \u2014 so accounts managed here have no effect on login until the auth mode is switched to pam, system, or windows.</div>'));
+    }
+    if (info.unrestricted) {
+      notes.appendChild($('<div class="hint" style="margin:0 0 10px">No restriction is currently set: <b>any</b> account this host\u2019s login method accepts may sign in. Adding a user below switches this to an explicit allow list \u2014 only accounts you\u2019ve added will then be permitted.</div>'));
+    }
+    if (!info.can_manage && info.manage_hint) {
+      notes.appendChild($('<div class="hint" style="margin:0 0 10px">'+esc(info.manage_hint)+'</div>'));
+    }
+  }
+
+  const tb = table.tBodies[0] || table;
+  [...table.rows].forEach((row,i) => { if(i>0) row.remove(); });
+  if (!list.length){
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td colspan="5" class="empty">no accounts listed'+(info.unrestricted?' \u2014 any account this host\u2019s login method accepts may sign in':'')+'</td>';
+    tb.appendChild(tr);
+    return;
+  }
+
+  list.forEach(u => {
+    const tr = document.createElement('tr'); tr.dataset.name = u.name;
+    const acctTag = '<span class="tag-toggle '+(u.exists?'on':'off')+'" title="'+(u.exists?'this OS account exists':'listed in allow_users, but no OS account by this name exists yet \u2014 set a password to create it')+'">'+(u.exists?'active':'not created')+'</span>';
+    tr.innerHTML = '<td class="selcol"><input type="checkbox" class="selbox"></td>'
+      + '<td>'+esc(u.name)+'</td>'
+      + '<td class="us-acct">'+acctTag+'</td>'
+      + '<td class="us-exp">'+usersExpiryLabel(u)+'</td>'
+      + '<td class="us-actions"><button class="ghost sm us-pw">password\u2026</button></td>';
+    tb.appendChild(tr);
+
+    if (table._canExpiry) {
+      const expTd = tr.querySelector('.us-exp');
+      expTd.title = 'double-click to edit';
+      expTd.ondblclick = () => usersExpiryEdit(expTd, u.name, u.expires_unix||0, () => usersReload(table, notes, nodeLabel));
+    }
+    tr.querySelector('.us-pw').onclick = () => usersPasswordEdit(tr.querySelector('.us-actions'), u.name, () => usersReload(table, notes, nodeLabel));
+  });
+}
+
+// usersExpiryLabel renders an account's expiry cell: "never" when known and
+// unset, a flagged "expired" when it's passed, the date otherwise, or a
+// plain dash when this host can't report expiry at all (darwin) \u2014 never
+// guessing at a value the host didn't actually give us.
+function usersExpiryLabel(u){
+  if (!u.expiry_known) return '<span style="color:var(--mut)">\u2014</span>';
+  if (!u.expires_unix) return 'never';
+  const d = new Date(u.expires_unix * 1000);
+  const txt = esc(d.toLocaleDateString());
+  return u.expired ? '<span style="color:var(--danger)">'+txt+' (expired)</span>' : txt;
+}
+
+// usersExpiryEdit swaps an expiry cell into a date input, mirroring
+// inlineCellEdit's shape but for a date + an explicit "never" clear rather
+// than free text.
+function usersExpiryEdit(td, name, currentUnix, onDone){
+  if (td.querySelector('input')) return;
+  const cur = currentUnix ? new Date(currentUnix*1000).toISOString().slice(0,10) : '';
+  td.innerHTML = '';
+  const inp = $('<input type="date" style="width:130px">'); inp.value = cur;
+  const save = $('<button class="sm">save</button>');
+  const never = $('<button class="ghost sm">never</button>');
+  const cancel = $('<button class="ghost sm">cancel</button>');
+  td.appendChild(inp); td.appendChild(save); td.appendChild(never); td.appendChild(cancel);
+  inp.focus();
+  let done = false;
+  const finish = async (expiresUnix) => {
+    if (done) return; done = true;
+    const r = await api('/api/system/users', { method:'POST', body: JSON.stringify({ op:'expiry', username: name, expires_unix: expiresUnix }) });
+    if (!r.ok){ alert((r.body && r.body.error) || 'could not set expiry'); }
+    onDone();
+  };
+  save.onclick = () => {
+    if (!inp.value){ alert('pick a date, or use \u201cnever\u201d to clear it'); return; }
+    const secs = Math.floor(new Date(inp.value+'T00:00:00Z').getTime()/1000);
+    finish(secs);
+  };
+  never.onclick = () => finish(0);
+  cancel.onclick = () => { done = true; onDone(); };
+}
+
+// usersPasswordEdit swaps a row's actions cell into a masked password field
+// (with the same show/hide toggle the BGP neighbor password editor uses),
+// posting through the "add" op \u2014 which both creates the OS account if it
+// doesn\u2019t exist yet and resets its password if it does, so one action
+// covers "first password for a listed-but-not-yet-created account" and
+// "reset an existing one" without the operator needing to know which case
+// they\u2019re in.
+function usersPasswordEdit(td, name, onDone){
+  if (td.querySelector('input')) return;
+  td.innerHTML = '';
+  const inp = $('<input type="password" style="width:110px" autocomplete="new-password" placeholder="new password">');
+  const eye = $('<button class="ghost sm" title="show while editing">\ud83d\udc41\ufe0f</button>');
+  const save = $('<button class="sm">save</button>');
+  const cancel = $('<button class="ghost sm">cancel</button>');
+  td.appendChild(inp); td.appendChild(eye); td.appendChild(save); td.appendChild(cancel);
+  inp.focus();
+  eye.onclick = (e) => { e.stopPropagation(); const showing = inp.type==='text'; inp.type = showing?'password':'text'; eye.title = showing?'show while editing':'hide while editing'; };
+  let done = false;
+  save.onclick = async () => {
+    if (done) return;
+    if (!inp.value){ alert('enter a password'); return; }
+    done = true;
+    const r = await api('/api/system/users', { method:'POST', body: JSON.stringify({ op:'add', username: name, password: inp.value }) });
+    if (!r.ok){ alert((r.body && r.body.error) || 'could not set password'); }
+    else if (r.body && r.body.note) { /* e.g. "account created but expiry could not be applied" */ console.info(r.body.note); }
+    onDone();
+  };
+  cancel.onclick = () => { done = true; onDone(); };
+}
+
+// usersAddRow is the blank draft row for adding a new console account: name,
+// password, and an optional expiry, all in one row like hostAddRow's shape.
+// Goes through the same "add" op as usersPasswordEdit, so a name that
+// happens to match an existing OS account is adopted (password reset, added
+// to allow_users) rather than rejected \u2014 the same "never recreate, just
+// claim it" rule parapet's add_user follows.
+function usersAddRow(table){
+  const tr = document.createElement('tr');
+  const expCell = table._canExpiry ? '<input class="us-new-exp" type="date" style="width:130px" title="optional expiry">' : '';
+  tr.innerHTML = '<td class="selcol"></td>'
+    + '<td><input class="us-new-name" placeholder="username" style="width:120px" autocapitalize="off" spellcheck="false"></td>'
+    + '<td colspan="1"><span style="color:var(--mut)">\u2014</span></td>'
+    + '<td>'+expCell+'</td>'
+    + '<td><input class="us-new-pw" type="password" style="width:110px" autocomplete="new-password" placeholder="password">'
+    + ' <button class="ghost sm us-new-eye" title="show while editing">\ud83d\udc41\ufe0f</button>'
+    + ' <button class="sm us-new-save">create</button> <button class="ghost sm us-new-cancel">cancel</button></td>';
+  if(!insertNewRow(table, tr)) return;
+  const nameInp = tr.querySelector('.us-new-name'), pwInp = tr.querySelector('.us-new-pw');
+  tr.querySelector('.us-new-eye').onclick = (e) => { e.stopPropagation(); const showing = pwInp.type==='text'; pwInp.type = showing?'password':'text'; };
+  tr.querySelector('.us-new-cancel').onclick = () => refresh();
+  nameInp.focus();
+  tr.querySelector('.us-new-save').onclick = () => {
+    const name = nameInp.value.trim();
+    const pw = pwInp.value;
+    if (!name){ alert('username required'); return; }
+    if (!pw){ alert('password required'); return; }
+    const expEl = tr.querySelector('.us-new-exp');
+    const expStr = expEl ? expEl.value : '';
+    const expiresUnix = expStr ? Math.floor(new Date(expStr+'T00:00:00Z').getTime()/1000) : 0;
+    edit('/api/system/users', { op:'add', username:name, password:pw, expires_unix: expiresUnix }, false);
+  };
 }
 
 // ---- Upgrade (System -> Upgrade) ------------------------------------------
@@ -7933,6 +8160,30 @@ function secGettingStarted(c){
     if (r.body.path){ body.appendChild($('<div class="hint" style="margin:16px 0 0;padding-top:10px;border-top:1px solid var(--line)"><span class="net-id">'+esc(r.body.path)+'</span></div>')); }
   })();
 }
+
+// secAPIDoc renders API.md — the HTTP API reference, read fresh from disk on
+// every request and rendered through mdRender exactly like secReadme renders
+// README. Deliberately not a second, in-app copy of the API surface: this
+// file is the only place it's written down, so the page can never show
+// something the actual docs/API.md doesn't say.
+function secAPIDoc(c){
+  const card = $('<div class="card"></div>');
+  const body = $('<div></div>');
+  body.innerHTML = '<div class="hint">loading\u2026</div>';
+  card.appendChild(body);
+  c.appendChild(card);
+  (async () => {
+    const r = await api('/api/api-doc');
+    if (!r.ok || !r.body){ body.innerHTML = '<div class="hint">could not load the API reference.</div>'; return; }
+    if (r.body.available === false){
+      body.innerHTML = '<div class="hint">API.md is not installed on disk. Install it with the installer, or set <b>api_doc_path</b> in the config to point at it.</div>';
+      return;
+    }
+    body.innerHTML = mdRender(r.body.text || '');
+    if (r.body.path){ body.appendChild($('<div class="hint" style="margin:16px 0 0;padding-top:10px;border-top:1px solid var(--line)"><span class="net-id">'+esc(r.body.path)+'</span></div>')); }
+  })();
+}
+
 
 // secLicense renders the on-disk LICENSE inside a normal card, matching the look
 // of every other page. The LICENSE is plain text (e.g. the GPL), so it's shown
