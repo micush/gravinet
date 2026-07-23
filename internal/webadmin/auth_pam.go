@@ -64,29 +64,29 @@ import (
 	"unsafe"
 
 	"gravinet/internal/logx"
+	"gravinet/internal/service"
 )
 
 type pamAuth struct {
 	service string
-	allow   map[string]bool
 	log     *logx.Logger
 }
 
-func systemAuthenticator(service string, allow []string, log *logx.Logger) (Authenticator, bool) {
-	if service == "" {
-		service = "gravinet"
+func systemAuthenticator(pamService string, log *logx.Logger) (Authenticator, bool) {
+	if pamService == "" {
+		pamService = "gravinet"
 	}
 	// Surface the two most common reasons PAM logins fail even when PAM is
 	// compiled in, at startup, where an admin will see them.
 	if log != nil {
-		if _, err := os.Stat("/etc/pam.d/" + service); err != nil {
-			log.Warnf("webadmin/pam: service file /etc/pam.d/%s not found — logins will hit PAM's 'other' policy (usually deny). The installer writes this file; create it to use system logins.", service)
+		if _, err := os.Stat("/etc/pam.d/" + pamService); err != nil {
+			log.Warnf("webadmin/pam: service file /etc/pam.d/%s not found — logins will hit PAM's 'other' policy (usually deny). The installer writes this file; create it to use system logins.", pamService)
 		}
 		if os.Geteuid() != 0 {
 			log.Warnf("webadmin/pam: running as euid=%d, not root — pam_unix usually cannot verify other users' passwords unless the daemon runs as root.", os.Geteuid())
 		}
 	}
-	return &pamAuth{service: service, allow: allowSet(allow), log: log}, true
+	return &pamAuth{service: pamService, log: log}, true
 }
 
 func systemAuthName() string { return "pam" }
@@ -107,9 +107,14 @@ func (a *pamAuth) Authenticate(user, pass string) bool {
 	if user == "" {
 		return false
 	}
-	if a.allow != nil && !a.allow[user] {
+	// Membership in the gravinet OS group is the sign-in gate — root is the
+	// only exception, exactly like a normal Unix login. Checked before PAM
+	// even runs: there's no reason to exercise the PAM stack (and, on some
+	// configurations, its own failure-count/lockout bookkeeping) for a
+	// correct password on an account that was never going to be let in.
+	if !service.IsGroupMember(user) {
 		if a.log != nil {
-			a.log.Warnf("webadmin/pam: user %q is not in web_admin.allow_users", user)
+			a.log.Warnf("webadmin/pam: user %q is not root and not a member of the %s group", user, service.GravinetGroup)
 		}
 		return false
 	}

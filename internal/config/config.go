@@ -1410,14 +1410,20 @@ type NAT struct {
 
 // WebAdmin configures the admin interface.
 type WebAdmin struct {
-	Enabled    bool        `json:"enabled"`
-	Listen     string      `json:"listen"`   // e.g. 127.0.0.1:8443
-	TLSCert    string      `json:"tls_cert"` // path; self-signed generated if empty
-	TLSKey     string      `json:"tls_key"`
-	AuthMode   string      `json:"auth_mode"`   // "local", "pam" (linux/macos/freebsd), "system" (openbsd bsd_auth), or "windows"
-	PAMService string      `json:"pam_service"` // e.g. "gravinet" or "login"
-	AllowUsers []string    `json:"allow_users"` // for pam/windows: limit to these system users (empty = any)
-	Users      []AdminUser `json:"users"`       // for auth_mode "local"
+	Enabled    bool   `json:"enabled"`
+	Listen     string `json:"listen"`   // e.g. 127.0.0.1:8443
+	TLSCert    string `json:"tls_cert"` // path; self-signed generated if empty
+	TLSKey     string `json:"tls_key"`
+	AuthMode   string `json:"auth_mode"`   // "local", "pam" (linux/macos/freebsd), "system" (openbsd bsd_auth), or "windows"
+	PAMService string `json:"pam_service"` // e.g. "gravinet" or "login"
+	// AllowUsers is retained only for backward-compatible JSON decoding of
+	// old config files; it is no longer consulted for anything. Sign-in
+	// under a system-auth mode (pam/system/windows) is gated by membership
+	// in the local "gravinet" OS group instead (root is always exempt) —
+	// see service.IsGroupMember and the System > Users admin page, which
+	// manages that group's membership directly rather than this field.
+	AllowUsers []string    `json:"allow_users,omitempty"`
+	Users      []AdminUser `json:"users"` // for auth_mode "local"
 	LoginBan   BanPolicy   `json:"login_ban"`
 
 	// GeoIPLookup adds an approximate location (city/region/country + a map)

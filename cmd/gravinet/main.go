@@ -48,7 +48,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "609"
+	version = "611"
 	commit  = "none"
 )
 
@@ -1387,6 +1387,24 @@ func cmdRun(args []string) {
 		// Web admin (hot config) — optional.
 		var webSrv *webadmin.Server
 		if cfg.WebAdmin.Enabled {
+			// The gravinet OS group gates sign-in under a system-auth mode
+			// (see service/groups.go); ensure it exists here rather than
+			// only lazily from the Users page, so a node whose auth_mode is
+			// already pam/system/windows has a working login gate from the
+			// very first boot after upgrading to a version with this
+			// feature, not only after an operator happens to open System >
+			// Users first. Best-effort: a failure here is logged, not
+			// fatal — auth_mode "local" and disabled web admin don't need
+			// the group at all, and even under a system-auth mode, IsGroupMember
+			// fails closed (nobody but root) rather than open if the group
+			// is still missing, so this is a convenience, not a correctness
+			// requirement.
+			switch strings.ToLower(cfg.WebAdmin.AuthMode) {
+			case "pam", "system", "windows":
+				if ok, hint := service.EnsureGravinetGroup(); !ok {
+					logx.Warnf("webadmin: could not ensure the %s group exists: %s — System > Users and system logins may not work until it's created by hand", service.GravinetGroup, hint)
+				}
+			}
 			webSrv = webadmin.New(cfg.WebAdmin, engine, logx.Default())
 			webSrv.SetConfigPath(*cfgPath)
 			webSrv.SetVersion(version, commit)

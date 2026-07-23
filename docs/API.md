@@ -104,9 +104,11 @@ Who can log in, and how, is set by `web_admin.auth_mode` in config:
 - `system` (OpenBSD) — `bsd_auth(3)`, OpenBSD's native equivalent.
 - `windows` — native Windows account logon.
 
-For `pam`/`system`/`windows`, `web_admin.allow_users` can restrict which
-system accounts are accepted (empty means any account that authenticates
-successfully is let in).
+For `pam`/`system`/`windows`, membership in the local `gravinet` OS group
+(root always exempt) decides which system accounts are actually let in —
+see [`POST /api/system/users`](#post-apisystemusers). The older
+config-based mechanism, `web_admin.allow_users`, still parses for backward
+compatibility but is no longer consulted for this.
 
 ### Logging out
 
@@ -1456,36 +1458,45 @@ Manages the local OS accounts permitted to sign in under gravinet's
 system-auth modes — `auth_mode` `"pam"` (linux/macos/freebsd), `"system"`
 (openbsd's bsd_auth), or `"windows"`. Never `auth_mode` `"local"`, which
 authenticates against `web_admin.users` (a list of PBKDF2 hashes gravinet
-owns directly — see `gravinet genpass`) and has no OS account behind any
-name at all; this endpoint never touches that list, and still
-works while a node is set to `"local"` (the `auth_mode` field in the `GET`
-reply is there so a caller can explain that accounts managed here have no
-effect on login until the mode is switched, rather than the endpoint
-refusing outright). Like Power and Time, follows the currently selected
-node.
+owns directly — see `gravinet genpass`) and has no OS account or group
+membership behind any name at all; this endpoint never touches that list,
+and still works while a node is set to `"local"` (the `auth_mode` field in
+the `GET` reply is there so a caller can explain that accounts managed
+here have no effect on login until the mode is switched, rather than the
+endpoint refusing outright). Like Power and Time, follows the currently
+selected node.
 
-`web_admin.allow_users` is the gate this endpoint manages: empty/nil means
-any account the authenticator accepts may sign in; a populated list
-restricts sign-in to just those names. Changing it needs a restart to take
-effect (the allow-set is built once at startup), so `add` and `delete`
-both reply with `"restart": true`.
+Membership in a single local OS group, **`gravinet`**, is the actual
+sign-in gate — root always may sign in and can't be added to or removed
+from the group; every other account, only while a member. This is the
+same design parapet's own Users page uses for its group, and it means a
+membership change here takes effect **immediately, live, no restart** —
+unlike almost everything else in this API — since it's checked against the
+OS fresh on every login attempt rather than a snapshot built once at
+startup. (An earlier version of this endpoint gated on a config list,
+`web_admin.allow_users`; that field still parses for backward compatibility
+but is no longer consulted here.)
 
-`GET` returns the live state for every name currently in `allow_users`:
+`GET` returns the live state of the group's current membership:
 
 ```json
 {"users": [{"name": "bob", "exists": true, "expires_unix": 0,
             "expiry_known": true, "expired": false}],
- "unrestricted": false, "can_manage": true, "can_expiry": true,
- "manage_hint": "", "expiry_hint": "", "auth_mode": "pam"}
+ "can_manage": true, "can_expiry": true, "manage_hint": "", "expiry_hint": "",
+ "group": "gravinet", "group_known": true, "group_hint": "",
+ "auth_mode": "pam"}
 ```
 
-`unrestricted: true` (with an empty-looking `users` list, or one shorter
-than you'd expect) means `allow_users` isn't set at all — not that
-nothing is configured. `expires_unix` is epoch seconds, `0` meaning
-never; `expiry_known: false` means this host has no way to report expiry
-at all (true on macOS, which has no simple built-in account-expiry
-mechanism — `can_expiry` is `false` there too) rather than the account
-having no expiry.
+`users` lists every current member of the `gravinet` group except root
+(which is never listed — its access is unconditional and it can't be
+removed from the group, since it was never in it). `group_known: false`
+means the group's membership couldn't be read at all (e.g. the group
+doesn't exist yet on this host and hasn't been created — see
+`group_hint`), distinct from a real, empty membership. `expires_unix` is
+epoch seconds, `0` meaning never; `expiry_known: false` means this host
+has no way to report expiry at all (true on macOS, which has no simple
+built-in account-expiry mechanism — `can_expiry` is `false` there too)
+rather than the account having no expiry.
 
 `POST` takes one op at a time:
 
@@ -1499,15 +1510,17 @@ having no expiry.
 - `add`: creates a login-only OS account (no home directory, nologin
   shell where the platform has one) if it doesn't already exist —
   **never recreates one that does**, just resets its password and expiry
-  — and adds `username` to `allow_users`. One call covers both "first
-  password for a name that's listed but has no OS account behind it yet"
-  and "reset an existing account's password".
+  — and adds it to the `gravinet` group (creating the group first if it
+  doesn't exist yet). One call covers both "first password for a name
+  that's a group member but has no OS account behind it yet" and "reset
+  an existing account's password".
 - `password` / `expiry`: act only on an already-existing OS account;
   `expiry`'s `expires_unix: 0` clears the expiry (never expires).
-- `delete`: removes the OS account and drops it from `allow_users`.
-  Refused with `400` if `username` is the account the calling session is
-  currently authenticated as — deleting your own account mid-session
-  would immediately orphan it.
+- `delete`: removes the OS account entirely, which — on every platform
+  this runs on — also drops its group membership as a side effect of the
+  account itself ceasing to exist. Refused with `400` if `username` is the
+  account the calling session is currently authenticated as — deleting
+  your own account mid-session would immediately orphan it.
 
 `username` is validated the same way on every op: 1–32 lowercase
 characters, starting with a letter or underscore, then
@@ -1833,8 +1846,8 @@ curl -sk -b cookies.txt -X POST $HOST/api/system/time \
 ```bash
 curl -sk -b cookies.txt -X POST $HOST/api/system/users \
   -d '{"op":"add","username":"bob","password":"hunter2"}'
-# allow_users now includes "bob"; restart for it to take effect
-curl -sk -b cookies.txt -X POST $HOST/api/restart
+# bob is now a member of the gravinet group and can sign in immediately —
+# no restart needed, membership is checked live on every login attempt.
 ```
 
 ### Log out

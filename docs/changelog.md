@@ -42,6 +42,162 @@ assuming it didn't happen.
 
 ---
 
+---
+
+---
+
+## v611 — 2026-07-23
+
+**System > Users redesigned around a real OS group, replacing the
+`web_admin.allow_users` config-list gate it launched with (v605).** Sign-in
+under a system-auth mode (`pam`, `system`/bsd_auth, `windows`) is now
+decided by membership in a single local OS group, **`gravinet`** — root
+always may sign in and can neither be added to nor removed from the group;
+every other account, only while a member. This is the same design parapet's
+own Users page uses its group for, and it's a better fit than the config
+list it replaces on the two axes that config list was worse on: it's the
+OS's own concept of "who's allowed to do this" (`usermod -aG gravinet bob`
+by hand and a click on this page now mean exactly the same thing, with no
+gravinet-owned bookkeeping to keep in sync with reality), and because
+membership is checked **live, on every login attempt** rather than a map
+built once at startup, a change here takes effect **immediately — no
+restart** — unlike almost everything else this admin UI edits. The page's
+top hint is now just: "Manage local OS accounts allowed to sign in to this
+console. Acts on the node you're currently managing." — the earlier
+"unrestricted / no restriction is currently set" note is gone entirely,
+since a group inherently has a defined membership; there's no longer an
+"anyone may sign in" state to explain.
+
+`web_admin.allow_users` still parses (JSON backward compatibility for old
+config files) but is no longer consulted anywhere. This is a genuine,
+security-relevant behavior change worth stating plainly: a node that was
+relying on a narrower `allow_users` list now grants access based on
+`gravinet` group membership instead, which may not be the identical set of
+accounts. Review group membership after upgrading if `allow_users` was in
+use.
+
+- **`internal/service/groups.go`** (new): `GravinetGroup` const,
+  `IsGroupMember` (the root exception, then a live OS check — fails closed,
+  never open, if membership can't be read at all), `EnsureGravinetGroup`
+  (idempotent create), and per-platform create/add-member/remove-member/
+  list-members: linux (`groupadd`/`gpasswd -a`/`gpasswd -d`), freebsd
+  (`pw groupadd`/`pw groupmod -m`, with member *removal* done as a
+  read-full-list-then-`pw groupmod -M`-the-filtered-list round trip since
+  `pw`(8) has no documented single-member delete flag to trust blindly),
+  openbsd (`groupadd`/`usermod -G`, same read-modify-write pattern since
+  OpenBSD's `-G` replaces the whole supplementary-group list rather than
+  appending like Linux's `-aG`), macOS (`dscl`, including picking a fresh
+  GID the same way `sysusers.go` already picks fresh UIDs), and Windows
+  (`net localgroup`). Membership reads check both the group's supplementary
+  member list *and* any account whose **primary** group happens to be this
+  one — the same two-source read parapet's own `group_members()` does, for
+  the same reason (a primary-group member never shows up in the
+  supplementary list alone).
+- **`internal/service/sysusers.go`**: `ListSystemUsers()` no longer takes a
+  config-supplied list — it reads live group membership itself (root
+  excluded from the returned list, though always allowed). `AddSystemUser`
+  now calls `EnsureGravinetGroup` then adds the account to it, rolling back
+  the just-created OS account if group-add fails (an account that exists
+  but can't actually sign in is worse than no account). `DeleteSystemUser`
+  removes group membership as a defensive, best-effort step after account
+  deletion (which already drops it from every group as a side effect on
+  every platform here).
+- **All three system-auth backends** (`auth_pam.go`, `auth_bsdauth.go`,
+  `auth_windows.go`) now gate on `service.IsGroupMember(user)` instead of a
+  config-built allow-map; the now-unused `allow []string` parameter and the
+  `allowSet` helper were removed rather than left as dead weight.
+  `auth_nopam.go`/`auth_other.go` stubs updated to match. Verified across
+  every build-tag combination that matters, not just this sandbox's
+  default: a real build for linux+cgo, plus cross-compiles for openbsd,
+  windows, darwin-without-cgo, and a generic no-system-auth platform — all
+  clean, since none of these five files can be exercised by a single `go
+  build` in one sandbox.
+- **`cmd/gravinet/main.go`**: ensures the `gravinet` group exists at
+  startup when `auth_mode` is already `pam`/`system`/`windows`, so a node
+  that reaches this feature already configured for a system-auth mode has a
+  working login gate from its very first boot on this version — not only
+  after an operator happens to open System > Users first. Best-effort and
+  non-fatal, consistent with `IsGroupMember` already failing closed if the
+  group is somehow still missing.
+- **Handler/wire changes** (`edit.go`): GET drops `unrestricted`, adds
+  `group`, `group_known`, `group_hint`. Both `add` and `delete` replies
+  drop `restart` entirely — there's nothing left that needs one.
+- **Tests**: `internal/service/groups_test.go` (new) — fixture-based
+  `/etc/group`+`/etc/passwd` parsing (supplementary-only, primary-group
+  inclusion without double-counting, unknown-group vs. empty-group
+  distinction, root's unconditional pass, fail-closed on an unreadable
+  group file) via the same overridable-path pattern `sysusers_test.go`
+  already established for `/etc/shadow` — no test here, or anywhere in this
+  change, ever risks invoking a real `groupadd`/`gpasswd`/`pw`/`net
+  localgroup` against the machine running the suite.
+  `systemusers_handler_test.go`'s `TestSystemUsersGet` updated for the new
+  field shape; deliberately checks field presence/types rather than
+  asserting a specific `group_known` value, since GET now reads this
+  sandbox's real (unmocked) group state and a value-specific assertion
+  would make the suite's outcome depend on unrelated host state.
+- **Docs**: `config.WebAdmin.AllowUsers`'s comment and `docs/API.md`
+  (Authentication section, the full `/api/system/users` reference, and the
+  console-user example) all updated to describe the group, not the old
+  list.
+- **Deliberately not done**: the install scripts do not create the
+  `gravinet` group at install time. `EnsureGravinetGroup`'s runtime call
+  already covers every case that matters — a fresh install with a
+  system-auth mode already configured gets the group at first boot (via
+  `main.go`'s new startup call), and an in-place upgrade to this version
+  gets it the first time anyone actually adds a user — so an install-script
+  addition would be pure redundancy with no case it uniquely covers,
+  not worth the extra surface across five platform-specific scripts.
+
+## v610 — 2026-07-23
+
+**Fixed a regression v609 itself introduced**: every backtick code span in a
+rendered doc page (Info > API, Readme, Getting Started) showed the literal
+text `\u0001N\u0001` instead of turning into a `<code>` tag — visible
+throughout Info > API's Networks table and everywhere else a `` `field` ``
+appeared. Root cause was a doubled backslash in v609's own edit to
+`mdRender`'s code-span placeholder: `codes.push(cc); return
+'\\u0001'+...` (two backslashes) inserts the seven literal characters
+`\u0001` as text, while the restore step later in the same function
+correctly looks for the real U+0001 control character — so the two never
+matched, and the placeholder text leaked straight into the page instead of
+being swapped for `<code>`. Fixed by dropping back to a single backslash
+(`'\u0001'`), which is what actually produces the control character at
+runtime.
+
+This was caught, and diagnosed to the exact byte, using a small Python
+script comparing backslash counts around every `u0001` occurrence in the
+current file against the pre-regression original — eyeballing escaped
+tool-output text is exactly how a doubled backslash slips by unnoticed
+(twice now, both times in this same file's Unicode escapes), so this one
+was pinned with a byte-for-byte diff instead of another visual read.
+
+**Also added real markdown table support to `mdRender`**, which never had
+any — a GFM table (header row, `|---|---|` separator, body rows) previously
+fell straight through to the plain-paragraph fallback and rendered as a
+wall of text with literal `|` and `---` characters, exactly like the
+Networks operation table and the ~70-row Quick Reference table looked in
+the screenshot that surfaced the `\u0001` bug above. Now: a row containing
+`|` immediately followed by a valid separator row (dashes, optionally
+colon-flanked per cell for `:--`/`--:`/`:-:` alignment) renders as a real
+`<table>` — reusing the app's existing global `table`/`th`/`td` styling
+rather than introducing a parallel set of rules — wrapped in the same
+`.tscroll` horizontal-scroll container wide tables elsewhere in the app
+already use. Cell splitting is a plain character scan, not a lookbehind
+-based regex split: lookbehind assertions only reached broad Safari support
+in 16.4 (March 2023), nothing else in this file uses one, and a manual loop
+handles `\|` (an escaped, literal pipe inside a cell) exactly as well.
+
+Verified against the real documents, not synthetic examples: extracted the
+actual `mdRender` function from the built file and ran it against the real
+`docs/API.md`, `README.md`, and `getting-started.md`. Zero placeholder
+leaks (either the literal 7-character text or a stray unconverted control
+character) in any of the three. All 10 of API.md's tables — confirmed
+against a direct count of `|---|`-style separator lines in the source, so
+none were missed and none spuriously invented — render as real `<table>`
+elements, including the large Quick Reference table. Spot-checked specific
+cells (the Networks table's `op`/`add` cells) resolve to the exact expected
+`<code>`/`<td>` markup, not just "a table exists somewhere."
+
 ## v609 — 2026-07-23
 
 **Fixed: every table-of-contents link on Info > API (and README/Getting

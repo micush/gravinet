@@ -5,7 +5,7 @@ package webadmin
 import "gravinet/internal/logx"
 
 // No system authenticator on this platform; callers fall back to local users.
-func systemAuthenticator(service string, allow []string, log *logx.Logger) (Authenticator, bool) {
+func systemAuthenticator(service string, log *logx.Logger) (Authenticator, bool) {
 	return nil, false
 }
 

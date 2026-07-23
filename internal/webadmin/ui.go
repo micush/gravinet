@@ -5787,12 +5787,17 @@ function secTime(c){
 //
 // Local OS accounts permitted to sign in under gravinet's system-auth modes
 // (pam on linux/macos/freebsd, bsd_auth on openbsd, LogonUser on windows).
-// web_admin.allow_users is the gate: this table *is* that list, each row
+// Membership in the "gravinet" OS group is the actual gate — root always
+// may sign in and can't be added or removed; everyone else, only while a
+// member — so this table *is* that group's membership list, each row
 // annotated with whether the OS account behind it actually exists right now
-// and, where the host supports it, its expiry. Deliberately says nothing
-// about auth_mode "local" beyond a passing note — that mode authenticates
-// gravinet's own web_admin.users credential list (via 'gravinet genpass'), which
-// has no OS account behind any name and isn't what this page manages.
+// and, where the host supports it, its expiry. See service/groups.go's
+// package comment for the full design and why it's a group now rather than
+// the web_admin.allow_users config list this page used to manage. Says
+// nothing about auth_mode "local" beyond a passing note — that mode
+// authenticates gravinet's own web_admin.users credential list (via
+// 'gravinet genpass'), which has no OS account or group membership behind
+// any name and isn't what this page manages.
 //
 // Follows the table idiom the rest of the admin UI uses for list-of-entries
 // sections (Allow List, Hosts, DNS, Routes, Seeds) — checkbox-select rows,
@@ -5800,7 +5805,7 @@ function secTime(c){
 // than Time's card-per-setting form, since this is fundamentally a list of
 // entries, not a handful of independent settings.
 function secUsers(c){
-  secHint(c, 'Local OS accounts allowed to sign in to this console under gravinet\u2019s system-auth modes (pam, bsd_auth, or windows). Acts on the node you\u2019re currently managing; adding or removing an account here changes web_admin.allow_users, which takes effect on restart.');
+  secHint(c, 'Manage local OS accounts allowed to sign in to this console. Acts on the node you\u2019re currently managing.');
 
   const nodeLabel = () => {
     if (!state.target) return 'this node';
@@ -5826,9 +5831,9 @@ function secUsers(c){
   usersReload(table, notes, nodeLabel);
 }
 
-// usersReload fetches the allow_users list (with live per-account state) and
-// (re)builds the table rows plus the notes above it. Mirrors exemptReload's
-// shape for the same reasons that section's doc comment gives.
+// usersReload fetches the gravinet group's membership (with live per-account
+// state) and (re)builds the table rows plus the notes above it. Mirrors
+// exemptReload's shape for the same reasons that section's doc comment gives.
 async function usersReload(table, notes, nodeLabel){
   const r = await api('/api/system/users');
   const info = (r.ok && r.body) || {};
@@ -5843,11 +5848,11 @@ async function usersReload(table, notes, nodeLabel){
     if (info.auth_mode === 'local') {
       notes.appendChild($('<div class="hint" style="margin:0 0 10px">'+esc(nodeLabel())+' is currently using <b>auth_mode \u201clocal\u201d</b>, which signs in against its own credential list (<code>gravinet genpass</code>), not OS accounts \u2014 so accounts managed here have no effect on login until the auth mode is switched to pam, system, or windows.</div>'));
     }
-    if (info.unrestricted) {
-      notes.appendChild($('<div class="hint" style="margin:0 0 10px">No restriction is currently set: <b>any</b> account this host\u2019s login method accepts may sign in. Adding a user below switches this to an explicit allow list \u2014 only accounts you\u2019ve added will then be permitted.</div>'));
-    }
     if (!info.can_manage && info.manage_hint) {
       notes.appendChild($('<div class="hint" style="margin:0 0 10px">'+esc(info.manage_hint)+'</div>'));
+    }
+    if (info.group_known === false && info.group_hint) {
+      notes.appendChild($('<div class="hint" style="margin:0 0 10px">'+esc(info.group_hint)+'</div>'));
     }
   }
 
@@ -5855,14 +5860,14 @@ async function usersReload(table, notes, nodeLabel){
   [...table.rows].forEach((row,i) => { if(i>0) row.remove(); });
   if (!list.length){
     const tr = document.createElement('tr');
-    tr.innerHTML = '<td colspan="5" class="empty">no accounts listed'+(info.unrestricted?' \u2014 any account this host\u2019s login method accepts may sign in':'')+'</td>';
+    tr.innerHTML = '<td colspan="5" class="empty">no accounts in the '+esc(info.group||'gravinet')+' group yet</td>';
     tb.appendChild(tr);
     return;
   }
 
   list.forEach(u => {
     const tr = document.createElement('tr'); tr.dataset.name = u.name;
-    const acctTag = '<span class="tag-toggle '+(u.exists?'on':'off')+'" title="'+(u.exists?'this OS account exists':'listed in allow_users, but no OS account by this name exists yet \u2014 set a password to create it')+'">'+(u.exists?'active':'not created')+'</span>';
+    const acctTag = '<span class="tag-toggle '+(u.exists?'on':'off')+'" title="'+(u.exists?'this OS account exists':'a member of the '+esc(info.group||'gravinet')+' group, but no OS account by this name exists yet \u2014 set a password to create it')+'">'+(u.exists?'active':'not created')+'</span>';
     tr.innerHTML = '<td class="selcol"><input type="checkbox" class="selbox"></td>'
       + '<td>'+esc(u.name)+'</td>'
       + '<td class="us-acct">'+acctTag+'</td>'
@@ -5954,8 +5959,8 @@ function usersPasswordEdit(td, name, onDone){
 // password, and an optional expiry, all in one row like hostAddRow's shape.
 // Goes through the same "add" op as usersPasswordEdit, so a name that
 // happens to match an existing OS account is adopted (password reset, added
-// to allow_users) rather than rejected \u2014 the same "never recreate, just
-// claim it" rule parapet's add_user follows.
+// to the gravinet group) rather than rejected \u2014 the same "never recreate,
+// just claim it" rule parapet's add_user follows.
 function usersAddRow(table){
   const tr = document.createElement('tr');
   const expCell = table._canExpiry ? '<input class="us-new-exp" type="date" style="width:130px" title="optional expiry">' : '';
@@ -8067,9 +8072,39 @@ function mdRender(src){
   // hyphen ("status--config") — exactly what these docs' own tables of
   // contents were written expecting.
   const mdSlug = s => s.toLowerCase().replace(/[^\w\- ]+/g, '').trim().replace(/ /g, '-');
+  // tableSepRe matches a GFM table's separator row: cells of dashes, each
+  // optionally flanked by a colon for alignment ( :--, --:, :-: ), joined by
+  // '|', with optional leading/trailing '|' and whitespace. This is the line
+  // that turns "a row with a pipe in it" into "the start of an actual table"
+  // — required immediately after a candidate header row before anything
+  // renders as a table, so an ordinary sentence containing '|' is never
+  // mistaken for one.
+  const tableSepRe = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+  // splitTableRow splits one GFM table row into trimmed cell strings,
+  // dropping a leading/trailing empty cell from the row's own bounding '|'
+  // (a row may or may not be pipe-terminated) and honoring '\|' as an
+  // escaped, literal pipe inside a cell rather than a column separator.
+  const splitTableRow = line => {
+    // Manual scan rather than a lookbehind-based split regex: lookbehind
+    // assertions only reached broad Safari support in 16.4 (March 2023), and
+    // nothing else in this file relies on one — not worth being the first,
+    // for what a plain character loop does just as well.
+    const cells = []; let cur = '';
+    for (let j=0; j<line.length; j++){
+      const c = line[j];
+      if (c === '\\' && line[j+1] === '|'){ cur += '|'; j++; }
+      else if (c === '|'){ cells.push(cur); cur = ''; }
+      else cur += c;
+    }
+    cells.push(cur);
+    let out = cells.map(c => c.trim());
+    if (out.length && out[0] === '') out = out.slice(1);
+    if (out.length && out[out.length-1] === '') out = out.slice(0, -1);
+    return out;
+  };
   const inline = s => {
     const codes = [];
-    s = s.replace(codeRe, (m,cc)=>{ codes.push(cc); return '\\u0001'+(codes.length-1)+'\\u0001'; });
+    s = s.replace(codeRe, (m,cc)=>{ codes.push(cc); return '\u0001'+(codes.length-1)+'\u0001'; });
     s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
     // Italic uses _underscore_, not *single asterisk*, so it can't be confused
     // with **bold** above regardless of run length or nesting.
@@ -8117,6 +8152,29 @@ function mdRender(src){
       else st+='font-size:13.5px;margin:14px 0 6px';
       html += '<h'+lvl+' id="'+esc1(id)+'" style="'+st+'">'+txt+'</h'+lvl+'>';
       i++; continue;
+    }
+    // GFM table: a row containing '|', immediately followed by a separator
+    // row of dashes/colons (the standard two-line signature — a lone line
+    // with a pipe in it is just a sentence that happens to mention one, so
+    // both lines are required before this commits to rendering a table).
+    if (line.indexOf('|')>=0 && tableSepRe.test(lines[i+1]||'')){
+      closeList();
+      const header = splitTableRow(line);
+      const aligns = splitTableRow(lines[i+1]).map(c=>{
+        const l=c.charAt(0)===':', r=c.charAt(c.length-1)===':';
+        return l&&r ? 'center' : r ? 'right' : ''; // left is the CSS default; nothing to add
+      });
+      i += 2;
+      const bodyRows = [];
+      while (i<lines.length && lines[i].indexOf('|')>=0 && !/^\s*$/.test(lines[i])){
+        bodyRows.push(splitTableRow(lines[i])); i++;
+      }
+      html += '<div class="tscroll"><table style="margin:8px 0"><tr>'
+        + header.map((c,ci)=>'<th'+(aligns[ci]?' style="text-align:'+aligns[ci]+'"':'')+'>'+inline(esc1(c))+'</th>').join('')
+        + '</tr>'
+        + bodyRows.map(row=>'<tr>'+row.map((c,ci)=>'<td'+(aligns[ci]?' style="text-align:'+aligns[ci]+'"':'')+'>'+inline(esc1(c))+'</td>').join('')+'</tr>').join('')
+        + '</table></div>';
+      continue;
     }
     const li = line.match(/^[-*]\s+(.*)$/);
     if (li){

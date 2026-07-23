@@ -245,7 +245,7 @@ func New(cfg config.WebAdmin, be Backend, log *logx.Logger) *Server {
 	noAuth := false
 	switch strings.ToLower(cfg.AuthMode) {
 	case "pam", "windows", "system":
-		if a, ok := systemAuthenticator(cfg.PAMService, cfg.AllowUsers, log); ok {
+		if a, ok := systemAuthenticator(cfg.PAMService, log); ok {
 			auth = a
 			warnIfPAMServiceMissing(cfg.PAMService, log)
 		} else {

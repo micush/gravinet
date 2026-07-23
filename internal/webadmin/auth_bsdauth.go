@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"gravinet/internal/logx"
+	"gravinet/internal/service"
 )
 
 // loginPasswdPath is OpenBSD's bsd_auth(3) password login helper — the same
@@ -27,16 +28,15 @@ const loginPasswdPath = "/usr/libexec/auth/login_passwd"
 const authBackChannelFD = 3
 
 type bsdAuth struct {
-	allow map[string]bool
-	log   *logx.Logger
+	log *logx.Logger
 }
 
 // systemAuthenticator returns the OpenBSD bsd_auth backend. The PAM "service"
 // argument is meaningless here (bsd_auth uses login classes in login.conf,
 // not per-service policy files), so it's accepted only for signature parity
 // with the PAM/Windows backends and ignored.
-func systemAuthenticator(service string, allow []string, log *logx.Logger) (Authenticator, bool) {
-	_ = service
+func systemAuthenticator(pamService string, log *logx.Logger) (Authenticator, bool) {
+	_ = pamService
 	if log != nil {
 		if _, err := os.Stat(loginPasswdPath); err != nil {
 			log.Warnf("webadmin/bsd_auth: %s not found — system logins can't work on this host; set web_admin.auth_mode=\"local\" and add a user with 'gravinet genpass'.", loginPasswdPath)
@@ -47,7 +47,7 @@ func systemAuthenticator(service string, allow []string, log *logx.Logger) (Auth
 			log.Warnf("webadmin/bsd_auth: running as euid=%d, not root — login_passwd usually cannot verify other users' passwords unless the daemon runs as root.", os.Geteuid())
 		}
 	}
-	return &bsdAuth{allow: allowSet(allow), log: log}, true
+	return &bsdAuth{log: log}, true
 }
 
 func systemAuthName() string { return "bsd_auth" }
@@ -63,9 +63,13 @@ func (a *bsdAuth) Authenticate(user, pass string) bool {
 	if user == "" {
 		return false
 	}
-	if a.allow != nil && !a.allow[user] {
+	// Membership in the gravinet OS group is the sign-in gate — root is the
+	// only exception, exactly like a normal Unix login. Checked before
+	// shelling out to login_passwd: no reason to run an external helper for
+	// a correct password on an account that was never going to be let in.
+	if !service.IsGroupMember(user) {
 		if a.log != nil {
-			a.log.Warnf("webadmin/bsd_auth: user %q is not in web_admin.allow_users", user)
+			a.log.Warnf("webadmin/bsd_auth: user %q is not root and not a member of the %s group", user, service.GravinetGroup)
 		}
 		return false
 	}

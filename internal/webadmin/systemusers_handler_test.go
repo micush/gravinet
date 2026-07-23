@@ -38,9 +38,13 @@ func usersTestServer(t *testing.T) (*httptest.Server, *http.Cookie) {
 	return ts, sessionFor(t, ts)
 }
 
-// TestSystemUsersGet checks the read shape the page draws from, and that a
-// fresh config (no allow_users set) reports unrestricted rather than an
-// empty-looking, seemingly-locked-down table.
+// TestSystemUsersGet checks the read shape the page draws from. This hits
+// the real, unmocked service.ListSystemUsers — there's no config knob left
+// to fake the group away, group membership is OS state — so it checks field
+// presence/types rather than asserting a specific group_known/users value:
+// whether the "gravinet" group happens to exist on the machine running the
+// test suite is not this test's business, and asserting a specific answer
+// would make the suite pass or fail depending on unrelated host state.
 func TestSystemUsersGet(t *testing.T) {
 	ts, c := usersTestServer(t)
 	req, _ := http.NewRequest("GET", ts.URL+"/api/system/users", nil)
@@ -57,7 +61,7 @@ func TestSystemUsersGet(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"users", "unrestricted", "can_manage", "can_expiry", "manage_hint", "expiry_hint", "auth_mode"} {
+	for _, k := range []string{"users", "can_manage", "can_expiry", "manage_hint", "expiry_hint", "group", "group_known", "group_hint", "auth_mode"} {
 		if _, ok := out[k]; !ok {
 			t.Errorf("reply is missing %q; the page reads it directly", k)
 		}
@@ -65,8 +69,11 @@ func TestSystemUsersGet(t *testing.T) {
 	if _, ok := out["users"].([]any); !ok {
 		t.Errorf("users = %#v, want a JSON array even when empty", out["users"])
 	}
-	if u, _ := out["unrestricted"].(bool); !u {
-		t.Error("a config with no allow_users set should report unrestricted:true")
+	if g, _ := out["group"].(string); g != "gravinet" {
+		t.Errorf(`group = %v, want "gravinet"`, out["group"])
+	}
+	if _, ok := out["group_known"].(bool); !ok {
+		t.Errorf("group_known = %#v, want a bool", out["group_known"])
 	}
 	if out["auth_mode"] != "local" {
 		t.Errorf("auth_mode = %v, want %q (this test server's own config)", out["auth_mode"], "local")

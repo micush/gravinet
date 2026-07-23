@@ -8,6 +8,7 @@ import (
 	"unsafe"
 
 	"gravinet/internal/logx"
+	"gravinet/internal/service"
 )
 
 var (
@@ -21,12 +22,12 @@ const (
 )
 
 type winAuth struct {
-	allow map[string]bool
-	log   *logx.Logger
+	log *logx.Logger
 }
 
-func systemAuthenticator(service string, allow []string, log *logx.Logger) (Authenticator, bool) {
-	return &winAuth{allow: allowSet(allow), log: log}, true
+func systemAuthenticator(pamService string, log *logx.Logger) (Authenticator, bool) {
+	_ = pamService
+	return &winAuth{log: log}, true
 }
 
 func systemAuthName() string { return "windows" }
@@ -43,9 +44,16 @@ func (a *winAuth) Authenticate(user, pass string) bool {
 	if user == "" {
 		return false
 	}
-	if a.allow != nil && !a.allow[user] {
+	// Membership in the gravinet local group is the sign-in gate, checked
+	// against the bare account name before the domain-prefix parsing below —
+	// group membership here only ever applies to local accounts, matching
+	// what AddSystemUser/net localgroup manage. (service.IsGroupMember also
+	// exempts an account literally named "root" the way it does on Unix;
+	// that's simply never a real Windows account name, so the check is
+	// harmless dead weight here rather than a meaningful bypass.)
+	if !service.IsGroupMember(user) {
 		if a.log != nil {
-			a.log.Warnf("webadmin/windows: user %q is not in web_admin.allow_users", user)
+			a.log.Warnf("webadmin/windows: user %q is not root and not a member of the %s group", user, service.GravinetGroup)
 		}
 		return false
 	}

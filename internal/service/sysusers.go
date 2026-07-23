@@ -79,30 +79,42 @@ type SysUser struct {
 
 // UsersInfo is the full state ListSystemUsers reads for the page.
 type UsersInfo struct {
-	Users        []SysUser
-	Unrestricted bool   // allow_users is empty: any OS account the authenticator accepts may sign in
-	CanManage    bool   // can accounts be created/deleted/re-passworded on this host at all
-	CanExpiry    bool   // can an account's expiry be set/cleared on this host
-	ManageHint   string // why CanManage is false, if it is
-	ExpiryHint   string // why CanExpiry is false, if it is
+	Users      []SysUser
+	CanManage  bool   // can accounts be created/deleted/re-passworded on this host at all
+	CanExpiry  bool   // can an account's expiry be set/cleared on this host
+	ManageHint string // why CanManage is false, if it is
+	ExpiryHint string // why CanExpiry is false, if it is
+	GroupKnown bool   // could gravinet-group membership be read at all
+	GroupHint  string // why GroupKnown is false, if it is
 }
 
-// ListSystemUsers reads the live OS state for every name in allow — existence,
-// expiry, and whether that expiry has passed — without mutating anything.
-// allow is web_admin.allow_users as currently saved; an empty list means no
-// restriction, which the page needs to say plainly rather than show an empty
-// table that looks broken.
-func ListSystemUsers(allow []string) UsersInfo {
+// ListSystemUsers reads the live OS state for the System > Users page: every
+// current member of GravinetGroup (root is never listed — its access is
+// unconditional and it can't be removed from the group, since it was never
+// in it), each annotated with whether the OS account still exists and,
+// where the host supports it, its expiry. Group membership is read fresh
+// from the OS on every call, the same as IsGroupMember — this function and
+// the login path always agree about who's currently allowed in, because
+// they're reading the identical live state, not two copies that could
+// drift apart.
+func ListSystemUsers() UsersInfo {
 	canManage, manageHint := sysUsersCanManage()
 	canExpiry, expiryHint := sysUsersCanExpiry()
 	info := UsersInfo{
-		Unrestricted: len(allow) == 0,
-		CanManage:    canManage,
-		CanExpiry:    canExpiry,
-		ManageHint:   manageHint,
-		ExpiryHint:   expiryHint,
+		CanManage:  canManage,
+		CanExpiry:  canExpiry,
+		ManageHint: manageHint,
+		ExpiryHint: expiryHint,
 	}
-	for _, name := range allow {
+	members, known := groupMembers(GravinetGroup)
+	info.GroupKnown = known
+	if !known {
+		info.GroupHint = "could not read the " + GravinetGroup + " group's membership on this host"
+	}
+	for _, name := range members {
+		if name == "root" {
+			continue
+		}
 		u := SysUser{Name: name, Exists: sysUserExists(name)}
 		if u.Exists {
 			if exp, known := sysUserExpiry(name); known {
@@ -127,10 +139,10 @@ func sysUserExists(name string) bool {
 func sysUsersCanManage() (bool, string) {
 	switch runtime.GOOS {
 	case "linux":
-		if haveCmd("useradd") && haveCmd("userdel") && haveCmd("chpasswd") {
+		if haveCmd("useradd") && haveCmd("userdel") && haveCmd("chpasswd") && haveCmd("gpasswd") {
 			return true, ""
 		}
-		return false, "account management needs useradd/userdel/chpasswd (shadow-utils), not all of which are on this host"
+		return false, "account management needs useradd/userdel/chpasswd/gpasswd (shadow-utils), not all of which are on this host"
 	case "darwin":
 		if haveCmd("dscl") {
 			return true, ""
@@ -172,7 +184,10 @@ func sysUsersCanExpiry() (bool, string) {
 // shell where the platform has one) with the given password and optional
 // expiry (zero = never), or — if the account already exists — just sets its
 // password and expiry, leaving it otherwise alone. Mirrors parapet's
-// add_user: never recreates an existing account.
+// add_user: never recreates an existing account. Either way, also ensures
+// the account is a member of GravinetGroup — the actual sign-in grant; see
+// this file's package comment (groups.go) for why that's a group now and
+// not a config list.
 func AddSystemUser(name, password string, expires time.Time) (bool, string) {
 	if err := validUsername(name); err != nil {
 		return false, err.Error()
@@ -182,6 +197,9 @@ func AddSystemUser(name, password string, expires time.Time) (bool, string) {
 	}
 	if ok, hint := sysUsersCanManage(); !ok {
 		return false, hint
+	}
+	if ok, hint := EnsureGravinetGroup(); !ok {
+		return false, "the " + GravinetGroup + " group doesn't exist and couldn't be created: " + hint
 	}
 
 	existed := sysUserExists(name)
@@ -197,6 +215,12 @@ func AddSystemUser(name, password string, expires time.Time) (bool, string) {
 			deleteOSUser(name)
 		}
 		return false, "account " + verbCreated(existed) + " but setting its password failed: " + hint
+	}
+	if ok, hint := addToGroup(name, GravinetGroup); !ok {
+		if !existed {
+			deleteOSUser(name) // same cleanup rule: don't leave an account that can't actually sign in
+		}
+		return false, "account " + verbCreated(existed) + " but could not be added to the " + GravinetGroup + " group: " + hint
 	}
 	if !expires.IsZero() {
 		if ok, hint := SetSystemUserExpiry(name, expires); !ok {
@@ -249,9 +273,13 @@ func SetSystemUserExpiry(name string, expires time.Time) (bool, string) {
 
 // DeleteSystemUser removes an OS account entirely. The caller (the HTTP
 // handler) is responsible for refusing to delete the account the caller is
-// currently signed in as — that's a session concern, not an OS one — and for
-// keeping allow_users in step; this function only ever touches the OS
-// account.
+// currently signed in as — that's a session concern, not an OS one. Deleting
+// the account already drops it from every group on every platform here as a
+// side effect of the account itself ceasing to exist; removeFromGroup is
+// still called explicitly afterward as a defensive, best-effort step (its
+// own failure is folded into the note, never turned into an overall
+// failure) rather than assumed, since the account is the thing that matters
+// and is already gone by that point regardless.
 func DeleteSystemUser(name string) (bool, string) {
 	if err := validUsername(name); err != nil {
 		return false, err.Error()
@@ -260,11 +288,17 @@ func DeleteSystemUser(name string) (bool, string) {
 		return false, hint
 	}
 	if !sysUserExists(name) {
-		// Already gone (e.g. removed by hand). Treat as success so the page
-		// can still drop it from allow_users without a confusing error.
+		// Already gone (e.g. removed by hand). Still try to drop stale group
+		// membership, since an account can be deleted without necessarily
+		// having been cleanly removed from every group first.
+		removeFromGroup(name, GravinetGroup)
 		return true, "no OS account '" + name + "' existed"
 	}
-	return deleteOSUser(name)
+	ok, hint := deleteOSUser(name)
+	if ok {
+		removeFromGroup(name, GravinetGroup)
+	}
+	return ok, hint
 }
 
 // ── validation ──────────────────────────────────────────────────────────

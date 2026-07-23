@@ -42,21 +42,6 @@ func NewLocalAuth(users []config.AdminUser) *localAuth {
 
 func (a *localAuth) Name() string { return "local" }
 
-// allowSet turns an allow-list into a lookup set. A nil result means "no
-// restriction" — any account the system authenticator accepts is allowed.
-func allowSet(allow []string) map[string]bool {
-	if len(allow) == 0 {
-		return nil
-	}
-	m := make(map[string]bool, len(allow))
-	for _, u := range allow {
-		if u != "" {
-			m[u] = true
-		}
-	}
-	return m
-}
-
 func (a *localAuth) Authenticate(user, pass string) bool {
 	c, ok := a.users[user]
 	if !ok {

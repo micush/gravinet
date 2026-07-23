@@ -1106,19 +1106,22 @@ func hostTimeJSON(t service.TimeInfo) map[string]any {
 // web_admin.users, a list of PBKDF2 hashes gravinet owns directly (see
 // GenerateCredential / `gravinet genpass`) with no OS account behind any name
 // at all, so this endpoint never touches that list. It still *works* while
-// auth_mode is "local" — the OS accounts and web_admin.allow_users it manages
-// simply have no effect on login until the mode is switched — and says so via
-// the "auth_mode" field in the GET reply rather than refusing outright, the
-// same "state what's true, let the UI explain it" approach as Power/Time's
-// Can*/hint fields.
+// auth_mode is "local" — the OS group it manages simply has no effect on
+// login until the mode is switched — and says so via the "auth_mode" field
+// in the GET reply rather than refusing outright, the same "state what's
+// true, let the UI explain it" approach as Power/Time's Can*/hint fields.
 //
-// web_admin.allow_users is the gate deciding which OS accounts may sign in
-// (empty = unrestricted: any account the authenticator accepts); this is
-// gravinet's equivalent of the Unix group parapet's Users page manages
-// membership of. Mutating it requires a restart to take effect — s.auth's
-// allow-set is built once in New() — so every write reply carries
-// restart:true, the same convention handleKey and friends already use for
-// changes that only bind in at startup.
+// Membership in the "gravinet" OS group is the actual sign-in gate — root is
+// always allowed and can't be added or removed; anyone else, only while a
+// member. This is gravinet's equivalent of the Unix group parapet's own
+// Users page manages membership of, and (as of this endpoint) replaces the
+// earlier design based on web_admin.allow_users, a config list gravinet
+// owned and checked against a snapshot built once at startup. See
+// service/groups.go's package comment for the full reasoning. Because
+// service.IsGroupMember checks the OS live on every login attempt rather
+// than a map built once in New(), a change made here takes effect
+// immediately — unlike almost everything else this admin UI edits, there is
+// no "restart" flag on a successful add/delete.
 //
 // Like Power and Time, this follows the currently selected node (not in
 // LOCAL_API): the whole point is being able to add/fix/remove a console
@@ -1126,21 +1129,20 @@ func hostTimeJSON(t service.TimeInfo) map[string]any {
 //
 // POST takes {op, username, password, expires_unix}:
 //
-//	{op:"add", username, password, expires_unix}      create-or-reuse + set password + (optional) expiry, add to allow_users
+//	{op:"add", username, password, expires_unix}      create-or-reuse + set password + (optional) expiry, add to the gravinet group
 //	{op:"password", username, password}                reset an existing account's password only
 //	{op:"expiry", username, expires_unix}               set (>0) or clear (0) an account's expiry only
-//	{op:"delete", username}                             delete the OS account and drop it from allow_users
+//	{op:"delete", username}                             delete the OS account (which also drops its group membership)
 //
 // expires_unix is epoch seconds, 0 meaning never — the same wire shape
 // parapet's users.rs uses, for a faithful recreation of its page.
 func (s *Server) handleSystemUsers(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		cfg, err := config.Load(s.configPath)
-		if err != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"users": []any{}, "error": err.Error()})
-			return
+		authMode := ""
+		if cfg, err := config.Load(s.configPath); err == nil {
+			authMode = cfg.WebAdmin.AuthMode
 		}
-		writeJSON(w, http.StatusOK, systemUsersJSON(cfg.WebAdmin.AllowUsers, cfg.WebAdmin.AuthMode))
+		writeJSON(w, http.StatusOK, systemUsersJSON(authMode))
 		return
 	}
 
@@ -1160,22 +1162,11 @@ func (s *Server) handleSystemUsers(w http.ResponseWriter, r *http.Request) {
 
 	var ok bool
 	var note string
-	needsRestart := false
 
 	switch req.Op {
 	case "add":
 		s.log.Infof("webadmin: adding/updating console account %q (requested from admin UI)", req.Username)
 		ok, note = service.AddSystemUser(req.Username, req.Password, expires)
-		if ok {
-			if err := s.mutateConfig(func(cfg *config.Config) error {
-				cfg.WebAdmin.AllowUsers = addAllowUser(cfg.WebAdmin.AllowUsers, req.Username)
-				return nil
-			}); err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "account created but allow_users could not be saved: " + err.Error()})
-				return
-			}
-			needsRestart = true
-		}
 	case "password":
 		s.log.Infof("webadmin: setting password for console account %q (requested from admin UI)", req.Username)
 		ok, note = service.SetSystemUserPassword(req.Username, req.Password)
@@ -1189,16 +1180,6 @@ func (s *Server) handleSystemUsers(w http.ResponseWriter, r *http.Request) {
 		}
 		s.log.Infof("webadmin: deleting console account %q (requested from admin UI)", req.Username)
 		ok, note = service.DeleteSystemUser(req.Username)
-		if ok {
-			if err := s.mutateConfig(func(cfg *config.Config) error {
-				cfg.WebAdmin.AllowUsers = removeAllowUser(cfg.WebAdmin.AllowUsers, req.Username)
-				return nil
-			}); err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "account deleted but allow_users could not be saved: " + err.Error()})
-				return
-			}
-			needsRestart = true
-		}
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "op must be 'add', 'password', 'expiry', or 'delete'"})
 		return
@@ -1208,51 +1189,24 @@ func (s *Server) handleSystemUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg, err := config.Load(s.configPath)
-	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "note": note, "restart": needsRestart})
-		return
+	authMode := ""
+	if cfg, err := config.Load(s.configPath); err == nil {
+		authMode = cfg.WebAdmin.AuthMode
 	}
-	resp := systemUsersJSON(cfg.WebAdmin.AllowUsers, cfg.WebAdmin.AuthMode)
+	resp := systemUsersJSON(authMode)
 	resp["ok"] = true
-	resp["restart"] = needsRestart
 	if note != "" {
 		resp["note"] = note
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// addAllowUser appends name to allow if not already present, preserving
-// order and never duplicating — repeated "add" calls for the same name (e.g.
-// a password reset that goes through the "add" op because the caller wasn't
-// sure the account already existed) stay idempotent on the config side.
-func addAllowUser(allow []string, name string) []string {
-	for _, u := range allow {
-		if u == name {
-			return allow
-		}
-	}
-	return append(append([]string{}, allow...), name)
-}
-
-// removeAllowUser drops name from allow, preserving order.
-func removeAllowUser(allow []string, name string) []string {
-	out := make([]string, 0, len(allow))
-	for _, u := range allow {
-		if u != name {
-			out = append(out, u)
-		}
-	}
-	return out
-}
-
-// systemUsersJSON reads live OS state for every allow_users entry (via
-// service.ListSystemUsers) and flattens it for the wire alongside the config
-// fields the page needs to explain itself: whether the list is empty
-// (unrestricted) and which auth_mode is active, since allow_users has zero
-// effect under "local".
-func systemUsersJSON(allow []string, authMode string) map[string]any {
-	info := service.ListSystemUsers(allow)
+// systemUsersJSON reads live gravinet-group membership (via
+// service.ListSystemUsers) and flattens it for the wire alongside the one
+// config field the page still needs to explain itself: which auth_mode is
+// active, since group membership has zero effect on login under "local".
+func systemUsersJSON(authMode string) map[string]any {
+	info := service.ListSystemUsers()
 	users := make([]map[string]any, 0, len(info.Users))
 	for _, u := range info.Users {
 		var expUnix int64
@@ -1265,9 +1219,11 @@ func systemUsersJSON(allow []string, authMode string) map[string]any {
 		})
 	}
 	return map[string]any{
-		"users": users, "unrestricted": info.Unrestricted,
+		"users":      users,
 		"can_manage": info.CanManage, "can_expiry": info.CanExpiry,
 		"manage_hint": info.ManageHint, "expiry_hint": info.ExpiryHint,
+		"group_known": info.GroupKnown, "group_hint": info.GroupHint,
+		"group":     service.GravinetGroup,
 		"auth_mode": authMode,
 	}
 }
