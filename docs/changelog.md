@@ -38,6 +38,22 @@ assuming it didn't happen.
 
 ---
 
+## v594 — 2026-07-22
+
+**UI only**, in `internal/webadmin/ui.go`: the local-only "Building…" label
+that v593 deliberately left static now animates too — Building, Building.,
+Building.., Building..., looping every 450ms, same cadence as the fleet
+push's "Pushing…" animation. It covers both places `applyLocal` runs: an
+empty peer selection, and the second (local) phase of "all peers, then this
+node" after every peer has applied. The timer is declared inside
+`applyLocal` itself (not shared with the push phase's `pushDotsTimer`, which
+lives one scope up and only covers `/api/upgrade/push`) and is cleared in a
+`finally` around the `/api/upgrade/source` fetch, so it stops the instant
+the request settles — success, failure, or thrown — and never fights the
+push phase's own timer when "all peers, then this node" chains the two.
+No API, config, or wire behaviour changed; the binary is identical to v593
+in everything but the version string.
+
 ## v593 — 2026-07-22
 
 **UI only**, in `internal/webadmin/ui.go`: the fleet upgrade push button's

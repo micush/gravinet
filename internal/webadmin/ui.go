@@ -5610,13 +5610,27 @@ async function drawUpgrade(host){
     // applyLocal builds+applies on THIS node (/api/upgrade/source) and restarts
     // into it. Used for an empty selection and as the second phase of "all
     // peers, then this node". Assumes the caller has already disabled the button.
+    // buildDotsTimer animates the label for as long as the build+apply request
+    // is in flight, same reasoning as pushDotsTimer below: a local build can
+    // take a while, and a static "Building…" gives no sign the tab hasn't just
+    // frozen. Scoped to this call (not shared with pushDotsTimer) so the two
+    // phases of "all peers, then this node" never fight over one interval.
     const applyLocal = async () => {
-      upgradeBtn.textContent = 'Building\u2026';
-      const resp = await fetch('/api/upgrade/source', { method:'POST', body: fileIn.files[0] });
-      const body = await resp.json().catch(()=>({}));
-      if (!resp.ok){ alert(body.error || 'build failed'); return; }
-      alert('Applied. This node is restarting into ' + (body.applied || 'the new build') + '.\n\nIf it cannot get its peers back within the confirm window, it will revert itself.');
-      drawUpgrade(host);
+      let buildDots = 0;
+      upgradeBtn.textContent = 'Building';
+      const buildDotsTimer = setInterval(() => {
+        buildDots = (buildDots + 1) % 4;
+        upgradeBtn.textContent = 'Building' + '.'.repeat(buildDots);
+      }, 450);
+      try {
+        const resp = await fetch('/api/upgrade/source', { method:'POST', body: fileIn.files[0] });
+        const body = await resp.json().catch(()=>({}));
+        if (!resp.ok){ alert(body.error || 'build failed'); return; }
+        alert('Applied. This node is restarting into ' + (body.applied || 'the new build') + '.\n\nIf it cannot get its peers back within the confirm window, it will revert itself.');
+        drawUpgrade(host);
+      } finally {
+        clearInterval(buildDotsTimer);
+      }
     };
 
     upgradeBtn.disabled = true;
