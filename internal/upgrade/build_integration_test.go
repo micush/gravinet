@@ -46,11 +46,21 @@ func TestBuildCompilesThisActualTree(t *testing.T) {
 	archive := tarRepo(t, repo)
 	t.Logf("archived this tree: %d bytes, version %s", len(archive), want)
 
-	bin, probe, cleanup, err := Build(context.Background(), bytes.NewReader(archive), t.TempDir())
+	bin, moduleRoot, probe, cleanup, err := Build(context.Background(), bytes.NewReader(archive), t.TempDir())
 	if err != nil {
 		t.Fatalf("Build failed on this project's own source: %v", err)
 	}
 	defer cleanup()
+
+	if moduleRoot == "" {
+		t.Error("Build returned an empty moduleRoot")
+	}
+	if fi, err := os.Stat(filepath.Join(moduleRoot, "go.mod")); err != nil || fi.IsDir() {
+		t.Errorf("moduleRoot %s does not contain go.mod: %v", moduleRoot, err)
+	}
+	if fi, err := os.Stat(filepath.Join(moduleRoot, "docs", "API.md")); err != nil || fi.IsDir() {
+		t.Errorf("moduleRoot %s does not contain docs/API.md, so SyncInstalledDocs would silently skip it: %v", moduleRoot, err)
+	}
 
 	if probe.Version != want {
 		t.Errorf("built binary reports version %q, source says %q", probe.Version, want)

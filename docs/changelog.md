@@ -38,6 +38,63 @@ assuming it didn't happen.
 
 ---
 
+## v607 — 2026-07-23
+
+**Fixed: Info > API showed "not installed on disk" after an in-place
+upgrade via System > Upgrade**, even on a node that just became v606 (which
+adds that page). Root cause was more general than API.md specifically: an
+in-place upgrade — `POST /api/system/upgrade/source`, or `gravinet upgrade
+apply` — only ever swaps the **binary**. It builds from an uploaded source
+archive, copies the resulting binary over the target, and throws the
+extracted source tree away; nothing about that path has ever touched
+`<prefix>/share/doc/gravinet/`. Populating that directory has only ever
+happened once, at the platform installer's initial install. So a node last
+*installed* before API.md existed, then *upgraded* in-place to v606, had the
+new page's code but never got the file it reads — and the same gap has
+silently applied to README/LICENSE/getting-started.md on every in-place
+upgrade all along, for anyone whose checkout changed those files between
+versions; API.md's Info page just made the general gap visible for the
+first time; it needed a file that had never existed on that node before.
+
+Fixed generally, not just patched for API.md:
+
+- **`internal/upgrade/source.go`**: `Build`'s signature grew a `moduleRoot`
+  return — the extracted source tree's root (where it already resolved
+  go.mod from, to build), now also handed back to the caller instead of
+  being an internal-only detail thrown away with the rest of the build
+  directory once `cleanup()` runs.
+- **`internal/upgrade/docs.go`** (new): `SyncInstalledDocs(moduleRoot,
+  target)` copies README.md, LICENSE, getting-started.md, and docs/API.md
+  from the extracted tree into the install's doc directory — deliberately
+  duplicating the install scripts' own path formula
+  (`<prefix>/share/doc/gravinet/` on unix, one level above the target's own
+  directory; beside the binary on Windows) rather than depending on
+  `internal/config` for it, since that's exactly the first candidate
+  `config.resolveDocPath`'s read-side search already checks — so whatever
+  gets written here is exactly what the Info pages pick up on their very
+  next request, no restart needed (those pages already read fresh from disk
+  every time). Best-effort by design: a missing source file or an
+  unwritable destination is silently skipped, never surfaced as an upgrade
+  failure — the binary swap is the one thing that must not be held hostage
+  to a documentation file.
+- **`cmd/gravinet/upgrade.go`**: the `"apply"` op now calls
+  `SyncInstalledDocs` right after a successful `upgrade.Apply`, before the
+  deferred `cleanup()` removes the extracted tree it reads from, and logs
+  which files it actually refreshed.
+- **Tests**: `internal/upgrade/docs_test.go` (new) — copies what exists,
+  skips what doesn't, and the empty/nonexistent-input cases degrade to a
+  quiet no-op rather than an error, all independent of the multi-minute real
+  compile. `internal/upgrade/build_integration_test.go` — the existing
+  end-to-end test (tars up this actual repo, builds it for real) now also
+  asserts the returned `moduleRoot` contains `go.mod` and `docs/API.md`;
+  this ran for real against this tree during development (not just
+  compiled) and passed, confirming the fix end-to-end rather than by
+  inspection.
+
+A node already stuck on v606 (or any earlier version) with a stale or
+missing doc directory self-heals the next time it upgrades in-place to v607
+or later — no separate action needed, and no reinstall required.
+
 ## v606 — 2026-07-23
 
 Four changes: fixed a double-popup on System > Power, added an Info > API

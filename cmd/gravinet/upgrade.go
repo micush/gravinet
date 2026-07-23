@@ -345,7 +345,7 @@ func (u *upgradeSvc) controlOp(op string, body []byte) ([]byte, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 		defer cancel()
 
-		bin, probe, cleanup, err := upgrade.Build(ctx, f, u.stateDir)
+		bin, moduleRoot, probe, cleanup, err := upgrade.Build(ctx, f, u.stateDir)
 		if err != nil {
 			return nil, err
 		}
@@ -375,6 +375,15 @@ func (u *upgradeSvc) controlOp(op string, body []byte) ([]byte, error) {
 		if _, err := upgrade.Apply(ctx, bin, opts); err != nil {
 			_ = u.guard.Clear()
 			return nil, err
+		}
+		// Refresh README/LICENSE/getting-started.md/API.md from the source
+		// tree that just got compiled, so an in-place upgrade keeps the
+		// installed docs current too — not just the binary. Must happen here,
+		// before the deferred cleanup() above removes moduleRoot; a doc-sync
+		// failure is logged but never fails the upgrade itself, which has
+		// already succeeded by this point.
+		if synced := upgrade.SyncInstalledDocs(moduleRoot, u.target); len(synced) > 0 {
+			logx.Infof("upgrade: refreshed installed docs: %v", synced)
 		}
 		go func() {
 			time.Sleep(500 * time.Millisecond)

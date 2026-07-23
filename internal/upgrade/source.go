@@ -443,8 +443,13 @@ func truncateBuildOutput(s string) string {
 
 // Build extracts a gravinet source archive, compiles it with this node's own
 // Go toolchain, and probes the result. It returns the path to the built
-// binary and a cleanup func the caller must invoke once it is done with that
-// path (typically after Apply has copied it next to the target).
+// binary, the extracted source tree's root (the directory containing
+// go.mod — also where README.md/LICENSE/getting-started.md/docs/API.md
+// live, for a caller that wants to refresh installed docs alongside the
+// binary via SyncInstalledDocs), and a cleanup func the caller must invoke
+// once it is done with both paths (typically after Apply has copied the
+// binary next to the target and any doc sync has run — cleanup removes the
+// whole extracted tree, moduleRoot included).
 //
 // This — not a downloaded binary — is the only way a new gravinet gets onto a
 // node. The project ships no prebuilt release artifact for any platform, so
@@ -453,22 +458,22 @@ func truncateBuildOutput(s string) string {
 // BSDs, macOS and Windows boxes simultaneously. The binary produced here is
 // native by construction: there is no os/arch negotiation to get wrong,
 // because nothing platform-specific ever crossed a wire.
-func Build(ctx context.Context, src io.Reader, workRoot string) (binPath string, p Probe, cleanup func(), err error) {
+func Build(ctx context.Context, src io.Reader, workRoot string) (binPath, moduleRoot string, p Probe, cleanup func(), err error) {
 	workDir, err := os.MkdirTemp(workRoot, ".build-*")
 	if err != nil {
-		return "", Probe{}, func() {}, err
+		return "", "", Probe{}, func() {}, err
 	}
 	cleanup = func() { os.RemoveAll(workDir) }
-	fail := func(e error) (string, Probe, func(), error) {
+	fail := func(e error) (string, string, Probe, func(), error) {
 		cleanup()
-		return "", Probe{}, func() {}, e
+		return "", "", Probe{}, func() {}, e
 	}
 
 	extractDir := filepath.Join(workDir, "src")
 	if err := os.MkdirAll(extractDir, 0o755); err != nil {
 		return fail(err)
 	}
-	moduleRoot, err := extractSourceArchive(src, extractDir)
+	modRoot, err := extractSourceArchive(src, extractDir)
 	if err != nil {
 		return fail(err)
 	}
@@ -488,7 +493,7 @@ func Build(ctx context.Context, src io.Reader, workRoot string) (binPath string,
 		binName += ".exe"
 	}
 	outPath := filepath.Join(workDir, binName)
-	buildOutput, err := build(ctx, moduleRoot, outPath)
+	buildOutput, err := build(ctx, modRoot, outPath)
 	if err != nil {
 		if buildOutput != "" {
 			return fail(fmt.Errorf("%w\n\n%s", err, truncateBuildOutput(buildOutput)))
@@ -500,7 +505,7 @@ func Build(ctx context.Context, src io.Reader, workRoot string) (binPath string,
 	if err != nil {
 		return fail(fmt.Errorf("built a binary but could not identify it: %w", err))
 	}
-	return outPath, probe, cleanup, nil
+	return outPath, modRoot, probe, cleanup, nil
 }
 
 // SourceVersion reads the version string baked into an extracted source tree
