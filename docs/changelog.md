@@ -38,6 +38,66 @@ assuming it didn't happen.
 
 ---
 
+## v591 — 2026-07-22
+
+**Peers now report their build version to each other, and the admin UI shows
+it.** Previously there was no way to tell which build a peer was running
+without logging into that peer: the only version on the wire was
+`protocol.Version`, a wire-compatibility integer unrelated to the release
+number. Now:
+
+- **New handshake field** (`hsPayload.Version`, `internal/mesh/handshake.go`)
+  carrying this node's own `version` string, as a length-prefixed optional
+  trailing field after `BGPASN` — a peer too old to send it decodes as `""`,
+  which every consumer renders as unknown rather than substituting a value.
+  Purely informational: nothing in the mesh behaves differently based on it.
+- **Propagated through peer-list gossip too** (new `peerListVersionBlock`
+  = 0x05, `internal/mesh/control.go`), not just the handshake — unlike
+  `BGPASN`, which is deliberately direct-peers-only. The managed-peer list
+  an operator picks from (`Engine.ManagedPeers`) intentionally includes
+  peers known only indirectly, and a blank version for exactly those rows
+  would have been the most confusing possible result. The block is emitted
+  only when at least one entry has a version to report, so a mesh of older
+  peers costs nothing, and an older decoder stops at the unrecognized
+  marker exactly as it already does for the four blocks before it.
+- **No live-refresh path**, unlike Managed/Manager/BGPASN: a build version
+  can't change without the process restarting, and a restart already tears
+  down and rebuilds every session. It is, however, now part of
+  `peerListSig` — a peer restarting onto a new build otherwise keeps an
+  identical gossip signature (same hostname, overlay, endpoint), so without
+  that the new version would only propagate at the next `gossipFullRefresh`
+  instead of promptly.
+- **Surfaced through** `nodeInfo`/`peerSession` → `ManagedPeer.Version` and
+  `PeerInfo.Version` (JSON `version,omitempty`) → `/api/status` and
+  `/api/cluster`'s `clusterPeer.Version`.
+- **Monitor → Mesh Peers** has a new **version** column between *target* and
+  *key* (`c-version` at 8%, taken off `c-target` 20→17% and `c-endpoint`
+  19→16%). A peer predating the field shows an em-dash, distinguishable
+  from a real version; this node's own row shows its version too, since a
+  build is a property of the node rather than of a session — so unlike
+  reach/key/time/transport it stays meaningful there.
+- **The upgrade peer picker** now labels each peer `name · id · v587`
+  (`version ?` when unknown) — which builds are behind is the whole reason
+  an operator reads that list before a push, so it belongs in the label
+  rather than a tooltip.
+- **`docs/API.md`** documents the field on both `PeerInfo` and
+  `clusterPeer`, plus a `curl`/`jq` example that prints the whole fleet's
+  builds in one call.
+
+Also fixed a latent bug in `TestHSPayloadCarriesExtraPorts`: it computed its
+"truncate back to TCPPort" offset from the end of the buffer without
+accounting for `LocalEndpoints`/`BGPASN`, both added after it. It was passing
+by luck — the offset landed 5 bytes into the extra-TCP port list, one byte
+short of a successful `readPortList` — and this change's one extra trailing
+byte would have tipped it into passing for the wrong reason instead. Both
+offsets there now subtract every trailing field explicitly, the version
+length was added to `TestHSPayloadCarriesTCPPort`'s `trailingLen` (whose own
+comment warns about precisely this hazard), and a `lenStrEncodedLen` helper
+joins the existing `portListEncodedLen`/`endpointListEncodedLen`. New
+`TestHSPayloadCarriesVersion` and `TestPeerListCarriesVersion` cover
+round-trip, block omission when no versions exist, and older-decoder
+truncation.
+
 ## v590 — 2026-07-22
 
 **UI copy only**, in the admin UI's Upgrade tab (`internal/webadmin/ui.go`):

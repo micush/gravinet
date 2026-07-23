@@ -191,7 +191,7 @@ const indexHTML = `<!doctype html>
      with different endpoint/hostname lengths drift out of alignment. */
   table.peers-table { table-layout:fixed; }
   table.peers-table col.c-sel { width:28px; }
-  table.peers-table col.c-target { width:20%; }
+  table.peers-table col.c-target { width:17%; }
   table.peers-table col.c-state { width:8%; }
   /* Mesh > Peers only has target/state/overlay left after Monitor > Mesh
      Peers took the rest, so it gets its own wider proportions instead of
@@ -202,8 +202,12 @@ const indexHTML = `<!doctype html>
   table.peers-table col.c-target-op { width:38%; }
   table.peers-table col.c-state-op { width:20%; }
   table.peers-table col.c-key { width:10%; }
+  /* Sits between target and key on Monitor > Mesh Peers. Narrow — a version
+     is a short numeric string — and the room comes off c-target/c-endpoint,
+     which had the most slack. */
+  table.peers-table col.c-version { width:8%; }
   table.peers-table col.c-overlay { width:13%; }
-  table.peers-table col.c-endpoint { width:19%; }
+  table.peers-table col.c-endpoint { width:16%; }
   table.peers-table col.c-reach { width:7%; }
   table.peers-table col.c-time { width:7%; }
   table.peers-table col.c-transport { width:auto; }
@@ -3181,7 +3185,11 @@ function peerRowsForNet(n) {
     rows.push({ id:selfID, host:self.Hostname||self.hostname||'',
       overlay:selfOv4||selfOv6||'', overlay4:selfOv4, overlay6:selfOv6,
       endpoint:(state.nat && state.nat.public) || '', endpointText:(state.nat && state.nat.public) || '', relayed:false,
-      disabled:false, self:true, notes:'' });
+      disabled:false, self:true, notes:'',
+      // Unlike reach/key/time/transport (all session properties, meaningless
+      // for yourself), a build version is a property of the node itself, so
+      // the self row shows it like any other.
+      version:self.Version||self.version||'' });
   }
   for (const p of (n.peers||[])) {
     const pid = p.NodeID||p.node_id||'';
@@ -3226,6 +3234,7 @@ function peerRowsForNet(n) {
       est:(p.EstablishedAt||p.established_at_unix_nano||0),
       mtu:p.PathMTU||p.path_mtu||0,
       keyLabel:p.KeyLabel||p.key_label||'',
+      version:p.Version||p.version||'',
       notes:p.Notes||p.notes||'',
       fsent:p.FragsSent||p.frags_sent||0, fsdrop:p.FragSendDrop||p.frag_send_drop||0,
       frcvd:p.FragsRcvd||p.frags_rcvd||0, rdrop:p.ReasmDrop||p.reasm_drop||0 });
@@ -3483,12 +3492,12 @@ function peerOverlayEdit(td, n, p){
 // Monitor, alongside the rest of that group's live-diagnostic views (metrics,
 // latency, route-table, ...), rather than a mode flag on secPeers.
 function infoMeshPeers(c) {
-  c.appendChild($('<div class="hint" style="margin:0 0 10px">Live connection detail for peers on this node, grouped by network. Peer state is read-only here; tick a row and use \u25a0 to open a shell or \ud83d\udec8 to look one up, or see Mesh \u2192 peers to enable, disable, or ban one. <b>key</b> is the label (from this node\'s own Keys table) of the key currently authenticating that peer\'s session, handy for confirming everyone has moved onto a newly-distributed key before you retire the old one. <b>endpoint</b> is the peer\'s observed underlay address; for a peer behind NAT this is its public mapping as seen from here. <b>reach</b> is <i>direct</i> when there\'s a working direct path, or <i>relayed</i> when the peer could only be reached through another node (a strong sign of a restrictive NAT or firewall). <b>time</b> is how long the current session has been established, and it resets on every reconnect.</div>'));
+  c.appendChild($('<div class="hint" style="margin:0 0 10px">Live connection detail for peers on this node, grouped by network. Peer state is read-only here; tick a row and use \u25a0 to open a shell or \ud83d\udec8 to look one up, or see Mesh \u2192 peers to enable, disable, or ban one. <b>version</b> is the gravinet build each peer reports for itself, so you can spot which nodes are behind without logging into each one (a dash means that peer predates version reporting). <b>key</b> is the label (from this node\'s own Keys table) of the key currently authenticating that peer\'s session, handy for confirming everyone has moved onto a newly-distributed key before you retire the old one. <b>endpoint</b> is the peer\'s observed underlay address; for a peer behind NAT this is its public mapping as seen from here. <b>reach</b> is <i>direct</i> when there\'s a working direct path, or <i>relayed</i> when the peer could only be reached through another node (a strong sign of a restrictive NAT or firewall). <b>time</b> is how long the current session has been established, and it resets on every reconnect.</div>'));
   perNet(c, (card, n) => {
     const rows = peerRowsForNet(n);
 
-    let h = '<table class="peers-table"><colgroup><col class="c-sel"><col class="c-target"><col class="c-key"><col class="c-overlay"><col class="c-endpoint"><col class="c-reach"><col class="c-time"><col class="c-transport"></colgroup><tr><th class="selcol"><input type="checkbox" class="rall"></th><th>target</th><th title="the label (from this node\'s own Keys table) of the key currently authenticating this peer\'s session">key</th><th>overlay</th><th>endpoint</th><th>reach</th><th title="how long the current session with this peer has been established; resets on every reconnect">time</th><th title="discovered path MTU to the peer, fragment counts (tx/rx), and fragment loss (send/reassembly). Clean counters here mean a connectivity problem is not inside the mesh.">transport</th></tr>';
-    if (!rows.length) h += '<tr><td colspan="8" class="empty">no peers</td></tr>';
+    let h = '<table class="peers-table"><colgroup><col class="c-sel"><col class="c-target"><col class="c-version"><col class="c-key"><col class="c-overlay"><col class="c-endpoint"><col class="c-reach"><col class="c-time"><col class="c-transport"></colgroup><tr><th class="selcol"><input type="checkbox" class="rall"></th><th>target</th><th title="the gravinet build this peer is running, as it advertises in its own handshake. A dash means the peer predates this field \u2014 not that it has no version.">version</th><th title="the label (from this node\'s own Keys table) of the key currently authenticating this peer\'s session">key</th><th>overlay</th><th>endpoint</th><th>reach</th><th title="how long the current session with this peer has been established; resets on every reconnect">time</th><th title="discovered path MTU to the peer, fragment counts (tx/rx), and fragment loss (send/reassembly). Clean counters here mean a connectivity problem is not inside the mesh.">transport</th></tr>';
+    if (!rows.length) h += '<tr><td colspan="9" class="empty">no peers</td></tr>';
     for (const p of rows) {
       // None of reach/key/time/transport describe a connection to yourself,
       // so the self row leaves them blank rather than showing something
@@ -3510,12 +3519,20 @@ function infoMeshPeers(c) {
       }
       const timeCell = (p.disabled || p.pending || p.self) ? '' : '<span class="hint" title="established '+esc(new Date(p.est/1e6).toLocaleString())+'">'+esc(fmtElapsed(p.est))+'</span>';
       const keyCell = (p.disabled || p.pending || p.self) ? '' : '<span class="hint">'+esc(p.keyLabel||'')+'</span>';
+      // Shown for every row that has one, including self and a
+      // disabled/pending peer: a version is a property of the node, not of
+      // the current session, so it stays meaningful (and last-known-good is
+      // still useful) where the session columns go blank. A peer too old to
+      // advertise one gets a dash, distinguishable from a version.
+      const verCell = p.version
+        ? '<span class="hint" title="gravinet build reported by this node">v'+esc(p.version)+'</span>'
+        : '<span class="hint" title="this peer\'s build predates version reporting">\u2014</span>';
       const stTitle = p.self ? 'this is the node you\'re currently on' : (p.pending ? 'enabled — waiting to connect' : (p.disabled ? 'disabled locally' : 'enabled'));
       // Self's "endpoint" is this node's own observed public address
       // (peerRowsForNet fills it from state.nat.public) — a real value once
       // NAT discovery completes, not a placeholder, so it's shown the same
       // way a peer's endpoint is rather than overridden to a dash.
-      h += '<tr class="selectable'+(p.self?' peer-self':'')+'" title="'+stTitle+'" data-peer="'+esc(p.id)+'"><td class="selcol"><input type="checkbox" class="rsel" data-k="'+esc(selKey(n.id,p.id))+'"'+(p.self?' title="this is the current node"':'')+'></td><td>'+nodeCell(p.host,p.id,n.id,p.endpoint)+'</td><td>'+keyCell+'</td>'
+      h += '<tr class="selectable'+(p.self?' peer-self':'')+'" title="'+stTitle+'" data-peer="'+esc(p.id)+'"><td class="selcol"><input type="checkbox" class="rsel" data-k="'+esc(selKey(n.id,p.id))+'"'+(p.self?' title="this is the current node"':'')+'></td><td>'+nodeCell(p.host,p.id,n.id,p.endpoint)+'</td><td>'+verCell+'</td><td>'+keyCell+'</td>'
         + '<td class="ov-cell"'+(p.overlay?' title="'+(p.self?'this node\'s own overlay address':'overlay address is set by the peer itself')+'">':'>')+overlayCellHTML(p)+'</td>'
         + '<td class="ep-cell"'+(p.self?' title="this node\'s own observed public address">':'>')+esc(dispAddr(p.endpointText))+'</td><td>'+reach+'</td><td>'+timeCell+'</td><td class="c-transport-cell">'+xport+'</td></tr>';
     }
@@ -5507,10 +5524,16 @@ async function drawUpgrade(host){
   let resBox = null;
   let targets = [];
   const ALL_PEERS = '*all*'; // sentinel; real node_ids never equal this
+  // Labelled name \u00b7 id \u00b7 version: which builds are behind is the whole
+  // reason an operator reads this list before a push, so the version belongs
+  // in the label itself rather than a tooltip. A peer too old to advertise one
+  // shows "version ?" rather than nothing, so "unknown" can't be misread as
+  // "up to date".
   const peerLabel = (id) => {
     const p = (state.cluster || []).find(x => x.node_id === id);
     const name = (p && p.hostname) || id.slice(0,8);
-    return name + ' \u00b7 ' + id.slice(0,8);
+    const ver = (p && p.version) ? ('v' + p.version) : 'version ?';
+    return name + ' \u00b7 ' + id.slice(0,8) + ' \u00b7 ' + ver;
   };
   if (!remote && state.manager){
     // Same search-to-add chip widget the redistribute pickers use

@@ -83,6 +83,29 @@ type hsPayload struct {
 	// announceClusterState). Kept fresh on an already-connected session by
 	// the same ctrlClusterNotify push that keeps those two current.
 	BGPASN uint32
+	// Version is this node's own build version — the same `version` string
+	// cmd/gravinet stamps into the binary (e.g. "587"), advertised so an
+	// operator can see at a glance which build every peer is running,
+	// without logging into each one. Purely informational: nothing in the
+	// mesh behaves differently based on it (wire compatibility is governed
+	// by protocol.Version, an entirely separate integer, and is checked
+	// long before this field is even decoded).
+	//
+	// Unlike Managed/Manager/BGPASN, this needs no live-refresh path
+	// (announceClusterState/ctrlClusterNotify): a build version cannot
+	// change without the process restarting, and a restart already tears
+	// down and rebuilds every session from scratch, so the handshake is
+	// the only place it ever needs to be set. It IS propagated onward
+	// through the multi-hop peer-list gossip (unlike BGPASN — see its
+	// comment above), because the managed-peer list an operator picks
+	// from deliberately includes peers known only indirectly (see
+	// Engine.ManagedPeers), and a blank version column for exactly those
+	// peers would be the most confusing possible result.
+	//
+	// Empty means the peer predates this field (or genuinely has no
+	// version stamped); callers should render that as unknown rather than
+	// inventing a value for it.
+	Version string
 }
 
 const ephemeralLen = 32
@@ -237,6 +260,11 @@ func encodeHSPayload(p hsPayload) []byte {
 	var asnB [4]byte
 	binary.BigEndian.PutUint32(asnB[:], p.BGPASN)
 	b = append(b, asnB[:]...)
+	// This node's build version — a further optional trailing field,
+	// length-prefixed exactly like NodeID/Hostname above (appendLenStr caps
+	// it at 255 bytes, far more than a version string ever needs). See
+	// hsPayload.Version.
+	b = appendLenStr(b, p.Version)
 	return b
 }
 
@@ -435,6 +463,13 @@ func decodeHSPayload(b []byte) (hsPayload, error) {
 						// value a peer with BGP genuinely off would send).
 						if asnB, ok := r.take(4); ok {
 							p.BGPASN = binary.BigEndian.Uint32(asnB)
+							// This node's build version, same nesting rule:
+							// absent on an older peer's payload, which
+							// leaves it "" — rendered as unknown rather
+							// than guessed at. See hsPayload.Version.
+							if v, ok := r.lenStr(); ok {
+								p.Version = v
+							}
 						}
 					}
 				}

@@ -130,6 +130,12 @@ type clusterPeer struct {
 	// Speedtest "from" picker filters on: a merely-Managed peer looks
 	// reachable here but gets a 401 the moment it tries to act as the client
 	// against a third peer.
+
+	// Version is the peer's build version (see mesh's hsPayload.Version),
+	// shown in the upgrade peer picker so an operator can tell at a glance
+	// which nodes are behind before pushing to them. Empty for a peer too
+	// old to advertise it; the UI shows that as unknown.
+	Version string `json:"version,omitempty"`
 }
 
 // handleCluster lists managed peers heard within the TTL, plus whether this node
@@ -151,6 +157,7 @@ func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 			Connected:  m.Connected,
 			Manageable: ip.IsValid() && m.WebPort != 0,
 			Manager:    m.Manager,
+			Version:    m.Version,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{

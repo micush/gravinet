@@ -29,7 +29,7 @@ func TestHSPayloadCarriesTCPPort(t *testing.T) {
 	// Simulate an older peer that doesn't send the TCP port: truncate right
 	// after WebPort, dropping everything the nested-optional-field chain adds
 	// after it (see decodeHSPayload) — TCPPort itself, the two extra-port
-	// lists, LocalEndpoints, and BGPASN — computed from each field's own
+	// lists, LocalEndpoints, BGPASN, and Version — computed from each field's own
 	// exact encoded size rather than a magic byte count, which is what let
 	// this test silently stop testing what it claimed to (see
 	// bgpASNFieldLen's sibling comment below) the last time a field was
@@ -40,7 +40,8 @@ func TestHSPayloadCarriesTCPPort(t *testing.T) {
 		portListEncodedLen(in.ExtraTCPPorts) +
 		portListEncodedLen(in.ExtraUDPPorts) +
 		endpointListEncodedLen(in.LocalEndpoints) +
-		bgpASNFieldLen
+		bgpASNFieldLen +
+		lenStrEncodedLen(in.Version)
 	old, err := decodeHSPayload(enc[:len(enc)-trailingLen])
 	if err != nil {
 		t.Fatalf("backward-compat decode failed: %v", err)

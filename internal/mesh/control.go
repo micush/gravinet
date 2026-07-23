@@ -56,6 +56,12 @@ type peerEntry struct {
 	// ever learn the other's LAN address first-hand. It can only reach them
 	// through a mutual peer's gossip, which is this field.
 	localEndpoints []netip.AddrPort
+	// version is the peer's build version, relayed onward from what it
+	// advertised in its handshake — see hsPayload.Version. Propagated
+	// through gossip (unlike bgpASN) specifically because ManagedPeers
+	// includes peers known only indirectly, and those are exactly the rows
+	// that would otherwise show a blank version.
+	version string
 }
 
 // ---- control dispatch ----
@@ -203,6 +209,14 @@ func (e *Engine) learnPeers(ps *peerSession, entries []peerEntry) {
 			ni.managed = en.managed
 			ni.manager = en.manager
 			ni.webPort = en.webPort
+			// Only overwrite with a version actually reported: a peer
+			// relaying an entry it learned before the version block
+			// existed sends "", and blanking a version we already knew
+			// from a fresher source would be a regression, not an
+			// update. Same shape as the tcpPort/extraPorts guards below.
+			if en.version != "" {
+				ni.version = en.version
+			}
 			if en.tcpPort != 0 {
 				ni.tcpPort = en.tcpPort
 			}
@@ -368,6 +382,7 @@ func (e *Engine) buildPeerList(ns *netState, exceptNodeID string) []byte {
 			extraTCPPorts:  p.extraTCPPorts,
 			extraUDPPorts:  p.extraUDPPorts,
 			localEndpoints: p.localEndpoints,
+			version:        p.version,
 		})
 	}
 	ns.mu.RUnlock()
@@ -381,7 +396,7 @@ func (e *Engine) buildPeerList(ns *netState, exceptNodeID string) []byte {
 // peerListSig returns a deterministic summary of every directly-connected
 // peer and the exact fields buildPeerList gossips about each one (hostname,
 // overlay addresses, endpoint, managed/manager/webPort/tcpPort, host
-// candidates). broadcastGossip
+// candidates, build version). broadcastGossip
 // floods the full peer list to every connected peer — at N peers that's
 // O(N) recipients times O(N) entries per message, unconditionally, every
 // gossipInterval. Most of those ticks change nothing: nobody joined, nobody
@@ -406,9 +421,13 @@ func (ns *netState) peerListSig() string {
 	var b strings.Builder
 	for _, nid := range ids {
 		p := ns.byNode[nid]
-		fmt.Fprintf(&b, "%s\x00%s\x00%s\x00%s\x00%s\x00%t\x00%t\x00%d\x00%d\x00%v\n",
+		fmt.Fprintf(&b, "%s\x00%s\x00%s\x00%s\x00%s\x00%t\x00%t\x00%d\x00%d\x00%v\x00%s\n",
 			nid, p.hostname, p.overlay4, p.overlay6, p.ep(), p.managed, p.manager, p.webPort, p.tcpPort,
-			p.localEndpoints) // host candidates are gossiped too, so a change in them must re-flood
+			p.localEndpoints, // host candidates are gossiped too, so a change in them must re-flood
+			p.version)        // ...as is the build version: a peer restarting onto a new build
+		// otherwise keeps an identical signature (same hostname, overlay and
+		// endpoint), so without this the new version would only propagate at
+		// the next gossipFullRefresh rather than promptly.
 	}
 	ns.mu.RUnlock()
 	return b.String()
@@ -916,6 +935,19 @@ func encodePeerList(entries []peerEntry) []byte {
 				b = appendEndpointList(b, en.localEndpoints)
 			}
 		}
+		// Peer build versions: one more trailing block, same rules again,
+		// and — like every block above — emitted after the ones that came
+		// before it and decoded in the same order, since a decoder
+		// predating it stops at the first marker it doesn't recognize.
+		// Only emitted when at least one entry actually has a version to
+		// report, so a mesh of peers that all predate the field costs
+		// nothing. See hsPayload.Version.
+		if peerListHasVersion(entries) {
+			b = append(b, peerListVersionBlock)
+			for _, en := range entries {
+				b = appendLenStr(b, en.version)
+			}
+		}
 	}
 	return b
 }
@@ -947,6 +979,17 @@ func peerListHasLocal(entries []peerEntry) bool {
 	return false
 }
 
+// peerListHasVersion reports whether any entry has a build version worth
+// encoding a trailing block for — see encodePeerList.
+func peerListHasVersion(entries []peerEntry) bool {
+	for _, en := range entries {
+		if en.version != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // peerListTCPBlock marks the optional trailing block of per-entry TCP fallback
 // ports in an encoded peer list. peerListExtraTCPBlock/peerListExtraUDPBlock
 // mark further optional trailing blocks of per-entry extra ports — see
@@ -957,6 +1000,7 @@ const (
 	peerListExtraTCPBlock = 0x02
 	peerListExtraUDPBlock = 0x03
 	peerListLocalBlock    = 0x04
+	peerListVersionBlock  = 0x05
 )
 
 func appendLenStr(b []byte, s string) []byte {
@@ -1095,6 +1139,14 @@ blocks:
 					break blocks
 				}
 				entries[i].localEndpoints = eps
+			}
+		case peerListVersionBlock:
+			for i := range entries {
+				v, ok := r.lenStr()
+				if !ok {
+					break blocks
+				}
+				entries[i].version = v
 			}
 		default:
 			break blocks // unrecognized block: stop rather than misparse

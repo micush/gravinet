@@ -36,6 +36,13 @@ type PeerInfo struct {
 	// guessing one from its tunnel address.
 	BGPASN uint32 `json:"bgp_asn,omitempty"`
 
+	// Version is the peer's build version, as advertised in its handshake
+	// (see hsPayload.Version) — surfaced so Monitor → Mesh Peers can show
+	// which build each peer runs without an operator logging into each one.
+	// Omitted when empty, which means the peer predates the field; the UI
+	// renders that as unknown rather than as a version.
+	Version string `json:"version,omitempty"`
+
 	// TxBytes/RxBytes are cumulative encrypted wire bytes exchanged with this
 	// peer over the life of its current session (they reset on re-handshake,
 	// like EstablishedAt). Omitted when zero so old clients and idle rows stay
@@ -330,6 +337,11 @@ type ManagedPeer struct {
 	LastSeen  time.Time
 	Connected bool
 	Manager   bool // peer currently advertises Manager mode (see IsManagerAddr)
+	// Version is the peer's build version — see hsPayload.Version. Empty
+	// for a peer that predates the field (or hasn't been heard from in
+	// enough detail yet); render as unknown rather than substituting
+	// anything.
+	Version string
 }
 
 // manageable reports whether this entry can actually be proxied to: it needs an
@@ -391,6 +403,7 @@ func (e *Engine) ManagedPeers(maxAge time.Duration) []ManagedPeer {
 				NodeID: nodeID, Hostname: ni.hostname, Network: id,
 				Overlay4: ni.overlay4, Overlay6: ni.overlay6, WebPort: ni.webPort,
 				LastSeen: ni.lastSeen, Connected: connected, Manager: ni.manager,
+				Version: ni.version,
 			}
 			if prev, ok := best[nodeID]; !ok || betterManaged(cur, prev) {
 				best[nodeID] = cur
@@ -856,6 +869,7 @@ func (e *Engine) ListPeers(networkID uint64) []PeerInfo {
 			TxPackets:     ps.txPkts.Load(),
 			RxPackets:     ps.rxPkts.Load(),
 			BGPASN:        ps.bgpASN,
+			Version:       ps.version,
 		}
 		if r := ps.getRelay(); r != nil {
 			if r.hostname != "" {
@@ -932,7 +946,7 @@ func (e *Engine) SelfPeer(networkID uint64) (pi PeerInfo, ok bool) {
 		return PeerInfo{}, false
 	}
 	s4, s6 := ns.selfAddrs()
-	pi = PeerInfo{NodeID: e.nodeID, Hostname: e.hostname, BGPASN: e.bgpASN.Load()}
+	pi = PeerInfo{NodeID: e.nodeID, Hostname: e.hostname, BGPASN: e.bgpASN.Load(), Version: e.version}
 	if s4.IsValid() {
 		pi.Overlay4 = s4.String()
 	}

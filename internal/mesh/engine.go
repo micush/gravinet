@@ -207,6 +207,11 @@ type Options struct {
 	Managed  bool   // advertise this node as remotely manageable
 	Manager  bool   // advertise this node as able to manage other Managed peers
 	WebPort  uint16 // web-admin port advertised for management over the overlay
+	// Version is this node's own build version, advertised to peers purely
+	// so an operator can see which build each one runs — see
+	// hsPayload.Version. Empty is fine (peers render it as unknown);
+	// nothing in the mesh behaves differently based on it.
+	Version string
 	// RouteAdvInterval is how often this node re-floods its own redistributed
 	// routes. Zero means the built-in default (10s).
 	RouteAdvInterval time.Duration
@@ -299,6 +304,12 @@ type Engine struct {
 	// comment for what it's for and why it's scoped to direct peers only.
 	bgpASN  atomic.Uint32
 	webPort uint16 // advertised web-admin port
+	// version is this node's own build version, advertised in every
+	// handshake (see hsPayload.Version). A plain immutable field, not an
+	// atomic like managed/manager/bgpASN: a build version cannot change
+	// without the process restarting, so there is no live-toggle path for
+	// it and nothing to guard against a concurrent write.
+	version string
 
 	routeAdvNs    atomic.Int64 // route re-advertisement interval (ns); tuned live
 	keepaliveNs   atomic.Int64 // NAT keepalive interval (ns); tuned live
@@ -926,7 +937,13 @@ type nodeInfo struct {
 	// isn't (or isn't currently) a direct peer.
 	extraTCPPorts []uint16
 	extraUDPPorts []uint16
-	lastSeen      time.Time
+	// version is the node's build version, learned from its handshake when
+	// it's a direct peer or from peer-list gossip when it isn't — see
+	// hsPayload.Version. Unlike bgpASN just above, this one genuinely is
+	// read back out (Engine.ManagedPeers surfaces it, and that list
+	// deliberately includes gossip-only nodes).
+	version  string
+	lastSeen time.Time
 }
 
 type peerSession struct {
@@ -980,8 +997,13 @@ type peerSession struct {
 	// see ensureFallback and the UDP seed-injection in handshake_engine.go.
 	extraTCPPorts []uint16
 	extraUDPPorts []uint16
-	lastRx        time.Time
-	established   time.Time // when this session was installed (see install()); resets on every reconnect
+	// version is the peer's build version from its handshake — see
+	// hsPayload.Version. Set once at install and never refreshed: a peer
+	// changing build necessarily restarts, which replaces this session
+	// wholesale rather than mutating it.
+	version     string
+	lastRx      time.Time
+	established time.Time // when this session was installed (see install()); resets on every reconnect
 
 	reportedMu sync.Mutex
 	reported   map[string]bool // node ids this peer advertised (relay candidate info)
@@ -1136,6 +1158,7 @@ func NewEngine(o Options) *Engine {
 		hostname:   o.Hostname,
 		log:        log,
 		webPort:    o.WebPort,
+		version:    o.Version,
 		sessions:   make(map[uint32]*peerSession),
 		stop:       make(chan struct{}),
 		reflexive:  make(map[string]reflexiveObs),

@@ -982,13 +982,21 @@ TTL), plus this node's own managed/manager state:
   "peers": [
     {"node_id": "<id>", "hostname": "office-router", "overlay": "10.42.0.5",
      "web_port": 8443, "age_seconds": 12, "connected": true,
-     "manageable": true, "manager": false}
+     "manageable": true, "manager": false, "version": "587"}
   ]
 }
 ```
 
 `manageable` means this node has enough information (a reachable overlay
 address and web port) to actually proxy to that peer right now.
+
+`version` is the gravinet build that peer reports for itself — surfaced
+here so a fleet operator can see which nodes are behind before pushing an
+upgrade to them. It's advertised by the peer in its own mesh handshake and
+relayed onward through peer-list gossip, so it's populated for peers known
+only indirectly too, not just direct neighbours. Omitted entirely for a
+peer running a build old enough to predate the field; treat that as
+unknown rather than as "no version".
 
 ### The management proxy
 
@@ -1377,7 +1385,9 @@ Full field lists for the recurring object shapes referenced above.
 
 **`PeerInfo`** (a connected peer, in `/api/status`):
 `node_id`, `hostname`, `overlay4`/`overlay6`, `endpoint` (observed
-underlay source), `relayed` (bool), `relay_via`, `bgp_asn`, `tx_bytes`/
+underlay source), `relayed` (bool), `relay_via`, `bgp_asn`, `version` (the
+gravinet build the peer reports for itself; omitted when the peer predates
+the field — render as unknown, not as "no version"), `tx_bytes`/
 `rx_bytes`, `tx_packets`/`rx_packets`, `rtt_ms`, `notes`, `key_label`,
 `transport` (`"udp"`/`"tcp"`), `established_at_unix_nano`, `path_mtu`,
 `frags_sent`/`frag_send_drop`/`frags_rcvd`/`reasm_ok`/`reasm_drop`/
@@ -1589,6 +1599,18 @@ curl -sk -b cookies.txt -X POST $HOST/api/speedtest/run \
   -d '{"target_ip":"10.42.0.5","target_port":8443}' \
   | jq '{download_mbps: .download.avg_mbps, upload_mbps: .upload.avg_mbps}'
 ```
+
+### See which nodes are running which build
+
+```bash
+curl -sk -b cookies.txt $HOST/api/cluster \
+  | jq -r '.peers[] | "\(.hostname) - \(.node_id[0:8]) - v\(.version // "?")"'
+```
+
+Every peer reports its own build version, relayed across the mesh, so this
+answers "what's behind?" for the whole fleet from one node without logging
+into each one. The same values back the version column in
+Monitor → Mesh Peers and the labels in the upgrade peer picker.
 
 ### Drive a peer through the fleet proxy
 

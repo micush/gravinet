@@ -37,7 +37,14 @@ func TestHSPayloadCarriesExtraPorts(t *testing.T) {
 	// Simulate an older peer that doesn't send either extra-ports field
 	// (strip everything after TCPPort): the primary fields must still
 	// decode correctly, with both extra lists left nil.
-	tcpPortEnd := len(enc) - portListEncodedLen(in.ExtraTCPPorts) - portListEncodedLen(in.ExtraUDPPorts)
+	// Every field encodeHSPayload writes after the two extra-port lists has
+	// to come off too, or this "truncate back to TCPPort" offset lands
+	// somewhere inside the extra-TCP list instead — see
+	// TestHSPayloadCarriesTCPPort's comment on the same hazard.
+	const bgpASNFieldLen = 4
+	afterExtras := endpointListEncodedLen(in.LocalEndpoints) + bgpASNFieldLen + lenStrEncodedLen(in.Version)
+	tcpPortEnd := len(enc) - afterExtras -
+		portListEncodedLen(in.ExtraTCPPorts) - portListEncodedLen(in.ExtraUDPPorts)
 	old, err := decodeHSPayload(enc[:tcpPortEnd])
 	if err != nil {
 		t.Fatalf("backward-compat decode failed: %v", err)
@@ -51,7 +58,7 @@ func TestHSPayloadCarriesExtraPorts(t *testing.T) {
 
 	// Simulate a peer that sends ExtraTCPPorts but predates ExtraUDPPorts
 	// (a hypothetical intermediate version) — only cut the UDP list.
-	tcpOnly := enc[:len(enc)-portListEncodedLen(in.ExtraUDPPorts)]
+	tcpOnly := enc[:len(enc)-afterExtras-portListEncodedLen(in.ExtraUDPPorts)]
 	mid, err := decodeHSPayload(tcpOnly)
 	if err != nil {
 		t.Fatalf("partial backward-compat decode failed: %v", err)
@@ -153,6 +160,19 @@ func portListEncodedLen(ports []uint16) int {
 	return 1 + 2*n
 }
 
+// lenStrEncodedLen returns how many bytes appendLenStr would produce for a
+// given string — 1 length byte plus the (255-capped) body. Same reasoning as
+// portListEncodedLen/endpointListEncodedLen: hsPayload.Version is a trailing
+// optional field, so a truncation test has to cut at its exact boundary
+// rather than a magic offset.
+func lenStrEncodedLen(s string) int {
+	n := len(s)
+	if n > 255 {
+		n = 255
+	}
+	return 1 + n
+}
+
 // endpointListEncodedLen returns how many bytes appendEndpointList would
 // produce for a given list — appendEndpoint's own per-entry shape
 // (1 family byte + 4 or 16 address bytes + 2 port bytes), same reasoning as
@@ -173,4 +193,96 @@ func endpointListEncodedLen(eps []netip.AddrPort) int {
 		}
 	}
 	return total
+}
+
+// TestHSPayloadCarriesVersion: the build version survives a handshake
+// round-trip, and a payload from a peer that predates the field decodes to ""
+// — one level further into the optional-field chain than BGPASN, same shape
+// as TestHSPayloadCarriesExtraPorts.
+func TestHSPayloadCarriesVersion(t *testing.T) {
+	in := hsPayload{
+		Index:     7,
+		Ephemeral: make([]byte, ephemeralLen),
+		NodeID:    "n",
+		Hostname:  "h",
+		TCPPort:   65432,
+		BGPASN:    4200000042,
+		Version:   "587",
+	}
+	enc := encodeHSPayload(in)
+	out, err := decodeHSPayload(enc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Version != "587" {
+		t.Fatalf("Version = %q, want \"587\"", out.Version)
+	}
+	if out.BGPASN != 4200000042 {
+		t.Fatalf("BGPASN = %d, want 4200000042 (version field must not disturb it)", out.BGPASN)
+	}
+
+	// A peer predating the version field sends everything up to BGPASN and
+	// stops: Version must come back empty, and BGPASN must still decode.
+	old, err := decodeHSPayload(enc[:len(enc)-lenStrEncodedLen(in.Version)])
+	if err != nil {
+		t.Fatalf("backward-compat decode failed: %v", err)
+	}
+	if old.Version != "" {
+		t.Fatalf("backward-compat Version = %q, want empty", old.Version)
+	}
+	if old.BGPASN != 4200000042 {
+		t.Fatalf("backward-compat BGPASN = %d, want 4200000042", old.BGPASN)
+	}
+}
+
+// TestPeerListCarriesVersion: the gossip list carries per-entry build
+// versions in their own trailing block, a list whose entries have none omits
+// the block entirely, and an older decoder that stops before it still reads
+// every earlier field — mirroring TestPeerListCarriesExtraPorts.
+func TestPeerListCarriesVersion(t *testing.T) {
+	in := []peerEntry{
+		{nodeID: "A", hostname: "a", overlay4: netip.MustParseAddr("10.0.0.1"),
+			endpoint: netip.MustParseAddrPort("198.51.100.7:65432"), tcpPort: 65432, version: "587"},
+		{nodeID: "B", hostname: "b", overlay4: netip.MustParseAddr("10.0.0.2"),
+			endpoint: netip.MustParseAddrPort("198.51.100.8:65432"), tcpPort: 8443, version: "571"},
+	}
+	out, err := decodePeerList(encodePeerList(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 2 || out[0].version != "587" || out[1].version != "571" {
+		t.Fatalf("versions not carried: %+v", out)
+	}
+
+	// Entries with no version at all: the block is not emitted, so the
+	// encoding is byte-identical to what it would have been before the
+	// field existed (a mesh of older peers costs nothing).
+	none := []peerEntry{
+		{nodeID: "A", hostname: "a", endpoint: netip.MustParseAddrPort("198.51.100.7:1"), tcpPort: 1},
+	}
+	withVer := []peerEntry{
+		{nodeID: "A", hostname: "a", endpoint: netip.MustParseAddrPort("198.51.100.7:1"), tcpPort: 1, version: "587"},
+	}
+	encNone, encVer := encodePeerList(none), encodePeerList(withVer)
+	if len(encNone) != len(encVer)-lenStrEncodedLen("587")-1 { // -1 for the block marker
+		t.Fatalf("empty-version encoding should omit the block: %d vs %d", len(encNone), len(encVer))
+	}
+	backNone, err := decodePeerList(encNone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backNone) != 1 || backNone[0].version != "" || backNone[0].tcpPort != 1 {
+		t.Fatalf("no-version round-trip wrong: %+v", backNone)
+	}
+
+	// An older decoder stops at the unrecognized version block; everything
+	// before it must still have been read.
+	trimmed := encVer[:len(encVer)-lenStrEncodedLen("587")-1]
+	backOld, err := decodePeerList(trimmed)
+	if err != nil {
+		t.Fatalf("backward-compat decode failed: %v", err)
+	}
+	if len(backOld) != 1 || backOld[0].version != "" || backOld[0].tcpPort != 1 {
+		t.Fatalf("backward-compat wrong: %+v", backOld)
+	}
 }

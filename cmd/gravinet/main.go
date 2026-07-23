@@ -48,7 +48,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "590"
+	version = "591"
 	commit  = "none"
 )
 
@@ -513,6 +513,7 @@ func cmdRun(args []string) {
 			Managed:           cfg.Managed,
 			Manager:           cfg.Manager,
 			WebPort:           webPortOf(cfg),
+			Version:           version,
 			RouteAdvInterval:  cfg.RouteAdvDuration(),
 			KeepaliveInterval: cfg.KeepaliveDuration(),
 			PeerTimeout:       cfg.PeerTimeoutDuration(),
