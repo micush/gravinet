@@ -38,6 +38,23 @@ assuming it didn't happen.
 
 ---
 
+## v598 — 2026-07-22
+
+**UI only**, in `internal/webadmin/ui.go`: Traffic \u2192 QoS. Rewrote the
+section's `secHint` description: opens with a plain-language "Quality of
+Service modifies traffic priority." sentence; drops the "(the same catalog
+as Firewall \u203a Services)" aside on named services and the "at most one raw
+entry per rule, any number of named services" constraint note (display
+text only \u2014 `secQoS`'s actual rule validation is untouched, so this is
+purely a wording change, not a behavior change); and capitalizes
+**Match** as its own sentence following "Strict priority is maintained \u2014
+higher classes drain first under contention." The requested text had an
+unmatched closing parenthesis after "lowest/bulk" (a stray leftover from
+editing the original's parenthetical); corrected by dropping the stray
+`)` rather than reproducing broken punctuation in the shipped UI. No API,
+config, or wire behaviour changed; the binary is identical to v597 in
+everything but the version string.
+
 ## v597 — 2026-07-22
 
 **UI only**, in `internal/webadmin/ui.go`: the same treatment v596 gave

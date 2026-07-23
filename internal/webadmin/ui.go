@@ -5312,7 +5312,7 @@ function qosClassOpts(classes, sel){
 
 function secQoS(c) {
   if (!state.cfg.length) return emptyCard(c, 'No networks.');
-  secHint(c, '5 priority classes (0 = highest, 4 = lowest/bulk). Unmatched traffic uses class 3 (normal). Strict priority — higher classes drain first under contention. <b>match</b> takes a comma-separated mix of named services (the same catalog as Firewall \u203a Services) and raw <code>proto</code>/<code>proto/port</code> entries (e.g. <code>https, tcp/8443, udp/53</code>); at most one raw entry per rule, any number of named services; leave it blank to match anything. Use + to add a rule, double-click a rule to edit it, double-click the state tag to toggle it, tick rows and use \u2212 to remove.');
+  secHint(c, 'Quality of Service modifies traffic priority. There are 5 priority classes - 0 = highest to 4 = lowest/bulk. Unmatched traffic uses class 3 (normal). Strict priority is maintained \u2014 higher classes drain first under contention. <b>Match</b> takes a comma-separated mix of named services and raw <code>proto</code>/<code>proto/port</code> entries (e.g. <code>https, tcp/8443, udp/53</code>); leave it blank to match anything. Use + to add a rule, double-click a rule to edit it, double-click the state tag to toggle it, tick rows and use \u2212 to remove.');
   for (const cf of state.cfg) {
     const q = cf.qos||{}; const en = !!q.enabled; const classes = q.classes||5;
     const dflt = (q.default_class!=null)?q.default_class:3;
