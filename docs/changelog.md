@@ -38,6 +38,32 @@ assuming it didn't happen.
 
 ---
 
+## v597 — 2026-07-22
+
+**UI only**, in `internal/webadmin/ui.go`: the same treatment v596 gave
+Monitor \u2192 Capture \u2014 description moved from inside the card to a
+`secHint` between the page title and the card, in-card title dropped \u2014
+now applied to the other six Monitor sections and Speedtest:
+
+- **Speedtest** (`infoSpeedtest`) had no in-card title to begin with, just
+  the hint; only the hint moved.
+- **Route Table** (`infoRoutes`): dropped the "Local routing table" `<h3>`
+  (redundant with the page title "Route Table"); hint moved.
+- **Hosts File** (`infoHosts`): dropped the "Local hosts file" `<h3>`
+  (redundant with "Hosts File"); hint moved.
+- **DNS State** (`infoDNS`): dropped the "Conditional DNS forwarding: live
+  state" `<h3>` (redundant with "DNS State"); hint moved.
+- **Latency** (`infoLatency`): dropped the "Latency to mesh peers" `<h3>`;
+  hint moved, including its two live poll/window-interval placeholders.
+- **Logs** (`secLogs`): no in-card title to begin with, just the hint; only
+  the hint moved.
+
+Per-network and per-peer `<h4>` sub-card headers inside these sections
+(e.g. DNS State's per-network blocks) are unrelated and untouched \u2014 only
+each section's own top-level card title and description moved. No API,
+config, or wire behaviour changed; the binary is identical to v596 in
+everything but the version string.
+
 ## v596 — 2026-07-22
 
 **UI only**, in `internal/webadmin/ui.go`: Monitor \u2192 Capture. The page

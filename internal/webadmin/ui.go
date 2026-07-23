@@ -6048,8 +6048,8 @@ function rateFmt(v){
 // filter, since the target only needs to accept the client's request, not
 // originate one.
 function infoSpeedtest(c){
+  secHint(c, 'Measure overlay throughput between two managed peers. The first peer runs the test against the second; download and upload are each measured for ~4s and graphed separately, with a third chart below them showing both directions\' packets/sec together, where available. Only peers in Manager mode can run a test as the first peer.');
   const card = $('<div class="card"></div>');
-  card.appendChild($('<div class="hint" style="margin:0 0 10px">Measure overlay throughput between two managed peers. The first peer runs the test against the second; download and upload are each measured for ~4s and graphed separately, with a third chart below them showing both directions\' packets/sec together, where available. Only peers in Manager mode can run a test as the first peer.</div>'));
 
   const bar = $('<div class="tbar"></div>');
   // Both pickers are buildListPicker listboxes, same as the header's node picker:
@@ -6490,9 +6490,8 @@ function infoCapture(c){
 
 // infoRoutes shows the host kernel routing table, read live (not from config).
 function infoRoutes(c){
+  secHint(c, 'The host kernel routing table on this node, read live and independent of config. Entries pointing at a gravinet interface are the ones installed for the mesh.');
   const card = $('<div class="card"></div>');
-  card.appendChild($('<h3>Local routing table</h3>'));
-  card.appendChild($('<div class="hint" style="margin:-4px 0 10px">The host kernel routing table on this node, read live and independent of config. Entries pointing at a gravinet interface are the ones installed for the mesh.</div>'));
   const body = $('<div></div>'); body.innerHTML = '<div class="hint">loading\u2026</div>'; card.appendChild(body); c.appendChild(card);
   (async () => {
     const r = await api('/api/localroutes');
@@ -7124,9 +7123,8 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
 
 // infoHosts shows the local hosts file contents, read live from disk.
 function infoHosts(c){
+  secHint(c, 'This host\'s hosts file, including the gravinet-managed block (peer hostnames and advertised records). Read live from disk.');
   const card = $('<div class="card"></div>');
-  card.appendChild($('<h3>Local hosts file</h3>'));
-  card.appendChild($('<div class="hint" style="margin:-4px 0 10px">This host\'s hosts file, including the gravinet-managed block (peer hostnames and advertised records). Read live from disk.</div>'));
   const body = $('<div></div>'); body.innerHTML = '<div class="hint">loading\u2026</div>'; card.appendChild(body); c.appendChild(card);
   (async () => {
     const r = await api('/api/localhosts');
@@ -7148,9 +7146,8 @@ function infoHosts(c){
 // reflects reality even if a sync silently failed. This is the direct way to
 // answer "is conditional forwarding actually working" without a shell.
 function infoDNS(c){
+  secHint(c, 'What\'s actually registered with this host\'s OS resolver right now, per network. Read live from the OS, not from gravinet\'s own records; if this is empty or missing an entry you expect, the last sync failed or hasn\'t happened yet; check the DNS section\'s advertise/reject lists and this node\'s logs.');
   const card = $('<div class="card"></div>');
-  card.appendChild($('<h3>Conditional DNS forwarding: live state</h3>'));
-  card.appendChild($('<div class="hint" style="margin:-4px 0 10px">What\'s actually registered with this host\'s OS resolver right now, per network. Read live from the OS, not from gravinet\'s own records; if this is empty or missing an entry you expect, the last sync failed or hasn\'t happened yet; check the DNS section\'s advertise/reject lists and this node\'s logs.</div>'));
   const body = $('<div></div>'); body.innerHTML = '<div class="hint">loading\u2026</div>'; card.appendChild(body); c.appendChild(card);
   (async () => {
     const r = await api('/api/localdns');
@@ -7240,10 +7237,8 @@ function latencySparkline(hist){
 
 function infoLatency(c){
   if (latencyTimer){ clearInterval(latencyTimer); latencyTimer = null; }
+  secHint(c, 'Round-trip time from this host to every other peer on each up network, pinged over the overlay (so it reflects the mesh path, not just the underlay). A couple of probes per peer, run concurrently; this can take a few seconds. Refreshes automatically every '+(LATENCY_POLL_MS/1000)+'s; <b>trend</b> covers the last '+(LATENCY_WINDOW_MS/1000)+'s; blue bars scale to that peer\u2019s own range, red is a miss; hover a bar for the exact reading, or the chart for how long it\u2019s held its current state.');
   const card = $('<div class="card"></div>');
-  const head = $('<h3>Latency to mesh peers</h3>');
-  card.appendChild(head);
-  card.appendChild($('<div class="hint" style="margin:-4px 0 10px">Round-trip time from this host to every other peer on each up network, pinged over the overlay (so it reflects the mesh path, not just the underlay). A couple of probes per peer, run concurrently; this can take a few seconds. Refreshes automatically every '+(LATENCY_POLL_MS/1000)+'s; <b>trend</b> covers the last '+(LATENCY_WINDOW_MS/1000)+'s; blue bars scale to that peer\u2019s own range, red is a miss; hover a bar for the exact reading, or the chart for how long it\u2019s held its current state.</div>'));
   const body = $('<div></div>'); body.innerHTML = '<div class="hint">pinging\u2026</div>'; card.appendChild(body); c.appendChild(card);
 
   const load = async () => {
@@ -7445,9 +7440,8 @@ function linkifyLog(msg, toks){
 // like every other list. Setting _rowButtons makes the toolbar (filter +
 // Refresh) render immediately, before the async tail load populates the rows.
 function secLogs(c){
+  secHint(c, 'Everything the daemon logs, newest first. Filter narrows by text across all columns (try a network id, <b>ERROR</b>, or <b>mesh</b>). Refresh reloads the tail of the log file.');
   const card = $('<div class="card"></div>');
-  const hint = $('<div class="hint" style="margin:0 0 10px">Everything the daemon logs, newest first. Filter narrows by text across all columns (try a network id, <b>ERROR</b>, or <b>mesh</b>). Refresh reloads the tail of the log file.</div>');
-  card.appendChild(hint);
   const t = $('<div></div>');
   t.innerHTML = '<table><tr><th>time</th><th>level</th><th>message</th></tr></table>';
   const table = t.querySelector('table');
