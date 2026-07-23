@@ -8055,14 +8055,37 @@ function mdRender(src){
   const esc1 = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   const codeRe = new RegExp(BT+'([^'+BT+']+)'+BT, 'g');
   const codeStyle = 'background:var(--bg);border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:12.5px';
+  // mdSlug turns heading text into the same anchor id GitHub's own markdown
+  // renderer would generate, since these docs' tables of contents (e.g.
+  // API.md's) were written assuming that convention: lowercase, strip
+  // anything that isn't a letter/digit/underscore/hyphen/space (backticks,
+  // punctuation, slashes — gone entirely, not turned into a hyphen; that's
+  // why "GET /api/x" slugs to "get-apix", not "get-a-p-i-x"), then turn each
+  // remaining space into a hyphen — one-to-one, not collapsing runs, since
+  // stripping an "&" between two spaces ("Status & config") leaves two
+  // adjacent spaces, and GitHub's own slugger turns *that* into a double
+  // hyphen ("status--config") — exactly what these docs' own tables of
+  // contents were written expecting.
+  const mdSlug = s => s.toLowerCase().replace(/[^\w\- ]+/g, '').trim().replace(/ /g, '-');
   const inline = s => {
     const codes = [];
-    s = s.replace(codeRe, (m,cc)=>{ codes.push(cc); return '\u0001'+(codes.length-1)+'\u0001'; });
+    s = s.replace(codeRe, (m,cc)=>{ codes.push(cc); return '\\u0001'+(codes.length-1)+'\\u0001'; });
     s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
     // Italic uses _underscore_, not *single asterisk*, so it can't be confused
     // with **bold** above regardless of run length or nesting.
     s = s.replace(/_([^_]+)_/g, '<em>$1</em>');
-    s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m,t,u)=>'<a href="'+u+'" target="_blank" rel="noopener" style="color:var(--acc)">'+t+'</a>');
+    s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m,t,u)=>{
+      // A "#anchor" link is this document's own table of contents pointing at
+      // a heading further down the SAME rendered page — it must stay a plain
+      // same-page anchor. target="_blank" on a hash-only href doesn't open
+      // the anchor in a new tab; it reloads this whole single-page app fresh
+      // in a new one, which always lands on the default section (Mesh >
+      // Networks) since there's no URL-hash routing here — exactly the
+      // "every TOC link dumps me on Networks" bug this fixes. A real
+      // external link (http/https) still opens in a new tab, same as before.
+      const attrs = u.charAt(0)==='#' ? '' : ' target="_blank" rel="noopener"';
+      return '<a href="'+u+'"'+attrs+' style="color:var(--acc)">'+t+'</a>';
+    });
     s = s.replace(/\u0001(\d+)\u0001/g, (m,n)=>'<code style="'+codeStyle+'">'+codes[+n]+'</code>');
     return s;
   };
@@ -8087,12 +8110,12 @@ function mdRender(src){
     const h = line.match(/^(#{1,6})\s+(.*)$/);
     if (h){
       closeList();
-      const lvl=h[1].length, txt=inline(esc1(h[2]));
+      const lvl=h[1].length, txt=inline(esc1(h[2])), id=mdSlug(h[2]);
       let st='text-transform:none;letter-spacing:normal;color:var(--fg);font-weight:700;';
       if (lvl===1) st+='font-size:20px;margin:16px 0 10px';
       else if (lvl===2) st+='font-size:16px;margin:18px 0 8px;padding-bottom:5px;border-bottom:1px solid var(--line)';
       else st+='font-size:13.5px;margin:14px 0 6px';
-      html += '<h'+lvl+' style="'+st+'">'+txt+'</h'+lvl+'>';
+      html += '<h'+lvl+' id="'+esc1(id)+'" style="'+st+'">'+txt+'</h'+lvl+'>';
       i++; continue;
     }
     const li = line.match(/^[-*]\s+(.*)$/);

@@ -38,6 +38,73 @@ assuming it didn't happen.
 
 ---
 
+---
+
+---
+
+## v609 — 2026-07-23
+
+**Fixed: every table-of-contents link on Info > API (and README/Getting
+Started, same renderer) dumped you on Mesh > Networks instead of jumping to
+the section.** Two compounding bugs in `mdRender`'s markdown renderer:
+
+1. Every link — `[Overview](#overview)` included — got
+   `target="_blank" rel="noopener"`, correct for a real external URL but
+   wrong for a same-page `#anchor`: opening a hash-only href in a new tab
+   doesn't jump to the anchor, it reloads this entire single-page app fresh
+   in that new tab. With no URL-hash routing here, a fresh load always lands
+   on `state.section`'s default, `'networks'` — exactly the reported "every
+   link takes you to Mesh > Networks."
+2. Even without bug 1, it wouldn't have worked anyway: rendered headings
+   never got an `id` attribute at all, so `#overview` had nothing to scroll
+   to in the DOM regardless of how the link was opened.
+
+Fixed both: the link renderer now only adds `target="_blank"` when the href
+does *not* start with `#`, so an internal anchor is a plain same-page link
+(native browser scroll-to-anchor, no reload) and an external `http(s)` link
+still opens in a new tab exactly as before. New `mdSlug()` generates the
+same anchor ids GitHub's own markdown renderer would — these docs' tables of
+contents were written assuming that convention — and every heading now
+carries `id="<slug>"`.
+
+`mdSlug` needed one non-obvious correctness detail to actually match: GitHub
+turns *each* space into a hyphen individually, it does not collapse runs of
+them first. Stripping punctuation like "&" from "Status & configuration"
+leaves two adjacent spaces where the "&" was, and those become a double
+hyphen —
+`status--configuration`, matching the TOC link the doc already had — not
+`status-configuration`, which is what a naive "collapse whitespace, then
+hyphenate" implementation produces (and what the first version of this fix
+actually shipped internally before being caught).
+
+Verified exhaustively against the real file rather than a few examples: a
+throwaway script extracted `mdSlug` from the built `ui.go`, ran it against
+all 25 top-level entries in API.md's own table of contents (all match) and
+all 39 `#anchor` links anywhere in the document body, including several
+added across v606/v607's own doc updates like
+`[`POST /api/restart`](#post-apirestart)` (all resolve to a real heading),
+and confirmed no two of the document's 115 headings collide on the same
+slug (none do, so no GitHub-style `-1`/`-2` disambiguation suffix was
+needed). Also checked README.md and getting-started.md, the renderer's other
+two consumers, for heading collisions of their own — none.
+
+## v608 — 2026-07-23
+
+**Documentation-only correction to v607's changelog entry** — no code
+change. v607's own entry claimed a node "self-heals the next time it
+upgrades in-place to v607 or later," which is wrong in the one case that
+actually matters: upgrading *to* v607 doesn't self-heal, because the code
+that performs that upgrade is the pre-upgrade binary, which doesn't have
+v607's fix yet. Confirmed for real: a node upgraded from v606 to v607 via
+System > Upgrade still showed Info > API as "not installed on disk"
+afterward, exactly as the flawed claim should have predicted but didn't.
+v607's entry now says plainly that the fix takes effect starting from the
+upgrade *after* a node reaches v607 — including re-applying the same
+archive again — and that there's no way around a manual re-apply for the
+transition upgrade itself, since nothing can make an old binary run code it
+was never compiled with, and no source tree survives between upgrades to
+retroactively draw from.
+
 ## v607 — 2026-07-23
 
 **Fixed: Info > API showed "not installed on disk" after an in-place
@@ -91,9 +158,28 @@ Fixed generally, not just patched for API.md:
   compiled) and passed, confirming the fix end-to-end rather than by
   inspection.
 
-A node already stuck on v606 (or any earlier version) with a stale or
-missing doc directory self-heals the next time it upgrades in-place to v607
-or later — no separate action needed, and no reinstall required.
+**This does not self-heal on the upgrade that reaches v607.** The code that
+performs any given upgrade is whichever binary is running *before* that
+upgrade — the old one, still executing until the swap and restart a moment
+later — never the one being installed. A node upgrading from v606 (or
+earlier) to v607 runs v606's `controlOp`/`Build`/`Apply`, which has no
+`SyncInstalledDocs` call at all; v607's copy of that code never gets a
+chance to run during its own installation. So a node that reaches v607 this
+way still has whatever doc directory it had before — missing or stale API.md
+included — and Info > API still says "not installed."
+
+**The fix takes effect starting from the upgrade *after* that.** Once a
+node is actually running v607, any further in-place upgrade it performs —
+including re-applying the very same v607 source a second time, version
+unchanged — runs under this fix and syncs the docs, because this time v607's
+own code is what's doing the upgrading. There is no way around this for the
+transition upgrade itself: nothing can make an old binary run code it was
+never compiled with, and gravinet keeps no source tree around between
+upgrades to retroactively draw from — the only two sources of these doc
+files are a platform installer run and an in-place upgrade's momentarily-
+extracted source tree, and the latter is exactly the mechanism this fix
+lives inside of. A node already on v607 wanting API.md now needs one more
+apply (the same archive again is fine) before the fix it contains can run.
 
 ## v606 — 2026-07-23
 
