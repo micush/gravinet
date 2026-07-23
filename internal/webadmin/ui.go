@@ -743,8 +743,19 @@ const NAV_GROUPS = [
     ['dns-state', 'what\u2019s actually registered with this host\u2019s OS resolver right now'],
     ['logs', 'the daemon\u2019s recent log output'],
   ]},
-  { name:'info', items: [
+  // System group — host-level operations on the machine gravinet runs on,
+  // mirroring parapet's System menu. Sits just above Info, as there. Upgrade
+  // lives here rather than under Info because it *changes* the host (it
+  // replaces the running binary and restarts the service); Info is for
+  // read-only reference pages — docs, license, build identity — and Upgrade was
+  // always the odd one out there. Power is last within the group: it's the most
+  // destructive item, and it takes down the whole host, not just the gravinet
+  // service (that's the restart under Settings). Both are local-only.
+  { name:'system', items: [
     ['upgrade', 'check and apply a new gravinet binary on this node; local only, no peer can trigger this'],
+    ['power', 'restart or shut down this host'],
+  ]},
+  { name:'info', items: [
     ['readme', 'project documentation'],
     ['getting-started', 'the full onboarding walkthrough'],
     ['license', 'license information'],
@@ -2288,6 +2299,7 @@ function renderSection() {
        upgrade:secUpgrade,
        metrics:infoMetrics, 'mesh-peers':infoMeshPeers, capture:infoCapture, speedtest:infoSpeedtest, latency:infoLatency,
        'route-table':infoRoutes, 'bgp-peers':secBgpPeers, 'hosts-file':infoHosts, 'dns-state':infoDNS,
+       power:secPower,
        logs:secLogs, readme:secReadme, 'getting-started':secGettingStarted, license:secLicense, about:infoAbout }[state.section])(c, nets);
   }
   c.querySelectorAll('table').forEach(enhanceTable);
@@ -5449,7 +5461,93 @@ function secBandwidth(c) {
   }
 }
 
-// ---- Upgrade (Mesh -> Upgrade) --------------------------------------------
+// ---- System ---------------------------------------------------------------
+//
+// secPower renders System > Power: reboot or shut down the host (the whole
+// machine, not just the gravinet service), immediately or on a delay, plus a
+// cancel for a pending scheduled action. Mirrors parapet's power page. The
+// action goes to /api/system/power, which — like every other section here —
+// follows the current target: local by default, or proxied to the selected
+// peer, so the confirm names exactly which node it's about to take down.
+function secPower(c){
+  secHint(c, 'Restart or shut down this host \u2014 the whole machine [gravinet] runs on, not just the service. This acts on the node you\u2019re currently managing.');
+
+  // Whose power is this? Local session, or the proxied peer if one is selected.
+  const nodeLabel = () => {
+    if (!state.target) return 'this node';
+    const p = (state.cluster || []).find(x => x.node_id === state.target);
+    return p ? (p.hostname || p.node_id.slice(0,8)) : state.target.slice(0,8);
+  };
+
+  // Radios get width/padding/border reset off the global boxed input styling so
+  // they render as actual radio dots, not little framed boxes.
+  const RADIO = 'width:auto;padding:0;border:0;margin:0 7px 0 0;accent-color:var(--acc);vertical-align:middle';
+  const NUM = 'width:70px;margin:0 6px';
+  const optRow = 'display:flex;align-items:center;gap:2px;margin:6px 0';
+  const legend = 'font-size:12px;text-transform:uppercase;letter-spacing:1px;color:var(--mut);margin:0 0 6px';
+
+  const card = $('<div class="card"></div>');
+
+  card.appendChild($('<div style="'+legend+'">Action</div>'));
+  card.appendChild($('<label style="'+optRow+'"><input type="radio" name="pwr-act" value="restart" checked style="'+RADIO+'"><span>restart host</span></label>'));
+  card.appendChild($('<label style="'+optRow+'"><input type="radio" name="pwr-act" value="shutdown" style="'+RADIO+'"><span>shut down host</span></label>'));
+
+  card.appendChild($('<div style="'+legend+';margin-top:14px">When</div>'));
+  card.appendChild($('<label style="'+optRow+'"><input type="radio" name="pwr-when" value="now" checked style="'+RADIO+'"><span>now</span></label>'));
+  const inRow = $('<label style="'+optRow+'"><input type="radio" name="pwr-when" value="in" style="'+RADIO+'"><span>in</span><input type="number" id="pwr-mins" min="1" max="10080" value="5" style="'+NUM+'"><span>minutes</span></label>');
+  card.appendChild(inRow);
+  const atRow = $('<label style="'+optRow+'"><input type="radio" name="pwr-when" value="at" style="'+RADIO+'"><span>at</span><input type="time" id="pwr-time" style="margin:0 6px"><span>(24-hour)</span></label>');
+  card.appendChild(atRow);
+
+  // Focusing a value field implies its radio, so typing a delay doesn't silently
+  // stay on "now".
+  const pick = (name, val) => { const r = card.querySelector('input[name="'+name+'"][value="'+val+'"]'); if (r) r.checked = true; };
+  const mins = card.querySelector('#pwr-mins'); if (mins) mins.addEventListener('focus', () => pick('pwr-when','in'));
+  const tm = card.querySelector('#pwr-time'); if (tm) tm.addEventListener('focus', () => pick('pwr-when','at'));
+
+  const btns = $('<div style="display:flex;gap:8px;margin-top:16px"></div>');
+  const execBtn = $('<button class="danger">Execute</button>');
+  const cancelBtn = $('<button class="ghost">Cancel scheduled power</button>');
+  btns.appendChild(execBtn); btns.appendChild(cancelBtn);
+  card.appendChild(btns);
+  c.appendChild(card);
+
+  execBtn.onclick = async () => {
+    const action = (card.querySelector('input[name="pwr-act"]:checked') || {}).value || 'restart';
+    const when = (card.querySelector('input[name="pwr-when"]:checked') || {}).value || 'now';
+    const isRestart = action === 'restart';
+    const payload = { action, when };
+    if (when === 'in') {
+      const m = parseInt(card.querySelector('#pwr-mins').value, 10);
+      if (!(m >= 1)) { alert('Enter a positive number of minutes.'); return; }
+      payload.minutes = m;
+    } else if (when === 'at') {
+      const t = card.querySelector('#pwr-time').value;
+      if (!/^\d{2}:\d{2}$/.test(t)) { alert('Choose a time.'); return; }
+      payload.time = t;
+    }
+    const verb = isRestart ? 'restart' : 'shut down';
+    const whenText = when === 'now' ? 'now' : when === 'in' ? ('in ' + payload.minutes + ' minute(s)') : ('at ' + payload.time);
+    const warn = isRestart
+      ? 'This reboots the entire host machine, not just gravinet.'
+      : 'This powers off the entire host machine; it stays down, blocking all traffic, until powered on out of band.';
+    if (!confirm(verb.charAt(0).toUpperCase()+verb.slice(1) + ' ' + nodeLabel() + ' ' + whenText + '?\n\n' + warn + '\n\nYou will lose access to this console' + (state.target ? ' for that node' : '') + '.')) return;
+    const r = await api('/api/system/power', { method:'POST', body: JSON.stringify(payload) });
+    if (!r.ok) { alert((r.body && r.body.error) || 'power action failed'); return; }
+    const w = (r.body && r.body.when) || 'now';
+    alert(w === 'now'
+      ? nodeLabel() + ' is ' + (isRestart ? 'restarting' : 'shutting down') + '\u2026'
+      : nodeLabel() + ' will ' + verb + ' ' + w + '.');
+  };
+
+  cancelBtn.onclick = async () => {
+    const r = await api('/api/system/power', { method:'POST', body: JSON.stringify({ action:'cancel' }) });
+    if (!r.ok) { alert((r.body && r.body.error) || 'No pending power action to cancel.'); return; }
+    alert('Pending power action cancelled.');
+  };
+}
+
+// ---- Upgrade (System -> Upgrade) ------------------------------------------
 //
 // The tab is deliberately opinionated about what it puts in front of you, in
 // this order: what THIS node is running, what it has staged, what the FLEET is

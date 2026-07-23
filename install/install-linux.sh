@@ -181,6 +181,21 @@ firewalld_running() {
   return 0
 }
 
+# will_speak_bgp reports whether this host will actually run FRR's BGP/BFD
+# speaker once this install finishes: either vtysh is already present, or we're
+# about to install FRR this run (INSTALL_FRR, i.e. --no-frr wasn't passed).
+# Only then is there any point opening the BGP/BFD ports below — on a host that
+# will never run bgpd/bfdd they'd be holes to nothing. This mirrors gravinet's
+# own bgpSupported() gate (vtysh presence, see internal/webadmin/bgp.go) with
+# this run's install intent folded in, and matches --no-frr's documented
+# meaning ("Pass this if you don't use BGP/BFD"): opt out of FRR and these
+# ports stay closed too. frr_installed is defined further down; it's only
+# *called* from here at firewall time, by which point it's defined.
+will_speak_bgp() {
+  [ "$INSTALL_FRR" = 1 ] && return 0
+  frr_installed
+}
+
 # firewalld_ports prints the ports gravinet needs open, one per line, in
 # firewall-cmd's port/proto form:
 #   - the underlay port on BOTH udp and tcp: udp is the primary transport, and tcp
@@ -190,8 +205,19 @@ firewalld_running() {
 #     speedtest streams, to this node's web admin across the mesh interface, which
 #     lands in firewalld's default zone like any other inbound packet and is
 #     dropped without this.
+#   - when this host will speak BGP/BFD (see will_speak_bgp): bgpd's 179/tcp plus
+#     bfdd's 3784/udp (single-hop control) and 4784/udp (multi-hop control). Like
+#     the web admin port these ride the mesh overlay between peers and so arrive
+#     in firewalld's default zone; FRR's own bgpd/bfdd — not the gravinet binary —
+#     listen on them, so gravinet's per-program reasoning doesn't cover them the
+#     way it might elsewhere. These are stock FRR ports; gravinet's generated
+#     config doesn't override them. bfdd's echo port (3785) is deliberately left
+#     out: echo mode is off in that config, so nothing ever binds it.
 firewalld_ports() {
   printf '%s/udp\n%s/tcp\n%s/tcp\n' "$(cfg_underlay_port)" "$(cfg_underlay_port)" "$(cfg_web_port)"
+  if will_speak_bgp; then
+    printf '179/tcp\n3784/udp\n4784/udp\n'
+  fi
 }
 
 open_firewalld() {

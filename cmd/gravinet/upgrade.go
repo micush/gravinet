@@ -73,7 +73,7 @@ must be present (the platform installers put one there).
 Upgrades are local-only by default: nothing here can be triggered by a peer.
 A node may opt in to accepting source pushed by a directly-connected Manager
 with upgrade.accept_manager_upgrades — off unless you set it. The web admin's
-Info -> Upgrade page does the same thing with a file picker.
+System -> Upgrade page does the same thing with a file picker.
 `)
 }
 

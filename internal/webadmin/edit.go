@@ -891,6 +891,113 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
+// handleSystemPower reboots or shuts down the *host* (not just the gravinet
+// service — that's handleRestart), optionally on a delay, via the OS's own
+// shutdown facility. Backend lives in the service package (HostPower /
+// HostPowerCancel / HostPowerSupported), cross-platform.
+//
+// Request: {action, when, minutes, time}.
+//
+//	action: "restart" | "shutdown" | "cancel"
+//	when:   "now" | "in" | "at"     (ignored for "cancel")
+//	minutes: N>0                    (required for when=="in")
+//	time:   "HH:MM" 24h             (required for when=="at")
+//
+// "when" is resolved to whole minutes-from-now here — "now"→0, "in"→minutes,
+// "at HH:MM"→minutes until the next occurrence of that clock time in the host's
+// local zone — so the platform layer only ever deals in a minute count and
+// never has to reason about clock formats that differ per OS. The reply echoes
+// a human-readable "when" so the UI can confirm what it scheduled.
+func (s *Server) handleSystemPower(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Action  string `json:"action"`
+		When    string `json:"when"`
+		Minutes int    `json:"minutes"`
+		Time    string `json:"time"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+
+	if req.Action == "cancel" {
+		s.log.Infof("webadmin: cancelling pending host power action (requested from admin UI)")
+		if ok, hint := service.HostPowerCancel(); !ok {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": hint})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "action": "cancel"})
+		return
+	}
+
+	if req.Action != "restart" && req.Action != "shutdown" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "action must be 'restart', 'shutdown', or 'cancel'"})
+		return
+	}
+	if ok, hint := service.HostPowerSupported(); !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": hint})
+		return
+	}
+
+	// Resolve when → whole minutes from now, plus a human string for the reply.
+	delayMin := 0
+	human := "now"
+	switch req.When {
+	case "", "now":
+		// immediate
+	case "in":
+		if req.Minutes < 1 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "'in' needs a positive number of minutes"})
+			return
+		}
+		if req.Minutes > 60*24*7 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "minutes must be at most 10080 (7 days)"})
+			return
+		}
+		delayMin = req.Minutes
+		human = fmt.Sprintf("in %d minute(s)", req.Minutes)
+	case "at":
+		mins, err := minutesUntilClock(req.Time)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		delayMin = mins
+		human = "at " + req.Time
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "'when' must be 'now', 'in', or 'at'"})
+		return
+	}
+
+	s.log.Infof("webadmin: host %s scheduled %s (requested from admin UI)", req.Action, human)
+	if ok, hint := service.HostPower(req.Action, delayMin); !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": hint})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "action": req.Action, "when": human})
+}
+
+// minutesUntilClock returns whole minutes from now until the next occurrence of
+// a 24-hour "HH:MM" wall-clock time in the host's local zone. A time earlier
+// today (or exactly now) rolls to tomorrow, so "at 02:00" at 09:00 means 17h
+// out, never a negative delay. Rounds up so the resulting minute never lands
+// before the requested clock time. Returns an error for a malformed time.
+func minutesUntilClock(hhmm string) (int, error) {
+	t, err := time.Parse("15:04", hhmm)
+	if err != nil {
+		return 0, fmt.Errorf("'at' needs a time in 24-hour HH:MM format")
+	}
+	now := time.Now()
+	target := time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), 0, 0, now.Location())
+	if !target.After(now) {
+		target = target.Add(24 * time.Hour)
+	}
+	mins := int((target.Sub(now) + time.Minute - time.Nanosecond) / time.Minute) // ceil
+	if mins < 1 {
+		mins = 1
+	}
+	return mins, nil
+}
+
 // handleKey: manage a network's join/rotation key slots. Key changes apply on
 // restart (keys bind into the engine at startup), so these return restart:true.
 // "reveal" is read-only and returns the full key for distribution.

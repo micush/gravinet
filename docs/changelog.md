@@ -38,6 +38,118 @@ assuming it didn't happen.
 
 ---
 
+## v603 — 2026-07-23
+
+**Upgrade moved from Info to System.** The upgrade page now sits in the
+**System** group added in v602, above **Power**, and Info is left holding only
+read-only reference pages (README, Getting Started, license, About). Upgrade
+never really belonged there: everything else under Info just *shows* you
+something, while Upgrade replaces the running binary and restarts the service —
+a host-level action, which is exactly what the System group is for. Within the
+group Upgrade comes first and Power second, keeping the most destructive item
+last, the same way Bans sits at the end of the Mesh group.
+
+- **UI** (`internal/webadmin/ui.go`): the `['upgrade', …]` entry moved from the
+  `info` group to the `system` group in `NAV_GROUPS`. Because the rail, the
+  accordion group state, `groupFor`, `SECTIONS`, and the global search index are
+  all derived from `NAV_GROUPS`, that one-line move is the whole functional
+  change — no handler, route, or dispatch entry was touched, and
+  `upgrade:secUpgrade` in the section dispatch is unchanged. The page itself,
+  its endpoints, and its local-only enforcement (`LOCAL_API`,
+  `upgradeLocalOnly`) all behave exactly as before; only where you click to
+  reach it has changed.
+- **Comment placement** (same file): v602 inserted `secPower` directly beneath
+  the `---- Upgrade ----` banner comment, leaving that block describing a
+  function two hundred lines away. The banner moved back down to sit
+  immediately above `secUpgrade`, and its stale nav path — it still said
+  `Mesh -> Upgrade`, from an even earlier layout — now reads
+  `System -> Upgrade`. `secPower` gets a short `---- System ----` banner of its
+  own.
+- **Docs**: `docs/UPGRADES.md` updated both places it spells out the click path
+  (single-node upload, and the Manager's push-to-managed-peers flow) from
+  Info → Upgrade to System → Upgrade; `cmd/gravinet/upgrade.go`'s CLI help text,
+  which points at the web equivalent, likewise. `README.md`'s sidebar tour
+  gained the **System** group, which v602 never added, and its **Info**
+  description now also mentions Getting Started.
+
+No config, API, or wire-format change; nothing to migrate.
+
+---
+
+## v602 — 2026-07-23
+
+**New: System > Power** — the first item of a new **System** nav group that
+mirrors parapet's System menu, positioned in the rail just above **Info**
+(parapet keeps System above Info too). Power reboots or shuts down the whole
+*host* — the machine gravinet runs on, not just the gravinet service (that's
+the restart under Settings) — immediately or on a delay, with a cancel for a
+pending scheduled action. It's a faithful recreation of parapet's power page.
+
+- **Backend** (`internal/service/power.go`, new): `HostPower(action, delayMin)`,
+  `HostPowerCancel()`, and `HostPowerSupported()`, cross-platform via a
+  `runtime.GOOS` switch in the same style as the existing `CanRestart`/
+  `Restart`: Linux prefers `systemctl reboot|poweroff` for an immediate action
+  (falling back to `shutdown`) and uses `shutdown -r|-h +N` when scheduled, with
+  `shutdown -c` to cancel; macOS and the BSDs use `shutdown` (`-p` for power-off
+  on BSD, `-h` on macOS) and have no cancel; Windows uses `shutdown /r|/s /t
+  <secs>` and `shutdown /a` to cancel. The immediate case is backgrounded with a
+  one-second head start (via `detachedRestart`, i.e. `Start` not `Run`) so the
+  HTTP reply flushes before the box goes down and so it never blocks on a
+  command that tears this process out from under it — the same self-wait hazard
+  `Restart` already documents.
+- **Handler** (`handleSystemPower`, `/api/system/power`): decodes
+  `{action, when, minutes, time}`, validates, and resolves `when` to whole
+  minutes-from-now — `now`→0, `in`→minutes (capped at 7 days), `at HH:MM`→
+  minutes until the next occurrence of that wall-clock time in the host's local
+  zone (rolls to tomorrow if already past, rounds up) — so the platform layer
+  only ever deals in a minute count and never has to reason about the clock
+  formats that differ per OS (Linux/BSD `shutdown` take an absolute HH:MM;
+  Windows only takes a second count). Like every other section, it follows the
+  current target: local by default, or proxied to the selected peer.
+- **UI** (`secPower`): action (restart/shutdown) and when (now / in N min / at
+  HH:MM) controls, an Execute button gated behind a `confirm()` that names
+  exactly which node it's about to take down, and a Cancel-scheduled button —
+  using gravinet's own `confirm()`/`alert()` idiom rather than parapet's modal.
+  Registered in `NAV_GROUPS` (new `system` group) and the section dispatch;
+  search and the rail pick it up automatically from `NAV_GROUPS`.
+
+The other five parapet System items (resolver, time, snmp, users — DHCP was
+dropped) are still to come; they'll land one at a time.
+
+## v601 — 2026-07-22
+
+**Install scripts**: open the BGP/BFD host-firewall ports on the platforms
+that actually run FRR. gravinet's BGP/BFD sessions ride the mesh overlay
+between peers, so — exactly like the web admin port the installer already
+opens — inbound BGP/BFD packets arrive on the mesh interface and land in the
+host firewall's default zone, where they're silently dropped unless opened.
+The ports are FRR's own stock ports, served by bgpd/bfdd (not the gravinet
+binary): **179/tcp** (bgpd), **3784/udp** (bfdd single-hop control), and
+**4784/udp** (bfdd multi-hop control). bfdd's echo port (3785) is left
+closed — echo mode is off in gravinet's generated FRR config, so nothing
+binds it.
+
+- `install/install-linux.sh`: `firewalld_ports()` now appends the three
+  ports when this host will speak BGP/BFD, gated by a new `will_speak_bgp`
+  helper — true when FRR is already present (same vtysh check as gravinet's
+  `bgpSupported()`) or about to be installed this run (`INSTALL_FRR`, i.e.
+  `--no-frr` wasn't passed). Opt out of FRR and the ports stay closed, so
+  they're never holes to nothing. The uninstall path already iterates the
+  same list and guards each removal with `--query-port`, so it cleans these
+  up too without any extra change.
+- `install/install-freebsd.sh`: FreeBSD has no firewall enabled by default,
+  so there's nothing to open — the existing "open the underlay port
+  yourself" note was extended to name the BGP/BFD ports too, for anyone
+  running pf/ipfw/ipfilter who uses the Traffic > BGP page.
+
+Deliberately unchanged: **Windows**, **macOS**, and **OpenBSD**. FRR's vtysh
+is never present on any of them, so `bgpSupported()` is always false and
+bgpd/bfdd never run there — opening 179/3784/4784 would expose ports nothing
+listens on. (Windows and macOS also use program-scoped firewall rules, not
+port rules; OpenBSD's pf opens the underlay port but has no FRR to serve
+BGP.) No gravinet binary code changed; this is install-tooling only, but the
+version still bumps so the shipped tree and changelog stay in lockstep.
+
 ## v600 — 2026-07-22
 
 **UI only**, in `internal/webadmin/ui.go`: Info \u2192 Upgrade, the Peers

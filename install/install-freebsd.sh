@@ -682,7 +682,10 @@ Web admin:  https://127.0.0.1:8443   (self-signed TLS — accept the warning)
 
 Note: FreeBSD has no firewall enabled by default, so — unlike the Windows and
 macOS installers — there's no "allow this app through the firewall" step
-here. If you do run pf/ipfw/ipfilter, open gravinet's underlay port yourself.
+here. If you do run pf/ipfw/ipfilter, open gravinet's underlay port yourself,
+and — if you use the Traffic > BGP page — also 179/tcp (bgpd) and 3784/udp +
+4784/udp (bfdd single-hop + multi-hop control) so peers' BGP/BFD sessions,
+which ride the mesh overlay, aren't dropped.
 
 To join a mesh:
   1. Generate keys:    $BIN genkey -n 3

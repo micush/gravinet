@@ -22,7 +22,7 @@ the result against its own config, swaps it in, and watches it.
 
 ## Upgrading one node
 
-**Web admin → Info → Upgrade → Upload.** Pick the source archive (`.tgz`,
+**Web admin → System → Upgrade → Upload.** Pick the source archive (`.tgz`,
 `.tar.gz` or `.zip` — the format is detected from the file's content, not its
 name, so GitHub's "Download ZIP" works as-is) and click **Upgrade**. One
 confirmation, one click, no staging step in between.
@@ -67,7 +67,7 @@ binary from the same bytes.
 deliberately local-only — the switch that authorizes remote upgrades can never
 itself be flipped by a remote peer.
 
-**Then, from the Manager:** Info → Upgrade → **Push to managed peers**. Pick
+**Then, from the Manager:** System → Upgrade → **Push to managed peers**. Pick
 the archive, tick the peers, push. Results come back per peer.
 
 A pushed archive is built and applied on a peer only if **all** of these hold,
