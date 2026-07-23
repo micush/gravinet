@@ -762,6 +762,7 @@ function label(s){
   if (s==='routes') return 'Mesh Routes';
   if (s==='bgp-peers') return 'BGP Peers';
   if (s==='getting-started') return 'Getting Started';
+  if (s==='capture') return 'Packet Capture';
   return s==='nat'||s==='qos'||s==='dns'||s==='bgp' ? s.toUpperCase() : s.charAt(0).toUpperCase()+s.slice(1);
 }
 
@@ -6394,9 +6395,8 @@ let captureTimer = null, captureCursor = 0, captureRunning = false;
 let captureLines = [];
 function infoCapture(c){
   if (captureTimer){ clearInterval(captureTimer); captureTimer = null; }
+  secHint(c, 'Live tcpdump-style capture on an interface of this node. Read-only; needs raw-socket privileges. The buffer keeps the most recent ~5000 packets; Download saves a .pcap of what\'s buffered.');
   const card = $('<div class="card"></div>');
-  card.appendChild($('<h3>Packet capture</h3>'));
-  card.appendChild($('<div class="hint" style="margin:-4px 0 10px">Live tcpdump-style capture on an interface of this node. Read-only; needs raw-socket privileges. The buffer keeps the most recent ~5000 packets; Download saves a .pcap of what\'s buffered.</div>'));
 
   const bar = $('<div class="tbar"></div>');
   const sel = $('<select style="padding:5px 9px;font-size:12px;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px"></select>');

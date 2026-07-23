@@ -38,6 +38,25 @@ assuming it didn't happen.
 
 ---
 
+## v596 — 2026-07-22
+
+**UI only**, in `internal/webadmin/ui.go`: Monitor \u2192 Capture. The page
+title (the `label()` mapping used for the `<h2 class="sec">` above every
+section) now reads "Packet Capture" instead of the generic default (a
+plain capitalized section key, "Capture") \u2014 an explicit case alongside
+the other multi-word overrides like "Mesh Peers" and "Route Table". The
+card's own "Packet capture" `<h3>` is gone (it was just repeating the new
+page title one line down), and its explanatory hint \u2014 "Live
+tcpdump-style capture on an interface of this node. Read-only; needs
+raw-socket privileges. The buffer keeps the most recent ~5000 packets;
+Download saves a .pcap of what's buffered." \u2014 moved from inside the card
+to just above it via `secHint`, landing between the page title and the
+card, the same placement `secHosts` and Traffic \u2192 Firewall \u2192 Allow List
+(v595) already use. `infoCapture`'s interface picker, filter, start/stop,
+clear, and download wiring are otherwise unchanged. No API, config, or
+wire behaviour changed; the binary is identical to v595 in everything but
+the version string.
+
 ## v595 — 2026-07-22
 
 **UI only**, in `internal/webadmin/ui.go`: Traffic \u2192 Firewall \u2192 Allow
