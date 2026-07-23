@@ -38,6 +38,93 @@ assuming it didn't happen.
 
 ---
 
+## v604 — 2026-07-23
+
+**New: System > Time** — the second of parapet's System items recreated (after
+Power), sitting between **Upgrade** and **Power** in the rail. Timezone, NTP
+servers, and a one-shot manual clock set, with the same central semantics as
+parapet's page: **filling in the server list is the on switch and clearing it is
+the off switch**, and a manual clock set is only offered while sync is off.
+
+There's a reason this one is worth having beyond menu parity. The engine rejects
+any HS_INIT whose timestamp is further than `clockSkew` (±2 min) from local time
+— that bound is what keeps the handshake replay window small — so a node whose
+clock drifts past it doesn't degrade, it silently stops forming sessions, and the
+only trace is a debug-level rejection log that ends "check NTP/system time on
+both nodes". This page is the other half of that sentence.
+
+- **Backend** (`internal/service/hosttime.go`, new): `HostTime()` plus
+  `SetHostTimezone` / `SetHostNTP` / `SetHostClock`, each returning `(ok, hint)`
+  and dispatching on `runtime.GOOS` in the same shape as `power.go`. Linux uses
+  `timedatectl` for the read, the timezone, the clock, and the NTP master switch,
+  with servers going to whichever implementation is *actually active* —
+  `systemctl is-active` decides, because plenty of hosts have both chrony and
+  timesyncd installed with only one running, and writing the idle one's config is
+  a silent no-op that looks like a successful save. macOS uses `systemsetup`
+  (and takes exactly one server, which the reply says out loud rather than
+  dropping the rest quietly); FreeBSD uses `/var/db/zoneinfo` + `service`/`sysrc`
+  with `/etc/ntp.conf`; OpenBSD uses `rcctl` + openntpd with `/etc/ntpd.conf`;
+  Windows uses `tzutil`, `w32tm`, and `Set-Date`.
+- **Nothing is stored in gravinet's config.** parapet keeps a `TimeSync` block in
+  its config and re-applies it on every commit; that's right for parapet, which
+  is the sole configuration authority for the box it runs on, and wrong for
+  gravinet, which is one daemon on a host whose clock may equally be managed by
+  the distro, a cloud-init template, or a hypervisor guest agent. A second stored
+  copy would be free to disagree with the OS, and the disagreement would win
+  silently on the next config reload. So the page reads what the OS says and
+  writes through to it; a change made with `timedatectl` by hand shows up here on
+  the next refresh instead of being fought.
+- **Config files are edited line-wise, not rewritten.** parapet writes
+  `timesyncd.conf` wholesale. Doing that here would discard `FallbackNTP=`,
+  `PollIntervalMaxSec=`, and any comments a distro or an operator put there — on
+  a save the operator thought was only about the server list. `setTimesyncdServersAt`
+  replaces just the `NTP=` line (never `FallbackNTP=`, hence `isDirective`'s
+  keyword-boundary check), and `setDirectiveLines` does the same for chrony/ntpd/
+  openntpd `server`/`pool` lines, keeping ordering, comments, and file mode.
+  Writes go through a temp file and a rename so a reader never sees a half-written
+  config.
+- **Injection surface**: every command is `exec.Command` with separate arguments,
+  never a shell string, and both a timezone (which also becomes a
+  `/usr/share/zoneinfo` path join) and every server address are validated first —
+  `validTimezone` / `validNTPServer` reject shell metacharacters, newlines,
+  traversal, and absolute paths.
+- **UI** (`secTime`): a live-ticking clock card, then timezone, servers, and the
+  manual set. Two things parapet's page doesn't have. The clock card compares
+  this node's clock against the browser's and warns when the gap exceeds the
+  handshake tolerance — worded as a difference, not a verdict, since the browser's
+  clock is only a second opinion and the comparison can't say which of the two is
+  wrong. And the tolerance it names comes from the new `mesh.ClockSkewTolerance()`
+  rather than a hardcoded 120, so the number in the UI can't drift from the one
+  the engine enforces. Server lists are a single comma-separated field, matching
+  the Servers cell under Naming > DNS, instead of parapet's one-row-per-server
+  table.
+- Like Power, `/api/system/time` follows the currently selected node — so the one
+  drifted peer can be fixed from the console you're already logged into. That's
+  also why it's deliberately *not* in `LOCAL_API`, and there's a test pinning
+  that, since getting it wrong would apply a clock fix to the wrong host.
+- **Windows names its zones its own way** ("US Mountain Standard Time", not
+  "America/Phoenix"), and `tzutil` rejects IANA names. `TimeInfo.TimezoneStyle`
+  carries that distinction to the page, which drops the IANA datalist there
+  rather than suggesting names the host would refuse.
+- **Tests**: `internal/service/hosttime_test.go` and
+  `internal/webadmin/systemtime_handler_test.go` — injection and validation
+  refusals, the datetime-local parse shapes (including that it parses in the
+  host's zone, not UTC), the line-preserving config rewrites and mode
+  preservation, `directiveValues` skipping commented-out distro examples,
+  `windowsPeerList`, the GET reply shape, the LOCAL_API/proxy placement, and the
+  nav ordering.
+
+The `Can*`/`*Known` flags exist so the page never claims knowledge the host
+didn't give it: "sync is off" and "this host won't say" are different answers, and
+a greyed-out control always carries a reason. Remaining parapet System items:
+resolver, snmp, and users (DHCP dropped).
+
+Note for later: neither Power (v602) nor Time is documented in `docs/API.md`,
+which stops short of the `/api/system/*` endpoints entirely. Left alone rather
+than half-fixed here.
+
+---
+
 ## v603 — 2026-07-23
 
 **Upgrade moved from Info to System.** The upgrade page now sits in the

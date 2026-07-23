@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"gravinet/internal/config"
+	"gravinet/internal/mesh"
 	"gravinet/internal/service"
 )
 
@@ -974,6 +975,119 @@ func (s *Server) handleSystemPower(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "action": req.Action, "when": human})
+}
+
+// handleSystemTime reads or changes this host's clock, timezone, and NTP
+// settings — the backend for System > Time. Like Power, it acts on whichever
+// node is currently selected (local by default, proxied to a managed peer
+// otherwise), which is what makes the page useful for the thing it's mostly for:
+// finding the one node in the mesh whose clock has drifted past the handshake
+// skew tolerance and fixing it from here.
+//
+// GET returns the live state (see service.HostTime). There is deliberately no
+// stored copy of any of this in gravinet's config — the OS is the source of
+// truth; see hosttime.go's package comment for why that differs from parapet.
+//
+// POST takes {op, ...}:
+//
+//	{op:"timezone", timezone:"America/Phoenix"}
+//	{op:"ntp", enabled:true, servers:["0.pool.ntp.org", ...]}
+//	{op:"clock", datetime:"2026-07-23T14:30:00"}
+//
+// Each op replies {ok:true} plus the freshly re-read state, so the page always
+// redraws from what the host actually says rather than from what was requested —
+// the two differ more often than you'd hope (a zone the host doesn't have, a
+// sync daemon that overrides the clock a second later), and showing the request
+// back would hide exactly those cases. A partial success carries a "note".
+func (s *Server) handleSystemTime(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		writeJSON(w, http.StatusOK, hostTimeJSON(service.HostTime()))
+		return
+	}
+
+	var req struct {
+		Op       string   `json:"op"`
+		Timezone string   `json:"timezone"`
+		Enabled  bool     `json:"enabled"`
+		Servers  []string `json:"servers"`
+		Datetime string   `json:"datetime"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+
+	var ok bool
+	var note string
+	switch req.Op {
+	case "timezone":
+		s.log.Infof("webadmin: setting host timezone to %q (requested from admin UI)", req.Timezone)
+		ok, note = service.SetHostTimezone(req.Timezone)
+	case "ntp":
+		s.log.Infof("webadmin: %s host NTP with %d server(s) (requested from admin UI)",
+			map[bool]string{true: "enabling", false: "disabling"}[req.Enabled], len(req.Servers))
+		ok, note = service.SetHostNTP(req.Enabled, req.Servers)
+	case "clock":
+		s.log.Infof("webadmin: setting host clock to %q (requested from admin UI)", req.Datetime)
+		ok, note = service.SetHostClock(req.Datetime)
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "op must be 'timezone', 'ntp', or 'clock'"})
+		return
+	}
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": note})
+		return
+	}
+
+	// A successful timezone change moves this process's own idea of local time,
+	// which Go caches in time.Local at first use — so without this the page (and
+	// every log line) would keep reporting the old zone until the daemon
+	// restarted. Re-resolving is cheap and only touches the cached zone.
+	if req.Op == "timezone" {
+		if loc, err := time.LoadLocation(req.Timezone); err == nil {
+			time.Local = loc
+		}
+	}
+
+	resp := hostTimeJSON(service.HostTime())
+	resp["ok"] = true
+	if note != "" {
+		resp["note"] = note
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// hostTimeJSON flattens a service.TimeInfo for the wire. `now` goes out as
+// RFC3339 with the host's offset *and* as epoch milliseconds: the string is what
+// the page displays, and the number is what it compares against the browser's
+// own clock to compute the skew warning without having to trust either side's
+// zone handling.
+func hostTimeJSON(t service.TimeInfo) map[string]any {
+	servers := t.Servers
+	if servers == nil {
+		servers = []string{}
+	}
+	return map[string]any{
+		"now":            t.Now.Format(time.RFC3339),
+		"now_ms":         t.Now.UnixMilli(),
+		"timezone":       t.Timezone,
+		"timezone_style": t.TimezoneStyle,
+		"abbrev":         t.Abbrev,
+		"offset_seconds": t.OffsetSeconds,
+		"ntp_enabled":    t.NTPEnabled,
+		"ntp_known":      t.NTPKnown,
+		"synchronized":   t.Synchronized,
+		"sync_known":     t.SyncKnown,
+		"servers":        servers,
+		"manager":        t.Manager,
+		"can_timezone":   t.CanTimezone,
+		"can_ntp":        t.CanNTP,
+		"can_clock":      t.CanClock,
+		"hint":           t.Hint,
+		// The mesh's own tolerance, so the page can name the number it's
+		// warning about instead of hardcoding a copy that drifts from
+		// mesh.clockSkew the first time anyone tunes it.
+		"skew_tolerance_seconds": int(mesh.ClockSkewTolerance().Seconds()),
+	}
 }
 
 // minutesUntilClock returns whole minutes from now until the next occurrence of

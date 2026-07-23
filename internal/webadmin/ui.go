@@ -748,11 +748,17 @@ const NAV_GROUPS = [
   // lives here rather than under Info because it *changes* the host (it
   // replaces the running binary and restarts the service); Info is for
   // read-only reference pages — docs, license, build identity — and Upgrade was
-  // always the odd one out there. Power is last within the group: it's the most
-  // destructive item, and it takes down the whole host, not just the gravinet
-  // service (that's the restart under Settings). Both are local-only.
+  // always the odd one out there.
+  //
+  // Power stays pinned last and everything new lands above it: it's the one
+  // item here that takes the whole host down (not just the gravinet service —
+  // that's the restart under Settings), so it shouldn't drift into the middle
+  // of a list of routine settings pages as more of parapet's System items get
+  // recreated. Among the rest, parapet's own relative order is kept, which is
+  // where Time sits.
   { name:'system', items: [
     ['upgrade', 'check and apply a new gravinet binary on this node; local only, no peer can trigger this'],
+    ['time', 'this host\u2019s clock, timezone, and NTP synchronization'],
     ['power', 'restart or shut down this host'],
   ]},
   { name:'info', items: [
@@ -2299,7 +2305,7 @@ function renderSection() {
        upgrade:secUpgrade,
        metrics:infoMetrics, 'mesh-peers':infoMeshPeers, capture:infoCapture, speedtest:infoSpeedtest, latency:infoLatency,
        'route-table':infoRoutes, 'bgp-peers':secBgpPeers, 'hosts-file':infoHosts, 'dns-state':infoDNS,
-       power:secPower,
+       time:secTime, power:secPower,
        logs:secLogs, readme:secReadme, 'getting-started':secGettingStarted, license:secLicense, about:infoAbout }[state.section])(c, nets);
   }
   c.querySelectorAll('table').forEach(enhanceTable);
@@ -5545,6 +5551,209 @@ function secPower(c){
     if (!r.ok) { alert((r.body && r.body.error) || 'No pending power action to cancel.'); return; }
     alert('Pending power action cancelled.');
   };
+}
+
+// secTime renders System > Time: the host's clock, timezone, and NTP settings.
+// Mirrors parapet's time page — timezone picker, a server list where "empty"
+// *is* the off switch, and a one-shot manual clock set that's only available
+// while sync is off — with two additions parapet has no reason to want.
+//
+// The first is the read-only clock card at the top. gravinet rejects any
+// handshake whose timestamp is more than mesh.ClockSkewTolerance() away from
+// local time, so "what does this node think the time is, and how far off is
+// that" is the actual question an operator arrives here with; the page compares
+// the node's clock against the browser's and says plainly whether the gap is
+// large enough to be costing sessions. That comparison can't identify *which*
+// clock is wrong — the browser's is just the only second opinion available
+// without trusting the network — so it's worded as a difference, not a verdict.
+//
+// The second is that, like Power, this follows the currently selected node, so
+// the drifted peer can be fixed from the console you're already logged into
+// rather than by going and finding it.
+let timeTimer = null;
+function secTime(c){
+  if (timeTimer){ clearInterval(timeTimer); timeTimer = null; }
+  secHint(c, 'This host\u2019s clock, timezone, and time synchronization. [gravinet] refuses handshakes whose timestamp is too far from local time, so a node whose clock has drifted stops forming sessions rather than degrading \u2014 this is where to check that and fix it. Acts on the node you\u2019re currently managing.');
+
+  const body = $('<div></div>');
+  body.innerHTML = '<div class="hint">loading\u2026</div>';
+  c.appendChild(body);
+
+  // fmtGap renders a signed millisecond gap as a short human duration.
+  const fmtGap = (ms) => {
+    const s = Math.abs(ms) / 1000;
+    if (s < 1) return Math.round(Math.abs(ms)) + 'ms';
+    if (s < 90) return s.toFixed(s < 10 ? 1 : 0) + 's';
+    if (s < 5400) return (s/60).toFixed(1) + ' min';
+    return (s/3600).toFixed(1) + 'h';
+  };
+  const fmtOffset = (secs) => {
+    const sign = secs < 0 ? '-' : '+';
+    const a = Math.abs(secs);
+    return sign + String(Math.floor(a/3600)).padStart(2,'0') + ':' + String(Math.floor((a%3600)/60)).padStart(2,'0');
+  };
+
+  const load = async () => {
+    if (state.section !== 'time'){ if (timeTimer){ clearInterval(timeTimer); timeTimer = null; } return; }
+    const r = await api('/api/system/time');
+    if (!r.ok || !r.body){ body.innerHTML = '<div class="hint">could not read this host\u2019s time settings.</div>'; return; }
+    draw(r.body);
+  };
+
+  const draw = (t) => {
+    body.innerHTML = '';
+    const windowsZones = t.timezone_style === 'windows';
+
+    // ---- clock (read-only) ------------------------------------------------
+    // The gap is measured once, here: hostMs - browserMs at the moment the
+    // reply landed. It carries one network round trip of error, which is
+    // irrelevant next to a tolerance measured in minutes but is why the line
+    // says "about".
+    const gap = t.now_ms - Date.now();
+    const tol = (t.skew_tolerance_seconds || 120) * 1000;
+    const clock = $('<div class="card"></div>');
+    const live = $('<div style="font-size:22px;letter-spacing:1px">\u2014</div>');
+    clock.appendChild(live);
+    const zoneBits = [];
+    if (t.timezone) zoneBits.push(esc(t.timezone));
+    if (t.abbrev && t.abbrev !== t.timezone) zoneBits.push(esc(t.abbrev));
+    zoneBits.push('UTC' + fmtOffset(t.offset_seconds || 0));
+    clock.appendChild($('<div class="hint" style="margin:6px 0 0">'+zoneBits.join(' \u00b7 ')+'</div>'));
+
+    // Sync state: three genuinely different answers (on and locked, on but not
+    // yet locked, off), plus "couldn't tell" on the platforms that don't report
+    // it — never collapsed into a bare on/off, which would claim knowledge the
+    // host didn't give us.
+    let syncTxt;
+    if (!t.ntp_known) syncTxt = 'time sync state unknown on this host';
+    else if (!t.ntp_enabled) syncTxt = 'time sync is <b>off</b>';
+    else if (!t.sync_known) syncTxt = 'time sync is <b>on</b>';
+    else syncTxt = 'time sync is <b>on</b> and this host is ' + (t.synchronized ? 'synchronized' : '<b>not yet synchronized</b>');
+    if (t.manager) syncTxt += ' (' + esc(t.manager) + ')';
+    clock.appendChild($('<div class="hint" style="margin:4px 0 0">'+syncTxt+'</div>'));
+
+    const drift = Math.abs(gap) > tol;
+    const gapTxt = Math.abs(gap) < 1000
+      ? 'matches your browser\u2019s clock'
+      : 'is about ' + fmtGap(gap) + (gap > 0 ? ' ahead of' : ' behind') + ' your browser\u2019s clock';
+    clock.appendChild($('<div class="hint" style="margin:4px 0 0'+(drift?';color:var(--danger)':'')+'">'
+      + 'This node\u2019s clock ' + gapTxt + '.'
+      + (drift
+          ? ' That is past the \u00b1' + Math.round(tol/1000) + 's handshake tolerance, so if the browser\u2019s clock is the correct one this node is rejecting handshakes and cannot form new sessions. Whichever of the two is wrong, fix it below or with NTP.'
+          : ' The handshake tolerance is \u00b1' + Math.round(tol/1000) + 's.')
+      + '</div>'));
+    body.appendChild(clock);
+
+    // Tick the displayed clock forward from the single measured gap rather than
+    // re-polling every second: one HTTP round trip per second per open admin
+    // page, forever, to display something arithmetic can supply.
+    const paint = () => { live.textContent = new Date(Date.now() + gap).toLocaleString(); };
+    paint();
+    timeTimer = setInterval(() => {
+      if (state.section !== 'time'){ clearInterval(timeTimer); timeTimer = null; return; }
+      paint();
+    }, 1000);
+
+    if (t.hint) body.appendChild($('<div class="hint" style="margin:0 0 12px">'+esc(t.hint)+'</div>'));
+
+    // ---- timezone ---------------------------------------------------------
+    const tzCard = $('<div class="card"></div>');
+    tzCard.appendChild($('<h3>Timezone</h3>'));
+    if (!t.can_timezone){
+      tzCard.appendChild($('<div class="empty">this host has no usable way to change its timezone</div>'));
+    } else {
+      // The zone list is the browser's own (Intl.supportedValuesOf), which
+      // costs nothing and is always current — no zone table to ship or age out
+      // of date. Windows names its zones its own way ("US Mountain Standard
+      // Time"), and tzutil rejects IANA names, so there the list is omitted
+      // rather than offering suggestions the host would refuse.
+      let dl = '';
+      if (!windowsZones){
+        let zones = [];
+        try { zones = (Intl && Intl.supportedValuesOf) ? Intl.supportedValuesOf('timeZone') : []; } catch(_) { zones = []; }
+        if (!zones.length) zones = ['UTC','America/New_York','America/Chicago','America/Denver','America/Phoenix','America/Los_Angeles','Europe/London','Europe/Paris','Europe/Berlin','Asia/Tokyo','Asia/Shanghai','Asia/Kolkata','Australia/Sydney'];
+        dl = '<datalist id="tz-list">' + zones.map(z => '<option value="'+esc(z)+'">').join('') + '</datalist>';
+      }
+      const row = $('<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'+dl
+        + '<input id="tz-in"'+(windowsZones?'':' list="tz-list"')+' value="'+esc(t.timezone||'')+'" placeholder="'
+        + (windowsZones ? 'e.g. US Mountain Standard Time' : 'type to search \u2014 e.g. America/Phoenix, Europe/London')
+        + '" style="flex:1;min-width:240px"></div>');
+      const save = $('<button class="sm">Save</button>');
+      row.appendChild(save);
+      tzCard.appendChild(row);
+      tzCard.appendChild($('<div class="hint" style="margin:8px 0 0">'
+        + (windowsZones
+            ? 'A Windows time-zone id, as listed by <code>tzutil /l</code>. IANA names like America/Phoenix are not accepted here.'
+            : 'An IANA zone name. This changes the whole host\u2019s timezone, not just what this page displays.')
+        + '</div>'));
+      save.onclick = async () => {
+        const tz = row.querySelector('#tz-in').value.trim();
+        if (!tz){ alert('Enter a timezone.'); return; }
+        const r = await api('/api/system/time', { method:'POST', body: JSON.stringify({ op:'timezone', timezone: tz }) });
+        if (!r.ok){ alert((r.body && r.body.error) || 'could not set the timezone'); return; }
+        load();
+      };
+    }
+    body.appendChild(tzCard);
+
+    // ---- time servers -----------------------------------------------------
+    const ntpCard = $('<div class="card"></div>');
+    ntpCard.appendChild($('<h3>Time servers</h3>'));
+    if (!t.can_ntp){
+      ntpCard.appendChild($('<div class="empty">this host has no usable way to change its time synchronization</div>'));
+    } else {
+      // Comma-separated in one field, like the Servers cell under Naming > DNS,
+      // rather than parapet's one-row-per-server table: for the two or three
+      // addresses this list ever holds, the table is more machinery than the
+      // data deserves, and gravinet already reads server lists this way.
+      const row = $('<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
+        + '<input id="ntp-in" value="'+esc((t.servers||[]).join(', '))+'" placeholder="0.pool.ntp.org, 1.pool.ntp.org" style="flex:1;min-width:240px"></div>');
+      const save = $('<button class="sm">Save</button>');
+      row.appendChild(save);
+      ntpCard.appendChild(row);
+      ntpCard.appendChild($('<div class="hint" style="margin:8px 0 0">Filling this in turns synchronization <b>on</b>; clearing it turns it <b>off</b>. Saving restarts the sync daemon so the change takes effect immediately.</div>'));
+      save.onclick = async () => {
+        const raw = row.querySelector('#ntp-in').value;
+        const servers = raw.split(/[\s,]+/).filter(Boolean);
+        const enabled = servers.length > 0;
+        if (!enabled && !confirm('Turn time synchronization off on ' + (state.target ? 'the selected node' : 'this node') + '?\n\nIts clock will drift freely from here on. Once it drifts past the handshake tolerance, this node stops forming new mesh sessions.')) return;
+        const r = await api('/api/system/time', { method:'POST', body: JSON.stringify({ op:'ntp', enabled: enabled, servers: servers }) });
+        if (!r.ok){ alert((r.body && r.body.error) || 'could not change time synchronization'); return; }
+        if (r.body && r.body.note) alert(r.body.note);
+        load();
+      };
+    }
+    body.appendChild(ntpCard);
+
+    // ---- manual clock -----------------------------------------------------
+    const setCard = $('<div class="card"></div>');
+    setCard.appendChild($('<h3>Set the clock by hand</h3>'));
+    if (!t.can_clock){
+      setCard.appendChild($('<div class="empty">this host has no usable way to set its clock directly</div>'));
+    } else if (t.ntp_known && t.ntp_enabled){
+      // Refused rather than merely warned about: a running sync daemon would
+      // steer the clock back within seconds, so offering the control would be
+      // offering something that doesn't work.
+      setCard.appendChild($('<div class="hint" style="margin:0">Not available while time sync is on \u2014 the sync daemon would put the clock back within seconds. Clear the time servers above first.</div>'));
+    } else {
+      const row = $('<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
+        + '<input type="datetime-local" id="clk-in" step="1" style="min-width:240px"></div>');
+      const save = $('<button class="sm">Set</button>');
+      row.appendChild(save);
+      setCard.appendChild(row);
+      setCard.appendChild($('<div class="hint" style="margin:8px 0 0">One-shot, in this host\u2019s own timezone as shown above. Nothing is stored \u2014 the clock is set once and left alone.</div>'));
+      save.onclick = async () => {
+        const v = row.querySelector('#clk-in').value;
+        if (!v){ alert('Pick a date and time.'); return; }
+        const r = await api('/api/system/time', { method:'POST', body: JSON.stringify({ op:'clock', datetime: v }) });
+        if (!r.ok){ alert((r.body && r.body.error) || 'could not set the clock'); return; }
+        load();
+      };
+    }
+    body.appendChild(setCard);
+  };
+
+  load();
 }
 
 // ---- Upgrade (System -> Upgrade) ------------------------------------------

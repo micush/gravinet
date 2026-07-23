@@ -368,6 +368,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/bfd", s.authed(s.handleBFD))                                         // read-only BFD session status via FRR/vtysh
 	mux.HandleFunc("/api/restart", s.authed(s.handleRestart))
 	mux.HandleFunc("/api/system/power", s.authed(s.handleSystemPower)) // reboot/shut down the host (System > Power)
+	mux.HandleFunc("/api/system/time", s.authed(s.handleSystemTime))   // host clock / timezone / NTP (System > Time)
 	mux.HandleFunc("/api/cluster", s.authed(s.handleCluster))
 	mux.HandleFunc("/api/loglevel", s.authed(s.handleLogLevel))
 	mux.HandleFunc("/api/logsize", s.authed(s.handleLogSize))

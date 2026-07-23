@@ -1076,6 +1076,14 @@ type pendingHS struct {
 	targetNode string       // relayed handshake: destination node id
 }
 
+// ClockSkewTolerance exposes clockSkew (below) to callers outside this package.
+// The web admin's System > Time page warns when a node's clock is far enough off
+// to start losing handshakes, and it names the actual tolerance in that warning;
+// reading it from here means the number in the UI can't drift away from the
+// number the engine enforces, which is exactly the kind of copy that goes stale
+// the first time anyone tunes the constant.
+func ClockSkewTolerance() time.Duration { return clockSkew }
+
 const (
 	handshakeRetry   = 2 * time.Second
 	handshakeBackoff = 5 * time.Second
