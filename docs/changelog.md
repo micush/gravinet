@@ -38,6 +38,53 @@ assuming it didn't happen.
 
 ---
 
+## v588 — 2026-07-22
+
+**Docs only.** `features.md`'s mention of `docs/API.md` is now a plain
+text reference instead of a Markdown link — features.md is prose read in
+places (e.g. a terminal, a plain-text render) where a relative link isn't
+useful and just adds clutter. No code, config, or wire behaviour changed;
+the binary is identical to v587 in everything but the version string.
+
+## v587 — 2026-07-22
+
+**Docs only.** Added `docs/API.md`: a full reference for the JSON API
+behind the web admin UI — every `/api/*` endpoint (auth, status/config,
+networks, peers/bans, firewall, routes, keys, seeds, hosts/DNS, NAT/QoS/
+bandwidth, transport settings, BGP/BFD, fleet management, remote shell,
+upgrades, diagnostics, and the doc-file endpoints), with request/response
+shapes, the `net`-field and `restart`-flag conventions, the Managed/
+Manager trust model, and a data-type reference for the recurring object
+shapes (`PeerInfo`, `FirewallRule`, `BGPConfig`, etc.). Written directly
+from the `internal/webadmin` handlers rather than from a separate spec.
+Also notes a discrepancy found while writing it: the management proxy's
+blocklist references `/api/upgrade/rollout`, `/api/upgrade/stage`, and
+`/api/upgrade/fleet`, none of which are actually registered as routes —
+the real fleet-push endpoint is `/api/upgrade/push`. `features.md`'s JSON
+API bullet now links to `docs/API.md`. No code, config, or wire behaviour
+changed; the binary is identical to v586 in everything but the version
+string.
+
+## v586 — 2026-07-22
+
+**Docs only.** In `features.md`, dropped the "single-binary" / "static binary"
+framing from the intro line, the setup section, and the "Built to be trusted"
+section — those bullets now describe the same facts (no runtime dependencies,
+pure-Go standard-library core) without leading with the binary-packaging detail.
+Also removed a stray pair of `<b>`/`</b>` tags around "source" in the admin
+UI's Manager-push description string (`internal/webadmin/ui.go`), left over
+from copy that otherwise uses Markdown-style emphasis. No code, config, or wire
+behaviour changed; the binary is identical to v585 in everything but the
+version string.
+
+## v585 — 2026-07-22
+
+**Docs only.** Added `features.md` at the repository root: a human-oriented,
+benefit-led overview of what gravinet does, meant as a companion to README.md's
+denser technical feature list rather than a replacement. No code, config, or wire
+behaviour changed; the binary is identical to v584 in everything but the version
+string.
+
 ## v584 — 2026-07-22
 
 **The local-node upgrade confirm now matches its siblings.** It read "Build this
