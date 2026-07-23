@@ -38,6 +38,25 @@ assuming it didn't happen.
 
 ---
 
+## v593 — 2026-07-22
+
+**UI only**, in `internal/webadmin/ui.go`: the fleet upgrade push button's
+label now animates while the push request is actually in flight — Pushing,
+Pushing., Pushing.., Pushing..., looping every 450ms — instead of a static
+"Pushing…" for however long the build+preflight+swap on every target peer
+takes (which `handleUpgradePush`'s own comment already notes can
+legitimately run minutes). The animation starts right before the
+`/api/upgrade/push` fetch and stops the instant it resolves; the timer
+handle is declared outside the surrounding `try` specifically so the
+existing `finally` block can always clear it, even if something throws
+before the request completes, so a stray tick can never overwrite the
+"Upgrade" label that block resets afterward. The local-only "Building…"
+label (an empty peer selection, or the second phase of "all peers, then
+this node") is unchanged — only the fleet push, the one that can genuinely
+run for minutes across several peers, got the animation. No API, config,
+or wire behaviour changed; the binary is identical to v592 in everything
+but the version string.
+
 ## v592 — 2026-07-22
 
 **UI copy only**, plus one table layout change, in `internal/webadmin/ui.go`:

@@ -5620,6 +5620,15 @@ async function drawUpgrade(host){
     };
 
     upgradeBtn.disabled = true;
+    // pushDotsTimer animates the Pushing label for as long as the push
+    // request is actually in flight — a build+preflight+swap on N peers can
+    // legitimately take minutes (see handleUpgradePush's own comment), and a
+    // static "Pushing…" gives no sign the tab hasn't just frozen. Declared
+    // here (not inside the try below) so the finally block can always clear
+    // it, even if something throws before the explicit clear after the
+    // fetch resolves — otherwise a stray tick could overwrite the "Upgrade"
+    // label the finally block sets afterward.
+    let pushDotsTimer = null;
     try {
       if (!nodes.length){ await applyLocal(); return; }
 
@@ -5628,13 +5637,19 @@ async function drawUpgrade(host){
       // peers first" is already guaranteed before the local phase can start.
       resBox.innerHTML = '';
       resBox.appendChild($('<div class="hint">Building on '+nodes.length+' peer(s)\u2026 this can take several minutes each.</div>'));
-      upgradeBtn.textContent = 'Pushing\u2026';
+      let pushDots = 0;
+      upgradeBtn.textContent = 'Pushing';
+      pushDotsTimer = setInterval(() => {
+        pushDots = (pushDots + 1) % 4;
+        upgradeBtn.textContent = 'Pushing' + '.'.repeat(pushDots);
+      }, 450);
       // Order matters: the peer list is read before the archive so the server
       // knows the targets before it spends anything spooling.
       const fd = new FormData();
       fd.append('nodes', JSON.stringify(nodes));
       fd.append('source', fileIn.files[0]);
       const resp = await fetch('/api/upgrade/push', { method:'POST', body: fd });
+      clearInterval(pushDotsTimer); pushDotsTimer = null;
       const body = await resp.json().catch(()=>({}));
       const results = body.results || [];
       resBox.innerHTML = '';
@@ -5679,7 +5694,10 @@ async function drawUpgrade(host){
         // so they can be retried without re-adding them.
         peerPicker.set(peerPicker.get().filter(n => !done.has(n)));
       }
-    } finally { upgradeBtn.disabled = false; upgradeBtn.textContent = 'Upgrade'; }
+    } finally {
+      if (pushDotsTimer) clearInterval(pushDotsTimer);
+      upgradeBtn.disabled = false; upgradeBtn.textContent = 'Upgrade';
+    }
   };
 
   if (remote){
