@@ -38,6 +38,20 @@ assuming it didn't happen.
 
 ---
 
+## v589 — 2026-07-22
+
+**Docs only.** Expanded `docs/API.md`'s single worked example into a full
+"Examples" section: `curl` recipes for the common tasks an operator or
+script is actually likely to want — logging in and reusing a cookie jar,
+reading status/config, adding a network, minting and redeeming a join
+token, banning/unbanning a peer, listing/adding/removing firewall rules,
+advertising a route, NAT masquerade, bandwidth caps, generating and
+revealing a key, turning up log verbosity and tailing the log, running a
+speed test, driving a peer through the fleet proxy, pushing a source
+upgrade to several peers, restarting, and logging out. No code, config,
+or wire behaviour changed; the binary is identical to v588 in everything
+but the version string.
+
 ## v588 — 2026-07-22
 
 **Docs only.** `features.md`'s mention of `docs/API.md` is now a plain

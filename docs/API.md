@@ -32,7 +32,7 @@ code is correct and this file has a bug — please report it.
 - [System & service](#system--service)
 - [Documentation endpoints](#documentation-endpoints)
 - [Data type reference](#data-type-reference)
-- [Worked example](#worked-example)
+- [Examples](#examples)
 - [Known gaps](#known-gaps)
 
 ## Overview
@@ -1453,23 +1453,180 @@ administratively holds this one session down without removing it).
 (bool)/`geoTarget`/`geo` (object)/`geoErr`. Every `*Err` field is populated
 only on failure; a successful section omits its error field.
 
-## Worked example
+## Examples
 
-Logging in and listing peers with `curl` (the `-k` flag trusts the node's
-self-signed certificate; a cookie jar carries the session):
+All examples assume a node reachable at `https://127.0.0.1:8443` (the
+default) and use `-k` to trust its self-signed certificate. Log in once
+and reuse a cookie jar for every other call:
 
 ```bash
-curl -sk -c cookies.txt -X POST https://127.0.0.1:8443/api/login \
-  -d '{"user":"admin","pass":"hunter2"}'
+HOST=https://127.0.0.1:8443
 
-curl -sk -b cookies.txt https://127.0.0.1:8443/api/status | jq '.nets[0].peers'
+curl -sk -c cookies.txt -X POST $HOST/api/login \
+  -d '{"user":"admin","pass":"hunter2"}'
 ```
 
-Adding a firewall rule that blocks a specific host:
+Every example below assumes that cookie jar (`-b cookies.txt`) exists.
+Replace `office`, node IDs, addresses, etc. with values from your own
+node — most examples read more clearly after a look at `/api/status` or
+`/api/config` first.
+
+### Check node status
 
 ```bash
-curl -sk -b cookies.txt -X POST https://127.0.0.1:8443/api/firewall \
+curl -sk -b cookies.txt $HOST/api/status | jq '.nets[0].peers'
+```
+
+### Read the stored configuration
+
+```bash
+curl -sk -b cookies.txt $HOST/api/config | jq .
+```
+
+### Add a network
+
+```bash
+curl -sk -b cookies.txt -X POST $HOST/api/network \
+  -d '{"op":"add","net":"office"}'
+```
+
+Subnets are auto-picked if left blank; to control them explicitly, add
+`"subnet4":"10.50.0.0/16","subnet6":"fd00:50::/64"` to the body.
+
+### Mint a join token and use it on another node
+
+```bash
+curl -sk -b cookies.txt -X POST $HOST/api/network/token \
+  -d '{"net":"office","addr":"203.0.113.9:51820","expires":"24h"}' | jq -r .token
+```
+
+Paste the resulting token into the *other* node's own login session:
+
+```bash
+curl -sk -b other-node-cookies.txt -X POST https://<other node>:8443/api/network \
+  -d '{"op":"join-token","token":"<token from above>"}'
+```
+
+### Ban and unban a peer
+
+```bash
+curl -sk -b cookies.txt -X POST $HOST/api/ban \
+  -d '{"net":"office","node":"<node id>","notes":"compromised key"}'
+
+curl -sk -b cookies.txt -X POST $HOST/api/unban \
+  -d '{"net":"office","node":"<node id>"}'
+```
+
+### List, add, and remove firewall rules
+
+```bash
+curl -sk -b cookies.txt "$HOST/api/firewall?net=office" | jq '.rules'
+
+curl -sk -b cookies.txt -X POST $HOST/api/firewall \
   -d '{"net":"office","op":"add","rule":{"action":"deny","direction":"both","src":"10.42.0.99"}}'
+```
+
+Removing a rule needs its `id` from the list above:
+
+```bash
+curl -sk -b cookies.txt -X POST $HOST/api/firewall \
+  -d '{"net":"office","op":"del","ids":[<id>]}'
+```
+
+### Advertise a route across the mesh
+
+```bash
+curl -sk -b cookies.txt -X POST $HOST/api/route \
+  -d '{"op":"add","net":"office","cidr":"192.168.50.0/24","metric":0}'
+```
+
+### Give overlay traffic internet access (NAT masquerade)
+
+```bash
+curl -sk -b cookies.txt -X POST $HOST/api/nat \
+  -d '{"op":"add","net":"office","iface":"eth0"}'
+```
+
+### Cap a network's bandwidth
+
+```bash
+curl -sk -b cookies.txt -X POST $HOST/api/bandwidth \
+  -d '{"net":"office","dir":"up","bps":10000000}'
+```
+
+10,000,000 bytes/sec ≈ 80 Mbit/s. Use `"dir":"down"` or `"dir":"both"` for
+the other directions; `{"op":"enable"}` / `{"op":"disable"}` turns
+throttling on/off without touching the cap itself.
+
+### Generate a new rotation key and reveal it
+
+```bash
+curl -sk -b cookies.txt -X POST $HOST/api/key \
+  -d '{"net":"office","op":"generate","slot":1,"label":"2026-Q3"}'
+
+curl -sk -b cookies.txt -X POST $HOST/api/key \
+  -d '{"net":"office","op":"reveal","slot":1}' | jq -r .key
+```
+
+### Turn up logging while chasing a bug, then back down
+
+```bash
+curl -sk -b cookies.txt -X POST $HOST/api/loglevel -d '{"level":"debug"}'
+
+curl -sk -b cookies.txt "$HOST/api/logs?n=200" | jq -r '.lines[]'
+
+curl -sk -b cookies.txt -X POST $HOST/api/loglevel -d '{"level":"info"}'
+```
+
+### Run a speed test against a peer
+
+Get the peer's overlay address and web port from `/api/cluster` first:
+
+```bash
+curl -sk -b cookies.txt $HOST/api/cluster | jq '.peers[] | {node_id,hostname,overlay,web_port}'
+
+curl -sk -b cookies.txt -X POST $HOST/api/speedtest/run \
+  -d '{"target_ip":"10.42.0.5","target_port":8443}' \
+  | jq '{download_mbps: .download.avg_mbps, upload_mbps: .upload.avg_mbps}'
+```
+
+### Drive a peer through the fleet proxy
+
+With Manager mode on locally and the target already in Managed mode (see
+[Fleet management](#fleet-management-managedmanager)):
+
+```bash
+curl -sk -b cookies.txt -X POST $HOST/api/manager -d '{"on":true}'
+
+curl -sk -b cookies.txt "$HOST/api/proxy?node=<peer node id>&path=/api/status" | jq .
+```
+
+Any `/api/...` path can follow `path=`, so this is also how to, say, add a
+firewall rule on a peer without logging into it separately — just proxy a
+normal `POST /api/firewall` body through.
+
+### Push a source upgrade to several peers at once
+
+Each target must have separately opted in
+(`POST /api/upgrade/accept-manager {"on":true}` run *on that peer*) before
+this will do anything:
+
+```bash
+curl -sk -b cookies.txt -X POST $HOST/api/upgrade/push \
+  -F 'nodes=["<peer1 id>","<peer2 id>"]' \
+  -F 'source=@gravinet-src.tgz' | jq .
+```
+
+### Restart the service
+
+```bash
+curl -sk -b cookies.txt -X POST $HOST/api/restart
+```
+
+### Log out
+
+```bash
+curl -sk -b cookies.txt -X POST $HOST/api/logout
 ```
 
 ## Known gaps
