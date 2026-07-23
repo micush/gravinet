@@ -38,6 +38,28 @@ assuming it didn't happen.
 
 ---
 
+## v600 — 2026-07-22
+
+**UI only**, in `internal/webadmin/ui.go`: Info \u2192 Upgrade, the Peers
+field's description. Reordered so the empty-selection case is explained
+last instead of first ("Leave it empty to upgrade only this node." now
+follows the "you\u2019re logged into" sentence rather than opening the
+paragraph), and split the run-on "...finish with this node last \u2014 this
+node is upgraded only after..." into two sentences on a period instead of
+an em dash. Wording of every individual clause \u2014 the peer-picking
+options, the revert behavior, the Accept Manager-pushed upgrades
+requirement \u2014 is otherwise unchanged. No API, config, or wire behaviour
+changed; the binary is identical to v599 in everything but the version
+string.
+
+## v599 — 2026-07-22
+
+**UI only**, in `internal/webadmin/ui.go`: Traffic \u2192 Shaping. Prepended
+"Limit traffic per network." to the section's `secHint` description, ahead
+of the existing rate/unit and cap-toggle instructions, which are otherwise
+unchanged. No API, config, or wire behaviour changed; the binary is
+identical to v598 in everything but the version string.
+
 ## v598 — 2026-07-22
 
 **UI only**, in `internal/webadmin/ui.go`: Traffic \u2192 QoS. Rewrote the

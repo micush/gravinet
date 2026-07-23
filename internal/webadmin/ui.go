@@ -5435,7 +5435,7 @@ function startQoSEdit(tr, net, classes){
 
 function secBandwidth(c) {
   if (!state.cfg.length) return emptyCard(c, 'No networks.');
-  secHint(c, 'Double-click a rate to set it — enter a number and pick the unit; clear the number for unlimited. Double-click the tag above to turn the cap on or off.');
+  secHint(c, 'Limit traffic per network. Double-click a rate to set it \u2014 enter a number and pick the unit; clear the number for unlimited. Double-click the tag above to turn the cap on or off.');
   for (const cf of state.cfg) {
     const t = cf.throttle||{}; const en = !!t.enabled; const card = $('<div class="card"></div>');
     card.appendChild(netCardHead(cf, en, '/api/bandwidth'));
@@ -5557,7 +5557,7 @@ async function drawUpgrade(host){
     // (buildRouteChipPicker), keyed on node_id but labelled with the hostname:
     // a checkbox list is fine for three peers and unreadable for thirty.
     const peerRow = $('<div class="settings-row"></div>');
-    peerRow.appendChild($('<div><div class="settings-label">Peers</div><div class="settings-desc">Leave empty to upgrade this node. Pick specific peers to build and apply the same archive on them (this node is left untouched), or pick <b>all peers, then this node</b> to roll the whole fleet and finish with this node last \u2014 this node is upgraded only after every peer has applied, so a bad build reverts on the peers before it can reach the node you\u2019re logged into. Each peer must have <b>Accept Manager-pushed upgrades</b> turned on or it refuses (shown per peer), and each reverts on its own if it can\u2019t rejoin the mesh.</div></div>'));
+    peerRow.appendChild($('<div><div class="settings-label">Peers</div><div class="settings-desc">Pick specific peers to build and apply the same archive on them (this node is left untouched), or pick <b>all peers, then this node</b> to roll the whole fleet and finish with this node last. This node is upgraded only after every peer has applied, so a bad build reverts on the peers before it can reach the node you\u2019re logged into. Leave it empty to upgrade only this node. Each peer must have <b>Accept Manager-pushed upgrades</b> turned on or it refuses (shown per peer), and each reverts on its own if it can\u2019t rejoin the mesh.</div></div>'));
     targets = computeSortedManageablePeers();
     // Offer the "all peers, then this node" sentinel only when there is at least
     // one peer to roll; with none it would just mean "this node", which the
