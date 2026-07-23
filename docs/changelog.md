@@ -38,6 +38,19 @@ assuming it didn't happen.
 
 ---
 
+## v595 — 2026-07-22
+
+**UI only**, in `internal/webadmin/ui.go`: Traffic \u2192 Firewall \u2192 Allow
+List. Dropped the redundant "Allow List" `<h3>` from the card (the tab
+itself already says Allow List, so the card heading was repeating it), and
+moved the explanatory hint \u2014 "Never allow the firewall to filter these
+protocols, on any network. Double-click the state tag to toggle an
+entry." \u2014 from inside the card to just above it via `secHint`, the same
+placement `secHosts` already uses for its two hints. `secAlwaysAllowed`'s
+table, row-add/remove wiring, and reset-to-defaults button are otherwise
+unchanged. No API, config, or wire behaviour changed; the binary is
+identical to v594 in everything but the version string.
+
 ## v594 — 2026-07-22
 
 **UI only**, in `internal/webadmin/ui.go`: the local-only "Building…" label

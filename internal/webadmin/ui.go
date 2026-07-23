@@ -2751,9 +2751,8 @@ function exSvcLabel(e, mgmtPort){
 }
 
 function secAlwaysAllowed(c){
+  secHint(c, 'Never allow the firewall to filter these protocols, on any network. Double-click the state tag to toggle an entry.');
   const card = $('<div class="card"></div>');
-  card.appendChild($('<h3>Allow List</h3>'));
-  card.appendChild($('<div class="hint" style="margin:-4px 0 10px">Never allow the firewall to filter these protocols, on any network. Double-click the state tag to toggle an entry.</div>'));
   const t = $('<div></div>');
   t.innerHTML = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>name</th><th>service</th></tr></table>';
   const table = t.querySelector('table');
