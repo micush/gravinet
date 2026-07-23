@@ -191,12 +191,15 @@ const indexHTML = `<!doctype html>
      with different endpoint/hostname lengths drift out of alignment. */
   table.peers-table { table-layout:fixed; }
   table.peers-table col.c-sel { width:28px; }
-  table.peers-table col.c-target { width:17%; }
+  /* Narrowed once nodeNameCell dropped the node id from this column (see
+     its own comment) — a bare hostname needs much less room than
+     "hostname UID" did. Freed width went to c-endpoint below. */
+  table.peers-table col.c-target { width:12%; }
   table.peers-table col.c-state { width:8%; }
   /* Mesh > Peers only has target/state/overlay left after Monitor > Mesh
      Peers took the rest, so it gets its own wider proportions instead of
      reusing c-target/c-state (still sized for the monitor page's fuller,
-     7-column layout); otherwise the operate table would sit cramped on
+     8-column layout); otherwise the operate table would sit cramped on
      the left with one oversized overlay column soaking up all the room the
      removed columns freed up. */
   table.peers-table col.c-target-op { width:38%; }
@@ -207,7 +210,7 @@ const indexHTML = `<!doctype html>
      which had the most slack. */
   table.peers-table col.c-version { width:8%; }
   table.peers-table col.c-overlay { width:13%; }
-  table.peers-table col.c-endpoint { width:16%; }
+  table.peers-table col.c-endpoint { width:21%; }
   table.peers-table col.c-reach { width:7%; }
   table.peers-table col.c-time { width:7%; }
   table.peers-table col.c-transport { width:auto; }
@@ -530,6 +533,19 @@ function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;'
 function nodeCell(host, id, netId, endpoint){
   const idHtml = '<span class="net-id">'+esc(id)+'</span>';
   const label = host ? esc(host)+' '+idHtml : idHtml;
+  const notes = netId ? nodeNotesTitle(netId, id, endpoint) : '';
+  return notes ? '<span title="'+notes+'">'+label+'</span>' : label;
+}
+// nodeNameCell is nodeCell's Monitor > Mesh Peers counterpart: the target
+// column there shows only the node's name, not the id alongside it — Mesh >
+// Peers (nodeCell's own table) is where the id is actually needed, e.g. to
+// match it against a join token, and Monitor > Mesh Peers already has a
+// dedicated version column and enough per-row detail that dropping a
+// redundant id keeps the target column narrow. Falls back to the id when no
+// hostname is known yet, same as nodeCell, so a not-yet-named peer isn't
+// blank; carries the same peer/seed-notes tooltip.
+function nodeNameCell(host, id, netId, endpoint){
+  const label = host ? esc(host) : '<span class="net-id">'+esc(id)+'</span>';
   const notes = netId ? nodeNotesTitle(netId, id, endpoint) : '';
   return notes ? '<span title="'+notes+'">'+label+'</span>' : label;
 }
@@ -2847,7 +2863,7 @@ async function exemptRemoveChecked(table){
 
 function secKeys(c) {
   if (!state.cfg.length) return emptyCard(c, 'No networks yet — create one first.');
-  secHint(c, 'Tick an <b>empty</b> slot and use Generate or Import to fill it; tick filled slots for Enable/Disable/Reveal/Copy/Delete. Double-click a label, state, or key to change it in place. All enabled keys authenticate joiners — to rotate, generate a new key, tick <b>distributed</b> to push it to every peer currently connected over the mesh itself (no copy/paste needed, and it lands in the same slot number there when that slot is free), then disable the old one once you\'re sure it reached everyone. Untick <b>distributed</b> to retract the key from every peer holding a copy — the key stays here, just pulled from everyone else. Renaming a distributed key\'s label, or changing its expiry, pushes the new value to those peers automatically. Double-click <b>expires</b> to set a date/time after which a key stops authenticating (its sessions then re-handshake on a remaining key).');
+  secHint(c, 'Manage network keys. Select an empty slot and use Generate or Import to fill it; select filled slots for Enable/Disable/Reveal/Copy/Delete. Double-click a label, state, or key to change it in place. All enabled keys authenticate joiners.<br><br>To rotate keys, generate a new key, tick <b>distributed</b> to push it to every peer currently connected over the mesh itself (no copy/paste needed, and it lands in the same slot number there when that slot is free), then disable the old one once you\'re sure it reached everyone. Untick <b>distributed</b> to retract the key from every peer holding a copy — the key stays here, just pulled from everyone else. Renaming a distributed key\'s label, or changing its expiry, pushes the new value to those peers automatically. Set a date and time to enable key expiry.');
   for (const cf of state.cfg) {
     const card = $('<div class="card"></div>');
     card.appendChild($('<h3><span class="net-name">'+esc(cf.name)+'</span> <span class="net-id">'+esc(cf.id)+'</span></h3>'));
@@ -2999,7 +3015,7 @@ function secKeys(c) {
 
 function secNetworks(c) {
   const cfgs = state.cfg;
-  secHint(c, 'Double-click a name, subnet, overlay address, or notes to edit, or the state tag to enable/disable. <b>overlay4/6</b> is this node\'s own address on the network (blank = auto-assigned); changing it persists now but takes effect on this node\'s next restart. <b>notes</b> is a free-form operator note (e.g. purpose, owner) — purely local, never sent to peers. <b>+</b> creates a network, <b>=</b> joins an existing one (paste a join token, or enter id/key/seed), <b>\u25cf</b> generates a join token for a ticked network to paste on another node, <b>\u2212</b> deletes the ticked networks (and their keys), <b>\u21bb reset</b> drops the ticked networks\' peer connections and immediately reconnects to their peers and seeds.');
+  secHint(c, 'Add, remove, and manage networks. Double-click on an existing network to edit the name, subnet, overlay address, or notes for that network, or toggle the network state to enabled or disabled.<br><br><b>+</b> creates a network, <b>=</b> joins an existing one (paste a join token, or enter id/key/seed), <b>\u25cf</b> generates a join token for a ticked network to paste on another node, <b>\u2212</b> deletes the selected networks and all associated items, and <b>\u21bb reset</b> drops the selected networks\' peer connections and immediately reconnects to their peers and seeds.');
   const card = $('<div class="card"></div>');
   let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>name</th><th>id</th><th>state</th><th>subnet4</th><th>overlay4</th><th>subnet6</th><th>overlay6</th><th>peers</th><th>seeds</th><th>notes</th></tr>';
   if (!cfgs.length) h += '<tr><td colspan="11" class="empty">no networks — click + to create one, or = to join an existing one</td></tr>';
@@ -3311,7 +3327,7 @@ function openPeerShellFromSel(n, sec) {
 }
 
 function secPeers(c) {
-  c.appendChild($('<div class="hint" style="margin:0 0 10px">Peers connected to this node, grouped by network. This node is listed too (<b>this node</b>), tickable to look up or shell into, but not disabled, edited, or banned. Double-click a peer to disable it; double-click <b>notes</b> for a local, permanent note on its node id (auto-filled from a matching seed\'s note on first connect, unless you\'ve set your own). Tick rows and Ban to block mesh-wide, or tick one and \ud83d\udec8 for DNS/WHOIS. See Monitor \u2192 mesh peers for connection health and transport detail.</div>'));
+  c.appendChild($('<div class="hint" style="margin:0 0 10px">Peers connected to this node, grouped by network. This node is listed too (<b>this node</b>), tickable to look up or shell into. Double-click a peer state to enable/disable it; double-click <b>notes</b> for a local, permanent note on its node id. Select peers and click Ban to block them mesh-wide.</div>'));
   if (state.nat && state.nat.class && state.nat.class !== 'unknown') {
     const m = {
       open: ['directly reachable (no NAT)', 'on'],
@@ -3532,7 +3548,7 @@ function infoMeshPeers(c) {
       // (peerRowsForNet fills it from state.nat.public) — a real value once
       // NAT discovery completes, not a placeholder, so it's shown the same
       // way a peer's endpoint is rather than overridden to a dash.
-      h += '<tr class="selectable'+(p.self?' peer-self':'')+'" title="'+stTitle+'" data-peer="'+esc(p.id)+'"><td class="selcol"><input type="checkbox" class="rsel" data-k="'+esc(selKey(n.id,p.id))+'"'+(p.self?' title="this is the current node"':'')+'></td><td>'+nodeCell(p.host,p.id,n.id,p.endpoint)+'</td><td>'+verCell+'</td><td>'+keyCell+'</td>'
+      h += '<tr class="selectable'+(p.self?' peer-self':'')+'" title="'+stTitle+'" data-peer="'+esc(p.id)+'"><td class="selcol"><input type="checkbox" class="rsel" data-k="'+esc(selKey(n.id,p.id))+'"'+(p.self?' title="this is the current node"':'')+'></td><td>'+nodeNameCell(p.host,p.id,n.id,p.endpoint)+'</td><td>'+verCell+'</td><td>'+keyCell+'</td>'
         + '<td class="ov-cell"'+(p.overlay?' title="'+(p.self?'this node\'s own overlay address':'overlay address is set by the peer itself')+'">':'>')+overlayCellHTML(p)+'</td>'
         + '<td class="ep-cell"'+(p.self?' title="this node\'s own observed public address">':'>')+esc(dispAddr(p.endpointText))+'</td><td>'+reach+'</td><td>'+timeCell+'</td><td class="c-transport-cell">'+xport+'</td></tr>';
     }
@@ -3545,7 +3561,7 @@ function infoMeshPeers(c) {
 }
 
 function secBans(c) {
-  c.appendChild($('<div class="hint" style="margin:0 0 10px">Banned peers, grouped by network — the banned target, the node that issued the ban (origin), and the notes. Bans propagate across the mesh from the node that created them; tick rows to lift one. Double-click the notes on a ban you issued to edit them — the change re-floods to every node.</div>'));
+  c.appendChild($('<div class="hint" style="margin:0 0 10px">Banned peers, grouped by network — the banned target, the node that issued the ban (origin), and notes. Bans propagate across the mesh from the node that created them; select a peer and click Unban to remove the mesh-wide ban.</div>'));
   perNet(c, (card, n) => {
     const bans = (n.bans||[]).slice().sort((a,b) =>
       (a.Target||a.target||'').localeCompare(b.Target||b.target||''));
@@ -4410,6 +4426,7 @@ async function fwAutoPopulateCatalog(){
 
 function secFirewall(c) {
   state.firewallTab = state.firewallTab || 'rules';
+  secHint(c, 'Stateful firewall inspection per network.');
   c.appendChild(buildTabBar([['rules','Rules'],['objects','Objects'],['services','Services'],['allowlist','Allow List']], state.firewallTab,
     (tab) => { state.firewallTab = tab; renderSection(); }));
 
@@ -4430,7 +4447,7 @@ function secFirewall(c) {
   if (state.firewallTab === 'services') { secFwServices(c); return; }
 
   if (!state.cfg.length) return emptyCard(c, 'No networks.');
-  secHint(c, 'Disabled = all traffic passes. Enabled = rules evaluated top-to-bottom, first match wins; unmatched traffic is allowed (stateful — replies to allowed flows pass automatically). <b>services</b> takes a comma-separated mix of named services and raw <code>proto</code>/<code>proto/port</code> entries (e.g. <code>https, tcp/8443, udp/53</code>); at most one raw entry per rule, any number of named services. Each of <b>source</b>, <b>destination</b>, and <b>services</b> has a <b>\u00d8</b> button inside its editor; click it to match anything <i>except</i> that field (shown as a leading <b>!</b> here), and next to it, a filterable dropdown of this node\u2019s objects/services catalog: start typing to narrow it, or just type a literal CIDR/proto/port instead, since these fields take either. Use + to add a rule, drag to reorder, double-click to edit or toggle state, tick rows and use \u2212 to remove.');
+  secHint(c, 'Enabled = Apply firewall filtering; Disabled = all traffic passes.<br><br>Rules are evaluated top-to-bottom, first match wins. Unmatched traffic is allowed unless specifically blocked.');
 
   for (const cf of state.cfg) {
     const fw = cf.firewall||{}; const en = !!fw.enabled;

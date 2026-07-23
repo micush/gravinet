@@ -38,6 +38,37 @@ assuming it didn't happen.
 
 ---
 
+## v592 — 2026-07-22
+
+**UI copy only**, plus one table layout change, in `internal/webadmin/ui.go`:
+
+- **Networks, Keys, Peers, Bans, and Firewall** section hints reworded to
+  shorter, more general copy (per explicit before/after text supplied):
+  Networks and Keys lead with a one-line summary before the operational
+  detail; Peers and Bans trim the DNS/WHOIS and note-editing asides; the
+  Firewall page gained a "Stateful firewall inspection per network."
+  tagline above its tab bar, and the Rules tab's hint dropped the detailed
+  walkthrough of the negate button, the objects/services dropdown, and the
+  `services` field's comma-separated syntax down to two sentences. Two
+  small typos in the supplied text were cleaned up along the way (a stray
+  double period, and "lookup" corrected to "look up" as a verb). Nothing
+  the trimmed text described was removed from the product — the negate
+  button, the catalog dropdown, and per-ban note editing all still work
+  exactly as before; they're merely no longer spelled out in the hint.
+- **Monitor → Mesh Peers**' target column no longer shows the node id
+  alongside the hostname, only the name (falling back to the id when no
+  hostname is known yet, same as before). Implemented as a new
+  `nodeNameCell`, not a change to the shared `nodeCell` — `nodeCell` still
+  shows `hostname · id` on Mesh → Peers and Bans, neither of which was
+  asked to change, and where the id is actually needed (e.g. to match it
+  against a join token). The column itself narrowed accordingly (17%→12%),
+  with the freed width going to `c-endpoint` (16%→21%), and a stale code
+  comment referring to Monitor's "7-column layout" was corrected to 8 now
+  that the version column (v591) exists.
+
+No API, config, or wire behaviour changed; the binary is identical to v591
+in everything but the version string.
+
 ## v591 — 2026-07-22
 
 **Peers now report their build version to each other, and the admin UI shows
