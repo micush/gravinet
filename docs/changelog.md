@@ -38,6 +38,23 @@ assuming it didn't happen.
 
 ---
 
+## v590 — 2026-07-22
+
+**UI copy only**, in the admin UI's Upgrade tab (`internal/webadmin/ui.go`):
+the Upgrade section's hint was trimmed from an explanation of the
+local-only trust model plus a doc pointer down to one line — "Deploy a
+new [gravinet] build to the mesh: upload it, and this node applies it and
+restarts." The Upload card's hint was similarly trimmed to "Select a
+[gravinet] source archive to deploy." Also removed a sentence from the
+fleet-push Peers picker's description — "A peer that drops off the mesh
+while you're choosing stays selected and is marked rather than vanishing
+from the list." — entirely. None of this changes behavior (upgrades are
+still strictly local-only to the node you're logged into; a
+disconnected-but-still-selected peer in the picker is still marked the
+same way), only the copy describing it. No code, config, or wire
+behaviour changed; the binary is identical to v589 in everything but the
+version string.
+
 ## v589 — 2026-07-22
 
 **Docs only.** Expanded `docs/API.md`'s single worked example into a full

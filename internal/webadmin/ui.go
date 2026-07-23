@@ -5428,7 +5428,7 @@ function secBandwidth(c) {
 // rollout started from this form is the same rollout, with the same canary and
 // the same abort rule, as one started from a terminal.
 function secUpgrade(c){
-  secHint(c, 'Get a new [gravinet] build running on this node: upload it, and this node applies it and restarts. This only ever happens on the machine you\u2019re logged into; no peer, not even a Manager, can start or control an upgrade here. See docs/UPGRADES.md.');
+  secHint(c, 'Deploy a new [gravinet] build to the mesh: upload it, and this node applies it and restarts.');
   const host = $('<div></div>');
   c.appendChild(host);
   drawUpgrade(host);
@@ -5474,7 +5474,7 @@ async function drawUpgrade(host){
       + esc(peerName) + '\u2019, which is selected above. Disabled here so it can\u2019t look like it\u2019s upgrading that peer when it isn\u2019t. Select \u201cThis node\u201d to use this on the node you\u2019re actually on, or log into '
       + esc(peerName) + '\u2019s own web admin to upgrade it there.</div>'));
   }
-  stCard.appendChild($('<div class="hint" style="margin:0 0 10px">Upload a gravinet source archive. It\u2019s compiled here with this node\u2019s own Go toolchain, checked against this node\u2019s config, and applied in one step. There\u2019s no binary to download \u2014 gravinet ships no prebuilt release, and a binary would only be valid for a single platform anyway.</div>'));
+  stCard.appendChild($('<div class="hint" style="margin:0 0 10px">Select a [gravinet] source archive to deploy.</div>'));
 
   const up = $('<div class="tbar"></div>');
   // No format choice on this side: .tgz/.tar.gz and .zip are both accepted,
@@ -5517,7 +5517,7 @@ async function drawUpgrade(host){
     // (buildRouteChipPicker), keyed on node_id but labelled with the hostname:
     // a checkbox list is fine for three peers and unreadable for thirty.
     const peerRow = $('<div class="settings-row"></div>');
-    peerRow.appendChild($('<div><div class="settings-label">Peers</div><div class="settings-desc">Leave empty to upgrade this node. Pick specific peers to build and apply the same archive on them (this node is left untouched), or pick <b>all peers, then this node</b> to roll the whole fleet and finish with this node last \u2014 this node is upgraded only after every peer has applied, so a bad build reverts on the peers before it can reach the node you\u2019re logged into. Each peer must have <b>Accept Manager-pushed upgrades</b> turned on or it refuses (shown per peer), and each reverts on its own if it can\u2019t rejoin the mesh. A peer that drops off the mesh while you\u2019re choosing stays selected and is marked rather than vanishing from the list.</div></div>'));
+    peerRow.appendChild($('<div><div class="settings-label">Peers</div><div class="settings-desc">Leave empty to upgrade this node. Pick specific peers to build and apply the same archive on them (this node is left untouched), or pick <b>all peers, then this node</b> to roll the whole fleet and finish with this node last \u2014 this node is upgraded only after every peer has applied, so a bad build reverts on the peers before it can reach the node you\u2019re logged into. Each peer must have <b>Accept Manager-pushed upgrades</b> turned on or it refuses (shown per peer), and each reverts on its own if it can\u2019t rejoin the mesh.</div></div>'));
     targets = computeSortedManageablePeers();
     // Offer the "all peers, then this node" sentinel only when there is at least
     // one peer to roll; with none it would just mean "this node", which the
