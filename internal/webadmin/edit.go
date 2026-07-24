@@ -1477,8 +1477,10 @@ func (s *Server) handleSystemSNMP(w http.ResponseWriter, r *http.Request) {
 // wire. community is returned in cleartext, the same way BGP neighbor
 // passwords already are in this API — an authenticated session can already
 // read this node's full config, so hiding one field of it here would be
-// false security, not real security; the page masks it for
-// shoulder-surfing, not from the API.
+// false security, not real security. The page shows it in plain text too
+// (SNMPv2c has no real secrecy to protect here either — the community
+// string travels unencrypted on the wire to any agent that will accept
+// it), rather than masking a field that was never actually confidential.
 func systemSNMPJSON(cfg config.SNMPConfig) map[string]any {
 	supported, hint := service.SNMPSupported()
 	interfaces := cfg.Interfaces

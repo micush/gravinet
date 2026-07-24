@@ -5971,10 +5971,8 @@ function secSNMP(c){
     const row = $('<div style="display:flex;flex-direction:column;gap:10px"></div>');
 
     row.appendChild($('<div><div class="hint" style="margin:0 0 4px">Community string</div>'
-      + '<span style="display:flex;gap:6px;align-items:center">'
-      + '<input id="snmp-community" type="password" autocomplete="new-password" value="'+esc(snmp.community||'')+'" placeholder="public" style="flex:1">'
-      + '<button class="ghost sm" id="snmp-pw-toggle" title="show while editing">\ud83d\udc41\ufe0f</button>'
-      + '</span></div>'));
+      + '<input id="snmp-community" type="text" autocomplete="off" spellcheck="false" value="'+esc(snmp.community||'')+'" placeholder="public" style="width:100%">'
+      + '</div>'));
     row.appendChild($('<div><div class="hint" style="margin:0 0 4px">Listen address</div>'
       + '<input id="snmp-listen" value="'+esc(snmp.listen_addr||'')+'" placeholder="udp:161 or 0.0.0.0:161 \u2014 blank = snmpd\u2019s own default" style="width:100%"></div>'));
     row.appendChild($('<div><div class="hint" style="margin:0 0 4px">Interfaces</div>'
@@ -5992,8 +5990,6 @@ function secSNMP(c){
     const ifacesIn = row.querySelector('#snmp-ifaces');
     const locationIn = row.querySelector('#snmp-location');
     const contactIn = row.querySelector('#snmp-contact');
-    const pwToggle = card.querySelector('#snmp-pw-toggle');
-    pwToggle.onclick = (e) => { e.stopPropagation(); const showing = communityIn.type==='text'; communityIn.type = showing?'password':'text'; pwToggle.title = showing?'show while editing':'hide while editing'; };
 
     // Enabled/disabled pill, placed next to the page's own <h2> title (a
     // sibling of this card, built by renderSection before secSNMP ever

@@ -2,6 +2,18 @@
 
 ---
 
+## v634 — 2026-07-24
+
+**Changed:** System > SNMP's community string field is shown in plain text
+now instead of masked, and its show/hide toggle button is gone along with
+it. It was never actually confidential end to end — the API already
+returned it in cleartext to any authenticated session, and SNMPv2c's
+community string travels unencrypted on the wire to any agent that accepts
+it — so masking it in the field was hiding something that was never
+hidden anywhere else.
+
+---
+
 ## v633 — 2026-07-24
 
 **Changed:** SNMP's and L2 Disco's enabled/disabled pill now toggles
