@@ -2,6 +2,41 @@
 
 ---
 
+## v628 — 2026-07-24
+
+**Fixed:** System > L2 Disco's interface picker kept showing whichever
+managed node's interfaces were fetched first, and never updated after
+switching to a different node in the header picker. systemInterfaces()
+caches /api/interfaces' response for reuse (NAT's masquerade dropdown and
+L2 Disco's picker both call it), but the cache was keyed on nothing, so a
+node switch left it silently serving the previous node's list — the
+request itself was correctly proxied to the newly-selected node, only the
+cached result on top of it was stale. setTarget now clears that cache at
+the one place a real node switch is known to happen, so the next
+systemInterfaces() call fetches fresh. Affected NAT's masquerade dropdown
+the same way, just less visibly since it only loads when a row is opened
+for editing rather than immediately on page load.
+
+---
+
+## v627 — 2026-07-24
+
+**Changed:** System > SNMP and System > L2 Disco each dropped their separate
+status card (the standalone box showing a "running"/"not running" tag) in
+favor of an **enabled**/**disabled** pill in the settings card's own header —
+the same pill NAT, QoS, and Shaping already show per network. SNMP's pill
+reflects the community-string-driven enabled flag; L2 Disco's reflects
+whether any interface actually has LLDP or CDP picked. Neither page lost any
+information a live service query wasn't already duplicating: L2 Disco's
+neighbor table and stray-process warning are unchanged, and both pills
+update in place after a save rather than forcing a redraw of the fields
+underneath them.
+
+**Changed:** the Upload card on System > Upgrade is now titled
+**[gravinet] updates**.
+
+---
+
 ## v626 — 2026-07-24
 
 **gravinet now owns the lldpd process instead of reporting on it.** v625

@@ -337,7 +337,7 @@ func TestPushUsesTheSharedChipPicker(t *testing.T) {
 	// The picker now lives in the Upload card, so anchor on that heading and
 	// bound the block at the next section, which still covers the picker
 	// construction and the Upgrade button's handler.
-	pushIdx := strings.Index(indexHTML, "<h3>Upload</h3>")
+	pushIdx := strings.Index(indexHTML, "<h3>[gravinet] updates</h3>")
 	if pushIdx < 0 {
 		t.Fatal("the Upload card is missing")
 	}
@@ -373,7 +373,7 @@ func TestUpgradeAllThenLocalOption(t *testing.T) {
 	if !strings.Contains(indexHTML, "all peers, then this node") {
 		t.Error("the Upgrade picker no longer offers the 'all peers, then this node' option")
 	}
-	up := strings.Index(indexHTML, "<h3>Upload</h3>")
+	up := strings.Index(indexHTML, "<h3>[gravinet] updates</h3>")
 	if up < 0 {
 		t.Fatal("the Upload card is missing")
 	}

@@ -366,7 +366,17 @@ const state = { section:'networks', status:[], cfg:[], restartPending:false, sta
 // refreshCluster() side by side, neither awaiting the other) share one
 // generation and don't invalidate each other; only a genuine further switch
 // while they're in flight bumps the generation and makes them stale.
-function setTarget(v){ state.target = v; state.targetSeq++; }
+//
+// Also clears _ifaceCache (see systemInterfaces): /api/interfaces is proxied
+// per node like everything outside LOCAL_API, but that cache was keyed on
+// nothing, so switching managed nodes kept silently serving whichever node's
+// interfaces happened to be fetched first — reported as "L2 Disco's
+// interfaces box only shows the current manager's interfaces, doesn't
+// update when I change managed nodes." Resetting it here, at the one place a
+// real switch is known to have happened, means the next systemInterfaces()
+// call — L2 Disco's picker on its next load(), or NAT's masquerade dropdown
+// next time a row is opened — fetches fresh instead of reusing a stale list.
+function setTarget(v){ state.target = v; state.targetSeq++; _ifaceCache = null; }
 
 // selection holds the currently ticked rows per multi-select section, keyed by
 // "netid#rowid", so a selection survives the 4s status re-render (peers/bans
@@ -2084,8 +2094,13 @@ async function quietPollBack(before, n, wentDown){
 // parseUnit turns a number + unit (Mbps/Gbps/Kbps) into bytes/sec.
 function toBps(num, unit){ const bits={Gbps:1e9,Mbps:1e6,Kbps:1e3}[unit]||1e6; return Math.round(parseFloat(num)*bits/8); }
 
-// systemInterfaces fetches the host's interface names once and caches them, for
-// the NAT masquerade dropdown.
+// systemInterfaces fetches the currently-targeted node's interface names and
+// caches them for reuse — the NAT masquerade dropdown and L2 Disco's
+// interface picker both call this rather than hitting /api/interfaces
+// themselves. Cached per node, not once forever: setTarget clears
+// _ifaceCache exactly when the managed-node selection actually changes, so a
+// switch is picked up on this function's next call instead of quietly
+// keeping the previous node's list around.
 let _ifaceCache = null;
 async function systemInterfaces(){
   if (_ifaceCache) return _ifaceCache;
@@ -5938,23 +5953,6 @@ function secSNMP(c){
     draw(r.body);
   };
 
-  // renderStatus (re)builds just the status card's own content — the
-  // running/not-running tag and hint. Called after the initial draw AND
-  // after every successful save, but deliberately never touches the field
-  // row: rebuilding *those* on every save (the previous version of this
-  // page did, via a full load()) destroyed and recreated every <input>
-  // mid-edit the instant a save round-trip completed, which stole focus
-  // and silently dropped whatever the operator had typed since — "field
-  // behavior is weird, sometimes I get cut off while typing" was this bug.
-  // A save's own response already carries fresh running/hint (see
-  // handleSystemSNMP), so no extra fetch is needed here either.
-  const renderStatus = (statusCard, snmp) => {
-    statusCard.innerHTML = '';
-    const runTag = '<span class="tag-toggle '+(snmp.running?'on':'off')+'">'+(snmp.running?'running':'not running')+'</span>';
-    statusCard.appendChild($('<div style="display:flex;align-items:center;gap:8px">'+runTag+'</div>'));
-    if (snmp.hint) statusCard.appendChild($('<div class="hint" style="margin:8px 0 0">'+esc(snmp.hint)+'</div>'));
-  };
-
   const draw = (snmp) => {
     body.innerHTML = '';
 
@@ -5964,6 +5962,20 @@ function secSNMP(c){
     }
 
     const card = $('<div class="card"></div>');
+    // Enabled/disabled pill, same "pill" look NAT/QoS/Shaping's per-network
+    // card headers already use, in place of the old separate status card's
+    // running/not-running tag. Reflects config (cfg.SNMP.Enabled, which the
+    // community field below drives \u2014 see the save hint), not a live service
+    // query, matching what those other pills report too. Updated in place by
+    // saveSNMP below on every successful save rather than rebuilt via a full
+    // redraw, for the same reason the field row itself is never rebuilt on
+    // save (see saveSNMP's own comment): destroying and recreating live
+    // elements mid-edit is what caused "field behavior is weird, sometimes I
+    // get cut off while typing".
+    const head = $('<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><span class="pill '+(snmp.enabled?'on':'off')+'">'+(snmp.enabled?'enabled':'disabled')+'</span></div>');
+    const pill = head.querySelector('.pill');
+    card.appendChild(head);
+
     const row = $('<div style="display:flex;flex-direction:column;gap:10px"></div>');
 
     row.appendChild($('<div><div class="hint" style="margin:0 0 4px">Community string</div>'
@@ -5982,10 +5994,6 @@ function secSNMP(c){
     card.appendChild(row);
     card.appendChild($('<div class="hint" style="margin:8px 0 0">Filling in the community string turns the agent <b>on</b>; clearing it turns it <b>off</b>. Interfaces is informational only \u2014 gravinet doesn\u2019t manage a host firewall rule to scope who can reach the agent; restrict that with the host\u2019s own firewall if it matters in your environment. Saves automatically when you click or tab away.</div>'));
     body.appendChild(card);
-
-    const statusCard = $('<div class="card"></div>');
-    body.appendChild(statusCard);
-    renderStatus(statusCard, snmp);
 
     const communityIn = row.querySelector('#snmp-community');
     const listenIn = row.querySelector('#snmp-listen');
@@ -6012,7 +6020,11 @@ function secSNMP(c){
       }) });
       if (!res.ok){ alert((res.body && res.body.error) || 'could not save SNMP settings'); return; }
       last = cur; // the baseline moves even if the fields have since changed further underneath this save
-      if (res.body) renderStatus(statusCard, res.body);
+      if (res.body){
+        const en = !!res.body.enabled;
+        pill.className = 'pill ' + (en?'on':'off');
+        pill.textContent = en ? 'enabled' : 'disabled';
+      }
       if (res.body && res.body.note) alert(res.body.note);
     };
     [communityIn, listenIn, ifacesIn, locationIn, contactIn].forEach(inp => {
@@ -6049,11 +6061,11 @@ function secSNMP(c){
 //
 // The neighbors card also surfaces disco.stray_hint when present — a
 // leftover lldpd process from an earlier configuration, invisible to both
-// the running tag above (which only asks the service manager about the ONE
-// instance it tracks) and the neighbor table itself (which only talks to
-// whichever instance currently holds the control socket). gravinet
-// terminates these itself now, so this appears only in the case worth
-// escalating: one that didn't respond to being signalled.
+// the enabled/disabled pill above (config-derived — whether any interface
+// is picked — not a live service query) and the neighbor table itself
+// (which only talks to whichever instance currently holds the control
+// socket). gravinet terminates these itself now, so this appears only in
+// the case worth escalating: one that didn't respond to being signalled.
 function secL2Disco(c){
   secHint(c, 'Link-layer discovery: LLDP, plus Cisco CDP, together on whichever interfaces you pick below. Advertises and listens for neighbor information on picked interfaces. Acts on the node you\u2019re currently managing.');
 
@@ -6070,19 +6082,20 @@ function secL2Disco(c){
   // renderNeighbors (re)builds just the neighbors card, independent of the
   // interface picker above it \u2014 called on initial draw and, after a save,
   // again with that save's own response (which already carries fresh
-  // neighbor/running data), the same "never rebuild the whole page just to
-  // refresh a status readout" fix secSNMP's own renderStatus applies for the
-  // identical reason: rebuilding the picker on every save could otherwise
-  // steal a click mid-pick.
+  // neighbor data), the same "never rebuild the whole page just to refresh
+  // a live readout" principle the enabled/disabled pill's own in-place
+  // update (see saveL2Disco below) follows for the identical reason:
+  // rebuilding the picker on every save could otherwise steal a click
+  // mid-pick.
   const renderNeighbors = (neighborsCard, disco) => {
     neighborsCard.innerHTML = '';
-    const runTag = '<span class="tag-toggle '+(disco.running?'on':'off')+'">'+(disco.running?'running':'not running')+'</span>';
-    neighborsCard.appendChild($('<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">'+runTag+'</div>'));
-    // stray_hint (service.LLDPStrays) is independent of running/neighbors
-    // below \u2014 a leftover lldpd from an earlier configuration that neither
-    // of those checks can notice. gravinet terminates these itself on every
-    // start/stop and once at daemon startup, so this only ever appears when
-    // one survived being signalled, which is genuinely worth flagging.
+    // stray_hint (service.LLDPStrays) is independent of the neighbor table
+    // below \u2014 a leftover lldpd from an earlier configuration that the
+    // neighbor table alone can't notice (it only talks to whichever
+    // instance currently holds the control socket). gravinet terminates
+    // these itself on every start/stop and once at daemon startup, so this
+    // only ever appears when one survived being signalled, which is
+    // genuinely worth flagging.
     if (disco.stray_hint){
       neighborsCard.appendChild($('<div class="hint" style="margin:0 0 10px;color:var(--danger)">'+esc(disco.stray_hint)+'</div>'));
     }
@@ -6118,6 +6131,17 @@ function secL2Disco(c){
     const card = $('<div class="card"></div>');
     const neighborsCard = $('<div class="card"></div>');
 
+    const picked = (disco.interfaces||[]).filter(i => i.lldp || i.cdp).map(i => i.name);
+
+    // Enabled/disabled pill, same "pill" look NAT/QoS/Shaping's per-network
+    // card headers already use, in place of the old running/not-running tag
+    // that used to sit atop the neighbors card. Reflects whether any
+    // interface is actually picked below (config), not a live service
+    // query, matching what those other pills report too.
+    const head = $('<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><span class="pill '+(picked.length?'on':'off')+'">'+(picked.length?'enabled':'disabled')+'</span></div>');
+    const pill = head.querySelector('.pill');
+    card.appendChild(head);
+
     // Posts the full current pick list on every add/remove \u2014
     // handleSystemL2Disco replaces cfg.Discovery wholesale, the same
     // "read it all, POST it all" shape rowRouteList's own BGP save uses.
@@ -6125,11 +6149,15 @@ function secL2Disco(c){
       const interfaces = names.map(name => ({ name, lldp:true, cdp:true }));
       const res = await api('/api/system/l2disco', { method:'POST', body: JSON.stringify({ interfaces }) });
       if (!res.ok){ alert((res.body && res.body.error) || 'could not save L2 discovery settings'); return; }
-      if (res.body) renderNeighbors(neighborsCard, res.body);
+      if (res.body){
+        renderNeighbors(neighborsCard, res.body);
+        const en = (res.body.interfaces||[]).some(i => i.lldp || i.cdp);
+        pill.className = 'pill ' + (en?'on':'off');
+        pill.textContent = en ? 'enabled' : 'disabled';
+      }
       if (res.body && res.body.note) alert(res.body.note);
     };
 
-    const picked = (disco.interfaces||[]).filter(i => i.lldp || i.cdp).map(i => i.name);
     const row = $('<div class="settings-row"></div>');
     row.appendChild($('<div><div class="settings-label">Interfaces</div><div class="settings-desc">Pick which interfaces run LLDP and CDP. Saves immediately when changed.</div></div>'));
     const picker = buildRouteChipPicker(ifNames, picked, (names) => saveL2Disco(names), {
@@ -6406,7 +6434,7 @@ async function drawUpgrade(host){
 
   const stCard = $('<div class="card"></div>');
   if (remote) stCard.classList.add('local-only-disabled');
-  stCard.appendChild($('<h3>Upload</h3>'));
+  stCard.appendChild($('<h3>[gravinet] updates</h3>'));
   if (remote){
     stCard.appendChild($('<div class="hint" style="margin:0 0 10px; color:var(--danger,#b33); opacity:1">Upgrades are local-only: this always acts on the node you\u2019re logged into, never on \u2018'
       + esc(peerName) + '\u2019, which is selected above. Disabled here so it can\u2019t look like it\u2019s upgrading that peer when it isn\u2019t. Select \u201cThis node\u201d to use this on the node you\u2019re actually on, or log into '
