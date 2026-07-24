@@ -1431,9 +1431,15 @@ func (s *Server) handleSystemSNMP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ApplySNMP runs before systemSNMPJSON builds the reply, not after:
+	// systemSNMPJSON's "running" field is a live systemctl/service/rcctl
+	// query, not derived from snmp itself, so building the reply first
+	// would report whatever the service's state happened to be *before*
+	// this save took effect — stale by exactly one save, every time.
+	ok, hint := service.ApplySNMP(snmp)
 	resp := systemSNMPJSON(snmp)
 	resp["ok"] = true
-	if ok, hint := service.ApplySNMP(snmp); !ok {
+	if !ok {
 		resp["note"] = "saved, but the snmpd service could not be reconciled: " + hint
 	}
 	writeJSON(w, http.StatusOK, resp)

@@ -5923,6 +5923,23 @@ function secSNMP(c){
     draw(r.body);
   };
 
+  // renderStatus (re)builds just the status card's own content — the
+  // running/not-running tag and hint. Called after the initial draw AND
+  // after every successful save, but deliberately never touches the field
+  // row: rebuilding *those* on every save (the previous version of this
+  // page did, via a full load()) destroyed and recreated every <input>
+  // mid-edit the instant a save round-trip completed, which stole focus
+  // and silently dropped whatever the operator had typed since — "field
+  // behavior is weird, sometimes I get cut off while typing" was this bug.
+  // A save's own response already carries fresh running/hint (see
+  // handleSystemSNMP), so no extra fetch is needed here either.
+  const renderStatus = (statusCard, snmp) => {
+    statusCard.innerHTML = '';
+    const runTag = '<span class="tag-toggle '+(snmp.running?'on':'off')+'">'+(snmp.running?'running':'not running')+'</span>';
+    statusCard.appendChild($('<div style="display:flex;align-items:center;gap:8px">'+runTag+'</div>'));
+    if (snmp.hint) statusCard.appendChild($('<div class="hint" style="margin:8px 0 0">'+esc(snmp.hint)+'</div>'));
+  };
+
   const draw = (snmp) => {
     body.innerHTML = '';
 
@@ -5952,10 +5969,8 @@ function secSNMP(c){
     body.appendChild(card);
 
     const statusCard = $('<div class="card"></div>');
-    const runTag = '<span class="tag-toggle '+(snmp.running?'on':'off')+'">'+(snmp.running?'running':'not running')+'</span>';
-    statusCard.appendChild($('<div style="display:flex;align-items:center;gap:8px">'+runTag+'</div>'));
-    if (snmp.hint) statusCard.appendChild($('<div class="hint" style="margin:8px 0 0">'+esc(snmp.hint)+'</div>'));
     body.appendChild(statusCard);
+    renderStatus(statusCard, snmp);
 
     const communityIn = row.querySelector('#snmp-community');
     const listenIn = row.querySelector('#snmp-listen');
@@ -5981,8 +5996,9 @@ function secSNMP(c){
         interfaces: cur.ifaces ? cur.ifaces.split(', ') : [], location: cur.location, contact: cur.contact,
       }) });
       if (!res.ok){ alert((res.body && res.body.error) || 'could not save SNMP settings'); return; }
+      last = cur; // the baseline moves even if the fields have since changed further underneath this save
+      if (res.body) renderStatus(statusCard, res.body);
       if (res.body && res.body.note) alert(res.body.note);
-      load();
     };
     [communityIn, listenIn, ifacesIn, locationIn, contactIn].forEach(inp => {
       inp.onblur = saveSNMP;

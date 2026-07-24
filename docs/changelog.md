@@ -48,6 +48,17 @@ assuming it didn't happen.
 
 ---
 
+---
+
+## v616 — 2026-07-24
+
+**Fixed: System > SNMP's form fields would sometimes lose keystrokes mid-typing.** Root cause: every field's `onblur` triggers a save across all five fields together (by design — they're one config, saved as one write), and on success the old code called a full `load()`, which re-fetched and completely rebuilt the card — `body.innerHTML = ''` then fresh `<input>` elements for every field, every time. If that save's round-trip completed while the operator had since clicked into (or was still typing in) another field, the element holding their cursor was destroyed and replaced out from under them mid-keystroke — later characters had nowhere to land. "Sometimes cut off while typing" is exactly what that looks like from the outside.
+
+- **`internal/webadmin/ui.go`**: `secSNMP`'s field row is now built exactly once, at initial load. A successful save calls a new `renderStatus()` instead of `load()`, which only touches the status card (the running/not-running tag and hint) — never the input row — so a save completing mid-edit no longer steals focus or drops anything. `renderStatus` doesn't even need a follow-up fetch: `handleSystemSNMP`'s own POST reply already carries fresh `running`/`hint`, so the save's own response is reused directly.
+- **`internal/webadmin/edit.go`**: found a second, related ordering bug while fixing the first — `handleSystemSNMP` built the JSON reply (which includes a *live* `service.SNMPServiceRunning()` query) *before* calling `service.ApplySNMP`, so every save reported whichever running/stopped state the service was in **before** that save took effect, one save stale, every time. `ApplySNMP` now runs first; the reply is built from its actual result.
+
+No API shape change (the POST reply's fields are unchanged, just correctly ordered now) and no config/wire migration. Full webadmin suite passes, including the SNMP handler tests from v615.
+
 ## v615 — 2026-07-24
 
 **New: System > SNMP**, the fifth of parapet's System items recreated —
