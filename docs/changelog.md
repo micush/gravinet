@@ -46,6 +46,84 @@ assuming it didn't happen.
 
 ---
 
+## v613 — 2026-07-24
+
+**Fixed: the name this node advertises to mesh peers (`config.Hostname`,
+falling back to the OS hostname) didn't update when the OS hostname changed
+via System > Resolver — it's read from the OS exactly once, at daemon
+startup, and cached for the process's life.** The first attempt at this fix
+was wrong in a way worth stating plainly rather than quietly dropping: it
+made `Engine.Hostname()` re-derive the OS hostname live on every call, then
+extended the `ctrlClusterNotify` control message with a new hostname field
+and an `AnnounceHostname()` push so already-connected peers would see a
+change without waiting for a reconnect. That's real, working complexity for
+a problem that already had a one-line answer already in use everywhere else
+in this exact codebase: **restart the service, and let it read the hostname
+fresh at its own next startup, the same as it always has.** Building the
+live-push version first also cost real time chasing what turned out to be an
+unrelated pre-existing bug it surfaced (see below) before the simpler fix was
+even tried.
+
+- **Reverted in full**: `internal/mesh/engine.go`, `ban.go`, and
+  `handshake_engine.go` are back to their exact v611 form — the `hostname`
+  field, `Hostname()` as a plain getter, no `AnnounceHostname`, no wire
+  change to `ctrlClusterNotify`. `cmd/gravinet/main.go` and
+  `shortHostname` (moved into `internal/mesh` in the first attempt) are
+  back where they were, including the original `hostname_test.go`.
+- **The actual fix**: `internal/webadmin`'s `handleSystemResolver`, after a
+  successful `{op:"hostname"}`, now restarts the gravinet service — reusing
+  `handleRestart`'s own reply-then-restart mechanism verbatim
+  (`service.CanRestart`/`service.Restart`, the same 700ms flush delay, the
+  same background goroutine) rather than inventing a second one. This has
+  nothing to do with the OS-level rename, which already took effect
+  synchronously inside `SetHostname`; it's specifically so gravinet's own
+  cached identity picks up the change too, without the operator needing to
+  separately notice and click Restart. Best-effort and scoped to the
+  `hostname` op only — a `dns` change never touches gravinet's own process
+  state, so it never restarts anything. If this host can't restart itself
+  (no service manager — `gravinet run` interactively, say), the OS-level
+  hostname change still stands; the reply's `note` says a manual restart is
+  needed instead, the same honesty every other best-effort corner of this
+  feature already uses.
+- **Docs updated to match**: the hostname card's hint text in `secResolver`,
+  `handleSystemResolver`'s own doc comment, `hostresolver.go`'s package doc,
+  and `docs/API.md`'s `hostname` field description all now describe the
+  restart instead of the abandoned live-push design.
+- **A real, pre-existing bug surfaced and got fixed as a side effect of
+  writing (and then discarding) the live-push version's integration test**,
+  worth keeping despite the revert: two real meshed test nodes with
+  bidirectional `AddSeed` (both sides seeding each other, not just one)
+  can race into `install()` twice per side — see that function's own
+  "installs a fresh session over a live one" comment — leaving `ns.byNode`
+  (what `ListPeers` reads) pointing at a different session object than the
+  one control messages actually route through. Confirmed this is not new:
+  it reproduces identically against an untouched v611 build. Nothing in
+  this version fixes the underlying dedup race itself — that's a separate,
+  larger piece of work — but it's now a known, reproducible finding rather
+  than a mystery, worth a look before anything else in this codebase
+  depends on both sides of a pair seeding each other and then reading live
+  per-peer state back immediately afterward.
+- **A second, smaller bug caught before shipping**: a find-and-replace while
+  making the new hostname hint text UI-editable doubled a backslash in two
+  Unicode escapes (`\u2014`, `\u2019`), which would have rendered as a
+  literal backslash followed by the escape code instead of an em dash and an
+  apostrophe. Caught by extracting and syntax-checking the embedded JS
+  before considering the change done, rather than assuming a clean `go
+  build` alone proves the generated page is correct — the same discipline
+  v605's own postmortem already flagged as necessary for exactly this class
+  of mistake.
+- **Tests**: no new automated test was added for the restart trigger itself.
+  `internal/webadmin/restart_handler_test.go`'s own
+  `TestHandleRestartRefusesWhenUnavailable` establishes the pattern this
+  codebase already uses for exactly this situation — check
+  `service.CanRestart()` for real and `t.Skip` the positive case where it
+  isn't exercisable — specifically because actually exercising the positive
+  case would restart (or, for `SetHostname`, actually rename) the machine
+  running the suite. Followed, not reinvented: the existing rejection-path
+  tests in `systemresolver_handler_test.go` are untouched and still pass, and
+  no new test calls `SetHostname` with a value that would actually change
+  this sandbox's hostname.
+
 ## v612 — 2026-07-24
 
 **New: System > Resolver** — the fourth of parapet's System items recreated,

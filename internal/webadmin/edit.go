@@ -1125,6 +1125,22 @@ func hostTimeJSON(t service.TimeInfo) map[string]any {
 // zone, which needs the small on-disk breadcrumb and startup reassert
 // documented in that file.
 //
+// A successful "hostname" op also restarts the gravinet service itself, a
+// few hundred milliseconds after the reply goes out — the same
+// reply-then-restart mechanism handleRestart uses. This has nothing to do
+// with the OS-level rename, which already took effect synchronously inside
+// SetHostname; it's for gravinet's *own* identity: the name this node
+// advertises to mesh peers (config.Hostname, falling back to the OS
+// hostname) is read once at daemon startup and would otherwise sit stale
+// until whenever this process next happened to restart on its own. Rather
+// than require the operator to separately notice that and click Restart,
+// this just does it — the same "structural change, so restart to apply it"
+// convention every other config change in this admin UI already follows,
+// nothing new invented for hostname specifically. Best-effort: if this host
+// can't restart itself (e.g. running interactively via `gravinet run`,
+// outside a service manager), the hostname change still stands; the reply's
+// "note" says a manual restart is needed instead.
+//
 // POST takes {op, ...}:
 //
 //	{op:"hostname", hostname:"node7.example"}
@@ -1135,8 +1151,9 @@ func hostTimeJSON(t service.TimeInfo) map[string]any {
 // what was requested, since the two can legitimately differ (a search domain
 // syntax the OS accepts but a manager silently drops, e.g.). A partial
 // success carries a "note" — see SetHostname's Windows path (a rename that
-// needs a restart to take effect) and setRootForward's breadcrumb-write
-// failure for the two cases that currently produce one.
+// needs a restart to take effect), setRootForward's breadcrumb-write
+// failure, and this handler's own can't-self-restart case above, for the
+// three cases that currently produce one.
 func (s *Server) handleSystemResolver(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		writeJSON(w, http.StatusOK, hostResolverJSON(service.HostResolver()))
@@ -1170,6 +1187,31 @@ func (s *Server) handleSystemResolver(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": note})
 		return
+	}
+
+	// A hostname change only takes effect on the OS immediately — the name
+	// gravinet itself advertises to mesh peers (config.Hostname, falling back
+	// to the OS hostname) is read once at daemon startup and cached for the
+	// process's life. Rather than make the operator go find and click Restart
+	// separately, restart right here — the same reply-then-restart mechanism
+	// handleRestart itself uses, so a fresh process picks the new name up on
+	// its own next startup, no different from any other structural change
+	// elsewhere in this UI that already restarts to apply. Best-effort: if
+	// this host has no way to self-restart (e.g. running interactively via
+	// `gravinet run`, outside a service manager), the hostname change still
+	// stands — only note that a manual restart is needed for peers to see it.
+	if req.Op == "hostname" {
+		if canRestart, hint := service.CanRestart(); canRestart {
+			go func() {
+				time.Sleep(700 * time.Millisecond) // let the reply flush first
+				s.log.Infof("webadmin: restarting service to apply hostname change (requested from admin UI)")
+				if ok, hint := service.Restart(); !ok {
+					s.log.Warnf("webadmin: automatic restart after hostname change failed: %s", hint)
+				}
+			}()
+		} else if note == "" {
+			note = "hostname changed, but this node can't restart itself (" + hint + ") — restart it by hand so mesh peers see the new name"
+		}
 	}
 
 	resp := hostResolverJSON(service.HostResolver())

@@ -1434,12 +1434,17 @@ once at its own startup.
 - `hostname`: RFC-1123-style — dot-separated labels of letters, digits,
   and hyphens, no leading/trailing hyphen in a label. Empty is rejected
   outright (there's no sensible "revert" for a hostname, unlike DNS
-  below); on Windows this takes effect only after the host next
-  restarts (`Rename-Computer`, which has no live equivalent), noted in
-  the reply's `note`. Setting this changes the OS hostname immediately;
-  it does **not** change what this node advertises to mesh peers
+  below). Setting this changes the OS hostname immediately (on Windows,
+  the OS-level rename itself only takes effect after the host next
+  restarts — `Rename-Computer` has no live equivalent — noted in the
+  reply's `note`), then restarts the gravinet **service** a few hundred
+  milliseconds later so the name this node advertises to mesh peers
   (`hostname` in `config.json`, which falls back to the OS hostname but
-  is only re-read from it once, at gravinet's own next startup).
+  is only ever read from it at startup) picks up the change too, without
+  the operator needing to separately trigger
+  [`POST /api/restart`](#post-apirestart). Best-effort: if this host
+  can't restart itself, the OS-level hostname change still stands; the
+  reply's `note` says a manual restart is needed instead.
 - `dns`: `servers` must each parse as a real IP address — unlike Time's
   NTP `servers`, a hostname isn't accepted here, since resolving one is
   the whole question this field answers. `search_domain` follows the

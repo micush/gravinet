@@ -5614,7 +5614,7 @@ function secResolver(c){
       const row = $('<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
         + '<input id="res-host-in" value="'+esc(r.hostname||'')+'" placeholder="node7.example" style="flex:1;min-width:240px"></div>');
       hostCard.appendChild(row);
-      hostCard.appendChild($('<div class="hint" style="margin:8px 0 0">Changes the OS hostname immediately. This is separate from the name (if any) this node advertises to mesh peers, which is only re-read from the OS hostname the next time gravinet itself starts \u2014 setting one here doesn\u2019t change what peers see until then.</div>'));
+      hostCard.appendChild($('<div class="hint" style="margin:8px 0 0">Changes the OS hostname immediately, then restarts the [gravinet] service so the name this node advertises to mesh peers \u2014 which is only ever read from the OS hostname at startup \u2014 picks it up too. A brief reconnect blip for this node\u2019s mesh sessions is expected.</div>'));
       const hostIn = row.querySelector('#res-host-in');
       let hostLast = r.hostname || '';
       const saveHost = async () => {

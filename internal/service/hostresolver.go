@@ -48,8 +48,13 @@ package service
 // from the OS exactly once, at daemon startup, and cached for the process's
 // lifetime. Changing the OS hostname here takes effect for the OS immediately,
 // but has no effect on what this node advertises to mesh peers until gravinet
-// itself restarts (and none at all if config.Hostname is set explicitly). The
-// UI says this plainly rather than implying the two are the same knob.
+// itself restarts (and none at all if config.Hostname is set explicitly).
+// SetHostname itself only does the OS-level change; internal/webadmin's
+// handler is what restarts gravinet afterward (best-effort, and only for the
+// hostname op — see its own doc comment) so that stays true without the
+// operator having to separately notice and click Restart. The UI says this
+// plainly rather than implying the OS hostname and the advertised name are
+// the same knob.
 //
 // Structure mirrors hosttime.go: a typed read (HostResolver) plus one setter
 // per field (SetHostname / SetHostDNS), each (ok, hint), each dispatching on
