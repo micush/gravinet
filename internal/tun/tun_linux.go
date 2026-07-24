@@ -52,15 +52,30 @@ func ioctl(fd uintptr, req uintptr, arg unsafe.Pointer) error {
 }
 
 // ctlSocket opens a throwaway datagram socket for SIOC* interface ioctls.
+// SOCK_CLOEXEC even though every caller here closes it well before returning
+// (defer syscall.Close right after) — a concurrent exec.Command on another
+// goroutine could still fork+exec in the brief window this fd is open and
+// inherit it otherwise; atomic-at-open avoids that race entirely rather than
+// relying on the close always winning it.
 func ctlSocket(family int) (int, error) {
-	return syscall.Socket(family, syscall.SOCK_DGRAM, 0)
+	return syscall.Socket(family, syscall.SOCK_DGRAM|syscall.SOCK_CLOEXEC, 0)
 }
 
 // New creates a TUN device. If name is empty the kernel assigns one (tunN).
 // It sets the MTU and brings the interface up. Addresses are assigned
 // separately via AddIPv4/AddIPv6 once the overlay address is chosen.
 func New(name string, mtu int) (*Device, error) {
-	fd, err := syscall.Open("/dev/net/tun", syscall.O_RDWR, 0)
+	// O_CLOEXEC matters here specifically because this fd lives for the whole
+	// daemon lifetime: every exec.Command gravinet ever runs (useradd,
+	// chpasswd, hostnamectl, sysrc, ...) forks from this process, and without
+	// it every one of those children would inherit an open handle to
+	// /dev/net/tun. On an SELinux-enforcing host that's exactly what makes
+	// chpasswd trip an AVC denial for a chr_file access it never actually
+	// asked for — it just inherited gravinet's own fd. Passed atomically at
+	// open time (not a separate fcntl afterward) so there's no window where a
+	// concurrent exec.Command on another goroutine could still race in and
+	// inherit it.
+	fd, err := syscall.Open("/dev/net/tun", syscall.O_RDWR|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open /dev/net/tun: %w (need CAP_NET_ADMIN)", err)
 	}

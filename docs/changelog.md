@@ -46,6 +46,66 @@ assuming it didn't happen.
 
 ---
 
+## v614 — 2026-07-24
+
+**Fixed: adding a console user (System > Users) could trip an SELinux AVC
+denial on `chpasswd` for reading and writing `/dev/net/tun`** — reported as
+an SELinux Alert Browser popup naming `chpasswd` as the source process and
+a `chr_file` at `/dev/net/tun` as the target. `chpasswd` has no legitimate
+reason to touch a TUN device at all; it never asked to. The real bug was in
+gravinet's own tun device code, not in anything System > Users does:
+`internal/tun/tun_linux.go` opened `/dev/net/tun` with a raw `syscall.Open`
+call carrying no `O_CLOEXEC` flag. That file descriptor lives for the whole
+daemon's lifetime, so without close-on-exec, **every child process gravinet
+ever spawns inherits it** — `chpasswd` merely being the first one running
+under an SELinux domain strict enough to log the inherited access as a
+denial. Every other `exec.Command` this daemon runs (`useradd`,
+`hostnamectl`, `resolvectl`, `sysrc`, PowerShell, ...) was inheriting the
+same fd silently; SELinux just happened to be the first thing anywhere in
+this stack to say so out loud.
+
+- **`internal/tun/tun_linux.go`**: the tun device's `syscall.Open` now
+  carries `O_CLOEXEC`, atomically at open time — not a separate `fcntl`
+  afterward, which would leave a window for a concurrent `exec.Command` on
+  another goroutine to fork in between and inherit the fd anyway. The
+  package's short-lived `ctlSocket` helper (used for `SIOC*` interface
+  ioctls, always closed well before returning) gets `SOCK_CLOEXEC` too, for
+  the same narrow-race reason.
+- **Swept the rest of the package for the same mistake**, since a raw
+  `syscall.Open`/`syscall.Socket` call with no close-on-exec handling is a
+  systemic pattern, not a one-off, and every other instance was exactly as
+  exposed as the tun device fd was: `gateway_linux.go` and `route_linux.go`'s
+  netlink sockets, `gateway_freebsd.go` and `tun_freebsd.go`'s (two) routing
+  sockets, and `gateway_openbsd.go`'s routing socket all gained
+  `SOCK_CLOEXEC`. macOS has no atomic close-on-exec flag for `socket(2)`, so
+  `tun_darwin.go`'s utun control socket and `gateway_darwin.go`'s routing
+  socket instead take `syscall.ForkLock` around an open-then-`CloseOnExec`
+  pair — the same pattern Go's own `os.OpenFile` uses internally on
+  platforms lacking an atomic flag. FreeBSD's and OpenBSD's main tun-device
+  opens (`tun_freebsd.go`, `tun_openbsd.go`) already went through
+  `os.OpenFile`, which sets close-on-exec correctly on its own; only their
+  *other*, raw-`syscall`-opened sockets needed the fix. Windows uses
+  wintun's own handle-based device model, not POSIX fd inheritance, and
+  Go's `syscall.Open`/`CreateProcess` path doesn't inherit arbitrary
+  handles by default there — not the same bug class, nothing to change.
+- **Tests**: `internal/tun/tun_linux_test.go` gained
+  `TestTUNFdNotInheritedByChildProcess` — creates a real tun device, spawns
+  a child process, and checks via `/proc/self/fd` from *the child's own
+  perspective* whether it can see the fd, rather than asserting `O_CLOEXEC`
+  merely appears in the source. Confirmed this actually catches the bug: run
+  against the pre-fix code, it fails with the exact fd number and a message
+  naming the missing flag; against the fix, it passes. Full
+  `internal/tun` suite and the `internal/mesh` tests that exercise the
+  gateway-detection code this change touched
+  (`TestPhysicalGatewayCachedAcrossDemotion`,
+  `TestCheckUnderlayChangeDetectsRoamViaGatewayWhenSourceIPUnchanged`, and
+  neighbors) all pass; every platform builds and vets clean.
+
+No config or wire-format change; nothing to migrate. The existing SELinux
+alert itself is just a log record of what already happened — safe to
+dismiss (Delete/Ignore in the Alert Browser) once running a build with this
+fix, since new user-adds shouldn't trigger it again.
+
 ## v613 — 2026-07-24
 
 **Fixed: the name this node advertises to mesh peers (`config.Hostname`,

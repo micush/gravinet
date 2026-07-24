@@ -305,7 +305,18 @@ func darwinSendRouteMsg(msgType uint8, p netip.Prefix, gateway netip.Addr, ifInd
 	*(*darwinRtMsghdr)(unsafe.Pointer(&msg[0])) = hdr
 	copy(msg[hdrSize:], body)
 
+	// Darwin has no atomic SOCK_CLOEXEC (unlike Linux/FreeBSD/OpenBSD's
+	// SOCK_RAW|SOCK_CLOEXEC elsewhere in this package), so this takes
+	// syscall.ForkLock the same way tun_darwin.go's New and Go's own
+	// os.OpenFile do — held across the open-then-mark pair so a concurrent
+	// exec.Command on another goroutine can't fork in the gap and inherit
+	// this fd, even though it's closed (defer) well before returning anyway.
+	syscall.ForkLock.RLock()
 	fd, err := syscall.Socket(syscall.AF_ROUTE, syscall.SOCK_RAW, 0)
+	if err == nil {
+		syscall.CloseOnExec(fd)
+	}
+	syscall.ForkLock.RUnlock()
 	if err != nil {
 		return err
 	}

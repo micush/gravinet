@@ -3,9 +3,11 @@
 package tun
 
 import (
+	"fmt"
 	"net"
 	"net/netip"
 	"os"
+	"os/exec"
 	"testing"
 	"time"
 )
@@ -82,5 +84,39 @@ func TestTUNCreateAndRead(t *testing.T) {
 		t.Logf("read %d-byte IPv4 packet to %s off %s", r.n, dst, dev.Name())
 	case <-time.After(3 * time.Second):
 		t.Skip("no packet observed (environment routing); device creation still verified")
+	}
+}
+
+// TestTUNFdNotInheritedByChildProcess is a direct regression test for the bug
+// that used to make SELinux flag chpasswd (spawned by System > Users' "add
+// user") for reading and writing a chr_file it had no legitimate reason to
+// touch at all: /dev/net/tun's fd was opened without O_CLOEXEC, so it stayed
+// open in every child process gravinet ever forked, on an SELinux-enforcing
+// host chpasswd runs under a domain with no policy rule for that device and
+// the access got logged as a denial. This test proves the concrete, checkable
+// fact that actually matters — a forked child does not have the fd open —
+// rather than merely asserting O_CLOEXEC appears in the source.
+func TestTUNFdNotInheritedByChildProcess(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("TUN test needs root / CAP_NET_ADMIN")
+	}
+	if _, err := os.Stat("/dev/net/tun"); err != nil {
+		t.Skip("/dev/net/tun not present")
+	}
+
+	dev, err := New("", 1500)
+	if err != nil {
+		t.Skipf("cannot create tun (environment): %v", err)
+	}
+	defer dev.Close()
+
+	fd := int(dev.f.Fd())
+	// A child that inherited fd would find /proc/self/fd/<fd> pointing at it;
+	// one that didn't gets ENOENT. Checked from the child's own perspective
+	// (not the parent's /proc/<pid>/fd, which would show it as gravinet's own
+	// regardless) so this is testing exactly what a spawned helper like
+	// chpasswd would actually see.
+	if err := exec.Command("/bin/sh", "-c", fmt.Sprintf("test -e /proc/self/fd/%d", fd)).Run(); err == nil {
+		t.Fatalf("child process inherited the tun device's fd (%d) — O_CLOEXEC isn't taking effect", fd)
 	}
 }

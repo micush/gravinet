@@ -317,7 +317,11 @@ func obsdSendRouteMsg(msgType uint8, p netip.Prefix, gateway netip.Addr, ifIndex
 	*(*obsdRtMsghdr)(unsafe.Pointer(&msg[0])) = hdr
 	copy(msg[hdrSize:], body)
 
-	fd, err := syscall.Socket(syscall.AF_ROUTE, syscall.SOCK_RAW, 0)
+	// SOCK_CLOEXEC: closed (defer) well before returning either way, but
+	// atomic-at-open closes the narrow concurrent-exec race a deferred close
+	// alone can't — see tun_linux.go's New for the concrete bug this class of
+	// leak caused elsewhere in this package.
+	fd, err := syscall.Socket(syscall.AF_ROUTE, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, 0)
 	if err != nil {
 		return err
 	}

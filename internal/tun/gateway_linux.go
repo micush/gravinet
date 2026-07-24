@@ -180,7 +180,12 @@ type rtEntry struct {
 // the kernel's multi-message dump convention: keep reading datagrams until
 // NLMSG_DONE, since a full table dump rarely fits in one recvfrom.
 func dumpDefaultRoutes(family int) ([]rtEntry, error) {
-	fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW, syscall.NETLINK_ROUTE)
+	// SOCK_CLOEXEC: this fd is always closed (defer) well before returning,
+	// but a concurrent exec.Command on another goroutine could still fork+exec
+	// in the brief window it's open and inherit it otherwise — see
+	// tun_linux.go's New for the concrete bug this class of leak caused with
+	// the (long-lived) tun device fd.
+	fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, syscall.NETLINK_ROUTE)
 	if err != nil {
 		return nil, err
 	}

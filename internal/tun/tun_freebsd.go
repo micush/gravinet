@@ -250,8 +250,15 @@ func nullTerminated(b []byte) string {
 	return string(b)
 }
 
+// renameIface's and destroyIface's control sockets are both closed (defer)
+// well before returning, but SOCK_CLOEXEC still matters: a concurrent
+// exec.Command on another goroutine could fork+exec in the brief window
+// either fd is open and inherit it otherwise, the same class of leak that
+// used to affect the main tun device fd's whole-process lifetime — see
+// tun_linux.go's New for the concrete symptom this caused there
+// (SELinux flagging chpasswd for touching a chr_file it never asked for).
 func renameIface(from, to string) error {
-	s, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, 0)
+	s, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM|syscall.SOCK_CLOEXEC, 0)
 	if err != nil {
 		return fmt.Errorf("rename %s: socket: %w", from, err)
 	}
@@ -285,7 +292,7 @@ func renameIface(from, to string) error {
 // traffic did stop, but the interface object itself sometimes didn't
 // actually go away.
 func destroyIface(name string) bool {
-	s, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, 0)
+	s, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM|syscall.SOCK_CLOEXEC, 0)
 	if err != nil {
 		return false
 	}

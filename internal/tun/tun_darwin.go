@@ -52,7 +52,22 @@ type Device struct {
 // New opens a utun device. If name is "utunN" that unit is requested, otherwise
 // the kernel assigns one. MTU is applied and the interface is brought up.
 func New(name string, mtu int) (*Device, error) {
+	// This fd lives for the whole daemon lifetime, and this package (like most
+	// of gravinet) shells out via os/exec elsewhere (ifconfig, and everything
+	// else the daemon runs from the same process). Without marking it
+	// close-on-exec, every child process forked from here would inherit an
+	// open handle to the utun control socket. Unlike Linux's SOCK_CLOEXEC,
+	// Darwin's socket(2) has no atomic close-on-exec flag, so this takes
+	// syscall.ForkLock the same way Go's own os.OpenFile does internally on
+	// platforms lacking one — held across the open-then-mark pair so a
+	// concurrent exec.Command on another goroutine can't fork in the gap
+	// between them and inherit the fd anyway.
+	syscall.ForkLock.RLock()
 	fd, err := syscall.Socket(cAF_SYSTEM, syscall.SOCK_DGRAM, cSYSPROTO_CONTROL)
+	if err == nil {
+		syscall.CloseOnExec(fd)
+	}
+	syscall.ForkLock.RUnlock()
 	if err != nil {
 		return nil, fmt.Errorf("utun socket: %w", err)
 	}

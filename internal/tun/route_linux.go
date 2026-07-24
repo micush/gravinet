@@ -202,7 +202,10 @@ func sendRouteMsg(msgType, extraFlags int, family int, dst []byte, dstBits int, 
 	binary.NativeEndian.PutUint32(msg[8:12], 1) // seq
 	msg = append(msg, body...)
 
-	fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW, syscall.NETLINK_ROUTE)
+	// SOCK_CLOEXEC: same reasoning as dumpDefaultRoutes in gateway_linux.go —
+	// closed well before returning, but atomic-at-open closes the narrow
+	// concurrent-exec race a deferred close alone can't.
+	fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, syscall.NETLINK_ROUTE)
 	if err != nil {
 		return err
 	}
