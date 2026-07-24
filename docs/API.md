@@ -292,6 +292,7 @@ cookie, or a qualifying fleet-manager mesh session — see
 | GET/POST | `/api/system/time` | Read/set the host's clock, timezone, and NTP sync |
 | GET/POST | `/api/system/users` | Manage OS accounts permitted to sign in (pam/bsd_auth/windows auth modes) |
 | GET/POST | `/api/system/snmp` | Read-only SNMPv2c monitoring agent (net-snmp's snmpd) |
+| GET/POST | `/api/system/l2disco` | Link-layer discovery (LLDP/CDP) config and live neighbor status |
 | GET | `/api/about` | Version/OS/architecture/Go runtime info |
 | GET | `/api/readme` | This node's bundled README.md |
 | GET | `/api/license` | This node's bundled LICENSE |
@@ -1659,6 +1660,63 @@ never as a `400` — an operator fixing a stuck `snmpd` package shouldn't
 have to re-enter every field because the save itself was "rejected" for a
 reason that has nothing to do with the fields.
 
+### `POST /api/system/l2disco`
+
+Reads or replaces this node's link-layer discovery (LLDP, and optionally
+Cisco CDP) configuration, and reports live neighbor status — like
+Power/Time/Users/SNMP, follows the currently selected node. Duplicates
+parapet's Network > L2 Discovery config page and its separate Monitor >
+Status: LLDP/CDP neighbor table onto one page, combining config and live
+status the same way SNMP's own endpoint does here, rather than parapet's
+split across two different nav locations.
+
+Same architecture note as SNMP, restated because it applies again here:
+parapet spawns and supervises `lldpd` as a direct child of its own
+process; gravinet instead manages it as an ordinary OS service
+(`systemctl` via a drop-in override on Linux; each BSD's own `_flags` rc
+variable elsewhere), the same way it already treats FRR and snmpd rather
+than running either as a child.
+
+```json
+{"interfaces": [{"name": "eth0", "lldp": true, "cdp": false}],
+ "supported": true, "hint": "", "running": true,
+ "neighbors": [{"local_iface": "eth0", "system_name": "switch1.example",
+                "port": "GigabitEthernet0/1", "mgmt_ip": "10.0.0.1"}],
+ "neighbors_available": true, "neighbors_hint": ""}
+```
+
+- `interfaces` lists only the interfaces this node has an opinion about
+  (sparse — the same "absence means off" shape SNMP's own reply doesn't
+  need but Users' `allow_users`-successor concept shares in spirit). An
+  interface never mentioned here is simply off. `supported`/`hint`/
+  `running` mirror SNMP's own fields exactly — `supported` is whether this
+  platform and an installed `lldpd` make the feature usable at all,
+  `running` whether the service is active right now.
+- `neighbors` is read fresh via `lldpcli show neighbors` on every `GET`,
+  independent of whether gravinet, systemd, or an operator by hand started
+  the agent — lldpcli talks to whatever instance is actually running.
+  `neighbors_available: false` (with `neighbors_hint` explaining why —
+  lldpcli not installed, or lldpd not running) is different from
+  `neighbors_available: true` with an empty `neighbors` array, which just
+  means no neighbors have been heard from yet.
+
+`POST` takes the same `interfaces` shape back:
+
+```json
+{"interfaces": [{"name": "eth0", "lldp": true, "cdp": true}, {"name": "eth1", "lldp": true, "cdp": false}]}
+```
+
+Every `name` is validated (1–15 ASCII alphanumeric/`.`/`-`/`_`/`@`
+characters — the same character class `lldpd -I`'s argv value is built
+from, so a name that could never legitimately reach that argv is rejected
+here instead of silently dropped); an invalid one is rejected whole with
+`400`, no partial save. `lo` is accepted syntactically but never actually
+activated — link-layer discovery on loopback is meaningless — matching
+`config.DiscoveryConfig.IsRunnable`/`AnyCDP`'s own exclusion. The config
+write and the `lldpd` service reconciliation are allowed to disagree, the
+same way and for the same reason as SNMP's: a reconciliation failure is a
+`"note"`, never a `400`.
+
 ### `GET /api/about`
 
 ```json
@@ -1991,6 +2049,13 @@ curl -sk -b cookies.txt -X POST $HOST/api/system/users \
 ```bash
 curl -sk -b cookies.txt -X POST $HOST/api/system/snmp \
   -d '{"enabled":true,"community":"public","location":"Server Room A"}'
+```
+
+### Turn on LLDP for one interface
+
+```bash
+curl -sk -b cookies.txt -X POST $HOST/api/system/l2disco \
+  -d '{"interfaces":[{"name":"eth0","lldp":true,"cdp":false}]}'
 ```
 
 ### Log out

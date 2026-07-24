@@ -52,6 +52,12 @@
 #                  agent itself won't run until the package shows up some other way.
 #                  Pass this if you don't use SNMP and don't want this host's package
 #                  set changed.
+#   --no-lldp      don't install the link-layer discovery agent. By default, if lldpd
+#                  isn't already on the host, this installs the "lldpd" package (the
+#                  same name on every distro this installer supports, unlike snmpd)
+#                  via the distro's package manager, for gravinet's System > L2 Disco
+#                  page. Pass this if you don't use LLDP/CDP and don't want this
+#                  host's package set changed.
 set -euo pipefail
 
 PREFIX=/usr/local
@@ -64,6 +70,7 @@ FIREWALL=1
 ENABLE_RESOLVED=1
 INSTALL_FRR=1
 INSTALL_SNMP=1
+INSTALL_LLDP=1
 UNDERLAY_PORT_DEFAULT=65432 # config.DefaultUDPPort
 WEB_PORT_DEFAULT=8443       # config.Default()'s web_admin.listen
 REPO="$(cd "$(dirname "$0")/.." && pwd)" # repo root (parent of install/)
@@ -99,7 +106,9 @@ while [ $# -gt 0 ]; do
     --frr) INSTALL_FRR=1 ;;
     --no-snmp) INSTALL_SNMP=0 ;;
     --snmp) INSTALL_SNMP=1 ;;
-    -h|--help) sed -n '2,54p' "$0"; exit 0 ;;
+    --no-lldp) INSTALL_LLDP=0 ;;
+    --lldp) INSTALL_LLDP=1 ;;
+    -h|--help) sed -n '2,60p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -444,6 +453,44 @@ ensure_snmpd() {
              some other way. Check that this host's package manager can
              reach its repos and that a package named "snmpd" or "net-snmp"
              exists for this release.
+NOTE
+}
+
+# lldpd_installed reports whether lldpd (the link-layer discovery agent
+# gravinet's System > L2 Disco page configures and starts) is already on
+# this host — deliberately the same handful of paths
+# internal/service/lldp.go's own lldpdBinary() checks, so "installed" here
+# means exactly what it means there.
+lldpd_installed() {
+  command -v lldpd >/dev/null 2>&1 && return 0
+  local p
+  for p in /usr/sbin/lldpd /sbin/lldpd /usr/bin/lldpd /usr/local/sbin/lldpd /usr/local/bin/lldpd; do
+    [ -x "$p" ] && return 0
+  done
+  return 1
+}
+
+# ensure_lldpd installs lldpd if it isn't already present, so System > L2
+# Disco works out of the box. Unlike SNMP, the package name is uniform —
+# "lldpd" — across every distro this installer supports (Debian/Ubuntu,
+# Fedora, openSUSE, Arch), so no per-manager name fallback is needed here.
+ensure_lldpd() {
+  if lldpd_installed; then
+    echo "    lldpd is already installed"
+    return 0
+  fi
+  echo "    lldpd is not installed; installing it"
+  if pkg_install lldpd && lldpd_installed; then
+    echo "    installed lldpd"
+    return 0
+  fi
+  cat <<'NOTE' >&2
+    warning: could not install the link-layer discovery agent automatically
+             on this host. gravinet's System > L2 Disco page will still let
+             you author a config, but nothing will actually run until
+             lldpd is installed some other way. Check that this host's
+             package manager can reach its repos and that a package named
+             "lldpd" exists for this release.
 NOTE
 }
 
@@ -861,6 +908,14 @@ if [ "$INSTALL_SNMP" = 1 ]; then
 else
   echo "    --no-snmp passed; leaving snmpd alone. gravinet's System > SNMP page will"
   echo "    still let you author a config, but nothing runs until snmpd is installed yourself."
+fi
+
+echo "==> link-layer discovery agent (lldpd)"
+if [ "$INSTALL_LLDP" = 1 ]; then
+  ensure_lldpd
+else
+  echo "    --no-lldp passed; leaving lldpd alone. gravinet's System > L2 Disco page will"
+  echo "    still let you author a config, but nothing runs until lldpd is installed yourself."
 fi
 
 echo "==> writing systemd unit"

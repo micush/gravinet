@@ -322,6 +322,16 @@ type Config struct {
 	// Ported from parapet's Snmp model — see internal/service/snmp.go.
 	SNMP SNMPConfig `json:"snmp,omitempty"`
 
+	// Discovery runs a link-layer discovery agent (lldpd, speaking LLDP and
+	// optionally Cisco CDP) on this host — System > L2 Disco. Node-global,
+	// like SNMP/BGP: one agent per host. Same architecture choice as SNMP,
+	// for the same reason: gravinet manages lldpd as an ordinary OS service
+	// rather than a child of its own process the way parapet's LldpManager
+	// does, so it survives a gravinet restart instead of blinking on every
+	// one. Ported from parapet's Discovery/DiscoveryIface models — see
+	// internal/service/lldp.go.
+	Discovery DiscoveryConfig `json:"discovery,omitempty"`
+
 	// path is where this config was loaded from / will be saved to.
 	path string
 }
@@ -358,6 +368,63 @@ type SNMPConfig struct {
 // Snmp::is_runnable).
 func (s SNMPConfig) IsRunnable() bool {
 	return s.Enabled && s.Community != ""
+}
+
+// DiscoveryIface is one interface row in the LLDP/CDP configuration table.
+// Ported from parapet's DiscoveryIface.
+type DiscoveryIface struct {
+	Name string `json:"name"`
+	// LLDP advertises and receives IEEE 802.1AB LLDP frames on this interface.
+	LLDP bool `json:"lldp"`
+	// CDP additionally speaks Cisco CDP on this interface. Meaningful
+	// without LLDP also being on (lldpd's -c flag is a global agent-wide
+	// switch, not conditioned on a specific interface's LLDP state), but
+	// the UI nudges toward turning LLDP on too, the same as parapet's own
+	// page comment does, since CDP alone with no LLDP is an unusual choice.
+	CDP bool `json:"cdp"`
+}
+
+// DiscoveryConfig is this node's link-layer discovery (LLDP/CDP)
+// configuration. gravinet runs and manages an lldpd agent that advertises
+// and receives these protocols per-interface. Ported from parapet's
+// Discovery model.
+type DiscoveryConfig struct {
+	// Interfaces holds only the rows an operator has actually touched —
+	// sparse, not one entry per host interface. An interface absent from
+	// this list is simply off (lldp:false, cdp:false), the same "absence
+	// means off" shape config.SNMPConfig.Interfaces already uses. The web
+	// UI merges this against the host's live interface list (the same one
+	// NAT's masquerade-interface picker already fetches via
+	// /api/interfaces) to show a complete table with nothing configured
+	// read as "off" rather than "unknown".
+	Interfaces []DiscoveryIface `json:"interfaces,omitempty"`
+}
+
+// IsRunnable reports whether lldpd should actually run: at least one
+// non-loopback interface has LLDP or CDP enabled. Mirrors parapet's
+// Discovery::is_runnable. lo is excluded here (not just at the UI layer)
+// since LLDP/CDP are link-layer discovery protocols and loopback has no
+// link partner to discover — the same reasoning parapet's own model applies,
+// and a defense against a hand-edited config file naming "lo" directly.
+func (d DiscoveryConfig) IsRunnable() bool {
+	for _, i := range d.Interfaces {
+		if i.Name != "lo" && (i.LLDP || i.CDP) {
+			return true
+		}
+	}
+	return false
+}
+
+// AnyCDP reports whether at least one non-loopback interface has CDP
+// enabled — lldpd's -c flag is global, not per-interface, so this decides
+// whether to pass it at all. Mirrors parapet's Discovery::any_cdp.
+func (d DiscoveryConfig) AnyCDP() bool {
+	for _, i := range d.Interfaces {
+		if i.Name != "lo" && i.CDP {
+			return true
+		}
+	}
+	return false
 }
 
 // BGPConfig is this node's BGP configuration and the BFD settings attached to

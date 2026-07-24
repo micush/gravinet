@@ -1466,6 +1466,108 @@ func systemSNMPJSON(cfg config.SNMPConfig) map[string]any {
 	}
 }
 
+// handleSystemL2Disco reads or replaces this node's link-layer discovery
+// (LLDP/CDP) configuration and reports live neighbor status — the backend
+// for System > L2 Disco. Duplicates parapet's Network > L2 Discovery
+// config page and its separate Monitor > Status: LLDP/CDP neighbor table
+// onto one gravinet page, the same "config plus live status together"
+// shape Time and SNMP already use here, rather than parapet's own split
+// across two different nav locations.
+//
+// Like SNMP, config is one cohesive blob (a sparse per-interface list, not
+// several independent ops), so this takes the same GET-returns/POST-replaces
+// shape. Saving always writes config.Discovery first regardless of what the
+// OS service does with it afterward — a reconciliation failure is a "note"
+// on an otherwise-successful save, never a rejection, the same split
+// Power/Time/Users/SNMP already use.
+//
+// Neighbor status (service.LLDPNeighbors) is read fresh on every GET and
+// folded into the same reply rather than a separate endpoint: it's read
+// via lldpcli talking to whatever lldpd instance is actually running,
+// independent of who started it, so there's no reason to force two round
+// trips for what the page shows as one view.
+//
+// Like Power/Time/Users/SNMP, follows the currently selected node.
+func (s *Server) handleSystemL2Disco(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		cfg, err := config.Load(s.configPath)
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, systemL2DiscoJSON(cfg.Discovery))
+		return
+	}
+
+	var req struct {
+		Interfaces []struct {
+			Name string `json:"name"`
+			LLDP bool   `json:"lldp"`
+			CDP  bool   `json:"cdp"`
+		} `json:"interfaces"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	discovery := config.DiscoveryConfig{}
+	for _, i := range req.Interfaces {
+		if !service.ValidLLDPIface(i.Name) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid interface name: " + i.Name})
+			return
+		}
+		discovery.Interfaces = append(discovery.Interfaces, config.DiscoveryIface{
+			Name: i.Name, LLDP: i.LLDP, CDP: i.CDP,
+		})
+	}
+
+	s.log.Infof("webadmin: saving link-layer discovery configuration (requested from admin UI)")
+	if err := s.mutateConfig(func(cfg *config.Config) error {
+		cfg.Discovery = discovery
+		return nil
+	}); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// ApplyLLDP runs before systemL2DiscoJSON builds the reply, for the same
+	// reason handleSystemSNMP's Apply now runs first: "running" is a live
+	// service query, so building the reply first would report the state
+	// from *before* this save took effect.
+	ok, hint := service.ApplyLLDP(discovery)
+	resp := systemL2DiscoJSON(discovery)
+	resp["ok"] = true
+	if !ok {
+		resp["note"] = "saved, but the lldpd service could not be reconciled: " + hint
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// systemL2DiscoJSON flattens a DiscoveryConfig plus live service and
+// neighbor state for the wire.
+func systemL2DiscoJSON(cfg config.DiscoveryConfig) map[string]any {
+	supported, hint := service.LLDPSupported()
+	ifaces := make([]map[string]any, 0, len(cfg.Interfaces))
+	for _, i := range cfg.Interfaces {
+		ifaces = append(ifaces, map[string]any{"name": i.Name, "lldp": i.LLDP, "cdp": i.CDP})
+	}
+
+	neighborRows, neighborsAvailable, neighborsHint := service.LLDPNeighbors()
+	neighbors := make([]map[string]any, 0, len(neighborRows))
+	for _, n := range neighborRows {
+		neighbors = append(neighbors, map[string]any{
+			"local_iface": n.LocalIface, "system_name": n.SystemName,
+			"port": n.Port, "mgmt_ip": n.MgmtIP,
+		})
+	}
+
+	return map[string]any{
+		"interfaces": ifaces,
+		"supported":  supported, "hint": hint,
+		"running":   supported && service.LLDPServiceRunning(),
+		"neighbors": neighbors, "neighbors_available": neighborsAvailable, "neighbors_hint": neighborsHint,
+	}
+}
+
 // minutesUntilClock returns whole minutes from now until the next occurrence of
 // a 24-hour "HH:MM" wall-clock time in the host's local zone. A time earlier
 // today (or exactly now) rolls to tomorrow, so "at 02:00" at 09:00 means 17h

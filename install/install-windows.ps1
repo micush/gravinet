@@ -620,6 +620,11 @@ Write-Host "    gravinet's System > SNMP page isn't available on Windows: it dri
 Write-Host "    snmpd, and Windows' own built-in SNMP Service is a completely different,"
 Write-Host "    registry-configured mechanism that page doesn't speak. Nothing to install here."
 
+Write-Host "==> link-layer discovery agent"
+Write-Host "    gravinet's System > L2 Disco page isn't available on Windows either: lldpd"
+Write-Host "    doesn't run there, and there's no built-in equivalent gravinet can drive"
+Write-Host "    instead. Nothing to install here."
+
 # Re-register the service (clears any stale binPath from a prior version).
 # The daemon talks to the SCM itself (StartServiceCtrlDispatcher).
 Remove-GravinetService

@@ -35,6 +35,11 @@
 #                  already on the host, this installs net-snmp via pkg_add for
 #                  gravinet's System > SNMP page. Pass this if you don't use
 #                  SNMP and don't want this host's package set changed.
+#   --no-lldp      don't install the link-layer discovery agent. By default, if
+#                  lldpd isn't already on the host, this installs it via pkg_add
+#                  for gravinet's System > L2 Disco page. Pass this if you
+#                  don't use LLDP/CDP and don't want this host's package set
+#                  changed.
 set -eu
 
 PREFIX=/usr/local
@@ -48,6 +53,7 @@ GO_MIN_MINOR=22   # go.mod requires go 1.22
 UNDERLAY_PORT=65432   # default gravinet underlay port (tcp+udp); the pf rule below opens it
 SETUP_UNBOUND=1       # default on: makes unbound the system resolver; --no-unbound opts out (see help)
 INSTALL_SNMP=1         # default on: installs net-snmp for System > SNMP; --no-snmp opts out (see help)
+INSTALL_LLDP=1         # default on: installs lldpd for System > L2 Disco; --no-lldp opts out (see help)
 
 # build_from_source() stages the freshly-built binary under a mktemp -d
 # directory (BUILD_TMP, set there) so it can be installed from a known path
@@ -74,7 +80,9 @@ while [ $# -gt 0 ]; do
     --no-unbound) SETUP_UNBOUND=0 ;;
     --snmp) INSTALL_SNMP=1 ;;
     --no-snmp) INSTALL_SNMP=0 ;;
-    -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
+    --lldp) INSTALL_LLDP=1 ;;
+    --no-lldp) INSTALL_LLDP=0 ;;
+    -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -218,6 +226,39 @@ ensure_snmpd() {
 NOTE
 }
 
+# lldpd_installed checks the same locations internal/service/lldp.go's own
+# lldpdBinary() checks.
+lldpd_installed() {
+  command -v lldpd >/dev/null 2>&1 && return 0
+  for p in /usr/sbin/lldpd /usr/local/sbin/lldpd; do
+    [ -x "$p" ] && return 0
+  done
+  return 1
+}
+
+# ensure_lldpd installs lldpd via pkg_add if it isn't already present, for
+# gravinet's System > L2 Disco page.
+ensure_lldpd() {
+  if lldpd_installed; then
+    echo "    lldpd is already installed"
+    return 0
+  fi
+  command -v pkg_add >/dev/null 2>&1 || { echo "    warning: pkg_add(8) not found; cannot install the link-layer discovery agent automatically" >&2; return 0; }
+  echo "    lldpd is not installed; installing it"
+  if pkg_add -I lldpd >/dev/null 2>&1 && lldpd_installed; then
+    echo "    installed lldpd"
+    echo "    L2 Disco is ready — configure it from gravinet's System > L2 Disco page."
+    return 0
+  fi
+  cat <<'NOTE' >&2
+    warning: could not install the link-layer discovery agent automatically.
+             gravinet's System > L2 Disco page will still let you author a
+             config, but nothing will actually run until lldpd is installed
+             some other way — check that pkg_add can reach its mirror and
+             that lldpd exists for this release.
+NOTE
+}
+
 build_from_source() {
   [ -f "$REPO/go.mod" ] || { echo "error: no prebuilt binary and no source tree at $REPO" >&2; exit 1; }
   ensure_go || { echo "error: could not obtain a Go toolchain (>=1.${GO_MIN_MINOR})" >&2; exit 1; }
@@ -347,6 +388,13 @@ if [ "$INSTALL_SNMP" = 1 ]; then
   ensure_snmpd
 else
   echo "    --no-snmp passed; leaving snmpd alone."
+fi
+
+echo "==> link-layer discovery agent (lldpd)"
+if [ "$INSTALL_LLDP" = 1 ]; then
+  ensure_lldpd
+else
+  echo "    --no-lldp passed; leaving lldpd alone."
 fi
 
 echo "==> writing rc.d script $RCSCRIPT"

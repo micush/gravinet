@@ -50,6 +50,132 @@ assuming it didn't happen.
 
 ---
 
+---
+
+## v617 — 2026-07-24
+
+**New: System > L2 Disco** — duplicates parapet's Network > L2 Discovery
+config page (per-interface LLDP/CDP toggles) *and* its separate Monitor >
+Status: LLDP/CDP neighbor table onto one gravinet page, sitting right after
+SNMP in the System group. Combines config and live neighbor status the same
+way Time and SNMP already do here, rather than parapet's own split across
+two different nav locations. Install-time `lldpd` installation, as
+requested, mirroring the SNMP pattern.
+
+Same architecture change as SNMP, for the same reason, restated because it
+applies again here: parapet spawns and supervises `lldpd` as a direct child
+of its own process (with real, hard-won complexity around lldpd's privsep
+worker process, process groups, and crash-hint diagnostics that come with
+owning that lifecycle — see `lldpd.rs`'s own extensive comments). gravinet
+instead manages it as an ordinary OS service, the same way it already
+treats FRR and snmpd rather than running either as a child. A child of
+gravinet's own process would die every time gravinet itself restarts, which
+happens far more often than an operator wants link-layer discovery to
+blink; a real OS service persists across that, and gravinet doesn't need to
+reimplement lldpd's own privsep-worker cleanup dance to get there. The one
+piece that's identical either way: reading live neighbor data. lldpcli
+talks to whatever lldpd instance is running over its control socket
+regardless of who launched it, so neighbor status works the same whether
+gravinet, systemd, or an operator by hand started the agent.
+
+Config is delivered as the exact argv parapet's own code already documents
+precisely (`-d`, `-c` for CDP, `-I <ifaces>`) rather than lldpd's own
+config-file directive grammar (lldpcli commands in `/etc/lldpd.conf`) —
+that grammar is real and would also work, but this sticks to argv already
+precisely specified in parapet's comments rather than a less-familiar
+syntax that can't be verified against a live lldpd here; getting an
+unfamiliar directive grammar subtly wrong would silently fail to apply
+instead of erroring. On Linux those flags go through a systemd drop-in
+(`ExecStart=` cleared then reset — a standard, well-documented override
+mechanism, not a guess at whichever distro-specific `/etc/default` or
+`/etc/sysconfig` convention the packaged unit might or might not read extra
+arguments from); on the BSDs, through each platform's own `_flags` rc
+variable, *appended to* the packaged rc.d script's own base invocation
+rather than replacing it — so `-d` is deliberately left out there, unlike
+the Linux drop-in, which fully replaces `ExecStart` and so needs the
+complete, self-sufficient command line.
+
+- **`internal/config/config.go`**: `DiscoveryConfig`/`DiscoveryIface`
+  (`Interfaces []DiscoveryIface{Name,LLDP,CDP}`) + `IsRunnable()`/`AnyCDP()`,
+  ported from parapet's `Discovery`/`DiscoveryIface` models — loopback
+  excluded from both, matching parapet's own reasoning (LLDP/CDP are
+  link-layer discovery protocols; loopback has no link partner).
+- **`internal/service/lldp.go`** (new): argv building (`lldpArgs`), interface
+  name validation (`ValidLLDPIface`, exported — see below), binary lookup,
+  `LLDPSupported()`, `ApplyLLDP()`, service start/stop/status for **linux,
+  freebsd, openbsd, darwin** (same root-vs-Homebrew caveat SNMP's package
+  comment already documents, restated here since it applies unchanged), and
+  `LLDPNeighbors()` — a faithful port of parapet's own `discovery_json()`
+  neighbor-table parser, handling both JSON shapes different lldpd versions
+  produce (`interface` as an object or an array of single-key objects,
+  exactly as parapet's own comment says it has to). **Windows is
+  unsupported**: unlike SNMP (which at least has *something* — a different,
+  registry-based built-in service — to honestly contrast against), LLDP has
+  no Windows equivalent at all gravinet could point to; there's nothing to
+  even describe as "different," it's just absent.
+- **`internal/service/lldp_test.go`** (new): 8 tests — argv construction
+  across every on/off/CDP-only/loopback-excluded/invalid-name combination,
+  comma-vs-space joining, and both neighbor-JSON shapes parsed against
+  realistic fixtures (including the "no recognized name field, fall back to
+  the map's sole key" case). All passed on the first run — no bugs caught
+  this time, unlike SNMP's two test-expectation mistakes and one real
+  handler bug.
+- **`handleSystemL2Disco`** (`/api/system/l2disco`, GET/POST): merges
+  config and live neighbor status into one reply, the same "config plus
+  live status together" shape SNMP/Time already use, rather than two
+  endpoints the way parapet split them. Found and fixed a real gap while
+  writing this: the first version had **no request validation at all** —
+  even an empty `{"interfaces":[]}` body would reach `service.ApplyLLDP`,
+  which for a not-runnable config really does call
+  `systemctl`/`service`/`rcctl`/`brew services` to disable the agent. Fixed
+  properly, not just for test convenience: exported `ValidLLDPIface` from
+  the service package so the handler validates every interface name (1–15
+  ASCII alphanumeric/`.`/`-`/`_`/`@`) before ever reaching `mutateConfig`/
+  `ApplyLLDP`, rejecting the whole request with `400` on a bad name rather
+  than silently dropping it from the argv later — an operator should be
+  told their save didn't do what they typed, not have it quietly do less.
+  Like Power/Time/Users/SNMP, `ApplyLLDP` runs before the reply is built
+  (not after), since `running` is a live query and building the reply
+  first would report pre-save state.
+- **`secL2Disco`** (`ui.go`): a per-interface LLDP/CDP checkbox table
+  (merging the host's live interface list — the same cached list NAT's
+  masquerade picker already fetches via `systemInterfaces()` — against
+  whatever's saved, so an interface gravinet's never heard of reads as off,
+  not unknown) plus a neighbor status table below it. A toggle saves
+  immediately (matching parapet's own click-and-save behavior — nothing to
+  debounce the way a text field needs) by reading every row's current
+  checkbox state and POSTing it whole, the same "read every row, POST it
+  all" shape the Users table's bulk actions already use. Applies the same
+  "never rebuild the whole page just to refresh a status readout" fix v616
+  gave SNMP: a save only refreshes the neighbor/status card (via the save's
+  own response, no extra fetch needed), never rebuilds the checkbox table
+  itself, so a save landing mid-toggle can't steal a click out from under
+  the operator.
+- **Install-time `lldpd` installation, across every platform that supports
+  it**: `install-linux.sh`/`install-freebsd.sh`/`install-openbsd.sh` all
+  gained `ensure_lldpd` (mirroring `ensure_snmpd`'s shape), each with a
+  matching `--no-lldp`/`--lldp` flag pair. Simpler than SNMP's story: the
+  package name is uniform — `"lldpd"` — across every distro this installer
+  supports, unlike snmpd's `snmpd`-vs-`net-snmp` split, so no per-manager
+  name fallback was needed. `install-macos.sh` prints a note rather than
+  attempting an install, the identical root-vs-Homebrew reasoning as SNMP's
+  own note there. `install-windows.ps1` prints a one-line "not available"
+  note.
+- **Fixed the same `--help` truncation class of bug again**, in three more
+  scripts this time: `install-freebsd.sh` and `install-openbsd.sh`'s
+  `sed -n '2,NNp'` ranges needed widening as their header comment blocks
+  grew (not a truncation *bug* there — those two already tracked their
+  real endpoints correctly before this change, just needed the number
+  updated alongside the new text); `install-macos.sh`'s did too. All
+  four scripts' ranges were re-verified end-to-end against the actual
+  file after every edit, the same discipline `install-linux.sh`'s v615
+  entry describes catching a real pre-existing truncation with.
+- **Docs**: `docs/API.md` gained the full `/api/system/l2disco` reference,
+  a Quick Reference row, and a curl example; re-verified afterward with the
+  same anchor/table-integrity check v609/v615 already established (122
+  headings, 0 duplicate slugs, 43 anchor links, 0 broken, 200 code-fence
+  lines — even).
+
 ## v616 — 2026-07-24
 
 **Fixed: System > SNMP's form fields would sometimes lose keystrokes mid-typing.** Root cause: every field's `onblur` triggers a save across all five fields together (by design — they're one config, saved as one write), and on success the old code called a full `load()`, which re-fetched and completely rebuilt the card — `body.innerHTML = ''` then fresh `<input>` elements for every field, every time. If that save's round-trip completed while the operator had since clicked into (or was still typing in) another field, the element holding their cursor was destroyed and replaced out from under them mid-keystroke — later characters had nowhere to land. "Sometimes cut off while typing" is exactly what that looks like from the outside.

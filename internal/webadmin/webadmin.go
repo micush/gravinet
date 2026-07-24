@@ -382,6 +382,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/system/time", s.authed(s.handleSystemTime))         // host clock / timezone / NTP (System > Time)
 	mux.HandleFunc("/api/system/users", s.authed(s.handleSystemUsers))       // console OS accounts (System > Users)
 	mux.HandleFunc("/api/system/snmp", s.authed(s.handleSystemSNMP))         // SNMPv2c agent (System > SNMP)
+	mux.HandleFunc("/api/system/l2disco", s.authed(s.handleSystemL2Disco))   // LLDP/CDP agent (System > L2 Disco)
 	mux.HandleFunc("/api/cluster", s.authed(s.handleCluster))
 	mux.HandleFunc("/api/loglevel", s.authed(s.handleLogLevel))
 	mux.HandleFunc("/api/logsize", s.authed(s.handleLogSize))

@@ -763,6 +763,7 @@ const NAV_GROUPS = [
     ['resolver', 'this host\u2019s hostname and default DNS servers'],
     ['time', 'this host\u2019s clock, timezone, and NTP synchronization'],
     ['snmp', 'read-only SNMPv2c monitoring agent'],
+    ['l2disco', 'link-layer discovery (LLDP/CDP) and neighbor status'],
     ['users', 'local OS accounts permitted to sign in to this console'],
     ['power', 'restart or shut down this host'],
   ]},
@@ -786,6 +787,7 @@ function label(s){
   if (s==='bgp-peers') return 'BGP Peers';
   if (s==='getting-started') return 'Getting Started';
   if (s==='capture') return 'Packet Capture';
+  if (s==='l2disco') return 'L2 Disco';
   return s==='nat'||s==='qos'||s==='dns'||s==='bgp'||s==='api'||s==='snmp' ? s.toUpperCase() : s.charAt(0).toUpperCase()+s.slice(1);
 }
 
@@ -2311,7 +2313,7 @@ function renderSection() {
        upgrade:secUpgrade,
        metrics:infoMetrics, 'mesh-peers':infoMeshPeers, capture:infoCapture, speedtest:infoSpeedtest, latency:infoLatency,
        'route-table':infoRoutes, 'bgp-peers':secBgpPeers, 'hosts-file':infoHosts, 'dns-state':infoDNS,
-       resolver:secResolver, time:secTime, snmp:secSNMP, users:secUsers, power:secPower,
+       resolver:secResolver, time:secTime, snmp:secSNMP, l2disco:secL2Disco, users:secUsers, power:secPower,
        logs:secLogs, readme:secReadme, 'getting-started':secGettingStarted, api:secAPIDoc, license:secLicense, about:infoAbout }[state.section])(c, nets);
   }
   c.querySelectorAll('table').forEach(enhanceTable);
@@ -6004,6 +6006,119 @@ function secSNMP(c){
       inp.onblur = saveSNMP;
       inp.onkeydown = (e) => { if (e.key === 'Enter'){ e.preventDefault(); inp.blur(); } };
     });
+  };
+
+  load();
+}
+
+// secL2Disco renders System > L2 Disco: link-layer discovery (LLDP) and,
+// per interface, Cisco CDP. Duplicates parapet's Network > L2 Discovery
+// config page and its separate Monitor > Status: LLDP/CDP neighbor table
+// onto one page under System, combining config and live neighbor status the
+// same way secSNMP/secTime already do here, rather than parapet's own split
+// across two different nav locations.
+//
+// The interface table shows every interface this host actually has (via
+// systemInterfaces(), the same cached list NAT's masquerade picker already
+// uses), each row's LLDP/CDP checkboxes merged in from whatever's saved —
+// an interface gravinet has never been told about reads as off, not
+// "unknown". A toggle saves immediately (matching parapet's own
+// click-to-toggle-and-save behavior for this exact table — there's nothing
+// to debounce the way a text field needs), sending the *whole* current
+// table state each time, not just the row that changed, the same "read
+// every row, POST it all" shape the Users table's bulk actions already use.
+function secL2Disco(c){
+  secHint(c, 'Link-layer discovery (LLDP), and Cisco CDP per interface. Advertises and listens for neighbor information on the interfaces you enable below. Acts on the node you\u2019re currently managing.');
+
+  const body = $('<div></div>');
+  body.innerHTML = '<div class="hint">loading\u2026</div>';
+  c.appendChild(body);
+
+  const load = async () => {
+    const [ifNames, r] = await Promise.all([systemInterfaces(), api('/api/system/l2disco')]);
+    if (!r.ok || !r.body){ body.innerHTML = '<div class="hint">could not read this host\u2019s L2 discovery settings.</div>'; return; }
+    draw(ifNames, r.body);
+  };
+
+  // renderNeighbors (re)builds just the neighbors card, independent of the
+  // interface-config table above it \u2014 called on initial draw and, after a
+  // save, again with that save's own response (which already carries fresh
+  // neighbor/running data), the same "never rebuild the whole page just to
+  // refresh a status readout" fix secSNMP's own renderStatus applies for the
+  // identical reason: rebuilding the interface table's checkboxes on every
+  // save could otherwise steal a click mid-toggle.
+  const renderNeighbors = (neighborsCard, disco) => {
+    neighborsCard.innerHTML = '';
+    const runTag = '<span class="tag-toggle '+(disco.running?'on':'off')+'">'+(disco.running?'running':'not running')+'</span>';
+    neighborsCard.appendChild($('<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">'+runTag+'</div>'));
+    if (disco.neighbors_available === false){
+      neighborsCard.appendChild($('<div class="empty">'+esc(disco.neighbors_hint||'no neighbor data available')+'</div>'));
+      return;
+    }
+    const rows = disco.neighbors || [];
+    if (!rows.length){
+      neighborsCard.appendChild($('<div class="empty">no neighbors seen yet</div>'));
+      return;
+    }
+    const t = $('<div></div>');
+    t.innerHTML = '<table><tr><th>local interface</th><th>system name</th><th>remote port</th><th>mgmt IP</th></tr></table>';
+    const table = t.querySelector('table');
+    rows.forEach(n => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = '<td>'+esc(n.local_iface||'')+'</td><td>'+esc(n.system_name||'')+'</td>'
+        + '<td>'+esc(n.port||'')+'</td><td>'+esc(n.mgmt_ip||'')+'</td>';
+      table.appendChild(tr);
+    });
+    neighborsCard.appendChild(t);
+  };
+
+  const draw = (ifNames, disco) => {
+    body.innerHTML = '';
+
+    if (disco.supported === false){
+      body.appendChild($('<div class="card"></div>')).appendChild($('<div class="empty">'+esc(disco.hint||'L2 discovery isn\u2019t supported on this host')+'</div>'));
+      return;
+    }
+
+    const cfgMap = new Map((disco.interfaces||[]).map(i => [i.name, i]));
+    const card = $('<div class="card"></div>');
+    let table = null;
+    if (!ifNames.length){
+      card.appendChild($('<div class="empty">no interfaces found on this host</div>'));
+    } else {
+      const t = $('<div></div>');
+      t.innerHTML = '<table><tr><th>interface</th><th class="selcol">LLDP</th><th class="selcol">CDP</th></tr></table>';
+      table = t.querySelector('table');
+      card.appendChild(t);
+      ifNames.forEach(name => {
+        const cfg = cfgMap.get(name) || { name, lldp:false, cdp:false };
+        const tr = document.createElement('tr'); tr.dataset.name = name;
+        tr.innerHTML = '<td>'+esc(name)+'</td>'
+          + '<td class="selcol"><input type="checkbox" class="l2d-lldp"'+(cfg.lldp?' checked':'')+'></td>'
+          + '<td class="selcol"><input type="checkbox" class="l2d-cdp"'+(cfg.cdp?' checked':'')+'></td>';
+        table.appendChild(tr);
+      });
+    }
+    card.appendChild($('<div class="hint" style="margin:8px 0 0">CDP can be turned on independently, but is usually paired with LLDP on the same interface. Saves immediately when toggled.</div>'));
+    body.appendChild(card);
+
+    const neighborsCard = $('<div class="card"></div>');
+    body.appendChild(neighborsCard);
+    renderNeighbors(neighborsCard, disco);
+
+    if (!table) return;
+    const saveL2Disco = async () => {
+      const interfaces = [...table.querySelectorAll('tr[data-name]')].map(tr => ({
+        name: tr.dataset.name,
+        lldp: tr.querySelector('.l2d-lldp').checked,
+        cdp: tr.querySelector('.l2d-cdp').checked,
+      }));
+      const res = await api('/api/system/l2disco', { method:'POST', body: JSON.stringify({ interfaces }) });
+      if (!res.ok){ alert((res.body && res.body.error) || 'could not save L2 discovery settings'); return; }
+      if (res.body) renderNeighbors(neighborsCard, res.body);
+      if (res.body && res.body.note) alert(res.body.note);
+    };
+    table.querySelectorAll('.l2d-lldp, .l2d-cdp').forEach(cb => { cb.onchange = saveL2Disco; });
   };
 
   load();

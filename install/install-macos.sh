@@ -16,6 +16,9 @@
 #                  this installer never attempts to install net-snmp itself here
 #                  (see the note at the SNMP step for why), so this flag only
 #                  suppresses that reminder for a scripted/quiet install.
+#   --no-lldp      don't print the link-layer discovery note (see below). Same
+#                  deal as --no-snmp: purely cosmetic, this installer never
+#                  attempts to install lldpd itself here either.
 set -euo pipefail
 
 PREFIX=/usr/local
@@ -23,6 +26,7 @@ CONFIG=/etc/gravinet/config.json
 SRC=""
 LOAD=1
 INSTALL_SNMP=1
+INSTALL_LLDP=1
 ACTION=install
 PLIST=/Library/LaunchDaemons/com.gravinet.daemon.plist
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -51,7 +55,9 @@ while [ $# -gt 0 ]; do
     --load) LOAD=1 ;;
     --snmp) INSTALL_SNMP=1 ;;
     --no-snmp) INSTALL_SNMP=0 ;;
-    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
+    --lldp) INSTALL_LLDP=1 ;;
+    --no-lldp) INSTALL_LLDP=0 ;;
+    -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -422,6 +428,26 @@ if [ "$INSTALL_SNMP" = 1 ]; then
     rather than expecting gravinet's own (typically root) process to
     manage it; see internal/service/snmp.go's package comment.
     Pass --no-snmp to silence this note.
+NOTE
+  fi
+fi
+
+if [ "$INSTALL_LLDP" = 1 ]; then
+  if command -v lldpd >/dev/null 2>&1 || [ -x /usr/local/sbin/lldpd ] || [ -x /opt/homebrew/sbin/lldpd ]; then
+    echo "==> link-layer discovery agent (lldpd)"
+    echo "    already installed"
+  else
+    cat <<'NOTE'
+==> link-layer discovery agent (lldpd)
+    not installed. Same story as the SNMP agent above: this script runs as
+    root, and Homebrew refuses to operate as root, so this installer does
+    not attempt to install it here. If you want gravinet's System > L2
+    Disco page to actually run an agent, install it yourself as your own
+    (non-root) user first:
+        brew install lldpd
+    gravinet drives it afterward via 'brew services', with the identical
+    root-vs-Homebrew caveat; see internal/service/lldp.go's package comment.
+    Pass --no-lldp to silence this note.
 NOTE
   fi
 fi

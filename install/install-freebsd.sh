@@ -52,6 +52,11 @@
 #                        per-major-version one) for gravinet's System > SNMP page.
 #                        Pass this if you don't use SNMP and don't want this
 #                        host's package set changed.
+#   --no-lldp            don't install the link-layer discovery agent. By default,
+#                        if lldpd isn't already on the host, this installs it via
+#                        pkg for gravinet's System > L2 Disco page. Pass this if
+#                        you don't use LLDP/CDP and don't want this host's
+#                        package set changed.
 #   --no-ifqmaxlen       don't touch net.link.ifqmaxlen. By default, if it isn't
 #                        already set to at least 1000 and nothing in
 #                        /boot/loader.conf already mentions it, this installer
@@ -78,6 +83,7 @@ ACTION=install
 ENABLE_LOCAL_UNBOUND=1
 INSTALL_FRR=1
 INSTALL_SNMP=1
+INSTALL_LLDP=1
 ENABLE_IFQMAXLEN=1
 RCSCRIPT=/usr/local/etc/rc.d/gravinet
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -110,9 +116,11 @@ while [ $# -gt 0 ]; do
     --frr) INSTALL_FRR=1 ;;
     --no-snmp) INSTALL_SNMP=0 ;;
     --snmp) INSTALL_SNMP=1 ;;
+    --no-lldp) INSTALL_LLDP=0 ;;
+    --lldp) INSTALL_LLDP=1 ;;
     --no-ifqmaxlen) ENABLE_IFQMAXLEN=0 ;;
     --ifqmaxlen) ENABLE_IFQMAXLEN=1 ;; # default; kept for symmetry with --frr/--enable-local-unbound
-    -h|--help) sed -n '2,70p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,75p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -615,6 +623,39 @@ ensure_snmpd() {
 NOTE
 }
 
+# lldpd_installed checks pkg's install location, the same locations
+# internal/service/lldp.go's own lldpdBinary() checks.
+lldpd_installed() {
+  command -v lldpd >/dev/null 2>&1 && return 0
+  for p in /usr/local/sbin/lldpd /usr/local/bin/lldpd; do
+    [ -x "$p" ] && return 0
+  done
+  return 1
+}
+
+# ensure_lldpd installs lldpd via pkg if it isn't already present, for
+# gravinet's System > L2 Disco page.
+ensure_lldpd() {
+  if lldpd_installed; then
+    echo "    lldpd is already installed"
+    return 0
+  fi
+  command -v pkg >/dev/null 2>&1 || { echo "    warning: pkg(8) not found; cannot install the link-layer discovery agent automatically" >&2; return 0; }
+  echo "    lldpd is not installed; installing it"
+  if pkg install -y lldpd >/dev/null 2>&1 && lldpd_installed; then
+    echo "    installed lldpd"
+    echo "    L2 Disco is ready — configure it from gravinet's System > L2 Disco page."
+    return 0
+  fi
+  cat <<'NOTE' >&2
+    warning: could not install the link-layer discovery agent automatically.
+             gravinet's System > L2 Disco page will still let you author a
+             config, but nothing will actually run until lldpd is installed
+             some other way — check that pkg can reach its repos and that
+             lldpd exists for this release.
+NOTE
+}
+
 
 echo "==> DNS forwarding (local-unbound)"
 if local_unbound_configured; then
@@ -664,6 +705,13 @@ if [ "$INSTALL_SNMP" = 1 ]; then
   ensure_snmpd
 else
   echo "    --no-snmp passed; leaving snmpd alone."
+fi
+
+echo "==> link-layer discovery agent (lldpd)"
+if [ "$INSTALL_LLDP" = 1 ]; then
+  ensure_lldpd
+else
+  echo "    --no-lldp passed; leaving lldpd alone."
 fi
 
 echo "==> outbound queue depth (net.link.ifqmaxlen)"
