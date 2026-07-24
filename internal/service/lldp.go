@@ -443,9 +443,19 @@ type LLDPNeighbor struct {
 // whatever instance is running over its control socket regardless of who
 // launched it) for its current neighbor table. Returns (neighbors,
 // available, hint) — available is false with a reason when lldpcli isn't
-// installed, lldpd isn't running, or its JSON couldn't be parsed; distinct
-// from (available: true, empty neighbors), which just means no neighbors
-// have been heard from yet.
+// installed or its connect attempt failed; distinct from (available: true,
+// empty neighbors), which just means no neighbors have been heard from yet.
+//
+// The connect-failure hint is deliberately neutral ("could not connect"),
+// not "lldpd is not running": this function has no way to actually know
+// *why* the connect failed — the service could be genuinely down, still
+// starting up, or up-but-unreachable (a permissions/SELinux denial on the
+// socket, a non-standard control-socket location, ...) — and asserting
+// "not running" as if it were a known fact directly contradicted a
+// service-status tag showing "running" right next to it, reported as a
+// real, confusing bug. systemL2DiscoJSON (which also knows the service's
+// own active/inactive state from a separate, independent check) is what
+// composes the final, contradiction-aware hint the page actually shows.
 func LLDPNeighbors() ([]LLDPNeighbor, bool, string) {
 	cli := lldpcliBinary()
 	if cli == "" {
@@ -453,7 +463,7 @@ func LLDPNeighbors() ([]LLDPNeighbor, bool, string) {
 	}
 	out, err := exec.Command(cli, "-f", "json", "show", "neighbors").CombinedOutput()
 	if err != nil {
-		return nil, false, "lldpd is not running (enable link-layer discovery in System > L2 Disco)"
+		return nil, false, "could not connect to lldpd's control interface"
 	}
 	rows, err := parseLLDPNeighborsJSON(out)
 	if err != nil {

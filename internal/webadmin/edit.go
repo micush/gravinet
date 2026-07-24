@@ -1543,7 +1543,18 @@ func (s *Server) handleSystemL2Disco(w http.ResponseWriter, r *http.Request) {
 }
 
 // systemL2DiscoJSON flattens a DiscoveryConfig plus live service and
-// neighbor state for the wire.
+// neighbor state for the wire. running (from LLDPServiceRunning, an OS
+// service-manager query) and neighbors_available (from LLDPNeighbors,
+// whether lldpcli could actually connect) are two independent checks that
+// can legitimately disagree — the OS can consider the service "active"
+// (the process started, hasn't exited) while its control interface is
+// still unreachable (starting up, a permissions/SELinux denial on the
+// socket, ...). Reported as a real, confusing bug: the page showed a green
+// "running" tag directly above "lldpd is not running," each individually
+// truthful about what it checked but flatly contradicting the other once
+// both were on screen together. running is computed first here so the two
+// can be reconciled into one hint that says what's actually going on
+// instead of independently asserting two different things.
 func systemL2DiscoJSON(cfg config.DiscoveryConfig) map[string]any {
 	supported, hint := service.LLDPSupported()
 	ifaces := make([]map[string]any, 0, len(cfg.Interfaces))
@@ -1551,7 +1562,9 @@ func systemL2DiscoJSON(cfg config.DiscoveryConfig) map[string]any {
 		ifaces = append(ifaces, map[string]any{"name": i.Name, "lldp": i.LLDP, "cdp": i.CDP})
 	}
 
+	running := supported && service.LLDPServiceRunning()
 	neighborRows, neighborsAvailable, neighborsHint := service.LLDPNeighbors()
+	neighborsHint = reconcileL2DiscoNeighborsHint(running, neighborsAvailable, neighborsHint)
 	neighbors := make([]map[string]any, 0, len(neighborRows))
 	for _, n := range neighborRows {
 		neighbors = append(neighbors, map[string]any{
@@ -1563,9 +1576,23 @@ func systemL2DiscoJSON(cfg config.DiscoveryConfig) map[string]any {
 	return map[string]any{
 		"interfaces": ifaces,
 		"supported":  supported, "hint": hint,
-		"running":   supported && service.LLDPServiceRunning(),
+		"running":   running,
 		"neighbors": neighbors, "neighbors_available": neighborsAvailable, "neighbors_hint": neighborsHint,
 	}
+}
+
+// reconcileL2DiscoNeighborsHint resolves the one case where two independent
+// live checks (the service's own active/inactive state, and whether
+// lldpcli could actually reach it) disagree in a way that would otherwise
+// read as a contradiction on screen: the service reports active, but the
+// control interface isn't reachable. Pure — no IO — so it's directly
+// testable against every combination without needing a real lldpd, unlike
+// the two checks that feed it.
+func reconcileL2DiscoNeighborsHint(running, neighborsAvailable bool, rawHint string) string {
+	if !neighborsAvailable && running {
+		return "lldpd's service reports active, but its control interface (lldpcli) could not be reached. It may still be starting up, or something — a permissions/SELinux denial on its control socket, a non-standard socket location, ... — is preventing it from actually listening even though the process itself is up. Check this host's system log (journalctl -u lldpd on Linux) for the reason."
+	}
+	return rawHint
 }
 
 // minutesUntilClock returns whole minutes from now until the next occurrence of

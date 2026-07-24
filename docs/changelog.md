@@ -56,6 +56,48 @@ assuming it didn't happen.
 
 ---
 
+---
+
+## v620 — 2026-07-24
+
+**Fixed: System > L2 Disco could show a green "running" tag directly above
+"lldpd is not running"** — reported against a real page showing exactly
+that. Both lines were individually truthful about what they checked; they
+just flatly contradicted each other once shown together, because they came
+from two independent live checks that can legitimately disagree:
+`running` (an OS service-manager query — is the process active?) and
+`neighbors_available` (does `lldpcli` actually connect?). The OS can
+consider lldpd "active" — the process started, hasn't exited — while its
+control interface is still unreachable: starting up, a permissions/SELinux
+denial on the socket, a non-standard socket location, or any of several
+other things v619's own fix was written in direct response to.
+
+- **`internal/service/lldp.go`**: `LLDPNeighbors`'s connect-failure hint no
+  longer asserts "lldpd is not running" as if it were a known fact — this
+  function has no way to actually know *why* the connect failed, only that
+  it did. Now says the neutral, accurate "could not connect to lldpd's
+  control interface."
+- **`internal/webadmin/edit.go`**: new `reconcileL2DiscoNeighborsHint`,
+  called from `systemL2DiscoJSON` with both independent results in hand.
+  When they disagree — service reports active, neighbors unreachable — it
+  composes an explanation that names the actual situation (may still be
+  starting, or something is blocking the control socket even though the
+  process is up) and points at `journalctl -u lldpd`, instead of two
+  pieces of UI independently asserting different things. Every other
+  combination passes the original hint through unchanged.
+- **Tests**: `TestReconcileL2DiscoNeighborsHint` (new) pins the exact
+  reported scenario as its first case, plus every other
+  running/neighbors-available combination (including the "shouldn't
+  happen but must never fabricate a claim" not-running-yet-available
+  case), and asserts the reconciled hint never contains the string "not
+  running" while `running` is true — the literal shape of the bug that was
+  reported. Extracted as a pure function (no IO) specifically so this is
+  testable without a real lldpd, the same pattern this project has used
+  throughout for exactly this reason.
+
+Full webadmin and service test suites, `go vet`, and `gofmt` all clean;
+cross-compiles clean on every platform L2 Disco supports.
+
 ## v619 — 2026-07-24
 
 **Found the actual root cause of v618's SELinux denial, from a real report:

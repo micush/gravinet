@@ -129,6 +129,66 @@ func TestSystemL2DiscoIsProxyable(t *testing.T) {
 	}
 }
 
+// TestReconcileL2DiscoNeighborsHint pins the exact bug reported against a
+// real page: a green "running" tag next to "lldpd is not running" —
+// individually truthful about what each check found, flatly contradicting
+// each other once shown together. running/neighborsAvailable disagreeing
+// (the interesting case) must produce the reconciled explanation, not
+// either raw claim; every other combination must pass the raw hint
+// through unchanged.
+func TestReconcileL2DiscoNeighborsHint(t *testing.T) {
+	cases := []struct {
+		name                        string
+		running, neighborsAvailable bool
+		rawHint, wantContains       string
+		wantExactPassthrough        bool
+	}{
+		{
+			name:    "the reported bug: active but unreachable",
+			running: true, neighborsAvailable: false,
+			rawHint:      "could not connect to lldpd's control interface",
+			wantContains: "reports active",
+		},
+		{
+			name:    "genuinely not running: passthrough",
+			running: false, neighborsAvailable: false,
+			rawHint:              "lldpd is not installed",
+			wantExactPassthrough: true,
+		},
+		{
+			name:    "everything fine: passthrough (empty)",
+			running: true, neighborsAvailable: true,
+			rawHint:              "",
+			wantExactPassthrough: true,
+		},
+		{
+			name:    "not running and somehow available (shouldn't happen, but must not fabricate a claim)",
+			running: false, neighborsAvailable: true,
+			rawHint:              "",
+			wantExactPassthrough: true,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := reconcileL2DiscoNeighborsHint(c.running, c.neighborsAvailable, c.rawHint)
+			if c.wantExactPassthrough {
+				if got != c.rawHint {
+					t.Errorf("got %q, want the raw hint %q passed through unchanged", got, c.rawHint)
+				}
+				return
+			}
+			if !strings.Contains(got, c.wantContains) {
+				t.Errorf("got %q, want it to contain %q", got, c.wantContains)
+			}
+			// The reconciled hint must never repeat the contradicted raw
+			// claim ("not running") right next to a running:true tag.
+			if strings.Contains(strings.ToLower(got), "not running") {
+				t.Errorf("reconciled hint still says \"not running\" while running=true: %q", got)
+			}
+		})
+	}
+}
+
 // TestSystemL2DiscoNavPlacement pins L2 Disco into the System group after
 // SNMP and before Users.
 func TestSystemL2DiscoNavPlacement(t *testing.T) {
