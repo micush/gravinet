@@ -1152,8 +1152,16 @@ func hostTimeJSON(t service.TimeInfo) map[string]any {
 // syntax the OS accepts but a manager silently drops, e.g.). A partial
 // success carries a "note" — see SetHostname's Windows path (a rename that
 // needs a restart to take effect), setRootForward's breadcrumb-write
-// failure, and this handler's own can't-self-restart case above, for the
-// three cases that currently produce one.
+// failure, this handler's own can't-self-restart case, and a failed
+// lldpd/snmpd restart after a hostname change (below), for the cases that
+// currently produce one.
+func appendNote(existing, add string) string {
+	if existing == "" {
+		return add
+	}
+	return existing + "; " + add
+}
+
 func (s *Server) handleSystemResolver(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		writeJSON(w, http.StatusOK, hostResolverJSON(service.HostResolver()))
@@ -1211,6 +1219,26 @@ func (s *Server) handleSystemResolver(w http.ResponseWriter, r *http.Request) {
 			}()
 		} else if note == "" {
 			note = "hostname changed, but this node can't restart itself (" + hint + ") — restart it by hand so mesh peers see the new name"
+		}
+
+		// lldpd and snmpd each read this host's hostname once, at their own
+		// startup — lldpd for its LLDP SysName TLV, snmpd for its sysName
+		// default — and neither watches for it changing afterward. Restart
+		// each, but only if it's currently running (RestartLLDPIfRunning/
+		// RestartSNMPIfRunning are no-ops otherwise): this is about an
+		// already-running agent advertising a stale name, not about turning
+		// either on. Synchronous, not deferred behind the same 700ms flush
+		// delay the gravinet restart above needs — restarting a *different*
+		// process doesn't kill the one serving this reply, so there's
+		// nothing to wait for. Best-effort: a failure here folds into note
+		// (appended, not overwriting an existing one) rather than the
+		// overall request, since the hostname itself was already applied
+		// successfully by this point.
+		if ok, rhint := service.RestartLLDPIfRunning(); !ok {
+			note = appendNote(note, "lldpd could not be restarted to pick up the new hostname: "+rhint)
+		}
+		if ok, rhint := service.RestartSNMPIfRunning(); !ok {
+			note = appendNote(note, "snmpd could not be restarted to pick up the new hostname: "+rhint)
 		}
 	}
 
@@ -1555,6 +1583,27 @@ func (s *Server) handleSystemL2Disco(w http.ResponseWriter, r *http.Request) {
 // both were on screen together. running is computed first here so the two
 // can be reconciled into one hint that says what's actually going on
 // instead of independently asserting two different things.
+//
+// When running-but-unreachable actually happens, service.LLDPJournalHint()
+// is called for a specific answer (the journal's own most recent line, plus
+// a targeted explanation where the pattern is recognized — "another
+// instance is running" being the one this was confirmed against for real,
+// alongside the SELinux/AppArmor case) rather than reconcile's own
+// previously-generic guess-list. Only called in that one branch — every
+// other GET this page makes has no reason to pay for a journalctl exec.
+//
+// strays/stray_hint (service.LLDPStrays) is a second, independent check: a
+// leftover lldpd invocation from a previous configuration, still running
+// under a completely different command line, that neither running nor
+// neighbors_available has any way to notice — running only asks about the
+// ONE instance the service manager tracks by name, and neighbors_available
+// only talks to whichever instance currently holds the control socket.
+// Confirmed for real: a host with discovery switched off still had an older
+// instance running from a previous configuration, invisible to both existing
+// checks. gravinet terminates these itself now — on every start and stop
+// (see service.ApplyLLDP) and once at daemon startup — so this reporting a
+// non-empty list means one survived being signalled, which is worth saying
+// out loud rather than a routine state to hand back as a chore.
 func systemL2DiscoJSON(cfg config.DiscoveryConfig) map[string]any {
 	supported, hint := service.LLDPSupported()
 	ifaces := make([]map[string]any, 0, len(cfg.Interfaces))
@@ -1564,7 +1613,11 @@ func systemL2DiscoJSON(cfg config.DiscoveryConfig) map[string]any {
 
 	running := supported && service.LLDPServiceRunning()
 	neighborRows, neighborsAvailable, neighborsHint := service.LLDPNeighbors()
-	neighborsHint = reconcileL2DiscoNeighborsHint(running, neighborsAvailable, neighborsHint)
+	var journalHint string
+	if running && !neighborsAvailable {
+		journalHint = service.LLDPJournalHint()
+	}
+	neighborsHint = reconcileL2DiscoNeighborsHint(running, neighborsAvailable, cfg.IsRunnable(), neighborsHint, journalHint)
 	neighbors := make([]map[string]any, 0, len(neighborRows))
 	for _, n := range neighborRows {
 		neighbors = append(neighbors, map[string]any{
@@ -1573,24 +1626,58 @@ func systemL2DiscoJSON(cfg config.DiscoveryConfig) map[string]any {
 		})
 	}
 
+	var strays []string
+	if supported {
+		strays = service.LLDPStrays(cfg)
+	}
+	if strays == nil {
+		strays = []string{} // nil marshals to JSON null, not []; the page expects an array
+	}
+	strayHint := ""
+	if len(strays) > 0 {
+		strayHint = fmt.Sprintf("%d leftover lldpd process(es) could not be stopped. gravinet terminates these automatically, so this means they didn't respond to being signalled — something outside gravinet is starting or holding them.", len(strays))
+	}
+
 	return map[string]any{
 		"interfaces": ifaces,
 		"supported":  supported, "hint": hint,
 		"running":   running,
 		"neighbors": neighbors, "neighbors_available": neighborsAvailable, "neighbors_hint": neighborsHint,
+		"strays": strays, "stray_hint": strayHint,
 	}
 }
 
-// reconcileL2DiscoNeighborsHint resolves the one case where two independent
+// reconcileL2DiscoNeighborsHint resolves the cases where two independent
 // live checks (the service's own active/inactive state, and whether
-// lldpcli could actually reach it) disagree in a way that would otherwise
-// read as a contradiction on screen: the service reports active, but the
-// control interface isn't reachable. Pure — no IO — so it's directly
-// testable against every combination without needing a real lldpd, unlike
-// the two checks that feed it.
-func reconcileL2DiscoNeighborsHint(running, neighborsAvailable bool, rawHint string) string {
+// lldpcli could actually reach it) would otherwise read as a contradiction
+// or a non-answer on screen. Pure — no IO — so it's directly testable
+// against every combination without needing a real lldpd, unlike the checks
+// (and the journalHint itself, when non-empty) that feed it.
+//
+// Two cases get composed rather than passed through:
+//
+//   - active but unreachable: the originally reported bug, a green
+//     "running" tag directly above "lldpd is not running". journalHint is
+//     service.LLDPJournalHint()'s own " — journal: ... (explanation)"
+//     suffix, computed by the caller only in this branch — passed in rather
+//     than fetched here so this stays pure — naming the actual root cause
+//     (confirmed for real: a leftover control socket, or a second instance
+//     still holding it) instead of a list of maybes. Falls back to that list
+//     only when the journal had nothing recognizable to say.
+//   - not running because no interfaces are picked: "could not connect to
+//     lldpd's control interface" is technically true and completely useless
+//     directly under a "not running" tag, when the actual reason is simply
+//     that this page is configured to leave it off. Says so instead.
+func reconcileL2DiscoNeighborsHint(running, neighborsAvailable, configured bool, rawHint, journalHint string) string {
 	if !neighborsAvailable && running {
-		return "lldpd's service reports active, but its control interface (lldpcli) could not be reached. It may still be starting up, or something — a permissions/SELinux denial on its control socket, a non-standard socket location, ... — is preventing it from actually listening even though the process itself is up. Check this host's system log (journalctl -u lldpd on Linux) for the reason."
+		base := "lldpd's service reports active, but its control interface (lldpcli) could not be reached."
+		if journalHint != "" {
+			return base + journalHint
+		}
+		return base + " It may still be starting up, or something — a permissions/SELinux denial on its control socket, a non-standard socket location, ... — is preventing it from actually listening even though the process itself is up. Check this host's system log (journalctl -u lldpd on Linux) for the reason."
+	}
+	if !neighborsAvailable && !running && !configured {
+		return "no interfaces are picked above, so the discovery agent is switched off on this host."
 	}
 	return rawHint
 }

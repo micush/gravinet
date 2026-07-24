@@ -354,3 +354,37 @@ func SNMPServiceRunning() bool {
 		return false
 	}
 }
+
+// RestartSNMPIfRunning restarts snmpd, but only if it's currently running —
+// never starts it fresh, since "should this be running at all" is System >
+// SNMP's own config's job to decide, not this function's. For picking up
+// an OS-level change snmpd only reads at its own startup: net-snmp's
+// sysName defaults to this host's hostname when not explicitly set (and
+// config.SNMPConfig has no separate sysName field — see systemSNMPJSON —
+// so every install here relies on that default), read once when it
+// starts, so a rename via System > Resolver leaves it advertising the old
+// name until it's restarted — nothing else triggers that on its own.
+func RestartSNMPIfRunning() (bool, string) {
+	if !SNMPServiceRunning() {
+		return true, ""
+	}
+	switch runtime.GOOS {
+	case "linux":
+		if out, err := exec.Command("systemctl", "restart", linuxSNMPUnit()).CombinedOutput(); err != nil {
+			return false, cmdErr("systemctl restart "+linuxSNMPUnit(), out, err)
+		}
+	case "freebsd":
+		if out, err := exec.Command("service", "snmpd", "restart").CombinedOutput(); err != nil {
+			return false, cmdErr("service snmpd restart", out, err)
+		}
+	case "openbsd":
+		if out, err := exec.Command("rcctl", "restart", "snmpd").CombinedOutput(); err != nil {
+			return false, cmdErr("rcctl restart snmpd", out, err)
+		}
+	case "darwin":
+		if out, err := exec.Command("brew", "services", "restart", "net-snmp").CombinedOutput(); err != nil {
+			return false, cmdErr("brew services restart net-snmp", out, err)
+		}
+	}
+	return true, ""
+}

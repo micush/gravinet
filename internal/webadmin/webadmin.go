@@ -393,6 +393,7 @@ func (s *Server) handler() http.Handler {
 	// own session check (upgradeLocalOnly) rather than relying on authed()'s
 	// Managed/Manager bypass — see that function's doc comment.
 	mux.HandleFunc("/api/upgrade", s.authed(s.handleUpgradeHome))
+	mux.HandleFunc("/api/upgrade/os-updates", s.authed(s.handleUpgradeOSUpdates))
 	mux.HandleFunc("/api/upgrade/source", s.authed(s.handleUpgradeSource))
 	mux.HandleFunc("/api/upgrade/rollback", s.authed(s.handleUpgradeRollback))
 	// remote-apply is the one upgrade endpoint a peer may reach, and only a

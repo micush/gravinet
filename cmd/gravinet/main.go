@@ -48,7 +48,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "620"
+	version = "626"
 	commit  = "none"
 )
 
@@ -1544,6 +1544,76 @@ func cmdRun(args []string) {
 				case <-t.C:
 					inheritSeedNotes(*cfgPath, engine, reloadFn)
 				}
+			}
+		}()
+
+		// Scheduled OS updates: System > Upgrade's "OS updates" section.
+		// Checked on a ticker rather than a precise one-shot timer, since
+		// the schedule (and whether it's even enabled) can change via a
+		// config reload at any time; 5 minutes is comfortably finer than
+		// the daily/weekly/monthly granularity this offers, so nothing
+		// meaningfully waits longer than that past its scheduled minute.
+		// Runs unconditionally, independent of whether the web admin is
+		// enabled — an operator configures this through the web UI, but
+		// once set, it's a property of this node's config, not of the web
+		// server being up. Shares tickStop.
+		checkOSUpdateSchedule := func() {
+			c, err := config.Load(*cfgPath)
+			if err != nil || service.OSUpdateRunning() {
+				return // can't read config, or an update (scheduled or manual) is already in flight
+			}
+			statePath := service.OSUpdateStatePath(c.UpgradeStateDir())
+			st := service.LoadOSUpdateState(statePath)
+			if !service.OSUpdateDue(c.OSUpdates, st.LastRun, time.Now()) {
+				return
+			}
+			logx.Infof("os-update: scheduled update is due; starting it now")
+			go func() {
+				if ok, output := service.RunOSUpdateNow(statePath, "schedule"); !ok {
+					logx.Warnf("os-update: scheduled update failed: %s", output)
+				}
+			}()
+		}
+		go func() {
+			t := time.NewTicker(5 * time.Minute)
+			defer t.Stop()
+			checkOSUpdateSchedule()
+			for {
+				select {
+				case <-tickStop:
+					return
+				case <-t.C:
+					checkOSUpdateSchedule()
+				}
+			}
+		}()
+
+		// Stray-lldpd cleanup, once at startup. lldpd runs as an OS service
+		// rather than a child process (see internal/service/lldp.go's package
+		// comment for why), and a service manager only ever tracks the ONE
+		// instance it started itself — so an lldpd left over from a previous
+		// configuration, or from a stop that didn't fully terminate it, keeps
+		// running completely invisibly: still advertising stale settings, and
+		// still holding the control socket a correctly-configured instance
+		// needs to bind. Confirmed on a real host, where it survived both a
+		// reconfiguration and discovery being switched off entirely.
+		//
+		// Only *stray* processes are terminated — never one whose command
+		// line matches this node's config — so link-layer discovery doesn't
+		// blink on every gravinet restart, which is the whole reason it isn't
+		// a child process to begin with. Best-effort and off the startup
+		// path: nothing here can fail in a way worth delaying the daemon for.
+		go func() {
+			c, err := config.Load(*cfgPath)
+			if err != nil {
+				return
+			}
+			killed, remaining := service.ReapStrayLLDPD(c.Discovery)
+			for _, k := range killed {
+				logx.Infof("lldpd: terminated a stray process left over from an earlier configuration: %s", k)
+			}
+			for _, r := range remaining {
+				logx.Warnf("lldpd: a stray process could not be terminated (something outside gravinet may be starting it): %s", r)
 			}
 		}()
 

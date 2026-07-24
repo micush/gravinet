@@ -117,7 +117,8 @@ const indexHTML = `<!doctype html>
   .settings-desc { font-size:12px; color:var(--mut); margin-top:2px; }
   /* route-picker: the search-to-add widget behind every redistribute
      picker (Redistribute connected/static/mesh routes on the BGP editor,
-     Redistribute from BGP on Mesh Routes) — a .search-select reusing the
+     Redistribute from BGP on Mesh Routes) and, despite the name, System >
+     L2 Disco's interface picker too — a .search-select reusing the
      same .ss-input/.ss-list/.ss-opt styling every other picker in this
      file already uses, plus its own chip list for what's currently
      selected below the search box. The row it sits in stacks vertically
@@ -489,7 +490,7 @@ const LOCAL_API = ['/api/proxy','/api/cluster','/api/managed','/api/manager','/a
   // half, so the browser doesn't even try). Upgrades are local-only outright:
   // a peer's own Upgrade page is something you visit by logging into *that*
   // node directly.
-  '/api/upgrade','/api/upgrade/source','/api/upgrade/rollback',
+  '/api/upgrade','/api/upgrade/source','/api/upgrade/rollback','/api/upgrade/os-updates',
   // accept-manager is a local-only security toggle (like /api/managed): the
   // switch that authorizes remote pushes must itself never be flippable from a
   // remote peer. push is the manager-side fleet action, driven from the node
@@ -787,8 +788,16 @@ function label(s){
   if (s==='bgp-peers') return 'BGP Peers';
   if (s==='getting-started') return 'Getting Started';
   if (s==='capture') return 'Packet Capture';
-  if (s==='l2disco') return 'L2 Disco';
+  if (s==='l2disco') return 'l2disco';
   return s==='nat'||s==='qos'||s==='dns'||s==='bgp'||s==='api'||s==='snmp' ? s.toUpperCase() : s.charAt(0).toUpperCase()+s.slice(1);
+}
+// sectionHeading is what the content pane's own <h2> shows \u2014 label(s)
+// everywhere except l2disco, whose nav-rail button stays the literal
+// "l2disco" (menu real estate is narrow) while the page itself gets the
+// fuller "Layer 2 Discovery" a standalone heading has room for.
+function sectionHeading(s){
+  if (s==='l2disco') return 'Layer 2 Discovery';
+  return label(s);
 }
 
 // sectionVisible gates sections whose availability depends on a runtime
@@ -2302,7 +2311,7 @@ function renderSection() {
   // hide it, this is the backstop. Fall back to the default section.
   if (!sectionVisible(state.section)) { state.section = 'networks'; setActiveRailTab(state.section); }
   c.innerHTML = '';
-  c.appendChild($('<h2 class="sec">'+label(state.section)+'</h2>'));
+  c.appendChild($('<h2 class="sec">'+sectionHeading(state.section)+'</h2>'));
   restartBanner(c);
   const nets = state.status;
   if (state.section === 'settings') {
@@ -4642,7 +4651,11 @@ function fwCatalogCombobox(input, getNames){
 // some CIDRs out of a possibly huge list" spot in this file: BGP's own
 // Redistribute connected/static/mesh pickers (renderBgpEditor's
 // rowRouteList) and Mesh Routes' Redistribute from BGP subcard
-// (secRoutes). Reuses the .ss-input/.ss-list/.ss-opt/.ss-empty styling
+// (secRoutes). Also reused, despite the CIDR-flavored name, by System >
+// L2 Disco's interface picker (secL2Disco) \u2014 there the "value" is an
+// interface name rather than a CIDR, but "pick some strings out of a
+// possibly huge list, show the picks as removable chips" is exactly the
+// same shape. Reuses the .ss-input/.ss-list/.ss-opt/.ss-empty styling
 // buildListPicker and fwCatalogCombobox already established, rather than
 // yet another dropdown look — narrowed by typing exactly like those, and,
 // like fwCatalogCombobox, caps rendered matches at 200 so a host with
@@ -6011,24 +6024,38 @@ function secSNMP(c){
   load();
 }
 
-// secL2Disco renders System > L2 Disco: link-layer discovery (LLDP) and,
-// per interface, Cisco CDP. Duplicates parapet's Network > L2 Discovery
-// config page and its separate Monitor > Status: LLDP/CDP neighbor table
-// onto one page under System, combining config and live neighbor status the
-// same way secSNMP/secTime already do here, rather than parapet's own split
-// across two different nav locations.
+// secL2Disco renders System > L2 Disco: link-layer discovery (LLDP) and
+// Cisco CDP, together, on whichever interfaces are picked. Duplicates
+// parapet's Network > L2 Discovery config page and its separate Monitor >
+// Status: LLDP/CDP neighbor table onto one page under System, combining
+// config and live neighbor status the same way secSNMP/secTime already do
+// here, rather than parapet's own split across two different nav locations.
 //
-// The interface table shows every interface this host actually has (via
-// systemInterfaces(), the same cached list NAT's masquerade picker already
-// uses), each row's LLDP/CDP checkboxes merged in from whatever's saved —
-// an interface gravinet has never been told about reads as off, not
-// "unknown". A toggle saves immediately (matching parapet's own
-// click-to-toggle-and-save behavior for this exact table — there's nothing
-// to debounce the way a text field needs), sending the *whole* current
-// table state each time, not just the row that changed, the same "read
-// every row, POST it all" shape the Users table's bulk actions already use.
+// The interface picker (buildRouteChipPicker — see its own doc comment)
+// offers every interface this host actually has, via systemInterfaces(),
+// the same cached list NAT's masquerade picker already uses. Picking an
+// interface here turns both LLDP and CDP on for it; removing its chip turns
+// both off — this page doesn't offer LLDP and CDP as independent
+// per-interface switches (config.DiscoveryIface itself still can — see its
+// own comment — this page just doesn't expose that split), matching the
+// same picker idiom BGP's Redistribute connected/static/mesh pickers and
+// Mesh Routes' Redistribute from BGP subcard already use for "pick some
+// values out of a possibly huge list." An interface gravinet has never
+// been told about reads as unpicked, not "unknown". Picking or removing
+// saves immediately (no separate save button — same as those other
+// pickers), sending the *whole* current pick list each time, not just
+// what changed, the same "read it all, POST it all" shape the Users
+// table's bulk actions already use.
+//
+// The neighbors card also surfaces disco.stray_hint when present — a
+// leftover lldpd process from an earlier configuration, invisible to both
+// the running tag above (which only asks the service manager about the ONE
+// instance it tracks) and the neighbor table itself (which only talks to
+// whichever instance currently holds the control socket). gravinet
+// terminates these itself now, so this appears only in the case worth
+// escalating: one that didn't respond to being signalled.
 function secL2Disco(c){
-  secHint(c, 'Link-layer discovery (LLDP), and Cisco CDP per interface. Advertises and listens for neighbor information on the interfaces you enable below. Acts on the node you\u2019re currently managing.');
+  secHint(c, 'Link-layer discovery: LLDP, plus Cisco CDP, together on whichever interfaces you pick below. Advertises and listens for neighbor information on picked interfaces. Acts on the node you\u2019re currently managing.');
 
   const body = $('<div></div>');
   body.innerHTML = '<div class="hint">loading\u2026</div>';
@@ -6041,16 +6068,24 @@ function secL2Disco(c){
   };
 
   // renderNeighbors (re)builds just the neighbors card, independent of the
-  // interface-config table above it \u2014 called on initial draw and, after a
-  // save, again with that save's own response (which already carries fresh
+  // interface picker above it \u2014 called on initial draw and, after a save,
+  // again with that save's own response (which already carries fresh
   // neighbor/running data), the same "never rebuild the whole page just to
   // refresh a status readout" fix secSNMP's own renderStatus applies for the
-  // identical reason: rebuilding the interface table's checkboxes on every
-  // save could otherwise steal a click mid-toggle.
+  // identical reason: rebuilding the picker on every save could otherwise
+  // steal a click mid-pick.
   const renderNeighbors = (neighborsCard, disco) => {
     neighborsCard.innerHTML = '';
     const runTag = '<span class="tag-toggle '+(disco.running?'on':'off')+'">'+(disco.running?'running':'not running')+'</span>';
     neighborsCard.appendChild($('<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">'+runTag+'</div>'));
+    // stray_hint (service.LLDPStrays) is independent of running/neighbors
+    // below \u2014 a leftover lldpd from an earlier configuration that neither
+    // of those checks can notice. gravinet terminates these itself on every
+    // start/stop and once at daemon startup, so this only ever appears when
+    // one survived being signalled, which is genuinely worth flagging.
+    if (disco.stray_hint){
+      neighborsCard.appendChild($('<div class="hint" style="margin:0 0 10px;color:var(--danger)">'+esc(disco.stray_hint)+'</div>'));
+    }
     if (disco.neighbors_available === false){
       neighborsCard.appendChild($('<div class="empty">'+esc(disco.neighbors_hint||'no neighbor data available')+'</div>'));
       return;
@@ -6080,45 +6115,34 @@ function secL2Disco(c){
       return;
     }
 
-    const cfgMap = new Map((disco.interfaces||[]).map(i => [i.name, i]));
     const card = $('<div class="card"></div>');
-    let table = null;
-    if (!ifNames.length){
-      card.appendChild($('<div class="empty">no interfaces found on this host</div>'));
-    } else {
-      const t = $('<div></div>');
-      t.innerHTML = '<table><tr><th>interface</th><th class="selcol">LLDP</th><th class="selcol">CDP</th></tr></table>';
-      table = t.querySelector('table');
-      card.appendChild(t);
-      ifNames.forEach(name => {
-        const cfg = cfgMap.get(name) || { name, lldp:false, cdp:false };
-        const tr = document.createElement('tr'); tr.dataset.name = name;
-        tr.innerHTML = '<td>'+esc(name)+'</td>'
-          + '<td class="selcol"><input type="checkbox" class="l2d-lldp"'+(cfg.lldp?' checked':'')+'></td>'
-          + '<td class="selcol"><input type="checkbox" class="l2d-cdp"'+(cfg.cdp?' checked':'')+'></td>';
-        table.appendChild(tr);
-      });
-    }
-    card.appendChild($('<div class="hint" style="margin:8px 0 0">CDP can be turned on independently, but is usually paired with LLDP on the same interface. Saves immediately when toggled.</div>'));
-    body.appendChild(card);
-
     const neighborsCard = $('<div class="card"></div>');
-    body.appendChild(neighborsCard);
-    renderNeighbors(neighborsCard, disco);
 
-    if (!table) return;
-    const saveL2Disco = async () => {
-      const interfaces = [...table.querySelectorAll('tr[data-name]')].map(tr => ({
-        name: tr.dataset.name,
-        lldp: tr.querySelector('.l2d-lldp').checked,
-        cdp: tr.querySelector('.l2d-cdp').checked,
-      }));
+    // Posts the full current pick list on every add/remove \u2014
+    // handleSystemL2Disco replaces cfg.Discovery wholesale, the same
+    // "read it all, POST it all" shape rowRouteList's own BGP save uses.
+    const saveL2Disco = async (names) => {
+      const interfaces = names.map(name => ({ name, lldp:true, cdp:true }));
       const res = await api('/api/system/l2disco', { method:'POST', body: JSON.stringify({ interfaces }) });
       if (!res.ok){ alert((res.body && res.body.error) || 'could not save L2 discovery settings'); return; }
       if (res.body) renderNeighbors(neighborsCard, res.body);
       if (res.body && res.body.note) alert(res.body.note);
     };
-    table.querySelectorAll('.l2d-lldp, .l2d-cdp').forEach(cb => { cb.onchange = saveL2Disco; });
+
+    const picked = (disco.interfaces||[]).filter(i => i.lldp || i.cdp).map(i => i.name);
+    const row = $('<div class="settings-row"></div>');
+    row.appendChild($('<div><div class="settings-label">Interfaces</div><div class="settings-desc">Pick which interfaces run LLDP and CDP. Saves immediately when changed.</div></div>'));
+    const picker = buildRouteChipPicker(ifNames, picked, (names) => saveL2Disco(names), {
+      placeholder: 'search interfaces to add\u2026',
+      noneText: 'no interfaces found on this host',
+      loadingText: 'loading interfaces\u2026',
+    });
+    row.appendChild(picker.wrap);
+    card.appendChild(row);
+    body.appendChild(card);
+
+    body.appendChild(neighborsCard);
+    renderNeighbors(neighborsCard, disco);
   };
 
   load();
@@ -6598,7 +6622,140 @@ async function drawUpgrade(host){
     up.querySelectorAll('input,button').forEach(el => { el.disabled = true; });
   }
   host.appendChild(stCard);
+  if (!remote) drawOSUpdates(host);
   return;
+}
+
+// drawOSUpdates renders System > Upgrade's "OS updates" card: a schedule
+// for patching the *host OS's* own packages (apt/dnf/zypper/pacman/pkg/
+// pkg_add/softwareupdate) — unrelated to the gravinet binary-upgrade
+// mechanism in the card above it, which only ever changes the gravinet
+// binary itself. Local-only, same as the rest of this page (see
+// /api/upgrade/os-updates' own doc comment for why), so this is only ever
+// called when !remote.
+//
+// All fields save together on any one field's change, the same "several
+// fields, one write" pattern secResolver's DNS card and secSNMP already
+// use — there's one OSUpdateConfig on the wire per save, not independent
+// per-field ops. "Run now" is always available regardless of whether a
+// schedule is enabled, for testing or an out-of-band patch pass.
+async function drawOSUpdates(host){
+  const card = $('<div class="card" style="margin-top:16px"></div>');
+  card.appendChild($('<h3>OS updates</h3>'));
+  card.appendChild($('<div class="hint" style="margin:0 0 10px">Scheduled updates to this host\u2019s own OS packages \u2014 separate from the gravinet upgrade above, which only replaces the gravinet binary itself. Never reboots on its own, even if an update would benefit from one; use System &gt; Power for that separately.</div>'));
+  host.appendChild(card);
+
+  const body = $('<div></div>');
+  body.innerHTML = '<div class="hint">loading\u2026</div>';
+  card.appendChild(body);
+
+  const WEEKDAYS = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+
+  const load = async () => {
+    const r = await api('/api/upgrade/os-updates');
+    if (!r.ok || !r.body){ body.innerHTML = '<div class="hint">could not read this host\u2019s OS update settings.</div>'; return; }
+    draw(r.body);
+  };
+
+  const draw = (u) => {
+    body.innerHTML = '';
+
+    if (u.supported === false){
+      body.appendChild($('<div class="empty">'+esc(u.hint||'OS updates aren\u2019t supported on this host')+'</div>'));
+      return;
+    }
+
+    const row = $('<div style="display:flex;flex-direction:column;gap:10px"></div>');
+    row.appendChild($('<label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="osu-enabled"'+(u.enabled?' checked':'')+'><span>Enabled</span></label>'));
+
+    const cadenceRow = $('<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">'
+      + '<select id="osu-cadence">'
+        + ['daily','weekly','monthly'].map(c => '<option value="'+c+'"'+(u.cadence===c?' selected':'')+'>'+c.charAt(0).toUpperCase()+c.slice(1)+'</option>').join('')
+      + '</select>'
+      + '<span id="osu-weekday-wrap" style="display:'+(u.cadence==='weekly'?'inline':'none')+'">on <select id="osu-weekday">'
+        + WEEKDAYS.map((d,i) => '<option value="'+i+'"'+(u.weekday===i?' selected':'')+'>'+d+'</option>').join('')
+      + '</select></span>'
+      + '<span id="osu-day-wrap" style="display:'+(u.cadence==='monthly'?'inline':'none')+'">on day <input id="osu-day" type="number" min="1" max="28" value="'+(u.day_of_month||1)+'" style="width:60px"></span>'
+      + '<span>at <input id="osu-time" type="time" value="'+String(u.hour||0).padStart(2,'0')+':'+String(u.minute||0).padStart(2,'0')+'"></span>'
+      + '</div>');
+    row.appendChild(cadenceRow);
+    body.innerHTML = '';
+    body.appendChild(row);
+
+    const statusLine = $('<div style="margin-top:10px"></div>');
+    if (u.running){
+      statusLine.appendChild($('<span class="tag-toggle on">running now\u2026</span>'));
+    } else if (u.last_run){
+      const when = new Date(u.last_run).toLocaleString();
+      const tag = '<span class="tag-toggle '+(u.last_ok?'on':'off')+'">'+(u.last_ok?'ok':'failed')+'</span>';
+      statusLine.appendChild($('<div>'+tag+' <span class="hint" style="display:inline">last run '+esc(when)+' ('+esc(u.last_triggered_by||'')+')</span></div>'));
+    } else {
+      statusLine.appendChild($('<div class="hint">never run</div>'));
+    }
+    if (u.next_run && u.enabled){
+      statusLine.appendChild($('<div class="hint">next scheduled run: '+esc(new Date(u.next_run).toLocaleString())+'</div>'));
+    }
+    body.appendChild(statusLine);
+
+    if (u.last_output){
+      const details = $('<details style="margin-top:8px"></details>');
+      details.appendChild($('<summary class="hint" style="cursor:pointer">last run output</summary>'));
+      details.appendChild($('<pre style="background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-top:6px;overflow:auto;max-height:240px;font-size:12px;white-space:pre-wrap">'+esc(u.last_output)+'</pre>'));
+      body.appendChild(details);
+    }
+
+    const btns = $('<div style="margin-top:10px"></div>');
+    const runBtn = $('<button class="ghost sm">Run now</button>');
+    btns.appendChild(runBtn);
+    body.appendChild(btns);
+
+    const enabledCb = row.querySelector('#osu-enabled');
+    const cadenceSel = row.querySelector('#osu-cadence');
+    const weekdaySel = row.querySelector('#osu-weekday');
+    const weekdayWrap = row.querySelector('#osu-weekday-wrap');
+    const daySel = row.querySelector('#osu-day');
+    const dayWrap = row.querySelector('#osu-day-wrap');
+    const timeIn = row.querySelector('#osu-time');
+
+    cadenceSel.onchange = () => {
+      weekdayWrap.style.display = cadenceSel.value === 'weekly' ? 'inline' : 'none';
+      dayWrap.style.display = cadenceSel.value === 'monthly' ? 'inline' : 'none';
+      saveSchedule();
+    };
+
+    const saveSchedule = async () => {
+      const [hh,mm] = (timeIn.value || '03:00').split(':').map(Number);
+      const res = await api('/api/upgrade/os-updates', { method:'POST', body: JSON.stringify({
+        op:'save', enabled: enabledCb.checked, cadence: cadenceSel.value,
+        weekday: parseInt(weekdaySel.value,10)||0, day_of_month: parseInt(daySel.value,10)||1,
+        hour: hh||0, minute: mm||0,
+      }) });
+      if (!res.ok){ alert((res.body && res.body.error) || 'could not save the OS update schedule'); return; }
+      draw(res.body);
+    };
+    [enabledCb, weekdaySel, daySel, timeIn].forEach(el => { el.onchange = saveSchedule; });
+
+    runBtn.onclick = async () => {
+      if (!confirm('Run an OS update pass on ' + (window.location.hostname||'this host') + ' now?\n\nThis applies whatever updates the host\u2019s package manager has pending. It will not reboot on its own.')) return;
+      runBtn.disabled = true;
+      const res = await api('/api/upgrade/os-updates', { method:'POST', body: JSON.stringify({ op:'run_now' }) });
+      if (!res.ok){ alert((res.body && res.body.error) || 'could not start the update'); runBtn.disabled = false; return; }
+      draw(res.body);
+      // Poll until it's done, since a real update can take minutes and
+      // there's no push channel for this — the same "come back and check"
+      // shape the upgrade guard's own status polling already uses elsewhere
+      // on this page.
+      const poll = setInterval(async () => {
+        const r2 = await api('/api/upgrade/os-updates');
+        if (r2.ok && r2.body && !r2.body.running){
+          clearInterval(poll);
+          draw(r2.body);
+        }
+      }, 5000);
+    };
+  };
+
+  load();
 }
 
 // infoMetrics renders the Metrics tab: a duration selector plus live CPU,

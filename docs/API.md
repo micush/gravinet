@@ -258,6 +258,7 @@ cookie, or a qualifying fleet-manager mesh session — see
 | GET/POST | `/api/managed` | This node's Managed-mode state |
 | GET/POST | `/api/manager` | This node's Manager-mode state |
 | GET/POST | `/api/upgrade/accept-manager` | Opt in/out of Manager-pushed upgrades |
+| GET/POST | `/api/upgrade/os-updates` | Schedule host OS package updates (separate from the gravinet binary) |
 | GET | `/api/cluster` | List managed peers this node currently sees |
 | ANY | `/api/proxy` | Forward an API call to a managed peer |
 | GET/POST | `/api/shell/setting` | Toggle remote shell access (session-only) |
@@ -1191,6 +1192,50 @@ digest is checked before anything is extracted or built; a mismatch is
 refused outright. On success, the archive goes through the exact same
 build/preflight/confirm-or-rollback path as a local upload.
 
+### `GET/POST /api/upgrade/os-updates`
+
+Scheduled updates to this host's own OS packages — a different concern
+from the rest of this section, which only ever replaces the gravinet
+binary. Applies whatever `apt`/`dnf`/`yum`/`zypper`/`pacman`/`pkg`/
+`pkg_add`/`softwareupdate` considers "update everything installed";
+**never reboots on its own**, even when an update implies one would help —
+that stays a separate, deliberate action via
+[`POST /api/system/power`](#post-apisystempower). Not supported on
+Windows: no package manager has a simple, dependency-free equivalent to
+script there the way every other platform here does.
+
+Local-only, like every other endpoint in this section — scheduling
+unattended OS patching for a remote peer without that peer's own operator
+directly involved would defeat the same "no peer can trigger this"
+guarantee the rest of the Upgrades API already provides.
+
+```json
+{"enabled": true, "cadence": "weekly", "weekday": 2, "day_of_month": 1,
+ "hour": 3, "minute": 0, "supported": true, "hint": "", "running": false,
+ "next_run": "2026-07-29T03:00:00-07:00",
+ "last_run": "2026-07-22T03:00:00-07:00", "last_ok": true,
+ "last_output": "...", "last_triggered_by": "schedule"}
+```
+
+`cadence` is `"daily"`, `"weekly"`, or `"monthly"`; `weekday`
+(0=Sunday..6=Saturday) only matters for `"weekly"`, `day_of_month` (1–28,
+capped so every month actually has that day) only for `"monthly"`. `hour`/
+`minute` are host-local, 24-hour. `last_run`/`last_ok`/`last_output`/
+`last_triggered_by` are absent, not zero-valued, until a run has actually
+happened — a real distinction from "ran and failed."
+
+`POST` takes:
+
+```json
+{"op": "save", "enabled": true, "cadence": "weekly", "weekday": 2, "hour": 3, "minute": 0}
+{"op": "run_now"}
+```
+
+`run_now` starts a real update pass — which can take minutes — and returns
+immediately (`running: true`) rather than blocking the request; poll `GET`
+to see when it finishes and what happened. Refused with `400` if one is
+already running, or if this node's upgrade machinery never initialized.
+
 ## Diagnostics & monitoring
 
 ### `GET /api/metrics?minutes=60`
@@ -1444,9 +1489,14 @@ once at its own startup.
   (`hostname` in `config.json`, which falls back to the OS hostname but
   is only ever read from it at startup) picks up the change too, without
   the operator needing to separately trigger
-  [`POST /api/restart`](#post-apirestart). Best-effort: if this host
-  can't restart itself, the OS-level hostname change still stands; the
-  reply's `note` says a manual restart is needed instead.
+  [`POST /api/restart`](#post-apirestart). `lldpd` and `snmpd` — each of
+  which also only reads this host's hostname once, at their own startup,
+  for LLDP's SysName TLV and SNMP's sysName default respectively — are
+  each restarted too, but only if already running (never started fresh
+  just for this). Best-effort throughout: if this host can't restart
+  itself, or `lldpd`/`snmpd` fails to restart, the OS-level hostname
+  change still stands regardless; the reply's `note` explains whichever
+  part didn't happen automatically.
 - `dns`: `servers` must each parse as a real IP address — unlike Time's
   NTP `servers`, a hostname isn't accepted here, since resolving one is
   the whole question this field answers. `search_domain` follows the

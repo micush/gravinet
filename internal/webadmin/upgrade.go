@@ -11,6 +11,8 @@ import (
 	"os"
 	"time"
 
+	"gravinet/internal/config"
+	"gravinet/internal/service"
 	"gravinet/internal/upgrade"
 )
 
@@ -171,6 +173,160 @@ func (s *Server) handleUpgradeHome(w http.ResponseWriter, r *http.Request) {
 		"confirm_seconds":    s.upg.ConfirmSeconds(),
 		"rollback_available": backupErr == nil,
 	})
+}
+
+// handleUpgradeOSUpdates reads or replaces this node's scheduled host OS
+// package update configuration, and can trigger an immediate run — the
+// backend for System > Upgrade's "OS updates" section. Local-only (see
+// upgradeLocalOnly), the same as every other endpoint on this page: unlike
+// Power/Time/Users/SNMP/L2 Disco, which all deliberately follow whichever
+// node is currently selected, scheduling unattended OS patching for a
+// *remote* peer without that peer's own operator directly involved is
+// exactly the kind of thing this page's existing "no peer can trigger this"
+// philosophy already exists to prevent for gravinet's own upgrade
+// mechanism — applied here to a second thing that can meaningfully change
+// what's running on a host.
+//
+// GET returns the current config plus live state: whether this platform
+// supports it at all (OSUpdatesSupported), when the next scheduled run
+// would be (NextOSUpdateRun), whether one is running right now
+// (OSUpdateRunning), and the last completed run's outcome (the on-disk
+// breadcrumb, LoadOSUpdateState — survives a gravinet restart and a
+// browser refresh).
+//
+// POST takes either a config save or an immediate-run request:
+//
+//	{op:"save", enabled, cadence, weekday, day_of_month, hour, minute}
+//	{op:"run_now"}
+//
+// A "run_now" starts a real update pass, which can take minutes — it's
+// deliberately asynchronous: the handler kicks it off in a goroutine and
+// returns immediately with running:true, rather than blocking the request
+// (and risking a browser/proxy timeout) for however long the host's
+// package manager takes. The page finds out it's done the same way it
+// finds out a scheduled run happened: polling GET and watching
+// last_run/running.
+func (s *Server) handleUpgradeOSUpdates(w http.ResponseWriter, r *http.Request) {
+	if !s.upgradeLocalOnly(w, r) {
+		return
+	}
+	statePath := ""
+	if s.upg != nil {
+		statePath = service.OSUpdateStatePath(s.upg.StateDir)
+	}
+
+	if r.Method == http.MethodGet {
+		cfg, err := config.Load(s.configPath)
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, osUpdatesJSON(cfg.OSUpdates, statePath))
+		return
+	}
+
+	var req struct {
+		Op         string `json:"op"`
+		Enabled    bool   `json:"enabled"`
+		Cadence    string `json:"cadence"`
+		Weekday    int    `json:"weekday"`
+		DayOfMonth int    `json:"day_of_month"`
+		Hour       int    `json:"hour"`
+		Minute     int    `json:"minute"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+
+	switch req.Op {
+	case "run_now":
+		if statePath == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "upgrade machinery failed to initialize on this node — check the daemon log"})
+			return
+		}
+		if service.OSUpdateRunning() {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "an update is already running"})
+			return
+		}
+		s.log.Infof("webadmin: starting an OS update pass now (requested from admin UI)")
+		go func() {
+			if ok, output := service.RunOSUpdateNow(statePath, "manual"); !ok {
+				s.log.Warnf("webadmin: manual OS update run failed: %s", output)
+			}
+		}()
+		cfg, _ := config.Load(s.configPath)
+		resp := osUpdatesJSON(cfg.OSUpdates, statePath)
+		resp["ok"] = true
+		writeJSON(w, http.StatusOK, resp)
+		return
+	case "save":
+		if req.Enabled {
+			switch req.Cadence {
+			case "daily":
+			case "weekly":
+				if req.Weekday < 0 || req.Weekday > 6 {
+					writeJSON(w, http.StatusBadRequest, map[string]any{"error": "weekday must be 0 (Sunday) through 6 (Saturday)"})
+					return
+				}
+			case "monthly":
+				if req.DayOfMonth < 1 || req.DayOfMonth > 28 {
+					writeJSON(w, http.StatusBadRequest, map[string]any{"error": "day_of_month must be between 1 and 28 (capped so every month actually has that day)"})
+					return
+				}
+			default:
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "cadence must be 'daily', 'weekly', or 'monthly'"})
+				return
+			}
+			if req.Hour < 0 || req.Hour > 23 || req.Minute < 0 || req.Minute > 59 {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "hour must be 0-23 and minute 0-59"})
+				return
+			}
+		}
+		osu := config.OSUpdateConfig{
+			Enabled: req.Enabled, Cadence: req.Cadence, Weekday: req.Weekday,
+			DayOfMonth: req.DayOfMonth, Hour: req.Hour, Minute: req.Minute,
+		}
+		s.log.Infof("webadmin: saving OS update schedule (enabled=%v cadence=%q) (requested from admin UI)", req.Enabled, req.Cadence)
+		if err := s.mutateConfig(func(cfg *config.Config) error {
+			cfg.OSUpdates = osu
+			return nil
+		}); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		resp := osUpdatesJSON(osu, statePath)
+		resp["ok"] = true
+		writeJSON(w, http.StatusOK, resp)
+		return
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "op must be 'save' or 'run_now'"})
+		return
+	}
+}
+
+// osUpdatesJSON flattens an OSUpdateConfig plus live scheduler/run state
+// for the wire.
+func osUpdatesJSON(cfg config.OSUpdateConfig, statePath string) map[string]any {
+	supported, hint := service.OSUpdatesSupported()
+	resp := map[string]any{
+		"enabled": cfg.Enabled, "cadence": cfg.Cadence, "weekday": cfg.Weekday,
+		"day_of_month": cfg.DayOfMonth, "hour": cfg.Hour, "minute": cfg.Minute,
+		"supported": supported, "hint": hint,
+		"running": service.OSUpdateRunning(),
+	}
+	if next, ok := service.NextOSUpdateRun(cfg, time.Now()); ok {
+		resp["next_run"] = next.Format(time.RFC3339)
+	}
+	if statePath != "" {
+		st := service.LoadOSUpdateState(statePath)
+		if !st.LastRun.IsZero() {
+			resp["last_run"] = st.LastRun.Format(time.RFC3339)
+			resp["last_ok"] = st.LastOK
+			resp["last_output"] = st.LastOutput
+			resp["last_triggered_by"] = st.LastTriggeredBy
+		}
+	}
+	return resp
 }
 
 // spoolUpload streams an upload to a temp file under the state directory,

@@ -3,6 +3,7 @@ package service
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -318,5 +319,97 @@ func TestRemoveSocketsAt(t *testing.T) {
 	}
 	if _, err := os.Stat(subdirExisting); !os.IsNotExist(err) {
 		t.Errorf("%s should have been removed, stat err = %v", subdirExisting, err)
+	}
+}
+
+// TestParseLLDPProcs pins parsing against the exact `pgrep -a -x lldpd`
+// output confirmed against a real host: a current instance (wlan0, no CDP)
+// running as its privsep monitor+worker pair sharing one command line, plus
+// an older leftover pair (eth0, CDP on) from a previous configuration.
+// Every pid must survive parsing — they all get signalled — while dedup for
+// *reporting* collapses each pair to one line.
+func TestParseLLDPProcs(t *testing.T) {
+	out := `24452 /usr/sbin/lldpd -d -c -I eth0
+24454 /usr/sbin/lldpd -d -c -I eth0
+1928776 /usr/sbin/lldpd -d -I wlan0
+1928950 /usr/sbin/lldpd -d -I wlan0
+`
+	procs := parseLLDPProcs(out)
+	if len(procs) != 4 {
+		t.Fatalf("parseLLDPProcs(...) returned %d procs, want all 4 pids", len(procs))
+	}
+	wantPIDs := map[int]bool{24452: true, 24454: true, 1928776: true, 1928950: true}
+	for _, p := range procs {
+		if !wantPIDs[p.PID] {
+			t.Errorf("unexpected pid %d", p.PID)
+		}
+		if !strings.HasPrefix(p.Argv, "/usr/sbin/lldpd ") {
+			t.Errorf("pid %d argv = %q, want the full command line", p.PID, p.Argv)
+		}
+	}
+
+	argvs := dedupLLDPArgvs(procs)
+	want := []string{"/usr/sbin/lldpd -d -c -I eth0", "/usr/sbin/lldpd -d -I wlan0"}
+	sort.Strings(argvs)
+	sort.Strings(want)
+	if len(argvs) != len(want) {
+		t.Fatalf("dedupLLDPArgvs(...) = %v, want %v", argvs, want)
+	}
+	for i := range want {
+		if argvs[i] != want[i] {
+			t.Errorf("dedupLLDPArgvs(...)[%d] = %q, want %q", i, argvs[i], want[i])
+		}
+	}
+}
+
+// TestParseLLDPProcsRejectsUnusableLines checks the no-lldpd-running case
+// and lines that can't safely be turned into a pid. pid 1 especially: every
+// pid this returns gets signalled, so init must never come back out of it.
+func TestParseLLDPProcsRejectsUnusableLines(t *testing.T) {
+	for _, in := range []string{"", "\n  \n", "24452\n", "notapid /usr/sbin/lldpd -d\n", "1 /sbin/init\n", "0 /usr/sbin/lldpd -d\n"} {
+		if got := parseLLDPProcs(in); len(got) != 0 {
+			t.Errorf("parseLLDPProcs(%q) = %+v, want nothing usable", in, got)
+		}
+	}
+}
+
+// TestStrayLLDPProcsRules pins which processes are considered strays. The
+// runnable case is linux-only on purpose (see strayLLDPProcs' own comment:
+// on the BSDs the real argv contains base rc.d flags gravinet never wrote,
+// so exact-matching there would terminate the correctly-running instance),
+// which is exactly the false positive this guards against.
+func TestStrayLLDPProcsRules(t *testing.T) {
+	const bin = "/usr/sbin/lldpd"
+	want := bin + " -d -I wlan0"
+	current := lldpProc{PID: 1000, Argv: want}
+	leftover := lldpProc{PID: 2000, Argv: bin + " -d -c -I eth0"}
+
+	// Nothing running: never anything to reap, whatever the config says.
+	if got := strayLLDPProcs(true, want, nil); len(got) != 0 {
+		t.Errorf("no processes running, got strays %+v", got)
+	}
+
+	// Switched off — the reported screenshot's exact state: nothing should be
+	// running at all, so everything is a stray, on every platform.
+	got := strayLLDPProcs(false, "", []lldpProc{current, leftover})
+	if len(got) != 2 {
+		t.Errorf("discovery off: got %d strays, want both processes reaped: %+v", len(got), got)
+	}
+
+	// On: only the mismatched leftover, and only where gravinet owns the
+	// whole command line.
+	got = strayLLDPProcs(true, want, []lldpProc{current, leftover})
+	if runtime.GOOS == "linux" {
+		if len(got) != 1 || got[0].PID != leftover.PID {
+			t.Errorf("got %+v, want only the leftover (pid %d)", got, leftover.PID)
+		}
+	} else if len(got) != 0 {
+		t.Errorf("got %+v, want nothing: argv can't be compared reliably on %s", got, runtime.GOOS)
+	}
+
+	// No expected argv to compare against (lldpd not installed): must never
+	// guess, or it would terminate a perfectly good running instance.
+	if got := strayLLDPProcs(true, "", []lldpProc{current, leftover}); len(got) != 0 {
+		t.Errorf("got %+v, want nothing when there's no argv to compare against", got)
 	}
 }

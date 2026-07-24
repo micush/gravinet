@@ -1,1426 +1,303 @@
 # Changelog
 
-## About this document
+---
 
-This changelog was reconstructed by searching back through past conversation
-history, not by walking a version-control log — [gravinet] doesn't have one
-available to this tool. That method has real limits worth stating plainly:
+## v626 — 2026-07-24
 
-- **Search returns snippets, not full transcripts.** Even for a conversation
-  this found, it may only surface part of what was discussed or changed.
-- **Coverage is uneven.** The version counter (the `version` string in
-  `cmd/gravinet/main.go`) jumps by exactly one on every recorded change. The
-  search-reconstructed part of this document is the range *before* **v263** —
-  a couple hundred increments, only a fraction of which turned up specific,
-  citable detail. Entries below with a version number are ones a past
-  conversation explicitly named; the gaps between them are real gaps in what's
-  recoverable this way, not evidence that nothing happened in between. A second
-  search pass (this session) went further back
-  than the first and recovered a fair number of versions the original pass
-  missed — v202, v203, v207–209, v241–245, v259–262 below are new this
-  round. **v273 specifically could not be recovered**: the version string
-  jumps straight from 272 to 273 with no search result describing what
-  changed, so it's left as an acknowledged gap rather than a guess.
-- **This project shares history with a separate, unrelated project** (a
-  Rust-based firewall console called `parapet` / `rampart`, and a ZFS
-  management tool) that came up in some of the same search results.
-  Anything that couldn't be clearly confirmed as [gravinet] specifically was
-  left out rather than guessed at.
+**gravinet now owns the lldpd process instead of reporting on it.** v625
+detected leftover lldpd processes and told the operator to go run `pgrep`
+and kill them by hand. That was the wrong answer to its own finding —
+managing this agent is gravinet's job.
 
-Versions **263–272** are from a single long conversation and are complete
-and precise — every change in that range was made directly in that session,
-not reconstructed from a search snippet. **v274** and everything from
-**v306 onward** is direct and precise. Everything else is a
-best-effort reconstruction. If a
-specific version or feature isn't listed here and you
-want it filled in, it's worth asking to search for it directly rather than
-assuming it didn't happen.
+**Fixed:** switching discovery off left leftover lldpd processes running.
+The page said "not running" (true of the service manager's own instance)
+while an older instance from a previous configuration kept advertising stale
+settings and holding the control socket. Stopping now terminates every
+surviving lldpd and clears its sockets: off means off. Starting does the
+same first, so a leftover can't block the new instance with "another
+instance is running... giving up."
+
+**Fixed:** the start path called `systemctl enable --now` and fell back to
+`restart`, which raced systemd's own `Restart=on-failure` — the
+five-restarts-in-one-second burst ending in "start request repeated too
+quickly" seen on a real host. Now stops through the service manager first,
+then reaps whatever it wasn't tracking, then starts. Termination is SIGTERM
+first (lldpd unlinks its own socket on a clean exit — the whole failure being
+prevented), SIGKILL only after a 3s grace.
+
+**New:** stray lldpd processes are also cleaned up once at daemon startup, so
+an existing leftover is gone before anyone opens the page. Only processes
+that don't match this node's config are touched — a correctly running
+instance is left alone, so discovery doesn't blink on every gravinet
+restart.
+
+**Fixed:** the stray check compared command lines on every platform, but on
+the BSDs and macOS gravinet's flags are appended to the packaged rc.d
+script's own invocation, so the real argv contains tokens gravinet never
+wrote — it would have flagged, and now would have *killed*, the correctly
+running instance there. Exact-matching is now linux-only, where gravinet
+writes the whole `ExecStart`.
+
+**Fixed:** with no interfaces picked, the page reported "could not connect to
+lldpd's control interface" under a "not running" tag — technically true,
+useless. Now says the agent is switched off because nothing is picked.
 
 ---
 
----
+## v625 — 2026-07-24
+
+Three fixes to System > L2 Disco's live status, all traced against a real
+host's `journalctl -u lldpd` and `pgrep -a lldpd` output:
+
+**Specific hint instead of a guess-list:** when lldpd reports active but its
+control socket can't be reached, the page used to show a generic list of
+maybes. Now calls into the journal for the actual last log line and, where
+recognized (an SELinux/AppArmor denial, "another instance is running"),
+names the real cause instead of guessing.
+
+**New: unmanaged-process warning.** A leftover `lldpd` process from a
+previous configuration — a different set of interfaces/CDP flags — can keep
+running indefinitely, invisible to both the running tag (which only asks
+the service manager about the one instance it tracks) and the neighbor
+table (which only talks to whichever instance currently holds the control
+socket). Now detected by comparing every running lldpd's command line
+against what the current config would actually produce, and surfaced as a
+warning on the page.
+
+**Fixed:** the hostname-rename restart path (`RestartLLDPIfRunning`) was
+missing the stale-control-socket cleanup a fresh start already had,
+exposing it to the same "another instance is running... giving up" failure
+on an unclean stop. Now cleaned up there too.
 
 ---
 
----
+## v624 — 2026-07-24
+
+**Fixed:** v623 changed L2 Disco's nav-rail label to "L2 Disco", which the
+rail's own lowercasing rendered as "l2 disco" (with a space) instead of the
+intended "l2disco". Nav label is now the literal string "l2disco"; the
+page heading is still "Layer 2 Discovery", unaffected.
 
 ---
 
----
+## v623 — 2026-07-24
+
+**Changed:** System > L2 Disco's per-interface LLDP/CDP checkbox table is now
+a search-to-add chip picker, the same widget BGP's redistribute pickers and
+Mesh Routes' "Redistribute from BGP" already use. Picking an interface turns
+LLDP and CDP on together for it; removing its chip turns both off — this
+page no longer exposes them as independent per-interface switches. Also:
+the page's own heading now reads "Layer 2 Discovery" (the nav item stays
+"L2 Disco"), and dropped the old "CDP can be turned on independently..."
+hint line, which no longer applies.
 
 ---
 
----
+## v622 — 2026-07-24
+
+**Docs only.** Removed the changelog's "About this document" preamble
+(reconstruction-methodology notes) entirely, per request. Fixed the one
+place another entry (v274) referenced it by name.
 
 ---
 
----
+## v621 — 2026-07-24
 
----
+Three changes:
+
+**Fixed:** hostname renames via System > Resolver didn't restart `lldpd`/
+`snmpd`, so both kept advertising the old name (each reads it once, at its
+own startup) — same class of bug as v613's already-fixed gravinet-restart
+case. Now restarts each too, but only if already running.
+
+**Changelog cleanup**: condensed v600–v620 from 1,364 lines to 169 (my own
+entries had grown 2–4x more verbose than this project's historical
+average) and removed 10 duplicate `---` separators that had piled up from
+careless insertions. Going forward, entries here will be much shorter.
+
+**New: System > Upgrade → OS updates** — schedule (daily/weekly/monthly + time
+of day) host OS package updates via whatever the host has (apt/dnf/yum/
+zypper/pacman/pkg/pkg_add/softwareupdate; Windows unsupported, no simple
+scriptable equivalent). Separate from gravinet's own binary-upgrade
+mechanism above it on the same page. Never reboots on its own — that stays
+a manual System > Power decision. Local-only, matching the rest of the
+Upgrade page. A "run now" button triggers an immediate pass, async since a
+real update can take minutes. `internal/service/osupdate.go` (new, with
+tests for the scheduling math and state persistence — never the real
+package-manager call, which this sandbox could actually run for real) +
+`handleUpgradeOSUpdates` (`/api/upgrade/os-updates`) + a 5-minute scheduler
+tick in `main.go`. Testing caught a real validation bug before shipping:
+`day_of_month`/`weekday` were required even for cadences that don't use
+them, rejecting an otherwise-valid daily or weekly save.
 
 ## v620 — 2026-07-24
 
-**Fixed: System > L2 Disco could show a green "running" tag directly above
-"lldpd is not running"** — reported against a real page showing exactly
-that. Both lines were individually truthful about what they checked; they
-just flatly contradicted each other once shown together, because they came
-from two independent live checks that can legitimately disagree:
-`running` (an OS service-manager query — is the process active?) and
-`neighbors_available` (does `lldpcli` actually connect?). The OS can
-consider lldpd "active" — the process started, hasn't exited — while its
-control interface is still unreachable: starting up, a permissions/SELinux
-denial on the socket, a non-standard socket location, or any of several
-other things v619's own fix was written in direct response to.
-
-- **`internal/service/lldp.go`**: `LLDPNeighbors`'s connect-failure hint no
-  longer asserts "lldpd is not running" as if it were a known fact — this
-  function has no way to actually know *why* the connect failed, only that
-  it did. Now says the neutral, accurate "could not connect to lldpd's
-  control interface."
-- **`internal/webadmin/edit.go`**: new `reconcileL2DiscoNeighborsHint`,
-  called from `systemL2DiscoJSON` with both independent results in hand.
-  When they disagree — service reports active, neighbors unreachable — it
-  composes an explanation that names the actual situation (may still be
-  starting, or something is blocking the control socket even though the
-  process is up) and points at `journalctl -u lldpd`, instead of two
-  pieces of UI independently asserting different things. Every other
-  combination passes the original hint through unchanged.
-- **Tests**: `TestReconcileL2DiscoNeighborsHint` (new) pins the exact
-  reported scenario as its first case, plus every other
-  running/neighbors-available combination (including the "shouldn't
-  happen but must never fabricate a claim" not-running-yet-available
-  case), and asserts the reconciled hint never contains the string "not
-  running" while `running` is true — the literal shape of the bug that was
-  reported. Extracted as a pure function (no IO) specifically so this is
-  testable without a real lldpd, the same pattern this project has used
-  throughout for exactly this reason.
-
-Full webadmin and service test suites, `go vet`, and `gofmt` all clean;
-cross-compiles clean on every platform L2 Disco supports.
+**Fixed:** System > L2 Disco could show a green "running" tag directly next
+to "lldpd is not running" — two independent live checks (service-active vs.
+control-socket-reachable) that can legitimately disagree, shown without
+reconciling. Now composes one honest explanation when they disagree instead
+of two contradicting claims.
 
 ## v619 — 2026-07-24
 
-**Found the actual root cause of v618's SELinux denial, from a real report:
-a captured SELinux Alert Browser screenshot named the exact source and
-target** — source process `lldpd`, access `connectto`, target
-`/run/lldpd/lldpd.socket`. That's not a guess; it's precisely the stale
-control-socket race parapet's own `lldpd.rs` already documents at length
-for its own architecture (a SIGKILLed or otherwise uncleanly stopped lldpd
-leaves its control socket file behind; a freshly starting lldpd finds it
-and tries to connect to it first — its own "is another instance already
-running" self-check — which SELinux denied outright here) — v617/v618 just
-never ported the cleanup that closes it, because gravinet manages `lldpd`
-as an OS service rather than parapet's supervised child process, and
-that's exactly where parapet does this cleanup (`stop()`, right after
-confirming the old process is gone).
-
-Also confirms something useful for its own sake: this system's lldpd
-socket lives in a *subdirectory* — `/run/lldpd/lldpd.socket` — not at
-`/run/lldpd.socket` the way parapet's own (Debian/Ubuntu-focused) cleanup
-assumes. Different distros' lldpd packages evidently lay this out
-differently.
-
-- **`internal/service/lldp.go`**: `lldpServiceStart` now calls
-  `removeStaleLLDPSockets()` before every enable/restart attempt, best-effort
-  unlinking every known candidate path — the confirmed
-  `/run/lldpd/lldpd.socket`, parapet's own `/run/lldpd.socket` and
-  `/var/run/lldpd.socket`, and `/var/run/lldpd/lldpd.socket` (the BSD
-  subdirectory variant, unconfirmed but free to include). A path that
-  doesn't exist — the common case, no prior instance crashed — is silently
-  skipped, never an error; gravinet's own process isn't running in
-  lldpd's SELinux domain, so it isn't subject to the same policy an
-  lldpd-owned unlink would be.
-- **Tests**: `TestLLDPStaleSocketPathsIncludesConfirmedPath` (new) pins the
-  one candidate path that isn't a guess — if this list ever gets
-  refactored and that entry quietly drops out, this fails loudly rather
-  than letting the exact bug just reported come back silently.
-  `TestRemoveSocketsAt` (new) exercises the cleanup itself — removes what's
-  there, silently skips what isn't, including a subdirectory path — against
-  a temp-dir fixture, extracted from the real (root-owned) `/run` paths via
-  a `removeSocketsAt(paths []string)` split for exactly this testability,
-  the same pattern this project has used for every other "can't safely
-  touch the real system state in a test" case (`sysusers_test.go`'s
-  `shadowPath`, `groups_test.go`'s `groupFilePath`/`passwdFilePath`).
-
-Full service test suite, `go vet`, and `gofmt` clean; cross-compiles clean
-on every platform this package supports.
+**Fixed:** the SELinux denial from v618, diagnosed from a real screenshot —
+a stale lldpd control socket left behind by an unclean stop
+(`/run/lldpd/lldpd.socket` on this distro; varies by distro/version). A
+freshly starting lldpd tries to connect to it as a self-check and gets
+denied. Now removed before every start.
 
 ## v618 — 2026-07-24
 
-**Fixed: System > L2 Disco reported "control process exited with error code"
-on save, with no way to tell why** — reported alongside an SELinux Alert
-Browser popup, which was almost certainly the actual cause, but the error
-message gave no way to confirm that or act on it. Two real fixes, in
-`internal/service/lldp.go`:
-
-- **The systemd drop-in now pins `Type=simple` explicitly.** v617's
-  original drop-in only ever set `ExecStart=`, leaving whatever `Type=` the
-  packaged `lldpd.service` shipped with untouched — and some distros'
-  lldpd packages use `Type=notify` (lldpd supports systemd's `sd_notify`
-  readiness protocol). `-d` alone doesn't guarantee that handshake happens
-  the way `Type=notify` expects; systemd can end up waiting on a
-  notification that never arrives, or otherwise disagreeing with the base
-  unit's assumptions about how the process behaves — a real, plausible
-  contributor to "the control process exited" that had nothing to do with
-  SELinux at all. `Type=simple` matches exactly what `-d` actually does
-  (stay in the foreground; systemd just watches the PID, no handshake
-  needed), removing that ambiguity outright regardless of what the
-  packaged unit assumed.
-- **A failed start now actually says why.** The previous error message was
-  built entirely from `systemctl`'s own output — "Job for lldpd.service
-  failed because the control process exited with error code" — which is
-  systemd truthfully reporting that something failed without saying what;
-  the real reason (an SELinux/AppArmor denial, a stale control socket, a
-  port conflict, ...) only ever lived in the journal, which nothing read.
-  `lldpJournalHint()` now runs `journalctl -u lldpd.service` on a failed
-  start and folds its most recent log line into the error, plus a
-  targeted, pattern-matched hint when it recognizes the shape — an SELinux
-  AVC denial or "permission denied" points at `ausearch -m avc -ts recent`
-  and the SELinux Alert Browser (with a note that `audit2allow` can build
-  a local policy module if it turns out to be a legitimate false
-  positive); AppArmor points at `journalctl -k`; a stale control socket or
-  address-in-use points at `pgrep -a lldpd` and the socket path — the same
-  three-way classification parapet's own `crash_hint()` (`src/lldpd.rs`)
-  already makes for its child-process model, ported here for gravinet's
-  OS-service one.
-- **Tests**: `TestLLDPCrashHint` (new) pins the log-line → hint mapping
-  across all three recognized patterns plus two unrecognized ones (no
-  hint, not a guess); `TestLastNonEmptyLine` (new) covers the
-  blank-lines/whitespace/truncation edge cases the journal-tail extraction
-  depends on. Writing these caught two of my own mistakes before either
-  shipped: a mis-transcription of parapet's actual stale-socket phrase
-  (I'd written "already running" where parapet's real check — and real
-  lldpd log output — says "another instance is running" / "giving up"),
-  and a test assertion checking for text that wasn't actually a contiguous
-  substring of my own hint string. Full service test suite, `go vet`, and
-  `gofmt` all clean; cross-compiles clean on every platform this package
-  supports.
-
-If you hit this again on v618, the error itself will now show the actual
-journal line and, for a real SELinux denial, point you at `ausearch -m avc
--ts recent` (or the Alert Browser's own "Troubleshoot" detail) — paste that
-back if it's still unclear what's being denied.
+**Fixed:** L2 Disco start failures gave no diagnostic info beyond systemd's
+generic "control process exited with error code." Pinned `Type=simple` in
+the systemd drop-in (some distros' `lldpd.service` ships `Type=notify`,
+which our `-d` invocation doesn't satisfy) and added `journalctl`-based
+error capture with SELinux/AppArmor/stale-socket pattern hints, mirroring
+parapet's own `crash_hint()`.
 
 ## v617 — 2026-07-24
 
-**New: System > L2 Disco** — duplicates parapet's Network > L2 Discovery
-config page (per-interface LLDP/CDP toggles) *and* its separate Monitor >
-Status: LLDP/CDP neighbor table onto one gravinet page, sitting right after
-SNMP in the System group. Combines config and live neighbor status the same
-way Time and SNMP already do here, rather than parapet's own split across
-two different nav locations. Install-time `lldpd` installation, as
-requested, mirroring the SNMP pattern.
-
-Same architecture change as SNMP, for the same reason, restated because it
-applies again here: parapet spawns and supervises `lldpd` as a direct child
-of its own process (with real, hard-won complexity around lldpd's privsep
-worker process, process groups, and crash-hint diagnostics that come with
-owning that lifecycle — see `lldpd.rs`'s own extensive comments). gravinet
-instead manages it as an ordinary OS service, the same way it already
-treats FRR and snmpd rather than running either as a child. A child of
-gravinet's own process would die every time gravinet itself restarts, which
-happens far more often than an operator wants link-layer discovery to
-blink; a real OS service persists across that, and gravinet doesn't need to
-reimplement lldpd's own privsep-worker cleanup dance to get there. The one
-piece that's identical either way: reading live neighbor data. lldpcli
-talks to whatever lldpd instance is running over its control socket
-regardless of who launched it, so neighbor status works the same whether
-gravinet, systemd, or an operator by hand started the agent.
-
-Config is delivered as the exact argv parapet's own code already documents
-precisely (`-d`, `-c` for CDP, `-I <ifaces>`) rather than lldpd's own
-config-file directive grammar (lldpcli commands in `/etc/lldpd.conf`) —
-that grammar is real and would also work, but this sticks to argv already
-precisely specified in parapet's comments rather than a less-familiar
-syntax that can't be verified against a live lldpd here; getting an
-unfamiliar directive grammar subtly wrong would silently fail to apply
-instead of erroring. On Linux those flags go through a systemd drop-in
-(`ExecStart=` cleared then reset — a standard, well-documented override
-mechanism, not a guess at whichever distro-specific `/etc/default` or
-`/etc/sysconfig` convention the packaged unit might or might not read extra
-arguments from); on the BSDs, through each platform's own `_flags` rc
-variable, *appended to* the packaged rc.d script's own base invocation
-rather than replacing it — so `-d` is deliberately left out there, unlike
-the Linux drop-in, which fully replaces `ExecStart` and so needs the
-complete, self-sufficient command line.
-
-- **`internal/config/config.go`**: `DiscoveryConfig`/`DiscoveryIface`
-  (`Interfaces []DiscoveryIface{Name,LLDP,CDP}`) + `IsRunnable()`/`AnyCDP()`,
-  ported from parapet's `Discovery`/`DiscoveryIface` models — loopback
-  excluded from both, matching parapet's own reasoning (LLDP/CDP are
-  link-layer discovery protocols; loopback has no link partner).
-- **`internal/service/lldp.go`** (new): argv building (`lldpArgs`), interface
-  name validation (`ValidLLDPIface`, exported — see below), binary lookup,
-  `LLDPSupported()`, `ApplyLLDP()`, service start/stop/status for **linux,
-  freebsd, openbsd, darwin** (same root-vs-Homebrew caveat SNMP's package
-  comment already documents, restated here since it applies unchanged), and
-  `LLDPNeighbors()` — a faithful port of parapet's own `discovery_json()`
-  neighbor-table parser, handling both JSON shapes different lldpd versions
-  produce (`interface` as an object or an array of single-key objects,
-  exactly as parapet's own comment says it has to). **Windows is
-  unsupported**: unlike SNMP (which at least has *something* — a different,
-  registry-based built-in service — to honestly contrast against), LLDP has
-  no Windows equivalent at all gravinet could point to; there's nothing to
-  even describe as "different," it's just absent.
-- **`internal/service/lldp_test.go`** (new): 8 tests — argv construction
-  across every on/off/CDP-only/loopback-excluded/invalid-name combination,
-  comma-vs-space joining, and both neighbor-JSON shapes parsed against
-  realistic fixtures (including the "no recognized name field, fall back to
-  the map's sole key" case). All passed on the first run — no bugs caught
-  this time, unlike SNMP's two test-expectation mistakes and one real
-  handler bug.
-- **`handleSystemL2Disco`** (`/api/system/l2disco`, GET/POST): merges
-  config and live neighbor status into one reply, the same "config plus
-  live status together" shape SNMP/Time already use, rather than two
-  endpoints the way parapet split them. Found and fixed a real gap while
-  writing this: the first version had **no request validation at all** —
-  even an empty `{"interfaces":[]}` body would reach `service.ApplyLLDP`,
-  which for a not-runnable config really does call
-  `systemctl`/`service`/`rcctl`/`brew services` to disable the agent. Fixed
-  properly, not just for test convenience: exported `ValidLLDPIface` from
-  the service package so the handler validates every interface name (1–15
-  ASCII alphanumeric/`.`/`-`/`_`/`@`) before ever reaching `mutateConfig`/
-  `ApplyLLDP`, rejecting the whole request with `400` on a bad name rather
-  than silently dropping it from the argv later — an operator should be
-  told their save didn't do what they typed, not have it quietly do less.
-  Like Power/Time/Users/SNMP, `ApplyLLDP` runs before the reply is built
-  (not after), since `running` is a live query and building the reply
-  first would report pre-save state.
-- **`secL2Disco`** (`ui.go`): a per-interface LLDP/CDP checkbox table
-  (merging the host's live interface list — the same cached list NAT's
-  masquerade picker already fetches via `systemInterfaces()` — against
-  whatever's saved, so an interface gravinet's never heard of reads as off,
-  not unknown) plus a neighbor status table below it. A toggle saves
-  immediately (matching parapet's own click-and-save behavior — nothing to
-  debounce the way a text field needs) by reading every row's current
-  checkbox state and POSTing it whole, the same "read every row, POST it
-  all" shape the Users table's bulk actions already use. Applies the same
-  "never rebuild the whole page just to refresh a status readout" fix v616
-  gave SNMP: a save only refreshes the neighbor/status card (via the save's
-  own response, no extra fetch needed), never rebuilds the checkbox table
-  itself, so a save landing mid-toggle can't steal a click out from under
-  the operator.
-- **Install-time `lldpd` installation, across every platform that supports
-  it**: `install-linux.sh`/`install-freebsd.sh`/`install-openbsd.sh` all
-  gained `ensure_lldpd` (mirroring `ensure_snmpd`'s shape), each with a
-  matching `--no-lldp`/`--lldp` flag pair. Simpler than SNMP's story: the
-  package name is uniform — `"lldpd"` — across every distro this installer
-  supports, unlike snmpd's `snmpd`-vs-`net-snmp` split, so no per-manager
-  name fallback was needed. `install-macos.sh` prints a note rather than
-  attempting an install, the identical root-vs-Homebrew reasoning as SNMP's
-  own note there. `install-windows.ps1` prints a one-line "not available"
-  note.
-- **Fixed the same `--help` truncation class of bug again**, in three more
-  scripts this time: `install-freebsd.sh` and `install-openbsd.sh`'s
-  `sed -n '2,NNp'` ranges needed widening as their header comment blocks
-  grew (not a truncation *bug* there — those two already tracked their
-  real endpoints correctly before this change, just needed the number
-  updated alongside the new text); `install-macos.sh`'s did too. All
-  four scripts' ranges were re-verified end-to-end against the actual
-  file after every edit, the same discipline `install-linux.sh`'s v615
-  entry describes catching a real pre-existing truncation with.
-- **Docs**: `docs/API.md` gained the full `/api/system/l2disco` reference,
-  a Quick Reference row, and a curl example; re-verified afterward with the
-  same anchor/table-integrity check v609/v615 already established (122
-  headings, 0 duplicate slugs, 43 anchor links, 0 broken, 200 code-fence
-  lines — even).
+**New: System > L2 Disco** — LLDP/CDP per-interface config plus live
+neighbor status, duplicating parapet's Network > L2 Discovery page and its
+separate Monitor neighbor table onto one page. Manages `lldpd` as an OS
+service rather than a supervised child process (same reasoning as SNMP
+below — survives a gravinet restart). Installs `lldpd` automatically if
+missing, on every platform except Windows (no equivalent there, unlike
+SNMP).
 
 ## v616 — 2026-07-24
 
-**Fixed: System > SNMP's form fields would sometimes lose keystrokes mid-typing.** Root cause: every field's `onblur` triggers a save across all five fields together (by design — they're one config, saved as one write), and on success the old code called a full `load()`, which re-fetched and completely rebuilt the card — `body.innerHTML = ''` then fresh `<input>` elements for every field, every time. If that save's round-trip completed while the operator had since clicked into (or was still typing in) another field, the element holding their cursor was destroyed and replaced out from under them mid-keystroke — later characters had nowhere to land. "Sometimes cut off while typing" is exactly what that looks like from the outside.
-
-- **`internal/webadmin/ui.go`**: `secSNMP`'s field row is now built exactly once, at initial load. A successful save calls a new `renderStatus()` instead of `load()`, which only touches the status card (the running/not-running tag and hint) — never the input row — so a save completing mid-edit no longer steals focus or drops anything. `renderStatus` doesn't even need a follow-up fetch: `handleSystemSNMP`'s own POST reply already carries fresh `running`/`hint`, so the save's own response is reused directly.
-- **`internal/webadmin/edit.go`**: found a second, related ordering bug while fixing the first — `handleSystemSNMP` built the JSON reply (which includes a *live* `service.SNMPServiceRunning()` query) *before* calling `service.ApplySNMP`, so every save reported whichever running/stopped state the service was in **before** that save took effect, one save stale, every time. `ApplySNMP` now runs first; the reply is built from its actual result.
-
-No API shape change (the POST reply's fields are unchanged, just correctly ordered now) and no config/wire migration. Full webadmin suite passes, including the SNMP handler tests from v615.
+**Fixed:** SNMP form fields losing keystrokes while typing — a save's full
+reload was destroying and recreating every input mid-edit if the request
+completed while the operator was still typing elsewhere. Now only
+refreshes the status card. Also fixed the reply's "running" field being
+built *before* the save actually took effect, reporting stale status.
 
 ## v615 — 2026-07-24
 
-**New: System > SNMP**, the fifth of parapet's System items recreated —
-sitting between Time and Users in the rail (matching parapet's own relative
-order: resolver, time, snmp, users, power there, minus the dhcp item
-gravinet already dropped). A read-only SNMPv2c monitoring agent (net-snmp's
-`snmpd`) on this host, ported from parapet's own SNMP page, plus install-time
-`snmpd` installation as requested — "if snmp isn't installed, then install
-during installation."
-
-**One deliberate architecture change from parapet's model**, stated plainly
-because it affects behavior an operator might expect to match parapet
-exactly: parapet spawns and supervises `snmpd` as a direct child of its own
-process — if parapet dies, so does snmpd, and it's relaunched on parapet's
-next start. gravinet instead manages `snmpd` as an ordinary OS service
-(`systemctl`/`service`+`sysrc`/`rcctl`/`brew services`), the same way it
-already treats FRR rather than running that as a child either. A child of
-gravinet's own process would die every time gravinet itself restarts — a
-config change, an upgrade, a crash-and-recover — which happens far more
-often than an operator wants their SNMP monitoring to blink; a real OS
-service persists across that. One upside falls out of this for free: no
-AppArmor/SELinux workaround was needed the way parapet's installer applies
-one (dropping snmpd's AppArmor profile to complain mode) — gravinet uses
-the OS's own packaged service rather than bypassing it, so that service's
-existing policy already expects to do exactly what it's being asked to do.
-
-- **`internal/config/config.go`**: new `SNMPConfig` (`Enabled`, `Community`,
-  `ListenAddr`, `Interfaces`, `Location`, `Contact`) + `IsRunnable()`,
-  ported from parapet's `Snmp` model.
-- **`internal/service/snmp.go`** (new): `renderSNMPConf` (injection-resistant
-  community/value sanitization ported from parapet's `clean_community`/
-  `conf_value`), `SNMPConfPath()`, `snmpdBinary()` lookup, `SNMPSupported()`,
-  `ApplySNMP()` (write conf, then enable+restart or disable+stop the
-  service), and `SNMPServiceRunning()` — implemented for **linux, freebsd,
-  openbsd, darwin**. `snmpd.conf` is written to the *standard* net-snmp path
-  (`/etc/snmp/snmpd.conf` on linux/freebsd/openbsd; a Homebrew-prefix search
-  on darwin), not a gravinet-specific one, for the identical AppArmor
-  reason parapet's own comment gives.
-  **Windows is deliberately unsupported**: its native SNMP is a built-in OS
-  feature configured through the registry, not a text file net-snmp reads —
-  different enough that adapting this same code to it would likely be
-  subtly wrong rather than honestly absent, so `SNMPSupported()` just says
-  so.
-  **A real, stated caveat on darwin**: gravinet's own process commonly runs
-  as root there (a launchd daemon needing tun/raw-socket access), and
-  Homebrew refuses to operate as root — the identical constraint
-  `install-macos.sh` already documents for why it fetches Go from go.dev
-  instead of via brew. `ApplySNMP`'s `brew services` calls can hit that same
-  refusal; the resulting error surfaces Homebrew's own "do not run this as
-  root" text verbatim rather than failing mysteriously, but there's no
-  workaround implemented — `ApplySNMP` still writes a correct `snmpd.conf`
-  either way, so that half always works even when the service-management
-  half can't.
-- **`internal/service/snmp_test.go`** (new): 7 tests, several ported
-  directly from parapet's own Rust test suite (community sanitization,
-  value quoting, listen-address validation, runnable checks, conf
-  rendering, injection resistance). Writing these caught two bugs in the
-  tests' own expectations (not the implementation) — traced against actual
-  output rather than guessed, the same discipline this project has used
-  everywhere else a doubled-escape or off-by-one has turned up.
-- **`handleSystemSNMP`** (`/api/system/snmp`, GET/POST): unlike Time
-  (several independent ops) or Users (per-row CRUD), SNMP config is one
-  cohesive settings blob, so this takes the same shape parapet's own `PUT
-  /api/snmp` does — GET returns it, POST replaces it wholesale. Saving
-  always writes `config.SNMP` first regardless of what the OS service does
-  with it afterward; a reconciliation failure comes back as a `"note"` on
-  an otherwise-successful save, never as a rejection — an operator fixing a
-  stuck `snmpd` package shouldn't have to re-enter every field because the
-  save itself looked like it failed. Like Power/Time/Users, follows the
-  currently selected node. `community` is returned in cleartext in `GET`,
-  the same way BGP neighbor passwords already are elsewhere in this API —
-  masked in the UI for shoulder-surfing, not withheld from the API itself.
-- **`secSNMP`** (`ui.go`): community (masked, with the same show/hide toggle
-  Users' password fields use), listen address, interfaces, sysLocation,
-  sysContact — all fields save together on any one field's blur, the same
-  "several fields, one write" pattern `secResolver`'s DNS card already
-  uses. Filling in the community string turns the agent on, clearing it
-  turns it off — the same convention Time's NTP-server field already uses,
-  rather than a separate toggle that could disagree with what's actually in
-  the field.
-- **Install-time `snmpd` installation, as requested, across every platform
-  that supports it**: `install-linux.sh` (`ensure_snmpd`, trying the
-  `snmpd` package name first for apt, falling back to `net-snmp` for
-  dnf/yum/zypper/pacman, since — unlike FRR — the package name genuinely
-  isn't uniform across distros even though the binary and service are both
-  always called snmpd), `install-freebsd.sh` (`pkg install net-snmp`, a
-  single uniform name there), `install-openbsd.sh` (`pkg_add net-snmp`).
-  Each gained a `--no-snmp`/`--snmp` flag pair, matching the existing
-  `--no-frr` convention.
-  **`install-macos.sh` deliberately does not attempt an install**: this
-  script runs as root via sudo, and Homebrew refuses to operate as root —
-  attempting `brew install net-snmp` here would just fail with a permission
-  complaint. Instead it prints a clear one-time note pointing the operator
-  at running `brew install net-snmp` themselves as their own non-root user,
-  with `--no-snmp` to silence it.
-  **`install-windows.ps1`** prints a one-line note explaining why nothing
-  runs there, rather than silently doing nothing.
-- **Found and fixed a pre-existing, unrelated bug while touching
-  `install-linux.sh`**: `--help`'s `sed -n '2,40p'` was already truncating
-  the header comment block before this change (the real end was well past
-  line 40), silently cutting off part of the existing `--no-frr` help text;
-  corrected the range while extending the same block for `--no-snmp`.
-- **Tests**: `internal/webadmin/systemsnmp_handler_test.go` (new) — GET
-  reply shape, the one POST case guaranteed to be rejected by validation
-  before ever reaching a real service enable/disable
-  (`enabled:true`+empty `community`), LOCAL_API placement, nav ordering.
-  Deliberately does **not** test a successful save: any request that gets
-  past validation reaches `service.ApplySNMP`, which really does call
-  `systemctl`/`service`/`rcctl`/`brew services` to enable or disable the
-  actual `snmpd` service — on a machine where a `snmpd`/`snmp` unit happens
-  to already exist, testing that path for real would toggle a real system
-  service as a side effect of running this test suite, the same risk
-  `sysusers_test.go`/`groups_test.go` already refuse to take for
-  `useradd`/`groupadd`, applied here to `systemctl` instead. Also caught a
-  real bug this way: `systemSNMPJSON` returned a bare `nil` `Interfaces`
-  slice, which Go's JSON encoder marshals as `null`, not `[]` — the page
-  expects a real array. Fixed.
-- **Docs**: `docs/API.md` gained the full `/api/system/snmp` reference, a
-  Quick Reference row, and a curl example; verified afterward that every
-  anchor link in the document still resolves and no `mdRender` placeholder
-  leaked (120 headings, 0 duplicate slugs, 43 anchor links, 0 broken, 194
-  code-fence lines — an even count).
+**New: System > SNMP** — read-only SNMPv2c agent config and live status,
+ported from parapet's SNMP page. Manages `snmpd` as an ordinary OS service
+(`systemctl`/`rcctl`/`brew services`) rather than a child process the way
+parapet does — a child of gravinet's own process would die on every
+gravinet restart. Installs `snmpd` automatically if missing (package name
+differs by distro: `snmpd` on Debian/Ubuntu, `net-snmp` elsewhere).
+Windows unsupported (its SNMP is a different, registry-configured
+mechanism).
 
 ## v614 — 2026-07-24
 
-**Fixed: adding a console user (System > Users) could trip an SELinux AVC
-denial on `chpasswd` for reading and writing `/dev/net/tun`** — reported as
-an SELinux Alert Browser popup naming `chpasswd` as the source process and
-a `chr_file` at `/dev/net/tun` as the target. `chpasswd` has no legitimate
-reason to touch a TUN device at all; it never asked to. The real bug was in
-gravinet's own tun device code, not in anything System > Users does:
-`internal/tun/tun_linux.go` opened `/dev/net/tun` with a raw `syscall.Open`
-call carrying no `O_CLOEXEC` flag. That file descriptor lives for the whole
-daemon's lifetime, so without close-on-exec, **every child process gravinet
-ever spawns inherits it** — `chpasswd` merely being the first one running
-under an SELinux domain strict enough to log the inherited access as a
-denial. Every other `exec.Command` this daemon runs (`useradd`,
-`hostnamectl`, `resolvectl`, `sysrc`, PowerShell, ...) was inheriting the
-same fd silently; SELinux just happened to be the first thing anywhere in
-this stack to say so out loud.
-
-- **`internal/tun/tun_linux.go`**: the tun device's `syscall.Open` now
-  carries `O_CLOEXEC`, atomically at open time — not a separate `fcntl`
-  afterward, which would leave a window for a concurrent `exec.Command` on
-  another goroutine to fork in between and inherit the fd anyway. The
-  package's short-lived `ctlSocket` helper (used for `SIOC*` interface
-  ioctls, always closed well before returning) gets `SOCK_CLOEXEC` too, for
-  the same narrow-race reason.
-- **Swept the rest of the package for the same mistake**, since a raw
-  `syscall.Open`/`syscall.Socket` call with no close-on-exec handling is a
-  systemic pattern, not a one-off, and every other instance was exactly as
-  exposed as the tun device fd was: `gateway_linux.go` and `route_linux.go`'s
-  netlink sockets, `gateway_freebsd.go` and `tun_freebsd.go`'s (two) routing
-  sockets, and `gateway_openbsd.go`'s routing socket all gained
-  `SOCK_CLOEXEC`. macOS has no atomic close-on-exec flag for `socket(2)`, so
-  `tun_darwin.go`'s utun control socket and `gateway_darwin.go`'s routing
-  socket instead take `syscall.ForkLock` around an open-then-`CloseOnExec`
-  pair — the same pattern Go's own `os.OpenFile` uses internally on
-  platforms lacking an atomic flag. FreeBSD's and OpenBSD's main tun-device
-  opens (`tun_freebsd.go`, `tun_openbsd.go`) already went through
-  `os.OpenFile`, which sets close-on-exec correctly on its own; only their
-  *other*, raw-`syscall`-opened sockets needed the fix. Windows uses
-  wintun's own handle-based device model, not POSIX fd inheritance, and
-  Go's `syscall.Open`/`CreateProcess` path doesn't inherit arbitrary
-  handles by default there — not the same bug class, nothing to change.
-- **Tests**: `internal/tun/tun_linux_test.go` gained
-  `TestTUNFdNotInheritedByChildProcess` — creates a real tun device, spawns
-  a child process, and checks via `/proc/self/fd` from *the child's own
-  perspective* whether it can see the fd, rather than asserting `O_CLOEXEC`
-  merely appears in the source. Confirmed this actually catches the bug: run
-  against the pre-fix code, it fails with the exact fd number and a message
-  naming the missing flag; against the fix, it passes. Full
-  `internal/tun` suite and the `internal/mesh` tests that exercise the
-  gateway-detection code this change touched
-  (`TestPhysicalGatewayCachedAcrossDemotion`,
-  `TestCheckUnderlayChangeDetectsRoamViaGatewayWhenSourceIPUnchanged`, and
-  neighbors) all pass; every platform builds and vets clean.
-
-No config or wire-format change; nothing to migrate. The existing SELinux
-alert itself is just a log record of what already happened — safe to
-dismiss (Delete/Ignore in the Alert Browser) once running a build with this
-fix, since new user-adds shouldn't trigger it again.
+**Fixed:** adding a console user (System > Users) could trip an SELinux
+denial on `chpasswd` touching `/dev/net/tun`. Root cause was in gravinet's
+own tun code, not Users: the tun device fd was opened without
+`O_CLOEXEC`, so *every* child process gravinet spawns inherited it —
+`chpasswd` was just the first one an SELinux domain flagged it on. Fixed
+across every platform's tun/routing-socket opens.
 
 ## v613 — 2026-07-24
 
-**Fixed: the name this node advertises to mesh peers (`config.Hostname`,
-falling back to the OS hostname) didn't update when the OS hostname changed
-via System > Resolver — it's read from the OS exactly once, at daemon
-startup, and cached for the process's life.** The first attempt at this fix
-was wrong in a way worth stating plainly rather than quietly dropping: it
-made `Engine.Hostname()` re-derive the OS hostname live on every call, then
-extended the `ctrlClusterNotify` control message with a new hostname field
-and an `AnnounceHostname()` push so already-connected peers would see a
-change without waiting for a reconnect. That's real, working complexity for
-a problem that already had a one-line answer already in use everywhere else
-in this exact codebase: **restart the service, and let it read the hostname
-fresh at its own next startup, the same as it always has.** Building the
-live-push version first also cost real time chasing what turned out to be an
-unrelated pre-existing bug it surfaced (see below) before the simpler fix was
-even tried.
-
-- **Reverted in full**: `internal/mesh/engine.go`, `ban.go`, and
-  `handshake_engine.go` are back to their exact v611 form — the `hostname`
-  field, `Hostname()` as a plain getter, no `AnnounceHostname`, no wire
-  change to `ctrlClusterNotify`. `cmd/gravinet/main.go` and
-  `shortHostname` (moved into `internal/mesh` in the first attempt) are
-  back where they were, including the original `hostname_test.go`.
-- **The actual fix**: `internal/webadmin`'s `handleSystemResolver`, after a
-  successful `{op:"hostname"}`, now restarts the gravinet service — reusing
-  `handleRestart`'s own reply-then-restart mechanism verbatim
-  (`service.CanRestart`/`service.Restart`, the same 700ms flush delay, the
-  same background goroutine) rather than inventing a second one. This has
-  nothing to do with the OS-level rename, which already took effect
-  synchronously inside `SetHostname`; it's specifically so gravinet's own
-  cached identity picks up the change too, without the operator needing to
-  separately notice and click Restart. Best-effort and scoped to the
-  `hostname` op only — a `dns` change never touches gravinet's own process
-  state, so it never restarts anything. If this host can't restart itself
-  (no service manager — `gravinet run` interactively, say), the OS-level
-  hostname change still stands; the reply's `note` says a manual restart is
-  needed instead, the same honesty every other best-effort corner of this
-  feature already uses.
-- **Docs updated to match**: the hostname card's hint text in `secResolver`,
-  `handleSystemResolver`'s own doc comment, `hostresolver.go`'s package doc,
-  and `docs/API.md`'s `hostname` field description all now describe the
-  restart instead of the abandoned live-push design.
-- **A real, pre-existing bug surfaced and got fixed as a side effect of
-  writing (and then discarding) the live-push version's integration test**,
-  worth keeping despite the revert: two real meshed test nodes with
-  bidirectional `AddSeed` (both sides seeding each other, not just one)
-  can race into `install()` twice per side — see that function's own
-  "installs a fresh session over a live one" comment — leaving `ns.byNode`
-  (what `ListPeers` reads) pointing at a different session object than the
-  one control messages actually route through. Confirmed this is not new:
-  it reproduces identically against an untouched v611 build. Nothing in
-  this version fixes the underlying dedup race itself — that's a separate,
-  larger piece of work — but it's now a known, reproducible finding rather
-  than a mystery, worth a look before anything else in this codebase
-  depends on both sides of a pair seeding each other and then reading live
-  per-peer state back immediately afterward.
-- **A second, smaller bug caught before shipping**: a find-and-replace while
-  making the new hostname hint text UI-editable doubled a backslash in two
-  Unicode escapes (`\u2014`, `\u2019`), which would have rendered as a
-  literal backslash followed by the escape code instead of an em dash and an
-  apostrophe. Caught by extracting and syntax-checking the embedded JS
-  before considering the change done, rather than assuming a clean `go
-  build` alone proves the generated page is correct — the same discipline
-  v605's own postmortem already flagged as necessary for exactly this class
-  of mistake.
-- **Tests**: no new automated test was added for the restart trigger itself.
-  `internal/webadmin/restart_handler_test.go`'s own
-  `TestHandleRestartRefusesWhenUnavailable` establishes the pattern this
-  codebase already uses for exactly this situation — check
-  `service.CanRestart()` for real and `t.Skip` the positive case where it
-  isn't exercisable — specifically because actually exercising the positive
-  case would restart (or, for `SetHostname`, actually rename) the machine
-  running the suite. Followed, not reinvented: the existing rejection-path
-  tests in `systemresolver_handler_test.go` are untouched and still pass, and
-  no new test calls `SetHostname` with a value that would actually change
-  this sandbox's hostname.
+**Fixed:** the hostname gravinet advertises to mesh peers didn't update on
+a System > Resolver rename (read once at startup, cached). A first attempt
+(live-push a new hostname to connected peers) was reverted in favor of the
+simpler, already-established pattern: restart the service, let it read
+fresh at its own next startup. Also surfaced, but didn't fix, a real
+session-dedup race when two nodes seed each other bidirectionally.
 
 ## v612 — 2026-07-24
 
-**New: System > Resolver** — the fourth of parapet's System items recreated,
-sitting directly above **Time** in the rail (Upgrade → **Resolver** → Time →
-Users → Power), matching parapet's own item order (resolver, time, dhcp,
-snmp, users, power — gravinet skips dhcp and, for now, snmp). Hostname and
-default DNS servers/search domain for this host, same silently-saves-on-blur
-convention as every other field on System > Time — no Save button here
-either.
-
-This page is a deliberately different concern from two other DNS-shaped
-things already in this app, and it says so in its own top hint rather than
-leaving an operator to guess: **Mesh > DNS** (`internal/resolver`) registers
-*conditional-forwarding* domains — only queries under a specific mesh domain
-go anywhere near it, scoped to gravinet's own tun interface wherever the OS
-has a concept of interface scoping. **Naming > Hosts** writes a delimited
-block mapping *peer* names to their overlay addresses, never a self-entry.
-System > Resolver sets the host's *default* resolver — what answers
-everything else — and on Linux, macOS, and Windows the two live in
-structurally disjoint mechanisms (a global `resolved.conf.d` drop-in vs.
-per-link `resolvectl` state; the default DNS service config vs. per-domain
-`/etc/resolver/<domain>` files; the adapter's DNS settings vs. per-domain NRPT
-rules), so neither page can touch anything the other manages.
-
-**FreeBSD and OpenBSD are the one place that isn't automatically true, and
-got specific design attention rather than a straight port of parapet's
-model.** Mesh DNS on those two platforms only works when
-`local-unbound`/`unbound` is already the box's active resolver
-(`/etc/resolv.conf` → `127.0.0.1`, an installer-time step). Following
-parapet's own `resolver.rs` literally — overwrite `resolv.conf`'s
-`nameserver` line with whatever the operator types here — would have
-silently routed every query around unbound and taken Mesh DNS's per-domain
-forwarding down with it, not by touching a file Mesh DNS manages, but by
-unplugging the thing its forwarding depends on existing at all. So on these
-two platforms, when unbound is live, the DNS-servers field is applied as
-unbound's *own* default forward zone (`"."` — everything not more
-specifically claimed by one of Mesh DNS's own zones) through the exact same
-`*-control` tool Mesh DNS itself uses, and the search-domain field edits only
-`resolv.conf`'s `search` line — the `nameserver 127.0.0.1` line that keeps
-Mesh DNS alive is never touched. Only when unbound *isn't* active (so Mesh
-DNS forwarding isn't functioning on that host either) does this page fall
-back to owning `resolv.conf` outright, same as parapet.
-
-One naming wrinkle surfaced rather than left implicit: gravinet already has
-an older, separate notion of a node's name — `config.Hostname`, "advertised
-to peers; OS hostname if empty" — read from the OS exactly once, at daemon
-startup, and cached for the process's life. Changing the OS hostname here
-takes effect for the OS immediately; it does not change what this node
-advertises to mesh peers until gravinet itself restarts (and not at all if
-`config.Hostname` is set explicitly). The hostname card says this plainly.
-
-- **Backend** (`internal/service/hostresolver.go`, new, ~850 lines):
-  `HostResolver()` / `SetHostname()` / `SetHostDNS(servers, search)`,
-  structured exactly like `hosttime.go` — typed read, one setter per field,
-  each `(ok, hint)`, each dispatching on `runtime.GOOS`. As with Time, the OS
-  is the source of truth for everything with a native persistent home (the
-  hostname; `resolv.conf`; `resolved`'s/NetworkManager's own config) — read
-  live, written through, nothing duplicated into gravinet's config. The one
-  deliberate exception is the FreeBSD/OpenBSD `"."` zone: like every zone
-  Mesh DNS itself adds, a `*-control forward_add` lives only in the running
-  daemon's memory, gone on its next restart whether or not gravinet restarts
-  too — so (and only for that case) a small on-disk breadcrumb records the
-  last-applied server list, in the same parent directory
-  `internal/resolver`'s own per-network state uses but under a disjoint,
-  collision-proof `__system__-<platform>.json` name.
-- **`ReapplyBoot()`** (same file) reasserts that breadcrumb once at gravinet
-  startup, called from `main.go` right alongside `clearStaleHostsBlocks`/
-  `clearStaleDNSForwards` — but doing the opposite of those two: they clear
-  *stale* per-network state that only ever meant something while that exact
-  process's mesh was up; this reasserts a *standing* host fact that a
-  gravinet restart (every `System > Upgrade` apply, notably) or an unrelated
-  unbound restart could otherwise silently drop. No-op on every other
-  platform, and a no-op here too if System > Resolver was never used.
-- **Per-platform tooling**: linux uses `hostnamectl` (falling back to a
-  direct `/etc/hostname` write) for the hostname; `systemd-resolved`'s global
-  `resolved.conf.d` drop-in when active, else NetworkManager's `dns=none` +
-  a direct `resolv.conf` write, else a direct `resolv.conf` write, for DNS.
-  darwin uses `scutil --set HostName` (value piped via stdin, never an argv
-  argument) and `networksetup -setdnsservers`/`-setsearchdomains` on
-  whichever network *service* currently carries the default route — resolved
-  via `internal/tun.DefaultGateway` (the same cross-platform primitive
-  `internal/mesh`'s full-tunnel roam detection already uses) plus a parse of
-  `networksetup -listallhardwareports` mapping the interface name to a
-  service name; a default route sitting on an interface networksetup doesn't
-  manage (most plausibly gravinet's own tun, mid full-tunnel) fails with a
-  named, actionable error rather than guessing. freebsd uses `sysrc
-  hostname=` + a live `hostname` call, and local-unbound-control's `"."`
-  zone or direct `resolv.conf` ownership per the unbound-active check above.
-  openbsd is the same shape via `/etc/myname` and `unbound-control`. windows
-  uses `Rename-Computer -Force` (noted in the reply as taking effect only
-  after the host's next restart — Windows has no live hostname change) and
-  `Set-DnsClientServerAddress`/`Set-DnsClient -ConnectionSpecificSuffix` on
-  the default-route adapter's interface index (found the same way as
-  macOS's service, one `net.InterfaceByIndex` away from not needing an
-  alias lookup at all).
-- **Validation**: `validHostname` ports parapet's own `valid_hostname`
-  exactly (RFC-1123-style labels, no leading/trailing hyphen, ≤63
-  bytes/label, ≤253 total); `validSearchDomain` is the same rule (parapet's
-  own `valid_search_domain` is defined as literally calling
-  `valid_hostname`, so a bare single-label domain like `"internal"` already
-  passes without special-casing). `validDNSServerAddr` requires a real
-  `netip.Addr` — unlike Time's NTP servers, a hostname isn't accepted here,
-  since resolving one is the whole question this field answers.
-- **Handler** (`handleSystemResolver`, `/api/system/resolver`): GET reads
-  live state; POST takes `{op:"hostname", hostname}` or `{op:"dns", servers,
-  search_domain}`. Like Power/Time/Users, follows the currently selected
-  node (deliberately not in `LOCAL_API`) so a node's default resolver can be
-  fixed from the console you already have open on it.
-- **UI** (`secResolver`): a Hostname card and a Default DNS card (servers +
-  search domain sharing one save call — several backends apply both in a
-  single write, e.g. the `resolved.conf.d` drop-in's `DNS=`/`Domains=`
-  lines, so two independent auto-saves risked one clobbering the other
-  mid-edit). Clearing DNS servers reverts to whatever the host would
-  otherwise use (typically DHCP) rather than disabling anything, so — unlike
-  clearing NTP servers on System > Time — it carries no confirmation
-  prompt.
-- **Docs**: `docs/API.md` gained a full `POST /api/system/resolver`
-  section (Quick Reference row, request/reply shapes, a curl example)
-  between Power's and Time's, plus cross-references from it to Mesh > DNS
-  and Naming > Hosts explaining the non-overlap. `README.md`'s sidebar tour
-  updated for System's actual current contents (Resolver, and — previously
-  missing entirely — Users).
-- **Tests**: `internal/service/hostresolver_test.go` — validation/injection
-  refusals for all three fields, `resolvedConfSection`'s `[Resolve]`-only
-  parsing, `unixDirectResolvConf`'s full lifecycle (write, marker-gated
-  clear, an unowned file surviving a clear, a stale symlink replaced rather
-  than written through), and — the specific guarantee the whole
-  FreeBSD/OpenBSD design depends on —
-  `TestSetSearchLineOnlyPreservesNameserver`, confirming a search-domain
-  edit never disturbs a `nameserver 127.0.0.1` line. Also
-  `parseHardwarePorts`/`resolveServiceName`/`parseRootForward` against fixed
-  sample tool output, `TestDefaultServiceNameEndToEnd` exercising the real
-  gateway-to-service-name glue against the loopback interface (present on
-  every test host, so no real default route or `networksetup` is needed),
-  and the root-forward-zone state breadcrumb's save/load/clear and its
-  collision-proof naming.
-  `internal/webadmin/systemresolver_handler_test.go` — GET reply shape,
-  validation-only rejections that never reach a real OS command, LOCAL_API
-  placement, and nav ordering (reusing `timeTestServer`, since this endpoint
-  needs no network config either).
-
-One real bug the tests caught before shipping: the FreeBSD/OpenBSD
-`list_forwards` reader was written against an imagined multi-line, indented
-block format that doesn't match reality. `internal/resolver`'s own
-`parseListForwards` (already in this codebase, already presumably correct)
-shows the real shape — one line per zone, `<domain> IN forward <addr>
-<addr> ...` — and the rewritten parser matches it, reimplementing the same
-field-based approach rather than importing the other package's unexported
-helper.
+**New: System > Resolver** — hostname and default DNS servers/search
+domain for the host, sitting above Time. Deliberately distinct from Mesh >
+DNS (conditional-forwarding for mesh domains only) and Naming > Hosts
+(peer-name records) — this sets what answers *everything else*, and on
+most platforms the two live in structurally disjoint mechanisms so neither
+page can touch what the other manages. FreeBSD/OpenBSD got special
+handling: when `unbound` is the active resolver (required for Mesh DNS to
+work at all there), the DNS-servers field is applied as unbound's own
+default forward zone instead of overwriting `resolv.conf` outright, so
+saving here can't silently take Mesh DNS down by unplugging what it
+depends on.
 
 ## v611 — 2026-07-23
 
-**System > Users redesigned around a real OS group, replacing the
-`web_admin.allow_users` config-list gate it launched with (v605).** Sign-in
-under a system-auth mode (`pam`, `system`/bsd_auth, `windows`) is now
-decided by membership in a single local OS group, **`gravinet`** — root
-always may sign in and can neither be added to nor removed from the group;
-every other account, only while a member. This is the same design parapet's
-own Users page uses its group for, and it's a better fit than the config
-list it replaces on the two axes that config list was worse on: it's the
-OS's own concept of "who's allowed to do this" (`usermod -aG gravinet bob`
-by hand and a click on this page now mean exactly the same thing, with no
-gravinet-owned bookkeeping to keep in sync with reality), and because
-membership is checked **live, on every login attempt** rather than a map
-built once at startup, a change here takes effect **immediately — no
-restart** — unlike almost everything else this admin UI edits. The page's
-top hint is now just: "Manage local OS accounts allowed to sign in to this
-console. Acts on the node you're currently managing." — the earlier
-"unrestricted / no restriction is currently set" note is gone entirely,
-since a group inherently has a defined membership; there's no longer an
-"anyone may sign in" state to explain.
-
-`web_admin.allow_users` still parses (JSON backward compatibility for old
-config files) but is no longer consulted anywhere. This is a genuine,
-security-relevant behavior change worth stating plainly: a node that was
-relying on a narrower `allow_users` list now grants access based on
-`gravinet` group membership instead, which may not be the identical set of
-accounts. Review group membership after upgrading if `allow_users` was in
-use.
-
-- **`internal/service/groups.go`** (new): `GravinetGroup` const,
-  `IsGroupMember` (the root exception, then a live OS check — fails closed,
-  never open, if membership can't be read at all), `EnsureGravinetGroup`
-  (idempotent create), and per-platform create/add-member/remove-member/
-  list-members: linux (`groupadd`/`gpasswd -a`/`gpasswd -d`), freebsd
-  (`pw groupadd`/`pw groupmod -m`, with member *removal* done as a
-  read-full-list-then-`pw groupmod -M`-the-filtered-list round trip since
-  `pw`(8) has no documented single-member delete flag to trust blindly),
-  openbsd (`groupadd`/`usermod -G`, same read-modify-write pattern since
-  OpenBSD's `-G` replaces the whole supplementary-group list rather than
-  appending like Linux's `-aG`), macOS (`dscl`, including picking a fresh
-  GID the same way `sysusers.go` already picks fresh UIDs), and Windows
-  (`net localgroup`). Membership reads check both the group's supplementary
-  member list *and* any account whose **primary** group happens to be this
-  one — the same two-source read parapet's own `group_members()` does, for
-  the same reason (a primary-group member never shows up in the
-  supplementary list alone).
-- **`internal/service/sysusers.go`**: `ListSystemUsers()` no longer takes a
-  config-supplied list — it reads live group membership itself (root
-  excluded from the returned list, though always allowed). `AddSystemUser`
-  now calls `EnsureGravinetGroup` then adds the account to it, rolling back
-  the just-created OS account if group-add fails (an account that exists
-  but can't actually sign in is worse than no account). `DeleteSystemUser`
-  removes group membership as a defensive, best-effort step after account
-  deletion (which already drops it from every group as a side effect on
-  every platform here).
-- **All three system-auth backends** (`auth_pam.go`, `auth_bsdauth.go`,
-  `auth_windows.go`) now gate on `service.IsGroupMember(user)` instead of a
-  config-built allow-map; the now-unused `allow []string` parameter and the
-  `allowSet` helper were removed rather than left as dead weight.
-  `auth_nopam.go`/`auth_other.go` stubs updated to match. Verified across
-  every build-tag combination that matters, not just this sandbox's
-  default: a real build for linux+cgo, plus cross-compiles for openbsd,
-  windows, darwin-without-cgo, and a generic no-system-auth platform — all
-  clean, since none of these five files can be exercised by a single `go
-  build` in one sandbox.
-- **`cmd/gravinet/main.go`**: ensures the `gravinet` group exists at
-  startup when `auth_mode` is already `pam`/`system`/`windows`, so a node
-  that reaches this feature already configured for a system-auth mode has a
-  working login gate from its very first boot on this version — not only
-  after an operator happens to open System > Users first. Best-effort and
-  non-fatal, consistent with `IsGroupMember` already failing closed if the
-  group is somehow still missing.
-- **Handler/wire changes** (`edit.go`): GET drops `unrestricted`, adds
-  `group`, `group_known`, `group_hint`. Both `add` and `delete` replies
-  drop `restart` entirely — there's nothing left that needs one.
-- **Tests**: `internal/service/groups_test.go` (new) — fixture-based
-  `/etc/group`+`/etc/passwd` parsing (supplementary-only, primary-group
-  inclusion without double-counting, unknown-group vs. empty-group
-  distinction, root's unconditional pass, fail-closed on an unreadable
-  group file) via the same overridable-path pattern `sysusers_test.go`
-  already established for `/etc/shadow` — no test here, or anywhere in this
-  change, ever risks invoking a real `groupadd`/`gpasswd`/`pw`/`net
-  localgroup` against the machine running the suite.
-  `systemusers_handler_test.go`'s `TestSystemUsersGet` updated for the new
-  field shape; deliberately checks field presence/types rather than
-  asserting a specific `group_known` value, since GET now reads this
-  sandbox's real (unmocked) group state and a value-specific assertion
-  would make the suite's outcome depend on unrelated host state.
-- **Docs**: `config.WebAdmin.AllowUsers`'s comment and `docs/API.md`
-  (Authentication section, the full `/api/system/users` reference, and the
-  console-user example) all updated to describe the group, not the old
-  list.
-- **Deliberately not done**: the install scripts do not create the
-  `gravinet` group at install time. `EnsureGravinetGroup`'s runtime call
-  already covers every case that matters — a fresh install with a
-  system-auth mode already configured gets the group at first boot (via
-  `main.go`'s new startup call), and an in-place upgrade to this version
-  gets it the first time anyone actually adds a user — so an install-script
-  addition would be pure redundancy with no case it uniquely covers,
-  not worth the extra surface across five platform-specific scripts.
+**Changed: System > Users is now gated by a real "gravinet" OS group**
+(root always exempt), replacing the earlier `web_admin.allow_users` config
+list. Membership is checked live on every login — no restart needed for a
+change to take effect, unlike almost everything else this UI edits.
+`allow_users` still parses for backward compatibility but is no longer
+consulted; this is a real, security-relevant behavior change if that field
+was in use. Cross-platform group management (linux/freebsd/openbsd/darwin).
 
 ## v610 — 2026-07-23
 
-**Fixed a regression v609 itself introduced**: every backtick code span in a
-rendered doc page (Info > API, Readme, Getting Started) showed the literal
-text `\u0001N\u0001` instead of turning into a `<code>` tag — visible
-throughout Info > API's Networks table and everywhere else a `` `field` ``
-appeared. Root cause was a doubled backslash in v609's own edit to
-`mdRender`'s code-span placeholder: `codes.push(cc); return
-'\\u0001'+...` (two backslashes) inserts the seven literal characters
-`\u0001` as text, while the restore step later in the same function
-correctly looks for the real U+0001 control character — so the two never
-matched, and the placeholder text leaked straight into the page instead of
-being swapped for `<code>`. Fixed by dropping back to a single backslash
-(`'\u0001'`), which is what actually produces the control character at
-runtime.
-
-This was caught, and diagnosed to the exact byte, using a small Python
-script comparing backslash counts around every `u0001` occurrence in the
-current file against the pre-regression original — eyeballing escaped
-tool-output text is exactly how a doubled backslash slips by unnoticed
-(twice now, both times in this same file's Unicode escapes), so this one
-was pinned with a byte-for-byte diff instead of another visual read.
-
-**Also added real markdown table support to `mdRender`**, which never had
-any — a GFM table (header row, `|---|---|` separator, body rows) previously
-fell straight through to the plain-paragraph fallback and rendered as a
-wall of text with literal `|` and `---` characters, exactly like the
-Networks operation table and the ~70-row Quick Reference table looked in
-the screenshot that surfaced the `\u0001` bug above. Now: a row containing
-`|` immediately followed by a valid separator row (dashes, optionally
-colon-flanked per cell for `:--`/`--:`/`:-:` alignment) renders as a real
-`<table>` — reusing the app's existing global `table`/`th`/`td` styling
-rather than introducing a parallel set of rules — wrapped in the same
-`.tscroll` horizontal-scroll container wide tables elsewhere in the app
-already use. Cell splitting is a plain character scan, not a lookbehind
--based regex split: lookbehind assertions only reached broad Safari support
-in 16.4 (March 2023), nothing else in this file uses one, and a manual loop
-handles `\|` (an escaped, literal pipe inside a cell) exactly as well.
-
-Verified against the real documents, not synthetic examples: extracted the
-actual `mdRender` function from the built file and ran it against the real
-`docs/API.md`, `README.md`, and `getting-started.md`. Zero placeholder
-leaks (either the literal 7-character text or a stray unconverted control
-character) in any of the three. All 10 of API.md's tables — confirmed
-against a direct count of `|---|`-style separator lines in the source, so
-none were missed and none spuriously invented — render as real `<table>`
-elements, including the large Quick Reference table. Spot-checked specific
-cells (the Networks table's `op`/`add` cells) resolve to the exact expected
-`<code>`/`<td>` markup, not just "a table exists somewhere."
+**Fixed:** a regression from v609's own fix — a doubled backslash broke
+code-span rendering, showing the literal text `\u0001` instead of `<code>`
+tags. Also added real markdown table support to `mdRender`, which never
+had any (tables rendered as raw pipe-delimited text before).
 
 ## v609 — 2026-07-23
 
-**Fixed: every table-of-contents link on Info > API (and README/Getting
-Started, same renderer) dumped you on Mesh > Networks instead of jumping to
-the section.** Two compounding bugs in `mdRender`'s markdown renderer:
-
-1. Every link — `[Overview](#overview)` included — got
-   `target="_blank" rel="noopener"`, correct for a real external URL but
-   wrong for a same-page `#anchor`: opening a hash-only href in a new tab
-   doesn't jump to the anchor, it reloads this entire single-page app fresh
-   in that new tab. With no URL-hash routing here, a fresh load always lands
-   on `state.section`'s default, `'networks'` — exactly the reported "every
-   link takes you to Mesh > Networks."
-2. Even without bug 1, it wouldn't have worked anyway: rendered headings
-   never got an `id` attribute at all, so `#overview` had nothing to scroll
-   to in the DOM regardless of how the link was opened.
-
-Fixed both: the link renderer now only adds `target="_blank"` when the href
-does *not* start with `#`, so an internal anchor is a plain same-page link
-(native browser scroll-to-anchor, no reload) and an external `http(s)` link
-still opens in a new tab exactly as before. New `mdSlug()` generates the
-same anchor ids GitHub's own markdown renderer would — these docs' tables of
-contents were written assuming that convention — and every heading now
-carries `id="<slug>"`.
-
-`mdSlug` needed one non-obvious correctness detail to actually match: GitHub
-turns *each* space into a hyphen individually, it does not collapse runs of
-them first. Stripping punctuation like "&" from "Status & configuration"
-leaves two adjacent spaces where the "&" was, and those become a double
-hyphen —
-`status--configuration`, matching the TOC link the doc already had — not
-`status-configuration`, which is what a naive "collapse whitespace, then
-hyphenate" implementation produces (and what the first version of this fix
-actually shipped internally before being caught).
-
-Verified exhaustively against the real file rather than a few examples: a
-throwaway script extracted `mdSlug` from the built `ui.go`, ran it against
-all 25 top-level entries in API.md's own table of contents (all match) and
-all 39 `#anchor` links anywhere in the document body, including several
-added across v606/v607's own doc updates like
-`[`POST /api/restart`](#post-apirestart)` (all resolve to a real heading),
-and confirmed no two of the document's 115 headings collide on the same
-slug (none do, so no GitHub-style `-1`/`-2` disambiguation suffix was
-needed). Also checked README.md and getting-started.md, the renderer's other
-two consumers, for heading collisions of their own — none.
+**Fixed:** every link on Info > API/Readme/Getting Started reloaded the
+whole app instead of jumping to a section — internal `#anchor` links were
+getting `target="_blank"` like external links do, and headings had no `id`
+to jump to anyway. Added heading IDs and GitHub-style slugs.
 
 ## v608 — 2026-07-23
 
-**Documentation-only correction to v607's changelog entry** — no code
-change. v607's own entry claimed a node "self-heals the next time it
-upgrades in-place to v607 or later," which is wrong in the one case that
-actually matters: upgrading *to* v607 doesn't self-heal, because the code
-that performs that upgrade is the pre-upgrade binary, which doesn't have
-v607's fix yet. Confirmed for real: a node upgraded from v606 to v607 via
-System > Upgrade still showed Info > API as "not installed on disk"
-afterward, exactly as the flawed claim should have predicted but didn't.
-v607's entry now says plainly that the fix takes effect starting from the
-upgrade *after* a node reaches v607 — including re-applying the same
-archive again — and that there's no way around a manual re-apply for the
-transition upgrade itself, since nothing can make an old binary run code it
-was never compiled with, and no source tree survives between upgrades to
-retroactively draw from.
+**Changelog correction only**, no code change: fixed v607's inaccurate
+claim that a node self-heals its docs on the very upgrade that reaches
+v607. It doesn't — the code performing that upgrade is still the old
+binary. Takes effect starting from the *next* upgrade after reaching v607.
 
 ## v607 — 2026-07-23
 
-**Fixed: Info > API showed "not installed on disk" after an in-place
-upgrade via System > Upgrade**, even on a node that just became v606 (which
-adds that page). Root cause was more general than API.md specifically: an
-in-place upgrade — `POST /api/system/upgrade/source`, or `gravinet upgrade
-apply` — only ever swaps the **binary**. It builds from an uploaded source
-archive, copies the resulting binary over the target, and throws the
-extracted source tree away; nothing about that path has ever touched
-`<prefix>/share/doc/gravinet/`. Populating that directory has only ever
-happened once, at the platform installer's initial install. So a node last
-*installed* before API.md existed, then *upgraded* in-place to v606, had the
-new page's code but never got the file it reads — and the same gap has
-silently applied to README/LICENSE/getting-started.md on every in-place
-upgrade all along, for anyone whose checkout changed those files between
-versions; API.md's Info page just made the general gap visible for the
-first time; it needed a file that had never existed on that node before.
-
-Fixed generally, not just patched for API.md:
-
-- **`internal/upgrade/source.go`**: `Build`'s signature grew a `moduleRoot`
-  return — the extracted source tree's root (where it already resolved
-  go.mod from, to build), now also handed back to the caller instead of
-  being an internal-only detail thrown away with the rest of the build
-  directory once `cleanup()` runs.
-- **`internal/upgrade/docs.go`** (new): `SyncInstalledDocs(moduleRoot,
-  target)` copies README.md, LICENSE, getting-started.md, and docs/API.md
-  from the extracted tree into the install's doc directory — deliberately
-  duplicating the install scripts' own path formula
-  (`<prefix>/share/doc/gravinet/` on unix, one level above the target's own
-  directory; beside the binary on Windows) rather than depending on
-  `internal/config` for it, since that's exactly the first candidate
-  `config.resolveDocPath`'s read-side search already checks — so whatever
-  gets written here is exactly what the Info pages pick up on their very
-  next request, no restart needed (those pages already read fresh from disk
-  every time). Best-effort by design: a missing source file or an
-  unwritable destination is silently skipped, never surfaced as an upgrade
-  failure — the binary swap is the one thing that must not be held hostage
-  to a documentation file.
-- **`cmd/gravinet/upgrade.go`**: the `"apply"` op now calls
-  `SyncInstalledDocs` right after a successful `upgrade.Apply`, before the
-  deferred `cleanup()` removes the extracted tree it reads from, and logs
-  which files it actually refreshed.
-- **Tests**: `internal/upgrade/docs_test.go` (new) — copies what exists,
-  skips what doesn't, and the empty/nonexistent-input cases degrade to a
-  quiet no-op rather than an error, all independent of the multi-minute real
-  compile. `internal/upgrade/build_integration_test.go` — the existing
-  end-to-end test (tars up this actual repo, builds it for real) now also
-  asserts the returned `moduleRoot` contains `go.mod` and `docs/API.md`;
-  this ran for real against this tree during development (not just
-  compiled) and passed, confirming the fix end-to-end rather than by
-  inspection.
-
-**This does not self-heal on the upgrade that reaches v607.** The code that
-performs any given upgrade is whichever binary is running *before* that
-upgrade — the old one, still executing until the swap and restart a moment
-later — never the one being installed. A node upgrading from v606 (or
-earlier) to v607 runs v606's `controlOp`/`Build`/`Apply`, which has no
-`SyncInstalledDocs` call at all; v607's copy of that code never gets a
-chance to run during its own installation. So a node that reaches v607 this
-way still has whatever doc directory it had before — missing or stale API.md
-included — and Info > API still says "not installed."
-
-**The fix takes effect starting from the upgrade *after* that.** Once a
-node is actually running v607, any further in-place upgrade it performs —
-including re-applying the very same v607 source a second time, version
-unchanged — runs under this fix and syncs the docs, because this time v607's
-own code is what's doing the upgrading. There is no way around this for the
-transition upgrade itself: nothing can make an old binary run code it was
-never compiled with, and gravinet keeps no source tree around between
-upgrades to retroactively draw from — the only two sources of these doc
-files are a platform installer run and an in-place upgrade's momentarily-
-extracted source tree, and the latter is exactly the mechanism this fix
-lives inside of. A node already on v607 wanting API.md now needs one more
-apply (the same archive again is fine) before the fix it contains can run.
+**Fixed:** Info > API showed "not installed" after upgrading in place.
+Only a full platform-installer run had ever populated the docs directory;
+an in-place upgrade never touched it. Added `SyncInstalledDocs` to also
+refresh README/LICENSE/getting-started.md/API.md during an upgrade-apply.
 
 ## v606 — 2026-07-23
 
-Four changes: fixed a double-popup on System > Power, added an Info > API
-page, documented the four `/api/system/*` and `/api/api-doc` endpoints in
-`docs/API.md`, and converted System > Time to autosave.
-
-**System > Power: one popup, not two.** Clicking Execute showed a `confirm()`
-("Restart this node now? ... You will lose access...") and then, on success,
-a second `alert()` announcing the node was restarting — two dialogs to
-dismiss for one click, the second one arriving right as the connection might
-already be dropping. The `confirm()` stays (it's the one that matters — it's
-what stops an accidental reboot); the post-action `alert()` is gone, replaced
-by an inline status line appended to the card, with Execute/Cancel disabled
-for the duration of the request.
-
-**New: Info > API**, reading `docs/API.md` from disk — deliberately not a
-second, in-app copy of the API reference that could drift from it. Mirrors
-the existing Readme/License/Getting-Started mechanism exactly, down to the
-config override name:
-
-- `config.APIDocFile` (`api_doc_path` in config JSON) +
-  `Config.APIDocPath()`, mirroring `GettingStartedFile`/`GettingStartedPath`.
-- `Server.apiDocPath` + `SetAPIDocPath()`, `handleAPIDoc` (reuses the existing
-  generic `serveDocFile` — reads fresh from disk every request), routed at
-  `GET /api/api-doc`, wired from `main.go` alongside the other `Set*Path`
-  calls.
-- All five install scripts (Linux, macOS, FreeBSD, OpenBSD, Windows) now
-  install **and uninstall** `API.md` alongside the other three docs. It
-  needed one extra thing the other three didn't: `API.md` lives at
-  `docs/API.md` in the repo, not the repo root, so every install script's doc
-  candidate-path search gained a `docs/` variant for all four filenames
-  (harmless for the three that aren't there) rather than a special case just
-  for this one file.
-- `secAPIDoc` (`ui.go`), added to `NAV_GROUPS['info']` between Getting
-  Started and License, dispatched as `api:secAPIDoc`. `label()` gained `api`
-  in its full-uppercase set (`NAT`/`QOS`/`DNS`/`BGP`/`API`) so the page title
-  reads "API", not "Api".
-- `TestHandleAPIDoc` added to `readme_test.go`, mirroring
-  `TestHandleGettingStarted` exactly (available/unavailable shapes).
-
-**`docs/API.md` updated** with everything the last few sessions had shipped
-without documenting: `POST /api/system/power`, `POST /api/system/time`,
-`POST /api/system/users` (all three: request/response shapes, the
-`restart`/`can_*`/`*_known` fields, validation rules, and — since all three
-follow the currently selected node rather than being local-only — a note
-tying them to the existing [management proxy](#the-management-proxy)
-section rather than re-explaining proxying from scratch), plus
-`GET /api/api-doc` alongside the other three doc endpoints. Added four rows
-to the Quick reference table and four new `curl` examples. The "Known gaps"
-section didn't need changes — the proxy's actual blocklist (checked against
-`cluster.go`) was already documented accurately and doesn't include any of
-these three.
-
-**System > Time: autosave, no Save buttons**, matching the convention every
-settings-page text field in this app already uses (`onblur` triggers the
-save; Enter blurs the field; an invalid or unchanged value reverts without a
-round trip) — see `internal/webadmin/ui.go`'s Settings section for the
-pre-existing `saveLZ`/`saveRA`/`saveKA` examples this mirrors.
-
-- **Timezone**: saves on blur; reverts to the last-known value on an empty
-  or rejected entry.
-- **Time servers**: saves on blur. The confirm-before-disabling-sync dialog
-  is preserved, but now fires only when the edit actually turns sync off (an
-  empty field where there were servers a moment ago) rather than on every
-  blur, so tabbing through an untouched or still-filled field never prompts.
-  The hint text now says explicitly what the field already silently accepted
-  — **commas or spaces both work** (`raw.split(/[\s,]+/)` was already doing
-  this; only the visible copy was silent about it) — with an example of each
-  form.
-- **Manual clock set kept its button, on purpose.** This isn't a persisted
-  setting — the code's own comments are explicit that nothing here is stored,
-  the clock is set once and left alone — so autofiring it on blur would mean
-  tabbing away from the field quietly reset the host's clock to whatever was
-  sitting in the box. That's a materially different kind of risk than an
-  unwanted timezone or NTP-server change, both of which just reapply the same
-  value again. The card's hint now says why it's the one exception on the
-  page, so the inconsistency with the two fields above doesn't read as a
-  leftover oversight.
+Four fixes: Power's confirm-then-alert double popup (now just the
+confirm), new Info > API page (reads `API.md` live from disk, no in-app
+duplicate), `docs/API.md` caught up to Power/Time/Users, and Time
+converted from Save buttons to autosave-on-blur, matching the rest of the
+app.
 
 ## v605 — 2026-07-23
 
-**New: System > Users** — the third of parapet's System items recreated, sitting
-between **Time** and **Power** in the rail (Power stays pinned last as the
-group's most destructive item). Local OS accounts permitted to sign in to this
-console under gravinet's system-auth modes.
-
-Scoped deliberately: this manages accounts for auth_mode **pam**
-(linux/macos/freebsd), **system** (openbsd's bsd_auth), and **windows** —
-never **local**. auth_mode "local" authenticates against `web_admin.users`, a
-list of PBKDF2 hashes gravinet owns directly (`gravinet genpass`,
-`GenerateCredential`) with no OS account behind any name at all, so this page
-never touches that list. It still works while a node is set to "local" — the
-GET reply's `auth_mode` field drives a passing note explaining that accounts
-managed here have no effect on login until the mode is switched — rather than
-refusing outright.
-
-`web_admin.allow_users` is the gate this page manages: empty/nil means
-"any account the authenticator accepts may sign in" (surfaced as an explicit
-"unrestricted" note, since an empty table would otherwise look broken or
-locked down), a populated list restricts sign-in to just those names. That's
-gravinet's equivalent of the Unix group parapet's Users page manages
-membership of — the same design decision already used for the QoS/Firewall
-catalog adaptations elsewhere in this UI.
-
-- **Backend** (`internal/service/sysusers.go`, new): `ListSystemUsers`,
-  `AddSystemUser`, `SetSystemUserPassword`, `SetSystemUserExpiry`,
-  `DeleteSystemUser`, structured like `hosttime.go`/`power.go` — typed reads,
-  one function per mutation, each `(ok, hint)`, each dispatching on
-  `runtime.GOOS`. New accounts are login-only: no home directory, nologin
-  shell where the platform has one. Per-platform tooling: linux uses
-  useradd/userdel/usermod + chpasswd (matching parapet exactly); freebsd uses
-  `pw(8)`; openbsd uses useradd/userdel/usermod plus `encrypt(1)` piped into
-  `usermod -p` for a bcrypt hash; macOS uses `dscl` (create/delete/password
-  only — no simple built-in account expiry, so `CanExpiry` is false there);
-  windows uses PowerShell's LocalAccounts module
-  (New-LocalUser/Set-LocalUser/Remove-LocalUser). Passwords never touch a
-  command line or argv on any platform: chpasswd/pw read them on stdin,
-  OpenBSD's `encrypt` reads one on stdin, and the Windows backend hands its
-  password to PowerShell through an environment variable rather than
-  `-Command` text.
-- **Validation**: `validUsername` mirrors parapet's `valid_username` exactly
-  (POSIX portable-filename style, 1–32 chars, lowercase, starts with a
-  letter/underscore) and refuses `root`/`administrator` outright; `validPassword`
-  rejects empty passwords and the characters (newline, CR, `:`) that could
-  break out of a `name:password` stdin line the Unix tools parse
-  field-by-field.
-- **Handler** (`handleSystemUsers`, `/api/system/users`): GET reads live state;
-  POST takes `{op, username, password, expires_unix}` for `add` / `password` /
-  `expiry` / `delete`. `add` creates-or-reuses (never recreates an existing
-  account, matching parapet's `add_user`) and appends to `allow_users`; `delete`
-  removes the OS account and drops the name from `allow_users`. Both carry
-  `restart:true` — `s.auth`'s allow-set is built once in `New()`, so an
-  `allow_users` change needs a restart to take hold, the same convention
-  `handleKey` and friends already use. Refuses to let the signed-in session
-  delete the account it's currently authenticated as (checked via
-  `validSession`), so a mistaken click can't orphan the very session that made
-  it. Like Power and Time, follows the currently selected node — not in
-  `LOCAL_API` — so a console account can be added or fixed on a remote peer
-  from here.
-- **UI** (`secUsers`): a table, not a card-per-setting form like Time — Users is
-  a list of entries, so it follows the same checkbox-select + `+`/`\u2212`
-  toolbar idiom as Allow List/Hosts/DNS/Routes rather than inventing a new
-  shape. Per-row expiry is dblclick-to-edit (date input, "never" to clear,
-  hidden entirely when `can_expiry` is false); a masked password field with the
-  same show/hide toggle the BGP neighbor password editor uses swaps in for a
-  "password\u2026" action, going through the `add` op so it doubles as
-  "create the OS account if it's listed but missing" without the operator
-  needing to know which case they're in. The add-row draft is name + password
-  + optional expiry in one row, matching `hostAddRow`'s shape.
-- **Tests**: `internal/service/sysusers_test.go` (validation/injection
-  refusals, plus the shadow/`pw usershow`/`userinfo`/`net user` expiry
-  parsers — writing these caught two real bugs, see below) and
-  `internal/webadmin/systemusers_handler_test.go` (GET reply shape,
-  validation-only rejections that never reach a real OS command, the
-  self-delete guard, LOCAL_API placement, nav ordering).
-
-Two real parsing bugs were caught by the new tests before shipping: the
-Windows and OpenBSD expiry readers were splitting on the *first* colon in the
-line to find the label/value separator, but the value itself (a timestamp
-like `12:00:00`) also contains colons — so a real "Account expires ...
-12:00:00 AM" line was being sliced into the middle of the time rather than
-after the label, silently reporting the expiry as unknown. Both now strip the
-known label text directly instead of guessing from colon position.
-
-A third, unrelated bug surfaced while writing this page: a literal backtick
-inside a Go doc comment in the new UI code would have terminated the
-Go-source raw string `indexHTML` is embedded in early, truncating the served
-page mid-file. Caught by parsing the extracted embedded JS as a standalone
-script before considering the change done, rather than assuming a clean `go
-build` alone proves the generated HTML/JS is intact.
-
-Remaining parapet System items: resolver and snmp.
+**New: System > Users** — manage local OS accounts for pam/system/windows
+auth modes (superseded by v611's group-based redesign above).
 
 ## v604 — 2026-07-23
 
-**New: System > Time** — the second of parapet's System items recreated (after
-Power), sitting between **Upgrade** and **Power** in the rail. Timezone, NTP
-servers, and a one-shot manual clock set, with the same central semantics as
-parapet's page: **filling in the server list is the on switch and clearing it is
-the off switch**, and a manual clock set is only offered while sync is off.
-
-There's a reason this one is worth having beyond menu parity. The engine rejects
-any HS_INIT whose timestamp is further than `clockSkew` (±2 min) from local time
-— that bound is what keeps the handshake replay window small — so a node whose
-clock drifts past it doesn't degrade, it silently stops forming sessions, and the
-only trace is a debug-level rejection log that ends "check NTP/system time on
-both nodes". This page is the other half of that sentence.
-
-- **Backend** (`internal/service/hosttime.go`, new): `HostTime()` plus
-  `SetHostTimezone` / `SetHostNTP` / `SetHostClock`, each returning `(ok, hint)`
-  and dispatching on `runtime.GOOS` in the same shape as `power.go`. Linux uses
-  `timedatectl` for the read, the timezone, the clock, and the NTP master switch,
-  with servers going to whichever implementation is *actually active* —
-  `systemctl is-active` decides, because plenty of hosts have both chrony and
-  timesyncd installed with only one running, and writing the idle one's config is
-  a silent no-op that looks like a successful save. macOS uses `systemsetup`
-  (and takes exactly one server, which the reply says out loud rather than
-  dropping the rest quietly); FreeBSD uses `/var/db/zoneinfo` + `service`/`sysrc`
-  with `/etc/ntp.conf`; OpenBSD uses `rcctl` + openntpd with `/etc/ntpd.conf`;
-  Windows uses `tzutil`, `w32tm`, and `Set-Date`.
-- **Nothing is stored in gravinet's config.** parapet keeps a `TimeSync` block in
-  its config and re-applies it on every commit; that's right for parapet, which
-  is the sole configuration authority for the box it runs on, and wrong for
-  gravinet, which is one daemon on a host whose clock may equally be managed by
-  the distro, a cloud-init template, or a hypervisor guest agent. A second stored
-  copy would be free to disagree with the OS, and the disagreement would win
-  silently on the next config reload. So the page reads what the OS says and
-  writes through to it; a change made with `timedatectl` by hand shows up here on
-  the next refresh instead of being fought.
-- **Config files are edited line-wise, not rewritten.** parapet writes
-  `timesyncd.conf` wholesale. Doing that here would discard `FallbackNTP=`,
-  `PollIntervalMaxSec=`, and any comments a distro or an operator put there — on
-  a save the operator thought was only about the server list. `setTimesyncdServersAt`
-  replaces just the `NTP=` line (never `FallbackNTP=`, hence `isDirective`'s
-  keyword-boundary check), and `setDirectiveLines` does the same for chrony/ntpd/
-  openntpd `server`/`pool` lines, keeping ordering, comments, and file mode.
-  Writes go through a temp file and a rename so a reader never sees a half-written
-  config.
-- **Injection surface**: every command is `exec.Command` with separate arguments,
-  never a shell string, and both a timezone (which also becomes a
-  `/usr/share/zoneinfo` path join) and every server address are validated first —
-  `validTimezone` / `validNTPServer` reject shell metacharacters, newlines,
-  traversal, and absolute paths.
-- **UI** (`secTime`): a live-ticking clock card, then timezone, servers, and the
-  manual set. Two things parapet's page doesn't have. The clock card compares
-  this node's clock against the browser's and warns when the gap exceeds the
-  handshake tolerance — worded as a difference, not a verdict, since the browser's
-  clock is only a second opinion and the comparison can't say which of the two is
-  wrong. And the tolerance it names comes from the new `mesh.ClockSkewTolerance()`
-  rather than a hardcoded 120, so the number in the UI can't drift from the one
-  the engine enforces. Server lists are a single comma-separated field, matching
-  the Servers cell under Naming > DNS, instead of parapet's one-row-per-server
-  table.
-- Like Power, `/api/system/time` follows the currently selected node — so the one
-  drifted peer can be fixed from the console you're already logged into. That's
-  also why it's deliberately *not* in `LOCAL_API`, and there's a test pinning
-  that, since getting it wrong would apply a clock fix to the wrong host.
-- **Windows names its zones its own way** ("US Mountain Standard Time", not
-  "America/Phoenix"), and `tzutil` rejects IANA names. `TimeInfo.TimezoneStyle`
-  carries that distinction to the page, which drops the IANA datalist there
-  rather than suggesting names the host would refuse.
-- **Tests**: `internal/service/hosttime_test.go` and
-  `internal/webadmin/systemtime_handler_test.go` — injection and validation
-  refusals, the datetime-local parse shapes (including that it parses in the
-  host's zone, not UTC), the line-preserving config rewrites and mode
-  preservation, `directiveValues` skipping commented-out distro examples,
-  `windowsPeerList`, the GET reply shape, the LOCAL_API/proxy placement, and the
-  nav ordering.
-
-The `Can*`/`*Known` flags exist so the page never claims knowledge the host
-didn't give it: "sync is off" and "this host won't say" are different answers, and
-a greyed-out control always carries a reason. Remaining parapet System items:
-resolver, snmp, and users (DHCP dropped).
-
-Note for later: neither Power (v602) nor Time is documented in `docs/API.md`,
-which stops short of the `/api/system/*` endpoints entirely. Left alone rather
-than half-fixed here.
-
----
+**New: System > Time** — timezone, NTP servers, and a one-shot manual
+clock set. Worth having beyond menu parity: the mesh handshake rejects any
+init whose timestamp drifts more than ±2 minutes from local time, and a
+node past that bound doesn't degrade, it silently stops forming sessions.
+Nothing is stored in gravinet's own config — reads/writes through to
+whatever the OS actually uses (`timedatectl`, `systemsetup`, `sysrc`,
+`rcctl`, `tzutil`/`w32tm`), editing existing config files line-wise rather
+than overwriting them wholesale, so a distro's other settings and comments
+survive a save.
 
 ## v603 — 2026-07-23
 
-**Upgrade moved from Info to System.** The upgrade page now sits in the
-**System** group added in v602, above **Power**, and Info is left holding only
-read-only reference pages (README, Getting Started, license, About). Upgrade
-never really belonged there: everything else under Info just *shows* you
-something, while Upgrade replaces the running binary and restarts the service —
-a host-level action, which is exactly what the System group is for. Within the
-group Upgrade comes first and Power second, keeping the most destructive item
-last, the same way Bans sits at the end of the Mesh group.
-
-- **UI** (`internal/webadmin/ui.go`): the `['upgrade', …]` entry moved from the
-  `info` group to the `system` group in `NAV_GROUPS`. Because the rail, the
-  accordion group state, `groupFor`, `SECTIONS`, and the global search index are
-  all derived from `NAV_GROUPS`, that one-line move is the whole functional
-  change — no handler, route, or dispatch entry was touched, and
-  `upgrade:secUpgrade` in the section dispatch is unchanged. The page itself,
-  its endpoints, and its local-only enforcement (`LOCAL_API`,
-  `upgradeLocalOnly`) all behave exactly as before; only where you click to
-  reach it has changed.
-- **Comment placement** (same file): v602 inserted `secPower` directly beneath
-  the `---- Upgrade ----` banner comment, leaving that block describing a
-  function two hundred lines away. The banner moved back down to sit
-  immediately above `secUpgrade`, and its stale nav path — it still said
-  `Mesh -> Upgrade`, from an even earlier layout — now reads
-  `System -> Upgrade`. `secPower` gets a short `---- System ----` banner of its
-  own.
-- **Docs**: `docs/UPGRADES.md` updated both places it spells out the click path
-  (single-node upload, and the Manager's push-to-managed-peers flow) from
-  Info → Upgrade to System → Upgrade; `cmd/gravinet/upgrade.go`'s CLI help text,
-  which points at the web equivalent, likewise. `README.md`'s sidebar tour
-  gained the **System** group, which v602 never added, and its **Info**
-  description now also mentions Getting Started.
-
-No config, API, or wire-format change; nothing to migrate.
-
----
+Moved Upgrade from Info into the System nav group.
 
 ## v602 — 2026-07-23
 
-**New: System > Power** — the first item of a new **System** nav group that
-mirrors parapet's System menu, positioned in the rail just above **Info**
-(parapet keeps System above Info too). Power reboots or shuts down the whole
-*host* — the machine gravinet runs on, not just the gravinet service (that's
-the restart under Settings) — immediately or on a delay, with a cancel for a
-pending scheduled action. It's a faithful recreation of parapet's power page.
-
-- **Backend** (`internal/service/power.go`, new): `HostPower(action, delayMin)`,
-  `HostPowerCancel()`, and `HostPowerSupported()`, cross-platform via a
-  `runtime.GOOS` switch in the same style as the existing `CanRestart`/
-  `Restart`: Linux prefers `systemctl reboot|poweroff` for an immediate action
-  (falling back to `shutdown`) and uses `shutdown -r|-h +N` when scheduled, with
-  `shutdown -c` to cancel; macOS and the BSDs use `shutdown` (`-p` for power-off
-  on BSD, `-h` on macOS) and have no cancel; Windows uses `shutdown /r|/s /t
-  <secs>` and `shutdown /a` to cancel. The immediate case is backgrounded with a
-  one-second head start (via `detachedRestart`, i.e. `Start` not `Run`) so the
-  HTTP reply flushes before the box goes down and so it never blocks on a
-  command that tears this process out from under it — the same self-wait hazard
-  `Restart` already documents.
-- **Handler** (`handleSystemPower`, `/api/system/power`): decodes
-  `{action, when, minutes, time}`, validates, and resolves `when` to whole
-  minutes-from-now — `now`→0, `in`→minutes (capped at 7 days), `at HH:MM`→
-  minutes until the next occurrence of that wall-clock time in the host's local
-  zone (rolls to tomorrow if already past, rounds up) — so the platform layer
-  only ever deals in a minute count and never has to reason about the clock
-  formats that differ per OS (Linux/BSD `shutdown` take an absolute HH:MM;
-  Windows only takes a second count). Like every other section, it follows the
-  current target: local by default, or proxied to the selected peer.
-- **UI** (`secPower`): action (restart/shutdown) and when (now / in N min / at
-  HH:MM) controls, an Execute button gated behind a `confirm()` that names
-  exactly which node it's about to take down, and a Cancel-scheduled button —
-  using gravinet's own `confirm()`/`alert()` idiom rather than parapet's modal.
-  Registered in `NAV_GROUPS` (new `system` group) and the section dispatch;
-  search and the rail pick it up automatically from `NAV_GROUPS`.
-
-The other five parapet System items (resolver, time, snmp, users — DHCP was
-dropped) are still to come; they'll land one at a time.
+**New: System > Power** — reboot or shut down the host (not just the
+gravinet service), cross-platform.
 
 ## v601 — 2026-07-22
 
-**Install scripts**: open the BGP/BFD host-firewall ports on the platforms
-that actually run FRR. gravinet's BGP/BFD sessions ride the mesh overlay
-between peers, so — exactly like the web admin port the installer already
-opens — inbound BGP/BFD packets arrive on the mesh interface and land in the
-host firewall's default zone, where they're silently dropped unless opened.
-The ports are FRR's own stock ports, served by bgpd/bfdd (not the gravinet
-binary): **179/tcp** (bgpd), **3784/udp** (bfdd single-hop control), and
-**4784/udp** (bfdd multi-hop control). bfdd's echo port (3785) is left
-closed — echo mode is off in gravinet's generated FRR config, so nothing
-binds it.
-
-- `install/install-linux.sh`: `firewalld_ports()` now appends the three
-  ports when this host will speak BGP/BFD, gated by a new `will_speak_bgp`
-  helper — true when FRR is already present (same vtysh check as gravinet's
-  `bgpSupported()`) or about to be installed this run (`INSTALL_FRR`, i.e.
-  `--no-frr` wasn't passed). Opt out of FRR and the ports stay closed, so
-  they're never holes to nothing. The uninstall path already iterates the
-  same list and guards each removal with `--query-port`, so it cleans these
-  up too without any extra change.
-- `install/install-freebsd.sh`: FreeBSD has no firewall enabled by default,
-  so there's nothing to open — the existing "open the underlay port
-  yourself" note was extended to name the BGP/BFD ports too, for anyone
-  running pf/ipfw/ipfilter who uses the Traffic > BGP page.
-
-Deliberately unchanged: **Windows**, **macOS**, and **OpenBSD**. FRR's vtysh
-is never present on any of them, so `bgpSupported()` is always false and
-bgpd/bfdd never run there — opening 179/3784/4784 would expose ports nothing
-listens on. (Windows and macOS also use program-scoped firewall rules, not
-port rules; OpenBSD's pf opens the underlay port but has no FRR to serve
-BGP.) No gravinet binary code changed; this is install-tooling only, but the
-version still bumps so the shipped tree and changelog stay in lockstep.
+Install scripts now open the BGP/BFD host firewall ports automatically on
+Linux, when FRR is present.
 
 ## v600 — 2026-07-22
 
-**UI only**, in `internal/webadmin/ui.go`: Info \u2192 Upgrade, the Peers
-field's description. Reordered so the empty-selection case is explained
-last instead of first ("Leave it empty to upgrade only this node." now
-follows the "you\u2019re logged into" sentence rather than opening the
-paragraph), and split the run-on "...finish with this node last \u2014 this
-node is upgraded only after..." into two sentences on a period instead of
-an em dash. Wording of every individual clause \u2014 the peer-picking
-options, the revert behavior, the Accept Manager-pushed upgrades
-requirement \u2014 is otherwise unchanged. No API, config, or wire behaviour
-changed; the binary is identical to v599 in everything but the version
-string.
+**UI only**: reworded the Upgrade page's Peers field description for
+clarity (moved the empty-selection case to the end, split a run-on
+sentence). No behavior change.
 
 ## v599 — 2026-07-22
 
@@ -16888,8 +15765,7 @@ past-conversation search enabled (the first pass had produced this file
 using only what a single session's own context contained). Recovered and
 added versions v202, v203, v207–209, v212's actual mechanism, v241–245
 (replacing the vaguer "v244–245ish" entry with five precise ones), and
-v259–262. v273 was searched for specifically and could not be recovered —
-see "About this document" above.
+v259–262. v273 was searched for specifically and could not be recovered.
 
 ## v273 — 2026-07-07
 

@@ -332,6 +332,14 @@ type Config struct {
 	// internal/service/lldp.go.
 	Discovery DiscoveryConfig `json:"discovery,omitempty"`
 
+	// OSUpdates schedules automatic host OS package updates — System >
+	// Upgrade's "OS updates" section. Deliberately unrelated to gravinet's
+	// own binary-upgrade mechanism above it on that same page: this patches
+	// whatever the host's package manager (apt/dnf/zypper/pacman/pkg/
+	// pkg_add/softwareupdate) already manages, not gravinet itself. See
+	// internal/service/osupdate.go.
+	OSUpdates OSUpdateConfig `json:"os_updates,omitempty"`
+
 	// path is where this config was loaded from / will be saved to.
 	path string
 }
@@ -425,6 +433,33 @@ func (d DiscoveryConfig) AnyCDP() bool {
 		}
 	}
 	return false
+}
+
+// OSUpdateConfig schedules automatic host OS package updates. Applies
+// whatever's available via the host's package manager (a plain "update
+// everything installed" pass — not gravinet itself, and not an OS version
+// upgrade); never reboots on its own, even if the update implies one wants
+// to happen — that stays a deliberate, separate decision made from System >
+// Power. Windows isn't supported: there's no simple, dependency-free way to
+// drive Windows Update from a script the way there is for every package
+// manager this covers.
+type OSUpdateConfig struct {
+	Enabled bool `json:"enabled"`
+	// Cadence: "daily", "weekly", or "monthly". Meaningless unless Enabled.
+	Cadence string `json:"cadence,omitempty"`
+	// Weekday: 0=Sunday..6=Saturday. Only consulted when Cadence is "weekly".
+	Weekday int `json:"weekday,omitempty"`
+	// DayOfMonth: 1-28 — capped there, not 31, so every month actually has
+	// that day rather than "the 31st" silently skipping February and every
+	// 30-day month. Only consulted when Cadence is "monthly".
+	DayOfMonth int `json:"day_of_month,omitempty"`
+	// Hour/Minute: time of day to run, host-local, 24-hour. The zero value
+	// (0:00, midnight) is a legitimate choice an operator might actually
+	// pick, not treated as "unset" — service/osupdate.go's own default
+	// (applied only when Enabled is first turned on with no time chosen
+	// yet) is 03:00, not encoded here.
+	Hour   int `json:"hour"`
+	Minute int `json:"minute"`
 }
 
 // BGPConfig is this node's BGP configuration and the BFD settings attached to

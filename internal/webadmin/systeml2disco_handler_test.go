@@ -60,7 +60,7 @@ func TestSystemL2DiscoGet(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"interfaces", "supported", "hint", "running", "neighbors", "neighbors_available", "neighbors_hint"} {
+	for _, k := range []string{"interfaces", "supported", "hint", "running", "neighbors", "neighbors_available", "neighbors_hint", "strays", "stray_hint"} {
 		if _, ok := out[k]; !ok {
 			t.Errorf("reply is missing %q; the page reads it directly", k)
 		}
@@ -70,6 +70,9 @@ func TestSystemL2DiscoGet(t *testing.T) {
 	}
 	if _, ok := out["neighbors"].([]any); !ok {
 		t.Errorf("neighbors = %#v, want a JSON array even when empty", out["neighbors"])
+	}
+	if _, ok := out["strays"].([]any); !ok {
+		t.Errorf("strays = %#v, want a JSON array even when empty", out["strays"])
 	}
 }
 
@@ -135,42 +138,60 @@ func TestSystemL2DiscoIsProxyable(t *testing.T) {
 // each other once shown together. running/neighborsAvailable disagreeing
 // (the interesting case) must produce the reconciled explanation, not
 // either raw claim; every other combination must pass the raw hint
-// through unchanged.
+// through unchanged. Also pins the follow-up fix: when a journalHint is
+// available, the reconciled message uses it (a specific, confirmed-real
+// root cause) instead of the generic list of maybes.
 func TestReconcileL2DiscoNeighborsHint(t *testing.T) {
 	cases := []struct {
-		name                        string
-		running, neighborsAvailable bool
-		rawHint, wantContains       string
-		wantExactPassthrough        bool
+		name                                    string
+		running, neighborsAvailable, configured bool
+		rawHint, journalHint                    string
+		wantContains, wantNotContains           string
+		wantExactPassthrough                    bool
 	}{
 		{
-			name:    "the reported bug: active but unreachable",
-			running: true, neighborsAvailable: false,
+			name:    "the reported bug: active but unreachable, no journal detail",
+			running: true, neighborsAvailable: false, configured: true,
 			rawHint:      "could not connect to lldpd's control interface",
 			wantContains: "reports active",
 		},
 		{
-			name:    "genuinely not running: passthrough",
-			running: false, neighborsAvailable: false,
+			name:    "active but unreachable, with a specific journal hint: use it, not the generic guess-list",
+			running: true, neighborsAvailable: false, configured: true,
+			rawHint:         "could not connect to lldpd's control interface",
+			journalHint:     " — journal: another instance is running, please stop it (another lldpd instance, or a leftover control socket from one, may already be present — check `pgrep -a lldpd`...)",
+			wantContains:    "another instance is running",
+			wantNotContains: "It may still be starting up, or something",
+		},
+		{
+			name:    "switched off: say so instead of a useless connect failure",
+			running: false, neighborsAvailable: false, configured: false,
+			rawHint:         "could not connect to lldpd's control interface",
+			wantContains:    "no interfaces are picked",
+			wantNotContains: "control interface",
+		},
+		{
+			name:    "configured to run but genuinely not running: passthrough",
+			running: false, neighborsAvailable: false, configured: true,
 			rawHint:              "lldpd is not installed",
 			wantExactPassthrough: true,
 		},
 		{
 			name:    "everything fine: passthrough (empty)",
-			running: true, neighborsAvailable: true,
+			running: true, neighborsAvailable: true, configured: true,
 			rawHint:              "",
 			wantExactPassthrough: true,
 		},
 		{
 			name:    "not running and somehow available (shouldn't happen, but must not fabricate a claim)",
-			running: false, neighborsAvailable: true,
+			running: false, neighborsAvailable: true, configured: true,
 			rawHint:              "",
 			wantExactPassthrough: true,
 		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := reconcileL2DiscoNeighborsHint(c.running, c.neighborsAvailable, c.rawHint)
+			got := reconcileL2DiscoNeighborsHint(c.running, c.neighborsAvailable, c.configured, c.rawHint, c.journalHint)
 			if c.wantExactPassthrough {
 				if got != c.rawHint {
 					t.Errorf("got %q, want the raw hint %q passed through unchanged", got, c.rawHint)
@@ -180,9 +201,12 @@ func TestReconcileL2DiscoNeighborsHint(t *testing.T) {
 			if !strings.Contains(got, c.wantContains) {
 				t.Errorf("got %q, want it to contain %q", got, c.wantContains)
 			}
-			// The reconciled hint must never repeat the contradicted raw
-			// claim ("not running") right next to a running:true tag.
-			if strings.Contains(strings.ToLower(got), "not running") {
+			if c.wantNotContains != "" && strings.Contains(got, c.wantNotContains) {
+				t.Errorf("got %q, want it NOT to contain %q", got, c.wantNotContains)
+			}
+			// The reconciled hint must never repeat a claim that contradicts
+			// the tag shown right next to it.
+			if c.running && strings.Contains(strings.ToLower(got), "not running") {
 				t.Errorf("reconciled hint still says \"not running\" while running=true: %q", got)
 			}
 		})
@@ -211,7 +235,10 @@ func TestSystemL2DiscoNavPlacement(t *testing.T) {
 	if !strings.Contains(indexHTML, "function secL2Disco(") {
 		t.Error("secL2Disco is not defined")
 	}
-	if !strings.Contains(indexHTML, "l2disco') return 'L2 Disco'") {
-		t.Error("label() has no l2disco -> 'L2 Disco' case")
+	if !strings.Contains(indexHTML, "l2disco') return 'l2disco'") {
+		t.Error("label() has no l2disco -> 'l2disco' case")
+	}
+	if !strings.Contains(indexHTML, "l2disco') return 'Layer 2 Discovery'") {
+		t.Error("sectionHeading() has no l2disco -> 'Layer 2 Discovery' case")
 	}
 }
