@@ -354,17 +354,6 @@ type SNMPConfig struct {
 	// ListenAddr is snmpd's listen spec, e.g. "udp:161" or "0.0.0.0:161".
 	// Empty means snmpd's own default (udp:161 on every address).
 	ListenAddr string `json:"listen_addr,omitempty"`
-	// Interfaces, if non-empty, is informational: which interfaces the
-	// agent is expected to be reached on, for an operator's own reference
-	// (e.g. when also configuring a host firewall rule by hand). Not
-	// passed to snmpd and not enforced by gravinet itself — snmpd has no
-	// native concept of "only listen on these interfaces" short of
-	// ListenAddr binding to one specific address, and gravinet doesn't
-	// manage the host firewall on SNMP's behalf (unlike the BGP/BFD ports,
-	// which install time always opens once FRR is present — SNMP is
-	// off by default and operator-toggled, not "present means used", so
-	// that isn't the right default here either). Empty = no stated scope.
-	Interfaces []string `json:"interfaces,omitempty"`
 	// Location/Contact become snmpd.conf's sysLocation/sysContact.
 	Location string `json:"location,omitempty"`
 	Contact  string `json:"contact,omitempty"`
@@ -415,10 +404,9 @@ type DiscoveryConfig struct {
 	Disabled bool `json:"disabled,omitempty"`
 	// Interfaces holds only the rows an operator has actually touched —
 	// sparse, not one entry per host interface. An interface absent from
-	// this list is simply off (lldp:false, cdp:false), the same "absence
-	// means off" shape config.SNMPConfig.Interfaces already uses. The web
-	// UI merges this against the host's live interface list (the same one
-	// NAT's masquerade-interface picker already fetches via
+	// this list is simply off (lldp:false, cdp:false) — an "absence means
+	// off" shape, so the web UI merges this against the host's live
+	// interface list (the same one NAT's masquerade-interface picker already fetches via
 	// /api/interfaces) to show a complete table with nothing configured
 	// read as "off" rather than "unknown".
 	Interfaces []DiscoveryIface `json:"interfaces,omitempty"`

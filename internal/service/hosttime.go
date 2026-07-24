@@ -79,6 +79,12 @@ type TimeInfo struct {
 	CanNTP        bool      // is an NTP change possible on this host
 	CanClock      bool      // is a manual clock set possible on this host
 	Hint          string    // why one of the Can* is false, if any is
+	// WindowsZones is every zone tzutil knows about on this host, only ever
+	// populated when TimezoneStyle is "windows" (see readWindowsTime). The
+	// UI's search-as-you-type picker is sourced from this instead of the
+	// browser's own Intl.supportedValuesOf('timeZone') the other platforms
+	// use, since that only ever returns IANA names and tzutil rejects those.
+	WindowsZones []WindowsTimezone
 }
 
 // HostTime reads the host's current clock, timezone, and NTP state. It never
@@ -283,12 +289,14 @@ func readBSDTime(info *TimeInfo) {
 // readWindowsTime uses tzutil for the zone and w32tm for sync state. Windows
 // names its zones its own way ("US Mountain Standard Time", not
 // "America/Phoenix"), which is why TimeInfo.TimezoneStyle exists: the UI drops
-// the IANA picker here and takes a Windows zone id instead, rather than offering
-// a list of names tzutil would reject.
+// the IANA picker here and takes a Windows zone id instead, with its
+// suggestions sourced from WindowsZones (tzutil /l on this host) rather than
+// the browser's own IANA-only zone list.
 func readWindowsTime(info *TimeInfo) {
 	if haveCmd("tzutil") {
 		info.Timezone = strings.TrimSpace(cmdOut("tzutil", "/g"))
 		info.CanTimezone = true
+		info.WindowsZones = WindowsTimezones()
 	} else {
 		info.Hint = "timezone changes need tzutil.exe, which isn't on this host"
 	}
@@ -332,6 +340,53 @@ func windowsPeerList(s string) []string {
 		}
 	}
 	return out
+}
+
+// WindowsTimezone is one entry from `tzutil /l`: the zone id tzutil /s
+// actually wants, plus the display name tzutil printed above it (e.g.
+// "(UTC-07:00) Arizona") for a human to recognize it by — the id alone
+// (e.g. "US Mountain Standard Time") is not always the name anyone
+// searching by city or region would think to type.
+type WindowsTimezone struct {
+	ID   string // tzutil's zone id, e.g. "US Mountain Standard Time"
+	Name string // tzutil's display line, e.g. "(UTC-07:00) Arizona"
+}
+
+// WindowsTimezones lists every zone tzutil knows about on this host, for
+// the web UI's search-as-you-type timezone picker — Windows' equivalent of
+// the browser-supplied Intl.supportedValuesOf('timeZone') list every other
+// platform's picker uses, which doesn't work here since that list is IANA
+// names and tzutil rejects those outright. Returns nil if tzutil isn't on
+// this host; callers should treat that the same as "no suggestions
+// available" rather than an error worth surfacing — the timezone field
+// still works by hand either way, it just loses autocomplete.
+func WindowsTimezones() []WindowsTimezone {
+	if !haveCmd("tzutil") {
+		return nil
+	}
+	return parseTzutilList(cmdOut("tzutil", "/l"))
+}
+
+// parseTzutilList parses `tzutil /l`'s output into name/id pairs. The
+// output is strictly alternating "(UTC±HH:MM) Display Name" / "Zone Id"
+// line pairs, one blank line between entries. Filtering out the blanks
+// first turns that into a flat, still-alternating list, so pairing
+// consecutive entries after the filter recovers the same name/id pairs
+// without having to reason about where the blank separators fall. Split
+// out from WindowsTimezones so the parsing itself is testable without
+// tzutil.exe actually being present (mirrors windowsPeerList below it).
+func parseTzutilList(out string) []WindowsTimezone {
+	var lines []string
+	for _, ln := range strings.Split(out, "\n") {
+		if ln = strings.TrimSpace(ln); ln != "" {
+			lines = append(lines, ln)
+		}
+	}
+	var zones []WindowsTimezone
+	for i := 0; i+1 < len(lines); i += 2 {
+		zones = append(zones, WindowsTimezone{Name: lines[i], ID: lines[i+1]})
+	}
+	return zones
 }
 
 // ── setters ─────────────────────────────────────────────────────────────────

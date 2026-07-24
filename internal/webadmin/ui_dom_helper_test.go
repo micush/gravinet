@@ -169,12 +169,22 @@ func TestSubnetChangeWarnsOfSilentPeerMismatch(t *testing.T) {
 // assignment. Redistribute connected/static/mesh routes moved from a single
 // rowTog checkbox to a rowRouteList picker (many checkboxes, one per CIDR)
 // — checked separately below, since a single "rcList.onchange" wouldn't
-// exist for it the same way.
+// exist for it the same way. Enable BGP itself is no longer a rowTog
+// checkbox at all — it's the title pill (bgpEnabled + ondblclick) — so it's
+// excluded from this loop and checked by its own assertion instead, for
+// the identical "read into the payload but never wired to trigger a save"
+// risk this test guards against everywhere else.
 func TestBGPEditorTogglesSaveOnChange(t *testing.T) {
-	for _, cb := range []string{"enableCb", "autoCb", "asPrependCb"} {
+	for _, cb := range []string{"autoCb", "asPrependCb"} {
 		if !strings.Contains(indexHTML, cb+".onchange") {
 			t.Errorf("%s has no .onchange handler — toggling it alone (touching nothing else) would never trigger a save", cb)
 		}
+	}
+	if !strings.Contains(indexHTML, "bgpEnabled = !bgpEnabled;") || !strings.Contains(indexHTML, "pill.ondblclick") {
+		t.Error("the BGP title pill's ondblclick doesn't flip bgpEnabled — toggling it would never change what gets saved")
+	}
+	if !strings.Contains(indexHTML, "enabled: bgpEnabled,") {
+		t.Error("doSave's payload doesn't read bgpEnabled — the pill's flip would never reach the server")
 	}
 	// rowRouteList's add (picking a search result) and remove (the chip's ×
 	// button) must each trigger a save themselves — the exact class of bug
@@ -190,6 +200,25 @@ func TestBGPEditorTogglesSaveOnChange(t *testing.T) {
 	}
 	if !strings.Contains(indexHTML, "buildRouteChipPicker(available, selected, () => scheduleSave(true));") {
 		t.Error("rowRouteList doesn't wire buildRouteChipPicker's onChange to scheduleSave — adding/removing a route in the redistribute connected/static/mesh pickers alone would never trigger a save")
+	}
+}
+
+// TestBGPEditorHasTitlePill guards the SNMP/L2Disco/Syslog-style
+// enable/disable pill placement decision: like those pages, Enable BGP
+// must be the title pill next to the page's own <h2>, not an inline
+// checkbox row — and it must be looked up (not recreated) so
+// renderBgpEditor's second call per page load (the live-FRR import
+// reflection in secBgp's load()) never leaves two pills stacked on the
+// same title.
+func TestBGPEditorHasTitlePill(t *testing.T) {
+	if strings.Contains(indexHTML, "'Enable BGP'") {
+		t.Error("\"Enable BGP\" is still a rowTog row; it should be the title pill instead, like SNMP/L2Disco/Syslog")
+	}
+	if !strings.Contains(indexHTML, "host.parentElement.querySelector('h2.sec')") {
+		t.Error("the BGP editor's pill isn't looked up via host.parentElement's h2.sec")
+	}
+	if !strings.Contains(indexHTML, "let pill = h2.querySelector('.pill.tag-toggle');") {
+		t.Error("the BGP editor's pill isn't reused across renderBgpEditor's two calls per load — a second render would stack a duplicate pill")
 	}
 }
 

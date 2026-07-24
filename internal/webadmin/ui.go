@@ -356,7 +356,7 @@ const indexHTML = `<!doctype html>
 <script>
 const $ = (h) => { const d=document.createElement('div'); d.innerHTML=h.trim(); return d.firstChild; };
 const app = document.getElementById('app');
-const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, geoipLookup:false, enableUpnp:false, allowRemoteShell:false, shellSupported:true, bgpSupported:false, selfId:null, selfHostname:'', targetSeq:0, pendingBgpHighlight:null };
+const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, geoipLookup:false, enableUpnp:false, allowRemoteShell:false, shellSupported:true, bgpSupported:false, snmpSupported:false, l2discoSupported:false, syslogSupported:false, selfId:null, selfHostname:'', targetSeq:0, pendingBgpHighlight:null };
 // setTarget is the only place state.target is ever assigned — bumping
 // targetSeq alongside it, once, exactly when the *selection itself* actually
 // changes. load()/startPolling()/refreshCluster() each capture targetSeq
@@ -767,14 +767,21 @@ const NAV_GROUPS = [
   // of a list of routine settings pages as more of parapet's System items get
   // recreated. Among the rest, parapet's own relative order is kept — its
   // System menu is resolver, time, dhcp, snmp, users, power; gravinet skips
-  // dhcp and (for now) snmp, which is why Resolver sits directly above Time
-  // and Users sits directly above Power rather than adjacent to Resolver.
+  // dhcp, which is why Resolver sits directly above Time.
   { name:'system', items: [
     ['upgrade', 'check and apply a new gravinet binary on this node; local only, no peer can trigger this'],
     ['resolver', 'this host\u2019s hostname and default DNS servers'],
     ['time', 'this host\u2019s clock, timezone, and NTP synchronization'],
-    ['snmp', 'read-only SNMPv2c monitoring agent'],
-    ['l2disco', 'link-layer discovery (LLDP/CDP) and neighbor status'],
+    // SNMP/L2 Disco/Syslog each need a real agent on the host (snmpd/
+    // lldpd/a syslog daemon) to be anything but an empty page — same
+    // "present in the model, but only shown when the host can actually
+    // back it" treatment Traffic > BGP gets above. sectionVisible()
+    // (state.snmpSupported/l2discoSupported/syslogSupported, set from
+    // /api/config) is what actually hides these; the entries stay listed
+    // here unconditionally.
+    ['snmp', 'read-only SNMPv2c monitoring agent (shown only when snmpd is present on this host)'],
+    ['l2disco', 'link-layer discovery (LLDP/CDP) and neighbor status (shown only when lldpd is present on this host)'],
+    ['syslog', 'forward this host\u2019s syslog to a remote collector (shown only when a supported syslog daemon is present)'],
     ['users', 'local OS accounts permitted to sign in to this console'],
     ['power', 'restart or shut down this host'],
   ]},
@@ -811,14 +818,18 @@ function sectionHeading(s){
 }
 
 // sectionVisible gates sections whose availability depends on a runtime
-// capability of the node being managed, rather than being universal. Today
-// that's just BGP, which needs FRR's vtysh present (state.bgpSupported, set
-// from /api/config); everything else is always visible. Both the rail nav and
-// the global search index consult this, so a hidden section can't be reached
-// by clicking or by searching, and renderSection guards the dispatch as a
-// belt-and-suspenders backstop.
+// capability of the node being managed, rather than being universal: BGP
+// (needs FRR's vtysh), SNMP (needs snmpd), L2 Disco (needs lldpd), and
+// Syslog (needs a syslog daemon this package can drive) — each backed by
+// state.<x>Supported, set from /api/config. Everything else is always
+// visible. Both the rail nav and the global search index consult this, so
+// a hidden section can't be reached by clicking or by searching, and
+// renderSection guards the dispatch as a belt-and-suspenders backstop.
 function sectionVisible(sec){
   if (sec === 'bgp' || sec === 'bgp-peers') return !!state.bgpSupported;
+  if (sec === 'snmp') return !!state.snmpSupported;
+  if (sec === 'l2disco') return !!state.l2discoSupported;
+  if (sec === 'syslog') return !!state.syslogSupported;
   return true;
 }
 
@@ -988,6 +999,16 @@ async function load() {
   // so switching to manage a remote peer reflects that peer's capability, not
   // this node's.
   state.bgpSupported = !!(c.body && c.body.bgp_supported);
+  // Same idea for System > SNMP, System > L2 Disco, and System > Syslog:
+  // gates on whether snmpd / lldpd / a syslog daemon gravinet knows how to
+  // drive are actually usable on the *targeted* node (see the server's
+  // service.SNMPSupported/LLDPSupported/SyslogSupported, which also back
+  // each page's own "supported" field) rather than this admin process's
+  // own host, since managing a remote peer with none of them installed is
+  // exactly when hiding the entry matters most.
+  state.snmpSupported = !!(c.body && c.body.snmp_supported);
+  state.l2discoSupported = !!(c.body && c.body.l2disco_supported);
+  state.syslogSupported = !!(c.body && c.body.syslog_supported);
   state.logLevel = (c.body && c.body.log_level) || 'info';
   state.logMaxSize = (c.body && c.body.log_max_size) || '200M';
   // Node-global firewall object/service catalog — shared by every network
@@ -1830,14 +1851,15 @@ function startPolling(){
 
 // syncRailGating re-applies sectionVisible() to every rail button already in
 // the DOM. buildRail() only runs once, at dashboard() startup, but a
-// capability-gated section's visibility (currently just BGP/BGP Peers, gated
-// on state.bgpSupported) is per-*target* and load() re-reads it fresh on
-// every switch. Without this, picking a peer from the managed-node list left
-// the previous target's BGP tabs on screen — still visible, still clickable —
-// on a target that doesn't have FRR; clicking one didn't error, it just fell
-// through renderSection()'s sectionVisible backstop straight to Networks,
-// which looked like a broken link rather than a hidden one. Called after
-// every load() (see refresh()) so the rail always matches whichever node
+// capability-gated section's visibility (BGP/BGP Peers, SNMP, L2 Disco — see
+// sectionVisible) is per-*target* and load() re-reads it fresh on every
+// switch. Without this, picking a peer from the managed-node list left the
+// previous target's gated tabs on screen — still visible, still clickable —
+// on a target that doesn't have the backing agent installed; clicking one
+// didn't error, it just fell through renderSection()'s sectionVisible
+// backstop straight to Networks, which looked like a broken link rather than
+// a hidden one. Called after every load() (see refresh()) so the rail always
+// matches whichever node
 // load() just fetched capabilities for.
 function syncRailGating(){
   document.querySelectorAll('.rail-tab[data-sec]').forEach(b => {
@@ -2337,7 +2359,7 @@ function renderSection() {
        upgrade:secUpgrade,
        metrics:infoMetrics, 'mesh-peers':infoMeshPeers, capture:infoCapture, speedtest:infoSpeedtest, latency:infoLatency,
        'route-table':infoRoutes, 'bgp-peers':secBgpPeers, 'hosts-file':infoHosts, 'dns-state':infoDNS,
-       resolver:secResolver, time:secTime, snmp:secSNMP, l2disco:secL2Disco, users:secUsers, power:secPower,
+       resolver:secResolver, time:secTime, snmp:secSNMP, l2disco:secL2Disco, syslog:secSyslog, users:secUsers, power:secPower,
        logs:secLogs, readme:secReadme, 'getting-started':secGettingStarted, api:secAPIDoc, license:secLicense, about:infoAbout }[state.section])(c, nets);
   }
   c.querySelectorAll('table').forEach(enhanceTable);
@@ -5817,26 +5839,33 @@ function secTime(c){
     if (!t.can_timezone){
       tzCard.appendChild($('<div class="empty">this host has no usable way to change its timezone</div>'));
     } else {
-      // The zone list is the browser's own (Intl.supportedValuesOf), which
-      // costs nothing and is always current — no zone table to ship or age out
-      // of date. Windows names its zones its own way ("US Mountain Standard
-      // Time"), and tzutil rejects IANA names, so there the list is omitted
-      // rather than offering suggestions the host would refuse.
+      // Both branches build a real <datalist> to search against — IANA
+      // zones come free from the browser's own Intl.supportedValuesOf,
+      // which costs nothing and is always current; Windows has no such
+      // browser-known list (tzutil rejects IANA names, and Windows zone
+      // ids are host-local, not a browser-known standard), so that branch
+      // is sourced from windows_zones instead — this host's own "tzutil
+      // /l" output, fetched server-side (see service.WindowsTimezones).
+      // Each option's value is the zone id tzutil /s wants; its visible
+      // text is tzutil's own display name (e.g. "(UTC-07:00) Arizona"),
+      // so searching by region still finds the right id.
       let dl = '';
       if (!windowsZones){
         let zones = [];
         try { zones = (Intl && Intl.supportedValuesOf) ? Intl.supportedValuesOf('timeZone') : []; } catch(_) { zones = []; }
         if (!zones.length) zones = ['UTC','America/New_York','America/Chicago','America/Denver','America/Phoenix','America/Los_Angeles','Europe/London','Europe/Paris','Europe/Berlin','Asia/Tokyo','Asia/Shanghai','Asia/Kolkata','Australia/Sydney'];
         dl = '<datalist id="tz-list">' + zones.map(z => '<option value="'+esc(z)+'">').join('') + '</datalist>';
+      } else if ((t.windows_zones||[]).length){
+        dl = '<datalist id="tz-list">' + t.windows_zones.map(z => '<option value="'+esc(z.id)+'">'+esc(z.name)+'</option>').join('') + '</datalist>';
       }
       const row = $('<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'+dl
-        + '<input id="tz-in"'+(windowsZones?'':' list="tz-list"')+' value="'+esc(t.timezone||'')+'" placeholder="'
-        + (windowsZones ? 'e.g. US Mountain Standard Time' : 'type to search \u2014 e.g. America/Phoenix, Europe/London')
+        + '<input id="tz-in" list="tz-list" value="'+esc(t.timezone||'')+'" placeholder="'
+        + (windowsZones ? 'type to search \u2014 e.g. Arizona, Pacific Time' : 'type to search \u2014 e.g. America/Phoenix, Europe/London')
         + '" style="flex:1;min-width:240px"></div>');
       tzCard.appendChild(row);
       tzCard.appendChild($('<div class="hint" style="margin:8px 0 0">'
         + (windowsZones
-            ? 'A Windows time-zone id, as listed by <code>tzutil /l</code>. IANA names like America/Phoenix are not accepted here.'
+            ? 'A Windows time-zone id, as listed by <code>tzutil /l</code>. Search by region or id below. IANA names like America/Phoenix are not accepted here.'
             : 'An IANA zone name. This changes the whole host\u2019s timezone, not just what this page displays.')
         + ' Saves automatically when you click or tab away.'
         + '</div>'));
@@ -5930,8 +5959,7 @@ function secTime(c){
 
 // secSNMP renders System > SNMP: a read-only SNMPv2c monitoring agent
 // (net-snmp's snmpd) on this host. Mirrors parapet's SNMP page almost
-// exactly — community string, listen address, interfaces (informational
-// only; see config.SNMPConfig's doc comment), sysLocation/sysContact.
+// exactly — community string, listen address, sysLocation/sysContact.
 //
 // All fields save together on any one field's blur, the same "several
 // fields, one write" pattern secResolver's DNS card uses \u2014 there's one
@@ -5975,19 +6003,16 @@ function secSNMP(c){
       + '</div>'));
     row.appendChild($('<div><div class="hint" style="margin:0 0 4px">Listen address</div>'
       + '<input id="snmp-listen" value="'+esc(snmp.listen_addr||'')+'" placeholder="udp:161 or 0.0.0.0:161 \u2014 blank = snmpd\u2019s own default" style="width:100%"></div>'));
-    row.appendChild($('<div><div class="hint" style="margin:0 0 4px">Interfaces</div>'
-      + '<input id="snmp-ifaces" value="'+esc((snmp.interfaces||[]).join(', '))+'" placeholder="blank = no stated scope \u2014 e.g. eth0, mgmt0" style="width:100%"></div>'));
     row.appendChild($('<div style="border-top:1px solid var(--line);padding-top:10px;margin-top:2px"><div class="hint" style="margin:0 0 4px">sysLocation</div>'
       + '<input id="snmp-location" value="'+esc(snmp.location||'')+'" placeholder="Server Room A, Rack 3" style="width:100%"></div>'));
     row.appendChild($('<div><div class="hint" style="margin:0 0 4px">sysContact</div>'
       + '<input id="snmp-contact" value="'+esc(snmp.contact||'')+'" placeholder="noc@example.com" style="width:100%"></div>'));
     card.appendChild(row);
-    card.appendChild($('<div class="hint" style="margin:8px 0 0">Filling in the community string turns the agent <b>on</b>; clearing it turns it <b>off</b> \u2014 or double-click the pill next to the page title to flip it directly. Interfaces is informational only \u2014 gravinet doesn\u2019t manage a host firewall rule to scope who can reach the agent; restrict that with the host\u2019s own firewall if it matters in your environment. Saves automatically when you click or tab away.</div>'));
+    card.appendChild($('<div class="hint" style="margin:8px 0 0">Filling in the community string turns the agent <b>on</b>; clearing it turns it <b>off</b> \u2014 or double-click the pill next to the page title to flip it directly. Saves automatically when you click or tab away.</div>'));
     body.appendChild(card);
 
     const communityIn = row.querySelector('#snmp-community');
     const listenIn = row.querySelector('#snmp-listen');
-    const ifacesIn = row.querySelector('#snmp-ifaces');
     const locationIn = row.querySelector('#snmp-location');
     const contactIn = row.querySelector('#snmp-contact');
 
@@ -6011,7 +6036,6 @@ function secSNMP(c){
 
     const readFields = () => ({
       community: communityIn.value.trim(), listen: listenIn.value.trim(),
-      ifaces: ifacesIn.value.split(/[\s,]+/).filter(Boolean).join(', '),
       location: locationIn.value.trim(), contact: contactIn.value.trim(),
     });
     // postSNMP is the one place that actually writes cfg.SNMP \u2014 both
@@ -6021,23 +6045,23 @@ function secSNMP(c){
     // own way.
     const postSNMP = (enabled, fields) => api('/api/system/snmp', { method:'POST', body: JSON.stringify({
       enabled, community: fields.community, listen_addr: fields.listen,
-      interfaces: fields.ifaces ? fields.ifaces.split(', ') : [], location: fields.location, contact: fields.contact,
+      location: fields.location, contact: fields.contact,
     }) });
 
     let last = {
-      community: snmp.community||'', listen: snmp.listen_addr||'', ifaces: (snmp.interfaces||[]).join(', '),
+      community: snmp.community||'', listen: snmp.listen_addr||'',
       location: snmp.location||'', contact: snmp.contact||'',
     };
     const saveSNMP = async () => {
       const cur = readFields();
-      if (cur.community===last.community && cur.listen===last.listen && cur.ifaces===last.ifaces && cur.location===last.location && cur.contact===last.contact) return;
+      if (cur.community===last.community && cur.listen===last.listen && cur.location===last.location && cur.contact===last.contact) return;
       const res = await postSNMP(!!cur.community, cur);
       if (!res.ok){ alert((res.body && res.body.error) || 'could not save SNMP settings'); return; }
       last = cur; // the baseline moves even if the fields have since changed further underneath this save
       if (res.body) setPill(!!res.body.enabled);
       if (res.body && res.body.note) alert(res.body.note);
     };
-    [communityIn, listenIn, ifacesIn, locationIn, contactIn].forEach(inp => {
+    [communityIn, listenIn, locationIn, contactIn].forEach(inp => {
       inp.onblur = saveSNMP;
       inp.onkeydown = (e) => { if (e.key === 'Enter'){ e.preventDefault(); inp.blur(); } };
     });
@@ -6188,6 +6212,117 @@ function secL2Disco(c){
       enabled = !enabled;
       setPill(enabled);
       saveL2Disco(picker.get(), enabled);
+    };
+  };
+
+  load();
+}
+
+// secSyslog renders System > Syslog: point this host's local syslog
+// daemon at a remote collector. Local logging is never touched — enabling
+// this only ever adds gravinet's own forwarding rule alongside whatever
+// this host already logs by default (see hostsyslog.go's package comment
+// for exactly what "local logging untouched" means per platform).
+//
+// Same "single field's blur (or the pill) writes the whole thing" shape
+// secSNMP already uses: filling in the target turns forwarding on,
+// clearing it turns it off, and the pill is a second, independent way to
+// flip the same flag without touching the field values.
+function secSyslog(c){
+  secHint(c, 'Forward this host\u2019s syslog to a remote collector. Local logging keeps working exactly as it already does \u2014 this only adds a copy going out, never a replacement. Acts on the node you\u2019re currently managing.');
+
+  const body = $('<div></div>');
+  body.innerHTML = '<div class="hint">loading\u2026</div>';
+  c.appendChild(body);
+
+  const load = async () => {
+    const r = await api('/api/system/syslog');
+    if (!r.ok || !r.body){ body.innerHTML = '<div class="hint">could not read this host\u2019s syslog settings.</div>'; return; }
+    draw(r.body);
+  };
+
+  const draw = (sy) => {
+    body.innerHTML = '';
+
+    if (sy.supported === false){
+      body.appendChild($('<div class="card"></div>')).appendChild($('<div class="empty">'+esc(sy.hint||'syslog forwarding isn\u2019t supported on this host')+'</div>'));
+      return;
+    }
+
+    const card = $('<div class="card"></div>');
+    const row = $('<div style="display:flex;flex-direction:column;gap:10px"></div>');
+
+    row.appendChild($('<div><div class="hint" style="margin:0 0 4px">Remote target</div>'
+      + '<input id="syslog-target" type="text" autocomplete="off" spellcheck="false" value="'+esc(sy.target||'')+'" placeholder="log.example.com:514" style="width:100%">'
+      + '</div>'));
+    row.appendChild($('<div><div class="hint" style="margin:0 0 4px">Protocol</div>'
+      + '<select id="syslog-proto" style="width:100%">'
+      + '<option value="udp"'+((sy.protocol||'udp')==='udp'?' selected':'')+'>UDP</option>'
+      + '<option value="tcp"'+(sy.protocol==='tcp'?' selected':'')+'>TCP</option>'
+      + '</select></div>'));
+    card.appendChild(row);
+    card.appendChild($('<div class="hint" style="margin:8px 0 0">Filling in a remote target turns forwarding <b>on</b>; clearing it turns it <b>off</b> \u2014 or double-click the pill next to the page title to flip it directly.'
+      + (sy.manager ? ' Applied via ' + esc(sy.manager) + '.' : '')
+      + ' Saves automatically when you click or tab away.</div>'));
+    body.appendChild(card);
+
+    const targetIn = row.querySelector('#syslog-target');
+    const protoIn = row.querySelector('#syslog-proto');
+
+    // Enabled/disabled pill, placed next to the page's own <h2> title \u2014
+    // the same spot and shape secSNMP's own pill uses, for the same
+    // "system-wide config, no per-item name to attach it to" reason.
+    const h2 = c.querySelector('h2.sec');
+    const pill = $('<span class="pill tag-toggle"></span>');
+    const setPill = (en) => {
+      pill.className = 'pill tag-toggle ' + (en?'on':'off');
+      pill.textContent = en ? 'enabled' : 'disabled';
+      pill.title = 'double-click to ' + (en ? 'disable' : 'enable');
+    };
+    setPill(!!sy.enabled);
+    h2.appendChild(document.createTextNode(' '));
+    h2.appendChild(pill);
+
+    const readFields = () => ({ target: targetIn.value.trim(), protocol: protoIn.value });
+    // postSyslog is the one place that actually writes the config \u2014 both
+    // saveSyslog (fields changed, enabled derived from target) and the
+    // pill's own double-click (enabled flipped directly, fields unchanged)
+    // funnel through this rather than each building the request its own way.
+    const postSyslog = (enabled, fields) => api('/api/system/syslog', { method:'POST', body: JSON.stringify({
+      enabled, target: fields.target, protocol: fields.protocol,
+    }) });
+
+    let last = { target: sy.target||'', protocol: sy.protocol||'udp' };
+    const saveSyslog = async () => {
+      const cur = readFields();
+      if (cur.target===last.target && cur.protocol===last.protocol) return;
+      const res = await postSyslog(!!cur.target, cur);
+      if (!res.ok){ alert((res.body && res.body.error) || 'could not save syslog settings'); targetIn.value = last.target; protoIn.value = last.protocol; return; }
+      last = cur;
+      if (res.body) setPill(!!res.body.enabled);
+    };
+    [targetIn, protoIn].forEach(inp => {
+      inp.onblur = saveSyslog;
+      inp.onkeydown = (e) => { if (e.key === 'Enter'){ e.preventDefault(); inp.blur(); } };
+    });
+    protoIn.onchange = saveSyslog;
+
+    // Double-click the pill to flip enabled independent of the target
+    // field's own auto-derive-on-blur above \u2014 same "flip now, don't wait
+    // on the round trip" idiom secSNMP's own pill uses. Turning on with an
+    // empty target reproduces the same rejection clearing-then-refilling
+    // the field would hit; that failure surfaces in the console here too,
+    // not a blocking alert, and the next visit to this page re-reads the
+    // true state from the server either way.
+    pill.ondblclick = () => {
+      const on = !pill.classList.contains('on');
+      setPill(on);
+      const cur = readFields();
+      postSyslog(on, cur).then(res => {
+        if (!res.ok) { console.warn('/api/system/syslog toggle failed:', (res.body&&res.body.error)||'failed'); return; }
+        last = cur;
+        if (res.body) setPill(!!res.body.enabled);
+      });
     };
   };
 
@@ -7878,7 +8013,44 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
     return picker;
   };
 
-  const enableCb = rowTog('Enable BGP', 'Render and run a <code>router bgp</code> speaker on this host. Off leaves no BGP block in FRR\u2019s config and switches bgpd off.', !!b.enabled);
+  // Enabled/disabled pill, placed next to the page's own <h2> title —
+  // replacing what used to be an inline "Enable BGP" toggle row here, now
+  // the same spot and shape secSNMP/secL2Disco/secSyslog's own pill use.
+  // host (editWrap) and the <h2> are both children of the same content
+  // container secBgp received, so it's reached via host.parentElement
+  // rather than a directly passed reference. Looked up rather than
+  // recreated on this editor's second render (the live-FRR import
+  // reflection in secBgp's load() calls renderBgpEditor a second time) so
+  // a re-render never leaves two pills stacked on the same title.
+  const h2 = host.parentElement.querySelector('h2.sec');
+  let pill = h2.querySelector('.pill.tag-toggle');
+  if (!pill) {
+    pill = $('<span class="pill tag-toggle"></span>');
+    h2.appendChild(document.createTextNode(' '));
+    h2.appendChild(pill);
+  }
+  const setPill = (en) => {
+    pill.className = 'pill tag-toggle ' + (en?'on':'off');
+    pill.textContent = en ? 'enabled' : 'disabled';
+    pill.title = 'double-click to ' + (en ? 'disable' : 'enable');
+  };
+  let bgpEnabled = !!b.enabled;
+  setPill(bgpEnabled);
+  // Flips immediately and saves through the same doSave() every other
+  // field on this form already uses (declared below; hoisted, so this
+  // forward reference is fine) — doSave always builds its payload from
+  // current form state, bgpEnabled included, so this needs no separate
+  // "post just the flag" path the way SNMP/L2Disco's simpler forms do.
+  // Enabling with no AS number and AutoBGP off is a real, reachable state
+  // this leaves the pill in — doSave's own validation guard below catches
+  // it and reports it on this form's status line rather than posting a
+  // guaranteed error; the pill itself doesn't revert, matching secSNMP's
+  // own "the next visit re-reads the true state from the server either way".
+  pill.ondblclick = () => {
+    bgpEnabled = !bgpEnabled;
+    setPill(bgpEnabled);
+    scheduleSave(true);
+  };
   const asnInp = rowInput('Local AS number', 'This node\u2019s autonomous-system number, e.g. 65001. Required to enable BGP \u2014 unless AutoBGP is on below and this is left blank, in which case it derives and fills one in.', b.asn||'', 'e.g. 65001', 180);
   const ridInp = rowInput('Router-id', 'BGP router-id (an IPv4-style id), e.g. 10.0.0.1. Optional \u2014 FRR picks one if left blank, or AutoBGP derives one if it\u2019s on below.', b.router_id||'', 'e.g. 10.0.0.1', 180);
   const autoCb = rowTog('AutoBGP', 'Auto-fills the AS number and router-id above from this node\u2019s tunnel IPv4 if blank, enables BGP, and keeps one Neighbor per connected mesh peer in sync (remote AS, password \u2018autobgp\u2019, BFD on) as peers come and go. Never touches a Neighbor it didn\u2019t create.', !!b.auto_bgp);
@@ -8144,14 +8316,14 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
     const ka = parseInt(kaInp.value, 10) || 0;
     const hold = parseInt(holdInp.value, 10) || 0;
     // Hold back invalid intermediate states rather than POSTing a guaranteed error.
-    if (enableCb.checked && !autoCb.checked && asn <= 0){
+    if (bgpEnabled && !autoCb.checked && asn <= 0){
       status.style.color = ''; status.textContent = 'Enter a local AS number to enable BGP (or turn on AutoBGP above to derive one).'; return;
     }
-    if (enableCb.checked && hold > 0 && hold <= ka){
+    if (bgpEnabled && hold > 0 && hold <= ka){
       status.style.color = ''; status.textContent = 'Hold timer must be greater than the keepalive timer (e.g. 4 and 12).'; return;
     }
     const payload = {
-      enabled: enableCb.checked,
+      enabled: bgpEnabled,
       asn: asn,
       router_id: ridInp.value.trim(),
       auto_bgp: autoCb.checked,
@@ -8185,8 +8357,9 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
   // Toggles and structural changes apply at once; the four text fields
   // debounce. The three route pickers above wire their own per-checkbox
   // save trigger (rowRouteList) since each holds many checkboxes, not one.
+  // Enable BGP itself is now the title pill above, not a row here — see
+  // its own ondblclick, set up alongside setPill.
 
-  enableCb.onchange = () => scheduleSave(true);
   autoCb.onchange = () => scheduleSave(true);
   asPrependCb.onchange = () => scheduleSave(true);
   [asnInp, ridInp, kaInp, holdInp].forEach(inp => { inp.oninput = () => scheduleSave(false); });

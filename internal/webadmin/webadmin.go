@@ -36,6 +36,7 @@ import (
 	"gravinet/internal/logx"
 	"gravinet/internal/mesh"
 	"gravinet/internal/ratelimit"
+	"gravinet/internal/service"
 )
 
 // Backend is the slice of the engine the admin UI drives.
@@ -383,6 +384,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/system/users", s.authed(s.handleSystemUsers))       // console OS accounts (System > Users)
 	mux.HandleFunc("/api/system/snmp", s.authed(s.handleSystemSNMP))         // SNMPv2c agent (System > SNMP)
 	mux.HandleFunc("/api/system/l2disco", s.authed(s.handleSystemL2Disco))   // LLDP/CDP agent (System > L2 Disco)
+	mux.HandleFunc("/api/system/syslog", s.authed(s.handleSystemSyslog))     // remote syslog forwarding (System > Syslog)
 	mux.HandleFunc("/api/cluster", s.authed(s.handleCluster))
 	mux.HandleFunc("/api/loglevel", s.authed(s.handleLogLevel))
 	mux.HandleFunc("/api/logsize", s.authed(s.handleLogSize))
@@ -919,8 +921,11 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			DNS: n.DNSAdvertise, DNSRej: n.DNSReject, Keys: keys,
 		})
 	}
+	snmpSupported, _ := service.SNMPSupported()
+	l2discoSupported, _ := service.LLDPSupported()
+	syslogSupported, _ := service.SyslogSupported()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"nets": out, "primary_port": cfg.PrimaryPort, "tcp_fallback_port": cfg.TCPFallbackPortValue(), "tcp_fallback_disabled": !cfg.TCPFallbackEnabled(), "extra_listen_ports": cfg.ExtraListenPorts, "extra_tcp_listen_ports": cfg.ExtraTCPListenPorts, "nat_state_timeout": cfg.NATStateTimeout, "geoip_lookup": s.cfg.GeoIPEnabled(), "enable_upnp": cfg.EnableUPnP, "allow_remote_shell": s.cfg.AllowRemoteShell, "shell_supported": ptySupported, "bgp_supported": bgpSupported(), "log_level": s.be.LogLevel(), "log_max_size": cfg.LogMaxSizeString(),
+		"nets": out, "primary_port": cfg.PrimaryPort, "tcp_fallback_port": cfg.TCPFallbackPortValue(), "tcp_fallback_disabled": !cfg.TCPFallbackEnabled(), "extra_listen_ports": cfg.ExtraListenPorts, "extra_tcp_listen_ports": cfg.ExtraTCPListenPorts, "nat_state_timeout": cfg.NATStateTimeout, "geoip_lookup": s.cfg.GeoIPEnabled(), "enable_upnp": cfg.EnableUPnP, "allow_remote_shell": s.cfg.AllowRemoteShell, "shell_supported": ptySupported, "bgp_supported": bgpSupported(), "snmp_supported": snmpSupported, "l2disco_supported": l2discoSupported, "syslog_supported": syslogSupported, "log_level": s.be.LogLevel(), "log_max_size": cfg.LogMaxSizeString(),
 		// Node-global firewall object/service catalog (see Config.FirewallObjects'
 		// doc comment) — shared by every network above, not nested under any one
 		// of them. The seeded flags let the admin UI populate the well-known

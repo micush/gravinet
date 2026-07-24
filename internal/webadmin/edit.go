@@ -1075,11 +1075,16 @@ func hostTimeJSON(t service.TimeInfo) map[string]any {
 	if servers == nil {
 		servers = []string{}
 	}
+	windowsZones := make([]map[string]string, 0, len(t.WindowsZones))
+	for _, z := range t.WindowsZones {
+		windowsZones = append(windowsZones, map[string]string{"id": z.ID, "name": z.Name})
+	}
 	return map[string]any{
 		"now":            t.Now.Format(time.RFC3339),
 		"now_ms":         t.Now.UnixMilli(),
 		"timezone":       t.Timezone,
 		"timezone_style": t.TimezoneStyle,
+		"windows_zones":  windowsZones,
 		"abbrev":         t.Abbrev,
 		"offset_seconds": t.OffsetSeconds,
 		"ntp_enabled":    t.NTPEnabled,
@@ -1096,6 +1101,61 @@ func hostTimeJSON(t service.TimeInfo) map[string]any {
 		// warning about instead of hardcoding a copy that drifts from
 		// mesh.clockSkew the first time anyone tunes it.
 		"skew_tolerance_seconds": int(mesh.ClockSkewTolerance().Seconds()),
+	}
+}
+
+// handleSystemSyslog reads or changes this host's remote-syslog-forwarding
+// configuration — the backend for System > Syslog. Like Resolver and Time,
+// this follows the currently selected node and nothing here is stored in
+// gravinet's own config; the host's own syslog daemon config is the source
+// of truth (see hostsyslog.go's package comment). Also like Resolver and
+// Time — and unlike SNMP/L2Disco, which keep a separate always-accepted
+// copy in gravinet's own config.json — there's no such fallback here, so
+// any failure (bad input, or the daemon reload itself failing) is a
+// straight rejection rather than a "saved, but..." note: there is nothing
+// gravinet's own source of truth already accepted independently of it.
+//
+// POST takes {enabled, target, protocol}:
+//
+//	{"enabled": true, "target": "log.example.com:514", "protocol": "udp"}
+//	{"enabled": false}
+//
+// Enabling only ever adds gravinet's own forwarding rule alongside whatever
+// this host already logs locally — see service.SetHostSyslog's doc comment.
+// Disabling removes only that rule.
+func (s *Server) handleSystemSyslog(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		writeJSON(w, http.StatusOK, hostSyslogJSON(service.HostSyslog()))
+		return
+	}
+
+	var req struct {
+		Enabled  bool   `json:"enabled"`
+		Target   string `json:"target"`
+		Protocol string `json:"protocol"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	s.log.Infof("webadmin: %s host syslog forwarding (requested from admin UI)",
+		map[bool]string{true: "enabling", false: "disabling"}[req.Enabled])
+	if ok, note := service.SetHostSyslog(req.Enabled, req.Target, req.Protocol); !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": note})
+		return
+	}
+	resp := hostSyslogJSON(service.HostSyslog())
+	resp["ok"] = true
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// hostSyslogJSON flattens a service.SyslogInfo for the wire. Field naming
+// matches systemSNMPJSON/L2Disco's own shape ("supported"/"hint"), not
+// TimeInfo's "can_*" convention, since this page is modeled on SNMP/L2
+// Disco's supported-gate pattern rather than Time's.
+func hostSyslogJSON(sy service.SyslogInfo) map[string]any {
+	return map[string]any{
+		"enabled": sy.Enabled, "target": sy.Target, "protocol": sy.Protocol,
+		"manager": sy.Manager, "supported": sy.CanSyslog, "hint": sy.Hint,
 	}
 }
 
@@ -1427,12 +1487,11 @@ func (s *Server) handleSystemSNMP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Enabled    bool     `json:"enabled"`
-		Community  string   `json:"community"`
-		ListenAddr string   `json:"listen_addr"`
-		Interfaces []string `json:"interfaces"`
-		Location   string   `json:"location"`
-		Contact    string   `json:"contact"`
+		Enabled    bool   `json:"enabled"`
+		Community  string `json:"community"`
+		ListenAddr string `json:"listen_addr"`
+		Location   string `json:"location"`
+		Contact    string `json:"contact"`
 	}
 	if !decode(w, r, &req) {
 		return
@@ -1443,7 +1502,7 @@ func (s *Server) handleSystemSNMP(w http.ResponseWriter, r *http.Request) {
 	}
 	snmp := config.SNMPConfig{
 		Enabled: req.Enabled, Community: req.Community, ListenAddr: req.ListenAddr,
-		Interfaces: req.Interfaces, Location: req.Location, Contact: req.Contact,
+		Location: req.Location, Contact: req.Contact,
 	}
 
 	action := "disabling"
@@ -1483,14 +1542,10 @@ func (s *Server) handleSystemSNMP(w http.ResponseWriter, r *http.Request) {
 // it), rather than masking a field that was never actually confidential.
 func systemSNMPJSON(cfg config.SNMPConfig) map[string]any {
 	supported, hint := service.SNMPSupported()
-	interfaces := cfg.Interfaces
-	if interfaces == nil {
-		interfaces = []string{} // nil marshals to JSON null, not []; the page expects an array
-	}
 	return map[string]any{
 		"enabled": cfg.Enabled, "community": cfg.Community,
-		"listen_addr": cfg.ListenAddr, "interfaces": interfaces,
-		"location": cfg.Location, "contact": cfg.Contact,
+		"listen_addr": cfg.ListenAddr,
+		"location":    cfg.Location, "contact": cfg.Contact,
 		"running":   supported && service.SNMPServiceRunning(),
 		"supported": supported, "hint": hint,
 	}

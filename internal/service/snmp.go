@@ -22,7 +22,9 @@ package service
 // keys under the SNMP service's Parameters key, enabled via DISM, not a
 // text config file net-snmp reads) — different enough that half-adapting
 // this same code to it would be more likely to be subtly wrong than
-// honestly absent. SNMPSupported says so plainly rather than pretending.
+// honestly absent. SNMPSupported reports the same generic "not supported
+// on this operating system" hint here as any other unsupported platform,
+// rather than surfacing this Windows-specific detail through the API/UI.
 //
 // darwin has its own real caveat, worth stating plainly rather than
 // discovering via a mysterious failure: gravinet's own process commonly
@@ -107,9 +109,9 @@ func snmpdBinary() string {
 // the binary is installed and the platform is one this package manages a
 // service on. (true, "") or (false, hint).
 func SNMPSupported() (bool, string) {
-	if runtime.GOOS == "windows" {
-		return false, "gravinet doesn't manage Windows' own SNMP Service — it has a completely different (registry-based) configuration mechanism than net-snmp's config file"
-	}
+	// Windows falls through to this same generic hint via SNMPConfPath's
+	// default case — see the file-level comment for why gravinet doesn't
+	// special-case Windows' own (registry-based) SNMP here.
 	if SNMPConfPath() == "" {
 		return false, "SNMP isn't supported on this operating system"
 	}
@@ -174,9 +176,9 @@ func renderSNMPConf(cfg config.SNMPConfig) string {
 	b.WriteString("# Read-only SNMPv2c agent.\n\n")
 
 	// rocommunity grants read-only access from any source; gravinet doesn't
-	// manage a host firewall rule to scope who can reach it (see
-	// config.SNMPConfig.Interfaces's doc comment) — restrict reachability
-	// with the host's own firewall if that matters in your environment.
+	// manage a host firewall rule to scope who can reach it — restrict
+	// reachability with the host's own firewall if that matters in your
+	// environment.
 	b.WriteString("rocommunity " + cleanSNMPCommunity(cfg.Community) + "\n")
 	if cfg.Location != "" {
 		b.WriteString("sysLocation " + snmpConfValue(cfg.Location) + "\n")

@@ -60,7 +60,7 @@ func TestSystemTimeGet(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"now", "now_ms", "timezone", "timezone_style", "abbrev", "offset_seconds",
+	for _, k := range []string{"now", "now_ms", "timezone", "timezone_style", "windows_zones", "abbrev", "offset_seconds",
 		"ntp_enabled", "ntp_known", "synchronized", "sync_known", "servers", "manager",
 		"can_timezone", "can_ntp", "can_clock", "hint", "skew_tolerance_seconds"} {
 		if _, ok := out[k]; !ok {
@@ -70,6 +70,12 @@ func TestSystemTimeGet(t *testing.T) {
 	// servers must always be an array, never null: the UI joins it.
 	if _, ok := out["servers"].([]any); !ok {
 		t.Errorf("servers = %#v, want a JSON array even when empty", out["servers"])
+	}
+	// windows_zones must always be an array too, for the same reason — the
+	// UI maps over it to build the datalist even on non-Windows hosts,
+	// where it's simply empty.
+	if _, ok := out["windows_zones"].([]any); !ok {
+		t.Errorf("windows_zones = %#v, want a JSON array even when empty", out["windows_zones"])
 	}
 	// The tolerance shown to the operator has to be the one the engine enforces,
 	// not a hardcoded copy — that's why mesh exports it.

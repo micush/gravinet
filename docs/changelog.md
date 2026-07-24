@@ -2,6 +2,131 @@
 
 ---
 
+## v641 — 2026-07-24
+
+**Fixed:** build break introduced in v636 — a stray pair of backticks in
+a `ui.go` comment (around the Windows timezone datalist work) terminated
+`indexHTML`'s raw string literal early, turning the rest of the file into
+invalid top-level Go and breaking every build from v636 through v640.
+Verified this time with an actual `go build ./...` (and `go vet ./...`),
+not just static review.
+
+---
+
+## v640 — 2026-07-24
+
+**Changed:** Traffic > BGP's "Enable BGP" control moved from an inline
+checkbox row to the same enabled/disabled title pill System > SNMP,
+System > L2 Disco, and System > Syslog already use — next to the page's
+own heading, double-click to flip, flips immediately and saves in the
+background through the same form-wide save every other field here
+already uses (there's no separate "post just the flag" endpoint the way
+SNMP/L2Disco/Syslog's simpler single-purpose forms have; BGP's save
+always carries the whole form). Wired to survive the editor's own
+occasional second render per page load (reflecting a live, not-yet-
+gravinet-managed FRR config) without stacking a duplicate pill.
+
+System > Syslog's own capability-based nav hiding and title pill — both
+already shipped in v639 alongside the feature itself — are unchanged
+here; this entry is BGP catching up to the pattern they (and SNMP/L2
+Disco before them) established.
+
+---
+
+## v639 — 2026-07-24
+
+**New:** System > Syslog. Points this host's local syslog daemon at a
+remote collector — additive only, never a replacement: whatever this
+host already logs locally keeps landing wherever it already lands,
+exactly as before. Supported on Linux via a dedicated rsyslog drop-in,
+and on FreeBSD/OpenBSD via a managed block in `/etc/syslog.conf` (classic
+BSD syslogd's own `@host`/`@@host` UDP/TCP forward syntax) appended
+alongside whatever's already there, never touching existing rules — the
+same non-destructive block-replace `internal/hosts` already does for the
+OS hosts file. syslog-ng and other Linux syslogd variants aren't
+supported (no reliable way to discover the distro-defined source name
+its config needs without risking one that fails to load), and neither is
+macOS (legacy syslogd, superseded by the unified logging system with no
+supported remote-forwarding mechanism) or Windows (no BSD-syslog-
+compatible daemon at all) — the same "honestly absent rather than
+subtly wrong" call SNMP's own Windows exclusion already makes.
+
+Like Resolver and Time, nothing here is stored in gravinet's own
+config — the host's own syslog daemon config is the single source of
+truth, read fresh and written straight through to.
+
+Gated with the same capability-based nav hiding SNMP and L2 Disco got in
+v638: a new `syslog_supported` flag in `/api/config`
+(`service.SyslogSupported`) hides the System > Syslog entry entirely on
+a host with no daemon this page can drive, rather than landing on a page
+that can only say "not supported."
+
+New endpoint: `GET`/`POST /api/system/syslog`.
+
+---
+
+## v638 — 2026-07-24
+
+**Changed:** System > SNMP and System > L2 Disco now hide themselves on a
+host that can't actually back them — snmpd missing (or an unsupported
+platform, e.g. Windows for SNMP) and lldpd missing, respectively — the
+same treatment Traffic > BGP already gets on a host without FRR's vtysh.
+`/api/config` gained `snmp_supported`/`l2disco_supported` flags
+(`service.SNMPSupported`/`LLDPSupported`, the same checks each page's own
+`GET` already used for its in-page hint), and the web UI's
+`sectionVisible()` now gates both nav entries and the global search index
+on them, read fresh per managed node the same way BGP's gating already
+is. Previously both sections were always listed and reachable regardless
+of the target node's capabilities, landing on an empty "not supported"
+page instead of simply not being there.
+
+---
+
+## v637 — 2026-07-24
+
+**New:** System > Time's timezone field now has real search suggestions
+on Windows, not just Linux/macOS/BSD. Previously the datalist was
+omitted there entirely — the browser's own zone list
+(`Intl.supportedValuesOf('timeZone')`) only knows IANA names, and
+`tzutil` rejects those outright, so offering it would have just
+suggested values the host would refuse. `GET`/`POST /api/system/time`
+now carry a `windows_zones` field (`service.WindowsTimezones`, parsed
+from this host's own `tzutil /l`), and the page searches that list on
+Windows the same way it searches the browser's IANA list everywhere
+else — by region or display name (e.g. "Arizona"), landing on the zone
+id `tzutil /s` actually wants (e.g. "US Mountain Standard Time").
+
+---
+
+## v636 — 2026-07-24
+
+**Changed:** System > SNMP's "Interfaces" field is gone — config, API,
+and page. It never did anything: it wasn't passed to snmpd and wasn't
+enforced by gravinet itself, since snmpd has no native "only listen on
+these interfaces" concept short of `ListenAddr` binding to one specific
+address, and gravinet doesn't manage a host firewall rule on SNMP's
+behalf. It was purely a place for an operator to jot down interface names
+for their own reference; that note-taking wasn't worth a config field, an
+API field, and a page input that all looked like they controlled
+something real. `GET`/`POST /api/system/snmp` no longer have an
+`interfaces` key; existing configs with the field already set will simply
+have it dropped on next save.
+
+---
+
+## v635 — 2026-07-24
+
+**Fixed:** System > SNMP's unsupported-platform message on Windows no
+longer claims gravinet is choosing not to manage Windows' own SNMP
+Service. It never had the option to in the first place — Windows' SNMP is
+a registry-configured OS feature with nothing in common with net-snmp's
+config file, so there was no net-snmp-shaped mechanism here that could
+have driven it either way. Windows now gets the same plain "SNMP isn't
+supported on this operating system" hint as any other unsupported
+platform.
+
+---
+
 ## v634 — 2026-07-24
 
 **Changed:** System > SNMP's community string field is shown in plain text

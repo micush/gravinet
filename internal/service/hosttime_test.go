@@ -296,6 +296,52 @@ func TestWindowsPeerList(t *testing.T) {
 	}
 }
 
+func TestParseTzutilList(t *testing.T) {
+	out := "(UTC-12:00) International Date Line West\r\n" +
+		"Dateline Standard Time\r\n" +
+		"\r\n" +
+		"(UTC-07:00) Arizona\r\n" +
+		"US Mountain Standard Time\r\n" +
+		"\r\n" +
+		"(UTC) Coordinated Universal Time\r\n" +
+		"UTC\r\n"
+	zones := parseTzutilList(out)
+	want := []WindowsTimezone{
+		{Name: "(UTC-12:00) International Date Line West", ID: "Dateline Standard Time"},
+		{Name: "(UTC-07:00) Arizona", ID: "US Mountain Standard Time"},
+		{Name: "(UTC) Coordinated Universal Time", ID: "UTC"},
+	}
+	if len(zones) != len(want) {
+		t.Fatalf("parseTzutilList returned %d zone(s), want %d: %#v", len(zones), len(want), zones)
+	}
+	for i, z := range zones {
+		if z != want[i] {
+			t.Errorf("zone %d = %#v, want %#v", i, z, want[i])
+		}
+	}
+}
+
+func TestParseTzutilListEmpty(t *testing.T) {
+	if zones := parseTzutilList(""); zones != nil {
+		t.Errorf("parseTzutilList(\"\") = %#v, want nil", zones)
+	}
+}
+
+func TestWindowsTimezonesWithoutTzutil(t *testing.T) {
+	// This test suite doesn't run on Windows CI, so tzutil is never on
+	// PATH here — exercises the "not present" branch the way it'll
+	// actually be hit on every non-Windows host WindowsTimezones ever
+	// runs on incidentally (readWindowsTime only calls it after its own
+	// haveCmd("tzutil") check, so in practice this path is Windows-only,
+	// but the function itself must still be safe to call anywhere).
+	if haveCmd("tzutil") {
+		t.Skip("tzutil is on PATH in this environment; not exercising the absent-binary path")
+	}
+	if zones := WindowsTimezones(); zones != nil {
+		t.Errorf("WindowsTimezones() = %#v, want nil without tzutil", zones)
+	}
+}
+
 func TestKeyValsAndLineHelpers(t *testing.T) {
 	kv := keyVals("Timezone=America/Phoenix\nNTP=yes\nNTPSynchronized=no\ngarbage\n")
 	if kv["Timezone"] != "America/Phoenix" || kv["NTP"] != "yes" || kv["NTPSynchronized"] != "no" {

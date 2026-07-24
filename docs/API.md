@@ -294,6 +294,7 @@ cookie, or a qualifying fleet-manager mesh session — see
 | GET/POST | `/api/system/users` | Manage OS accounts permitted to sign in (pam/bsd_auth/windows auth modes) |
 | GET/POST | `/api/system/snmp` | Read-only SNMPv2c monitoring agent (net-snmp's snmpd) |
 | GET/POST | `/api/system/l2disco` | Link-layer discovery (LLDP/CDP) config and live neighbor status |
+| GET/POST | `/api/system/syslog` | Forward this host's syslog to a remote collector |
 | GET | `/api/about` | Version/OS/architecture/Go runtime info |
 | GET | `/api/readme` | This node's bundled README.md |
 | GET | `/api/license` | This node's bundled LICENSE |
@@ -382,6 +383,9 @@ first to see current values before deciding what to send.
   "allow_remote_shell": false,
   "shell_supported": true,
   "bgp_supported": true,
+  "snmp_supported": true,
+  "l2disco_supported": true,
+  "syslog_supported": true,
   "log_level": "info",
   "log_max_size": "200M",
   "firewall_objects": [ /* config.FirewallObject, node-global */ ],
@@ -394,6 +398,15 @@ first to see current values before deciding what to send.
 `keys[].set` reports whether a slot holds a key at all, without revealing
 it; `distributed` mirrors whether this slot is currently being kept in
 sync mesh-wide (see [Keys](#keys)).
+
+`bgp_supported`/`snmp_supported`/`l2disco_supported`/`syslog_supported`
+report whether the corresponding System/Traffic page has anything to show
+on the currently selected node at all — FRR's `vtysh`, `snmpd`, `lldpd`,
+and a syslog daemon this endpoint knows how to drive, respectively, each
+probed independently. The web UI's nav rail and search index hide a
+section entirely when its flag is false rather than showing a page that
+can only ever say "not supported"; each underlying endpoint's own GET
+also reports the identical `supported` value for the same reason.
 
 ## Networks
 
@@ -1523,8 +1536,8 @@ rather than being silently overwritten.
 
 ```json
 {"now": "2026-07-23T14:30:00-07:00", "now_ms": 1785000000000,
- "timezone": "America/Phoenix", "timezone_style": "iana", "abbrev": "MST",
- "offset_seconds": -25200, "ntp_enabled": true, "ntp_known": true,
+ "timezone": "America/Phoenix", "timezone_style": "iana", "windows_zones": [],
+ "abbrev": "MST", "offset_seconds": -25200, "ntp_enabled": true, "ntp_known": true,
  "synchronized": true, "sync_known": true,
  "servers": ["0.pool.ntp.org", "1.pool.ntp.org"], "manager": "systemd-timesyncd",
  "can_timezone": true, "can_ntp": true, "can_clock": true, "hint": "",
@@ -1533,7 +1546,13 @@ rather than being silently overwritten.
 
 `timezone_style` is `"windows"` on Windows (a Windows zone id like
 `"US Mountain Standard Time"`, not an IANA name — `tzutil` rejects IANA
-names outright) and `"iana"` everywhere else. The `can_*` flags and
+names outright) and `"iana"` everywhere else. `windows_zones` is every
+zone `tzutil /l` reports on this host — `[{"id": "US Mountain Standard
+Time", "name": "(UTC-07:00) Arizona"}, ...]` — always `[]` outside
+Windows; the web UI's timezone field uses it as its search suggestions on
+Windows the same way it uses the browser's own IANA zone list everywhere
+else, since neither the browser nor gravinet ships a static copy of
+Windows' own zone table. The `can_*` flags and
 `ntp_known`/`sync_known` distinguish "this host reports the setting is
 off" from "this host has no way to tell" — a false `can_*`/`*_known` is
 explained in `hint`, never silently treated as "off"/"no". Every `restart`
@@ -1666,7 +1685,7 @@ wholesale — the same shape parapet's own `PUT /api/snmp` uses.
 
 ```json
 {"enabled": true, "community": "public", "listen_addr": "",
- "interfaces": [], "location": "Server Room A", "contact": "noc@example.com",
+ "location": "Server Room A", "contact": "noc@example.com",
  "running": true, "supported": true, "hint": ""}
 ```
 
@@ -1677,9 +1696,6 @@ wholesale — the same shape parapet's own `PUT /api/snmp` uses.
 - `listen_addr` is an optional snmpd listen spec (`"udp:161"`,
   `"0.0.0.0:161"`); empty means snmpd's own default (every address, port
   161).
-- `interfaces` is informational only — gravinet does not manage a host
-  firewall rule to scope who can reach the agent on your behalf; restrict
-  that with the host's own firewall if it matters in your environment.
 - `running`/`supported`/`hint` reflect live state: `supported` is whether
   this host can run an agent at all (the platform is one gravinet manages a
   service on, and `snmpd` is actually installed); `running` is whether the
@@ -1689,11 +1705,11 @@ wholesale — the same shape parapet's own `PUT /api/snmp` uses.
   merely an untested platform.
 
 `POST` takes the same shape back (`enabled`, `community`, `listen_addr`,
-`interfaces`, `location`, `contact`):
+`location`, `contact`):
 
 ```json
 {"enabled": true, "community": "public", "listen_addr": "",
- "interfaces": ["eth0"], "location": "Server Room A", "contact": "noc@example.com"}
+ "location": "Server Room A", "contact": "noc@example.com"}
 ```
 
 Filling in `community` is the on switch; clearing it (or `enabled: false`)
@@ -1766,6 +1782,48 @@ activated — link-layer discovery on loopback is meaningless — matching
 write and the `lldpd` service reconciliation are allowed to disagree, the
 same way and for the same reason as SNMP's: a reconciliation failure is a
 `"note"`, never a `400`.
+
+### `POST /api/system/syslog`
+
+Reads or changes this node's remote-syslog-forwarding configuration —
+like Power/Time/Resolver/SNMP/L2Disco, follows the currently selected
+node. Unlike SNMP/L2Disco, nothing here is stored in gravinet's own
+config: the host's own syslog daemon config is the source of truth, the
+same architecture Resolver and Time use and for the same reason (see
+hosttime.go's package comment). Enabling only ever adds gravinet's own
+forwarding rule alongside whatever this host already logs locally —
+never a replacement — and disabling removes only that rule.
+
+```json
+{"enabled": false, "target": "", "protocol": "",
+ "manager": "rsyslog", "supported": true, "hint": ""}
+```
+
+- `target` is `"host:port"` of the configured remote collector, or `""`
+  when forwarding is off. `protocol` is `"udp"` or `"tcp"`.
+- `manager` names which syslog daemon this is applied through
+  (`"rsyslog"` on Linux, `"syslogd"` on FreeBSD/OpenBSD), for display.
+- `supported`/`hint` mirror SNMP/L2Disco's own fields: `supported` is
+  whether this platform and an installed syslog daemon this endpoint
+  knows how to drive make the feature usable at all. Only rsyslog (Linux)
+  and classic BSD `syslogd` (FreeBSD/OpenBSD) are supported — syslog-ng
+  and other Linux syslogd variants are not, and macOS/Windows always
+  report `supported: false` (see hostsyslog.go's package comment for why
+  each is excluded).
+
+`POST` takes:
+
+```json
+{"enabled": true, "target": "log.example.com:514", "protocol": "udp"}
+{"enabled": false}
+```
+
+Unlike SNMP/L2Disco, a rejected request here is always a `400`, never a
+partial-success `"note"` — there's no separate gravinet-side config copy
+that already accepted the request independently of whether the host's
+own syslog daemon config could be written and reloaded, the same "any
+failure is a straight rejection" shape Time/Resolver already use for the
+identical reason.
 
 ### `GET /api/about`
 

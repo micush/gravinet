@@ -62,16 +62,13 @@ func TestSystemSNMPGet(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"enabled", "community", "listen_addr", "interfaces", "location", "contact", "running", "supported", "hint"} {
+	for _, k := range []string{"enabled", "community", "listen_addr", "location", "contact", "running", "supported", "hint"} {
 		if _, ok := out[k]; !ok {
 			t.Errorf("reply is missing %q; the page reads it directly", k)
 		}
 	}
 	if enabled, _ := out["enabled"].(bool); enabled {
 		t.Error("a fresh config should report enabled:false")
-	}
-	if _, ok := out["interfaces"].([]any); !ok {
-		t.Errorf("interfaces = %#v, want a JSON array even when empty", out["interfaces"])
 	}
 }
 
