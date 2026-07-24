@@ -1,6 +1,8 @@
 package service
 
 import (
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -211,5 +213,110 @@ func TestParseLLDPNeighborsEmptyAndMalformed(t *testing.T) {
 	}
 	if _, err := parseLLDPNeighborsJSON([]byte(`not json`)); err == nil {
 		t.Error("expected an error parsing non-JSON input")
+	}
+}
+
+// TestLLDPCrashHint pins the log-line -> hint mapping this bug report
+// motivated adding: without it, a failed start only ever reported systemd's
+// own generic "control process exited with error code," with no way to
+// tell an SELinux denial from a stale socket from a genuine config problem.
+func TestLLDPCrashHint(t *testing.T) {
+	cases := []struct {
+		line       string
+		wantSubstr string // "" means no hint expected
+	}{
+		{`lldpd[1234]: fatal: avc: denied { write } for pid=1234 comm="lldpd"`, "SELinux"},
+		{`SELinux is preventing lldpd from ...`, "SELinux"},
+		{`Permission denied while opening /var/run/lldpd.socket`, "SELinux"},
+		{`apparmor="DENIED" operation="open" profile="lldpd"`, "AppArmor"},
+		{`lldpd: another instance is running, giving up`, "already be present"},
+		{`bind: Address already in use`, "already be present"},
+		{`lldpd: unrecognized option '--bogus'`, ""},
+		{`lldpd: started successfully`, ""},
+	}
+	for _, c := range cases {
+		got := lldpCrashHint(c.line)
+		if c.wantSubstr == "" {
+			if got != "" {
+				t.Errorf("lldpCrashHint(%q) = %q, want no hint", c.line, got)
+			}
+			continue
+		}
+		if !strings.Contains(got, c.wantSubstr) {
+			t.Errorf("lldpCrashHint(%q) = %q, want it to mention %q", c.line, got, c.wantSubstr)
+		}
+	}
+}
+
+func TestLastNonEmptyLine(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"", ""},
+		{"\n\n\n", ""},
+		{"one line", "one line"},
+		{"first\nsecond\nthird", "third"},
+		{"first\nsecond\n\n  \n", "second"},
+		{"  padded with spaces  \n", "padded with spaces"},
+	}
+	for _, c := range cases {
+		if got := lastNonEmptyLine(c.in); got != c.want {
+			t.Errorf("lastNonEmptyLine(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	// Truncation: a single very long line is capped, not returned whole.
+	long := strings.Repeat("x", 500)
+	got := lastNonEmptyLine(long)
+	if len([]rune(got)) != 200 {
+		t.Errorf("lastNonEmptyLine truncation: got length %d, want 200", len([]rune(got)))
+	}
+}
+
+// TestLLDPStaleSocketPathsIncludesConfirmedPath pins the one candidate path
+// that isn't a guess: /run/lldpd/lldpd.socket was named directly in a real
+// SELinux AVC denial (source process lldpd, access "connectto") reported
+// against a real gravinet install, confirming that some distros' lldpd
+// really does put its control socket in a subdirectory — not just at
+// /run/lldpd.socket the way parapet's own (Debian/Ubuntu-focused) cleanup
+// assumed. If this ever gets refactored away, the exact failure this test
+// suite exists to catch would silently come back.
+func TestLLDPStaleSocketPathsIncludesConfirmedPath(t *testing.T) {
+	found := false
+	for _, p := range lldpStaleSocketPaths {
+		if p == "/run/lldpd/lldpd.socket" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("lldpStaleSocketPaths is missing /run/lldpd/lldpd.socket, the path directly confirmed via a real SELinux denial")
+	}
+}
+
+// TestRemoveSocketsAt checks the cleanup actually removes what's there and
+// is a silent no-op for what isn't — against a temp-dir fixture, never the
+// real (root-owned) /run paths lldpStaleSocketPaths names.
+func TestRemoveSocketsAt(t *testing.T) {
+	dir := t.TempDir()
+	existing := filepath.Join(dir, "lldpd.socket")
+	if err := os.WriteFile(existing, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(dir, "does-not-exist.socket")
+	subdirExisting := filepath.Join(dir, "sub", "lldpd.socket")
+	if err := os.MkdirAll(filepath.Dir(subdirExisting), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(subdirExisting, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Must not panic or error out just because "missing" isn't there.
+	removeSocketsAt([]string{existing, missing, subdirExisting})
+
+	if _, err := os.Stat(existing); !os.IsNotExist(err) {
+		t.Errorf("%s should have been removed, stat err = %v", existing, err)
+	}
+	if _, err := os.Stat(subdirExisting); !os.IsNotExist(err) {
+		t.Errorf("%s should have been removed, stat err = %v", subdirExisting, err)
 	}
 }

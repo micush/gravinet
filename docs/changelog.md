@@ -52,6 +52,113 @@ assuming it didn't happen.
 
 ---
 
+---
+
+---
+
+## v619 — 2026-07-24
+
+**Found the actual root cause of v618's SELinux denial, from a real report:
+a captured SELinux Alert Browser screenshot named the exact source and
+target** — source process `lldpd`, access `connectto`, target
+`/run/lldpd/lldpd.socket`. That's not a guess; it's precisely the stale
+control-socket race parapet's own `lldpd.rs` already documents at length
+for its own architecture (a SIGKILLed or otherwise uncleanly stopped lldpd
+leaves its control socket file behind; a freshly starting lldpd finds it
+and tries to connect to it first — its own "is another instance already
+running" self-check — which SELinux denied outright here) — v617/v618 just
+never ported the cleanup that closes it, because gravinet manages `lldpd`
+as an OS service rather than parapet's supervised child process, and
+that's exactly where parapet does this cleanup (`stop()`, right after
+confirming the old process is gone).
+
+Also confirms something useful for its own sake: this system's lldpd
+socket lives in a *subdirectory* — `/run/lldpd/lldpd.socket` — not at
+`/run/lldpd.socket` the way parapet's own (Debian/Ubuntu-focused) cleanup
+assumes. Different distros' lldpd packages evidently lay this out
+differently.
+
+- **`internal/service/lldp.go`**: `lldpServiceStart` now calls
+  `removeStaleLLDPSockets()` before every enable/restart attempt, best-effort
+  unlinking every known candidate path — the confirmed
+  `/run/lldpd/lldpd.socket`, parapet's own `/run/lldpd.socket` and
+  `/var/run/lldpd.socket`, and `/var/run/lldpd/lldpd.socket` (the BSD
+  subdirectory variant, unconfirmed but free to include). A path that
+  doesn't exist — the common case, no prior instance crashed — is silently
+  skipped, never an error; gravinet's own process isn't running in
+  lldpd's SELinux domain, so it isn't subject to the same policy an
+  lldpd-owned unlink would be.
+- **Tests**: `TestLLDPStaleSocketPathsIncludesConfirmedPath` (new) pins the
+  one candidate path that isn't a guess — if this list ever gets
+  refactored and that entry quietly drops out, this fails loudly rather
+  than letting the exact bug just reported come back silently.
+  `TestRemoveSocketsAt` (new) exercises the cleanup itself — removes what's
+  there, silently skips what isn't, including a subdirectory path — against
+  a temp-dir fixture, extracted from the real (root-owned) `/run` paths via
+  a `removeSocketsAt(paths []string)` split for exactly this testability,
+  the same pattern this project has used for every other "can't safely
+  touch the real system state in a test" case (`sysusers_test.go`'s
+  `shadowPath`, `groups_test.go`'s `groupFilePath`/`passwdFilePath`).
+
+Full service test suite, `go vet`, and `gofmt` clean; cross-compiles clean
+on every platform this package supports.
+
+## v618 — 2026-07-24
+
+**Fixed: System > L2 Disco reported "control process exited with error code"
+on save, with no way to tell why** — reported alongside an SELinux Alert
+Browser popup, which was almost certainly the actual cause, but the error
+message gave no way to confirm that or act on it. Two real fixes, in
+`internal/service/lldp.go`:
+
+- **The systemd drop-in now pins `Type=simple` explicitly.** v617's
+  original drop-in only ever set `ExecStart=`, leaving whatever `Type=` the
+  packaged `lldpd.service` shipped with untouched — and some distros'
+  lldpd packages use `Type=notify` (lldpd supports systemd's `sd_notify`
+  readiness protocol). `-d` alone doesn't guarantee that handshake happens
+  the way `Type=notify` expects; systemd can end up waiting on a
+  notification that never arrives, or otherwise disagreeing with the base
+  unit's assumptions about how the process behaves — a real, plausible
+  contributor to "the control process exited" that had nothing to do with
+  SELinux at all. `Type=simple` matches exactly what `-d` actually does
+  (stay in the foreground; systemd just watches the PID, no handshake
+  needed), removing that ambiguity outright regardless of what the
+  packaged unit assumed.
+- **A failed start now actually says why.** The previous error message was
+  built entirely from `systemctl`'s own output — "Job for lldpd.service
+  failed because the control process exited with error code" — which is
+  systemd truthfully reporting that something failed without saying what;
+  the real reason (an SELinux/AppArmor denial, a stale control socket, a
+  port conflict, ...) only ever lived in the journal, which nothing read.
+  `lldpJournalHint()` now runs `journalctl -u lldpd.service` on a failed
+  start and folds its most recent log line into the error, plus a
+  targeted, pattern-matched hint when it recognizes the shape — an SELinux
+  AVC denial or "permission denied" points at `ausearch -m avc -ts recent`
+  and the SELinux Alert Browser (with a note that `audit2allow` can build
+  a local policy module if it turns out to be a legitimate false
+  positive); AppArmor points at `journalctl -k`; a stale control socket or
+  address-in-use points at `pgrep -a lldpd` and the socket path — the same
+  three-way classification parapet's own `crash_hint()` (`src/lldpd.rs`)
+  already makes for its child-process model, ported here for gravinet's
+  OS-service one.
+- **Tests**: `TestLLDPCrashHint` (new) pins the log-line → hint mapping
+  across all three recognized patterns plus two unrecognized ones (no
+  hint, not a guess); `TestLastNonEmptyLine` (new) covers the
+  blank-lines/whitespace/truncation edge cases the journal-tail extraction
+  depends on. Writing these caught two of my own mistakes before either
+  shipped: a mis-transcription of parapet's actual stale-socket phrase
+  (I'd written "already running" where parapet's real check — and real
+  lldpd log output — says "another instance is running" / "giving up"),
+  and a test assertion checking for text that wasn't actually a contiguous
+  substring of my own hint string. Full service test suite, `go vet`, and
+  `gofmt` all clean; cross-compiles clean on every platform this package
+  supports.
+
+If you hit this again on v618, the error itself will now show the actual
+journal line and, for a real SELinux denial, point you at `ausearch -m avc
+-ts recent` (or the Alert Browser's own "Troubleshoot" detail) — paste that
+back if it's still unclear what's being denied.
+
 ## v617 — 2026-07-24
 
 **New: System > L2 Disco** — duplicates parapet's Network > L2 Discovery
