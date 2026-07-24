@@ -5931,15 +5931,21 @@ function secTime(c){
 // secSNMP renders System > SNMP: a read-only SNMPv2c monitoring agent
 // (net-snmp's snmpd) on this host. Mirrors parapet's SNMP page almost
 // exactly — community string, listen address, interfaces (informational
-// only; see config.SNMPConfig's doc comment), sysLocation/sysContact — and
-// its "filling in the community string turns it on, clearing it turns it
-// off" convention, the same one Time's NTP-server field already uses in
-// this app, rather than a separate on/off toggle that could disagree with
-// what's actually in the field.
+// only; see config.SNMPConfig's doc comment), sysLocation/sysContact.
 //
 // All fields save together on any one field's blur, the same "several
 // fields, one write" pattern secResolver's DNS card uses \u2014 there's one
 // config.SNMPConfig on the wire per save, not independent per-field ops.
+// The enabled/disabled pill sits next to the page's own <h2> title (the
+// same placement NAT/QoS/Shaping use for their per-network pill, next to
+// each card's own name) and is a second, independent way to flip
+// cfg.SNMP.Enabled: double-clicking it posts whatever is currently in the
+// fields with just that one flag inverted, same "flip on the wire, don't
+// wait for a field edit" idiom netCardHead's own pill uses. Filling in or
+// clearing the community field still flips it too, on its own blur \u2014 the
+// two paths write the same flag, neither is more authoritative than the
+// other, and each save's response is what the pill actually reflects
+// afterward either way.
 function secSNMP(c){
   secHint(c, 'A read-only SNMPv2c monitoring agent (net-snmp\u2019s snmpd) on this host. Acts on the node you\u2019re currently managing.');
 
@@ -5962,20 +5968,6 @@ function secSNMP(c){
     }
 
     const card = $('<div class="card"></div>');
-    // Enabled/disabled pill, same "pill" look NAT/QoS/Shaping's per-network
-    // card headers already use, in place of the old separate status card's
-    // running/not-running tag. Reflects config (cfg.SNMP.Enabled, which the
-    // community field below drives \u2014 see the save hint), not a live service
-    // query, matching what those other pills report too. Updated in place by
-    // saveSNMP below on every successful save rather than rebuilt via a full
-    // redraw, for the same reason the field row itself is never rebuilt on
-    // save (see saveSNMP's own comment): destroying and recreating live
-    // elements mid-edit is what caused "field behavior is weird, sometimes I
-    // get cut off while typing".
-    const head = $('<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><span class="pill '+(snmp.enabled?'on':'off')+'">'+(snmp.enabled?'enabled':'disabled')+'</span></div>');
-    const pill = head.querySelector('.pill');
-    card.appendChild(head);
-
     const row = $('<div style="display:flex;flex-direction:column;gap:10px"></div>');
 
     row.appendChild($('<div><div class="hint" style="margin:0 0 4px">Community string</div>'
@@ -5992,7 +5984,7 @@ function secSNMP(c){
     row.appendChild($('<div><div class="hint" style="margin:0 0 4px">sysContact</div>'
       + '<input id="snmp-contact" value="'+esc(snmp.contact||'')+'" placeholder="noc@example.com" style="width:100%"></div>'));
     card.appendChild(row);
-    card.appendChild($('<div class="hint" style="margin:8px 0 0">Filling in the community string turns the agent <b>on</b>; clearing it turns it <b>off</b>. Interfaces is informational only \u2014 gravinet doesn\u2019t manage a host firewall rule to scope who can reach the agent; restrict that with the host\u2019s own firewall if it matters in your environment. Saves automatically when you click or tab away.</div>'));
+    card.appendChild($('<div class="hint" style="margin:8px 0 0">Filling in the community string turns the agent <b>on</b>; clearing it turns it <b>off</b> \u2014 or double-click the pill next to the page title to flip it directly. Interfaces is informational only \u2014 gravinet doesn\u2019t manage a host firewall rule to scope who can reach the agent; restrict that with the host\u2019s own firewall if it matters in your environment. Saves automatically when you click or tab away.</div>'));
     body.appendChild(card);
 
     const communityIn = row.querySelector('#snmp-community');
@@ -6003,45 +5995,89 @@ function secSNMP(c){
     const pwToggle = card.querySelector('#snmp-pw-toggle');
     pwToggle.onclick = (e) => { e.stopPropagation(); const showing = communityIn.type==='text'; communityIn.type = showing?'password':'text'; pwToggle.title = showing?'show while editing':'hide while editing'; };
 
+    // Enabled/disabled pill, placed next to the page's own <h2> title (a
+    // sibling of this card, built by renderSection before secSNMP ever
+    // runs) rather than inside this card's own header \u2014 the same "pill
+    // next to the name" spot NAT/QoS/Shaping's netCardHead already uses,
+    // just next to the page title instead of a per-network name since SNMP
+    // has only the one, system-wide config. tag-toggle gets its double-click
+    // handler below, once the field inputs it needs to read exist.
+    const h2 = c.querySelector('h2.sec');
+    const pill = $('<span class="pill tag-toggle"></span>');
+    const setPill = (en) => {
+      pill.className = 'pill tag-toggle ' + (en?'on':'off');
+      pill.textContent = en ? 'enabled' : 'disabled';
+      pill.title = 'double-click to ' + (en ? 'disable' : 'enable');
+    };
+    setPill(!!snmp.enabled);
+    h2.appendChild(document.createTextNode(' '));
+    h2.appendChild(pill);
+
+    const readFields = () => ({
+      community: communityIn.value.trim(), listen: listenIn.value.trim(),
+      ifaces: ifacesIn.value.split(/[\s,]+/).filter(Boolean).join(', '),
+      location: locationIn.value.trim(), contact: contactIn.value.trim(),
+    });
+    // postSNMP is the one place that actually writes cfg.SNMP \u2014 both
+    // saveSNMP (fields changed, enabled derived from community) and the
+    // pill's own double-click (enabled flipped directly, fields unchanged)
+    // funnel through this rather than each building the request body its
+    // own way.
+    const postSNMP = (enabled, fields) => api('/api/system/snmp', { method:'POST', body: JSON.stringify({
+      enabled, community: fields.community, listen_addr: fields.listen,
+      interfaces: fields.ifaces ? fields.ifaces.split(', ') : [], location: fields.location, contact: fields.contact,
+    }) });
+
     let last = {
       community: snmp.community||'', listen: snmp.listen_addr||'', ifaces: (snmp.interfaces||[]).join(', '),
       location: snmp.location||'', contact: snmp.contact||'',
     };
     const saveSNMP = async () => {
-      const cur = {
-        community: communityIn.value.trim(), listen: listenIn.value.trim(),
-        ifaces: ifacesIn.value.split(/[\s,]+/).filter(Boolean).join(', '),
-        location: locationIn.value.trim(), contact: contactIn.value.trim(),
-      };
+      const cur = readFields();
       if (cur.community===last.community && cur.listen===last.listen && cur.ifaces===last.ifaces && cur.location===last.location && cur.contact===last.contact) return;
-      const res = await api('/api/system/snmp', { method:'POST', body: JSON.stringify({
-        enabled: !!cur.community, community: cur.community, listen_addr: cur.listen,
-        interfaces: cur.ifaces ? cur.ifaces.split(', ') : [], location: cur.location, contact: cur.contact,
-      }) });
+      const res = await postSNMP(!!cur.community, cur);
       if (!res.ok){ alert((res.body && res.body.error) || 'could not save SNMP settings'); return; }
       last = cur; // the baseline moves even if the fields have since changed further underneath this save
-      if (res.body){
-        const en = !!res.body.enabled;
-        pill.className = 'pill ' + (en?'on':'off');
-        pill.textContent = en ? 'enabled' : 'disabled';
-      }
+      if (res.body) setPill(!!res.body.enabled);
       if (res.body && res.body.note) alert(res.body.note);
     };
     [communityIn, listenIn, ifacesIn, locationIn, contactIn].forEach(inp => {
       inp.onblur = saveSNMP;
       inp.onkeydown = (e) => { if (e.key === 'Enter'){ e.preventDefault(); inp.blur(); } };
     });
+
+    // Double-click the pill to flip enabled independent of the community
+    // field's own auto-derive-on-blur above \u2014 flips immediately and posts
+    // in the background, the same "flip now, don't wait on the round trip"
+    // idiom NAT/QoS/Bandwidth's own netCardHead pill already uses (see
+    // toggleTagState's doc comment for why: a failure logs to the console
+    // rather than blocking on an alert or reverting the flip). Turning on
+    // with no community reproduces the same "SNMP requires a community
+    // string" rejection clearing-then-refilling the field would hit; that
+    // failure surfaces the same way any other toggle failure here does \u2014
+    // in the console, not a blocking alert \u2014 and the next visit to this
+    // page re-reads the true state from the server either way.
+    pill.ondblclick = () => {
+      const on = !pill.classList.contains('on');
+      setPill(on);
+      const cur = readFields();
+      postSNMP(on, cur).then(res => {
+        if (!res.ok) { console.warn('/api/system/snmp toggle failed:', (res.body&&res.body.error)||'failed'); return; }
+        last = cur;
+        if (res.body) setPill(!!res.body.enabled);
+        if (res.body && res.body.note) alert(res.body.note);
+      });
+    };
   };
 
   load();
 }
 
 // secL2Disco renders System > L2 Disco: link-layer discovery (LLDP) and
-// Cisco CDP, together, on whichever interfaces are picked. Duplicates
-// parapet's Network > L2 Discovery config page and its separate Monitor >
-// Status: LLDP/CDP neighbor table onto one page under System, combining
-// config and live neighbor status the same way secSNMP/secTime already do
-// here, rather than parapet's own split across two different nav locations.
+// Cisco CDP, together, on whichever interfaces are picked. Just the config
+// side of parapet's Network > L2 Discovery page — no neighbor table, no
+// live status readout of any kind; this page picks interfaces and shows
+// whether the result is enabled, full stop.
 //
 // The interface picker (buildRouteChipPicker — see its own doc comment)
 // offers every interface this host actually has, via systemInterfaces(),
@@ -6059,13 +6095,16 @@ function secSNMP(c){
 // what changed, the same "read it all, POST it all" shape the Users
 // table's bulk actions already use.
 //
-// The neighbors card also surfaces disco.stray_hint when present — a
-// leftover lldpd process from an earlier configuration, invisible to both
-// the enabled/disabled pill above (config-derived — whether any interface
-// is picked — not a live service query) and the neighbor table itself
-// (which only talks to whichever instance currently holds the control
-// socket). gravinet terminates these itself now, so this appears only in
-// the case worth escalating: one that didn't respond to being signalled.
+// The enabled/disabled pill sits next to the page's own <h2> title, same
+// spot NAT/QoS/Shaping put their per-network pill — and, like theirs, backs
+// a real flag (config.DiscoveryConfig.Disabled) independent of the
+// interface list, not derived from it. Double-clicking it doesn't touch
+// Interfaces at all; it just starts or stops lldpd (see service.ApplyLLDP),
+// the same "flip the flag, leave the rules alone" split NAT/QoS/Bandwidth's
+// own Enabled already uses. Both the pill and the picker save through the
+// same endpoint (handleSystemL2Disco replaces cfg.Discovery wholesale), so
+// each one's save carries the other's current value unchanged — see
+// saveL2Disco below.
 function secL2Disco(c){
   secHint(c, 'Link-layer discovery: LLDP, plus Cisco CDP, together on whichever interfaces you pick below. Advertises and listens for neighbor information on picked interfaces. Acts on the node you\u2019re currently managing.');
 
@@ -6079,47 +6118,6 @@ function secL2Disco(c){
     draw(ifNames, r.body);
   };
 
-  // renderNeighbors (re)builds just the neighbors card, independent of the
-  // interface picker above it \u2014 called on initial draw and, after a save,
-  // again with that save's own response (which already carries fresh
-  // neighbor data), the same "never rebuild the whole page just to refresh
-  // a live readout" principle the enabled/disabled pill's own in-place
-  // update (see saveL2Disco below) follows for the identical reason:
-  // rebuilding the picker on every save could otherwise steal a click
-  // mid-pick.
-  const renderNeighbors = (neighborsCard, disco) => {
-    neighborsCard.innerHTML = '';
-    // stray_hint (service.LLDPStrays) is independent of the neighbor table
-    // below \u2014 a leftover lldpd from an earlier configuration that the
-    // neighbor table alone can't notice (it only talks to whichever
-    // instance currently holds the control socket). gravinet terminates
-    // these itself on every start/stop and once at daemon startup, so this
-    // only ever appears when one survived being signalled, which is
-    // genuinely worth flagging.
-    if (disco.stray_hint){
-      neighborsCard.appendChild($('<div class="hint" style="margin:0 0 10px;color:var(--danger)">'+esc(disco.stray_hint)+'</div>'));
-    }
-    if (disco.neighbors_available === false){
-      neighborsCard.appendChild($('<div class="empty">'+esc(disco.neighbors_hint||'no neighbor data available')+'</div>'));
-      return;
-    }
-    const rows = disco.neighbors || [];
-    if (!rows.length){
-      neighborsCard.appendChild($('<div class="empty">no neighbors seen yet</div>'));
-      return;
-    }
-    const t = $('<div></div>');
-    t.innerHTML = '<table><tr><th>local interface</th><th>system name</th><th>remote port</th><th>mgmt IP</th></tr></table>';
-    const table = t.querySelector('table');
-    rows.forEach(n => {
-      const tr = document.createElement('tr');
-      tr.innerHTML = '<td>'+esc(n.local_iface||'')+'</td><td>'+esc(n.system_name||'')+'</td>'
-        + '<td>'+esc(n.port||'')+'</td><td>'+esc(n.mgmt_ip||'')+'</td>';
-      table.appendChild(tr);
-    });
-    neighborsCard.appendChild(t);
-  };
-
   const draw = (ifNames, disco) => {
     body.innerHTML = '';
 
@@ -6129,38 +6127,56 @@ function secL2Disco(c){
     }
 
     const card = $('<div class="card"></div>');
-    const neighborsCard = $('<div class="card"></div>');
 
     const picked = (disco.interfaces||[]).filter(i => i.lldp || i.cdp).map(i => i.name);
 
-    // Enabled/disabled pill, same "pill" look NAT/QoS/Shaping's per-network
-    // card headers already use, in place of the old running/not-running tag
-    // that used to sit atop the neighbors card. Reflects whether any
-    // interface is actually picked below (config), not a live service
-    // query, matching what those other pills report too.
-    const head = $('<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><span class="pill '+(picked.length?'on':'off')+'">'+(picked.length?'enabled':'disabled')+'</span></div>');
-    const pill = head.querySelector('.pill');
-    card.appendChild(head);
+    // Enabled/disabled pill, placed next to the page's own <h2> title (a
+    // sibling of this card, built by renderSection before secL2Disco ever
+    // runs) rather than inside this card's own header \u2014 the same "pill
+    // next to the name" spot NAT/QoS/Shaping's netCardHead already uses.
+    // Tracks cfg.Discovery.Disabled (via disco.enabled from the API),
+    // independent of picked \u2014 unlike this page's previous, picked-derived
+    // pill, so toggling it never touches the interface list.
+    const h2 = c.querySelector('h2.sec');
+    const pill = $('<span class="pill tag-toggle"></span>');
+    const setPill = (en) => {
+      pill.className = 'pill tag-toggle ' + (en?'on':'off');
+      pill.textContent = en ? 'enabled' : 'disabled';
+      pill.title = 'double-click to ' + (en ? 'disable' : 'enable');
+    };
+    let enabled = !!disco.enabled;
+    setPill(enabled);
+    h2.appendChild(document.createTextNode(' '));
+    h2.appendChild(pill);
 
-    // Posts the full current pick list on every add/remove \u2014
-    // handleSystemL2Disco replaces cfg.Discovery wholesale, the same
-    // "read it all, POST it all" shape rowRouteList's own BGP save uses.
-    const saveL2Disco = async (names) => {
+    // Posts the full current pick list plus the full current enabled flag
+    // on every save \u2014 handleSystemL2Disco replaces cfg.Discovery wholesale,
+    // the same "read it all, POST it all" shape SNMP's own save already
+    // uses for its fields. Picking/removing an interface (via the picker's
+    // onChange below) sends the current enabled unchanged; flipping the
+    // pill (see pill.ondblclick below) sends the current interfaces
+    // unchanged \u2014 each write carries the other half of the config through
+    // untouched rather than only ever sending its own half.
+    //
+    // Fire-and-forget, not awaited by either caller: flips the pill or the
+    // picker's chips immediately and posts in the background, the same
+    // "flip now, don't wait on the round trip" idiom NAT/QoS/Bandwidth's
+    // own netCardHead pill already uses \u2014 see toggleTagState's doc comment
+    // for why (a failure logs to the console rather than blocking on an
+    // alert or reverting the flip; a real failure surfaces on the next
+    // visit to this page, which re-reads the true state from the server).
+    const saveL2Disco = (names, en) => {
       const interfaces = names.map(name => ({ name, lldp:true, cdp:true }));
-      const res = await api('/api/system/l2disco', { method:'POST', body: JSON.stringify({ interfaces }) });
-      if (!res.ok){ alert((res.body && res.body.error) || 'could not save L2 discovery settings'); return; }
-      if (res.body){
-        renderNeighbors(neighborsCard, res.body);
-        const en = (res.body.interfaces||[]).some(i => i.lldp || i.cdp);
-        pill.className = 'pill ' + (en?'on':'off');
-        pill.textContent = en ? 'enabled' : 'disabled';
-      }
-      if (res.body && res.body.note) alert(res.body.note);
+      api('/api/system/l2disco', { method:'POST', body: JSON.stringify({ interfaces, enabled: en }) })
+        .then(res => {
+          if (!res.ok) { console.warn('/api/system/l2disco save failed:', (res.body&&res.body.error)||'failed'); return; }
+          if (res.body && res.body.note) alert(res.body.note);
+        });
     };
 
     const row = $('<div class="settings-row"></div>');
     row.appendChild($('<div><div class="settings-label">Interfaces</div><div class="settings-desc">Pick which interfaces run LLDP and CDP. Saves immediately when changed.</div></div>'));
-    const picker = buildRouteChipPicker(ifNames, picked, (names) => saveL2Disco(names), {
+    const picker = buildRouteChipPicker(ifNames, picked, (names) => saveL2Disco(names, enabled), {
       placeholder: 'search interfaces to add\u2026',
       noneText: 'no interfaces found on this host',
       loadingText: 'loading interfaces\u2026',
@@ -6169,8 +6185,14 @@ function secL2Disco(c){
     card.appendChild(row);
     body.appendChild(card);
 
-    body.appendChild(neighborsCard);
-    renderNeighbors(neighborsCard, disco);
+    // Double-click the pill to flip enabled directly, independent of
+    // whichever interfaces are currently picked \u2014 sends the picker's own
+    // current list unchanged.
+    pill.ondblclick = () => {
+      enabled = !enabled;
+      setPill(enabled);
+      saveL2Disco(picker.get(), enabled);
+    };
   };
 
   load();
@@ -6558,7 +6580,11 @@ async function drawUpgrade(host){
         const resp = await fetch('/api/upgrade/source', { method:'POST', body: fileIn.files[0] });
         const body = await resp.json().catch(()=>({}));
         if (!resp.ok){ alert(body.error || 'build failed'); return; }
-        alert('Applied. This node is restarting into ' + (body.applied || 'the new build') + '.\n\nIf it cannot get its peers back within the confirm window, it will revert itself.');
+        if (body.skipped){
+          alert('Already on ' + (body.already_on || 'this version') + ' \u2014 nothing to build or apply.');
+        } else {
+          alert('Applied. This node is restarting into ' + (body.applied || 'the new build') + '.\n\nIf it cannot get its peers back within the confirm window, it will revert itself.');
+        }
         drawUpgrade(host);
       } finally {
         clearInterval(buildDotsTimer);
@@ -6611,7 +6637,7 @@ async function drawUpgrade(host){
         mark.textContent = res.ok ? '\u2713 ' : '\u2717 ';
         mark.style.color = res.ok ? 'var(--ok,#2a2)' : 'var(--danger,#b33)';
         line.appendChild(mark);
-        line.appendChild(document.createTextNode(peerLabel(res.node) + (res.ok ? ' \u2014 applied, restarting' : '')));
+        line.appendChild(document.createTextNode(peerLabel(res.node) + (res.ok ? (res.skipped ? ' \u2014 already up to date' : ' \u2014 applied, restarting') : '')));
         if (!res.ok && res.error){
           const why = $('<div class="hint" style="margin:2px 0 6px 16px;white-space:pre-wrap"></div>');
           why.textContent = res.error;
@@ -6630,10 +6656,10 @@ async function drawUpgrade(host){
         // node is ever touched.
         peerPicker.set(allApplied ? [] : nodes.filter(n => !done.has(n)));
         if (allApplied){
-          resBox.appendChild($('<div class="hint">All peers applied \u2014 upgrading this node now\u2026</div>'));
+          resBox.appendChild($('<div class="hint">All peers applied or already up to date \u2014 upgrading this node now\u2026</div>'));
           await applyLocal();
         } else {
-          resBox.appendChild($('<div class="hint" style="color:var(--danger,#b33)">'+applied.length+' of '+nodes.length+' peers applied; this node was left as-is. Fix or retry the failed peers, then upgrade this node.</div>'));
+          resBox.appendChild($('<div class="hint" style="color:var(--danger,#b33)">'+applied.length+' of '+nodes.length+' peers applied or already up to date; this node was left as-is. Fix or retry the failed peers, then upgrade this node.</div>'));
         }
       } else if (applied.length){
         // Explicit selection: drop the peers that applied, keep any that failed

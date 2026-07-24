@@ -2,6 +2,106 @@
 
 ---
 
+## v633 — 2026-07-24
+
+**Changed:** SNMP's and L2 Disco's enabled/disabled pill now toggles
+asynchronously — flips immediately and posts in the background, the same
+fire-and-forget "flip now, don't wait on the round trip" idiom NAT/QoS/
+Shaping's own per-network pill already uses. A failed toggle logs to the
+console instead of blocking on an alert or reverting the flip; the next
+visit to the page re-reads the true state from the server either way.
+
+**New:** L2 Disco has a real independent enabled flag
+(config.DiscoveryConfig.Disabled) for the first time, decoupled from which
+interfaces are picked. Previously "enabled" was derived purely from
+whether any interface had LLDP or CDP on, so the pill's toggle had to
+inspect and mutate the interface list to do anything — clearing it to turn
+off, remembering and restoring a pick list to turn back on. Now toggling
+the pill just starts or stops lldpd directly (service.ApplyLLDP), without
+touching Interfaces at all, the same "flag separate from the rules it
+gates" split NAT/QoS/Bandwidth's own per-network Enabled already uses.
+Picking or removing an interface no longer has any effect on whether the
+feature itself is on.
+
+The new field defaults to enabled (zero value = false = not disabled) so
+an existing config saved before this field existed — interfaces already
+picked, nothing to disagree with — keeps running exactly as it did; only
+an explicit `"disabled":true` in config.json turns it off.
+
+---
+
+## v632 — 2026-07-24
+
+**Changed:** System > L2 Disco's neighbors card is gone — no neighbor
+table, no stray-lldpd warning, no "switched off" hint box. The page is now
+just the interface picker and the enabled/disabled pill next to the title.
+v630 tried hiding that card's content down to a single explanatory
+sentence when nothing was picked ("no interfaces are picked above, so the
+discovery agent is switched off on this host"); that sentence, sitting
+alone in its own box, was exactly the kind of status box this page was
+supposed to have lost back in v626. Removed outright instead.
+
+---
+
+## v631 — 2026-07-24
+
+**Changed:** System > SNMP's and System > L2 Disco's enabled/disabled pill
+moved from the settings card's own header to next to the page's title, and
+is now double-click toggleable — the same interaction NAT/QoS/Shaping's
+per-network pill already has.
+
+Double-clicking SNMP's pill posts whatever is currently in the fields with
+just `enabled` flipped; turning it on with no community string still
+requires one (the same rejection clearing the field always hit), shown as
+an alert with the pill reverted rather than a silent snap-back. Filling in
+or clearing the community field still flips it too, on that field's own
+blur — both paths write the same flag, and each save's own response is
+what the pill actually reflects afterward.
+
+L2 Disco has no independent enabled flag to flip the way SNMP or NAT/QoS/
+Bandwidth do — "enabled" there can only mean "at least one interface has
+LLDP or CDP set" — so double-clicking off clears every interface (same as
+removing every chip by hand) and double-clicking back on restores whichever
+set was picked most recently in that page visit. With nothing picked yet
+this visit, turning it on shows an alert pointing at the picker below
+instead of silently doing nothing.
+
+---
+
+## v630 — 2026-07-24
+
+**Changed:** the "all peers, then this node" fleet upgrade's pre-local-phase
+banner now reads "All peers applied or already up to date" instead of "All
+peers applied" — accurate when v629's same-version skip is why some peers
+didn't need a real apply. A skipped peer still counts toward the gate that
+lets this node's own upgrade proceed (it's already on the target version,
+same as a genuine apply would achieve), only the wording was off. The
+partial-failure message below it got the same correction.
+
+---
+
+## v629 — 2026-07-24
+
+**New:** System > Upgrade (and Manager-pushed fleet upgrades, and the CLI's
+`gravinet upgrade apply`) now check a source archive's baked-in version
+before doing anything else. If it matches the version already running, the
+apply is skipped outright — no `go build`, no preflight, no binary swap, no
+restart. Previously every upload triggered a full rebuild and restart even
+when the archive was byte-for-byte the version already installed.
+
+The check reads just the archive's `cmd/gravinet/main.go` (a light
+extraction, no compile), so it costs a fraction of a second regardless of
+how long the eventual build would have taken. A corrupt or unrecognized
+archive isn't treated as a special case here — it falls straight through
+to the normal build path, which reports the real problem.
+
+Fleet pushes see the same benefit: a Manager pushing to peers where some
+are already current now reports those peers as "already up to date" rather
+than "applied, restarting", and none of them pay for an unnecessary
+rebuild.
+
+---
+
 ## v628 — 2026-07-24
 
 **Fixed:** System > L2 Disco's interface picker kept showing whichever

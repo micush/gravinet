@@ -441,6 +441,32 @@ func truncateBuildOutput(s string) string {
 	return "… (truncated) …\n" + s[len(s)-limit:]
 }
 
+// extractToTemp extracts src into a fresh temp directory under workRoot and
+// returns that temp directory, the module root within it (the directory
+// containing go.mod), and a cleanup func that removes the whole temp tree.
+// Shared by Build, which extracts and then compiles (into a binary placed
+// alongside — not inside — the extracted tree, via workDir), and
+// ExtractedVersion, which extracts and stops there — reading the version
+// costs a few file-system operations, not a multi-minute `go build`.
+func extractToTemp(src io.Reader, workRoot, prefix string) (workDir, moduleRoot string, cleanup func(), err error) {
+	workDir, err = os.MkdirTemp(workRoot, prefix)
+	if err != nil {
+		return "", "", func() {}, err
+	}
+	cleanup = func() { os.RemoveAll(workDir) }
+	extractDir := filepath.Join(workDir, "src")
+	if err := os.MkdirAll(extractDir, 0o755); err != nil {
+		cleanup()
+		return "", "", func() {}, err
+	}
+	modRoot, err := extractSourceArchive(src, extractDir)
+	if err != nil {
+		cleanup()
+		return "", "", func() {}, err
+	}
+	return workDir, modRoot, cleanup, nil
+}
+
 // Build extracts a gravinet source archive, compiles it with this node's own
 // Go toolchain, and probes the result. It returns the path to the built
 // binary, the extracted source tree's root (the directory containing
@@ -459,23 +485,13 @@ func truncateBuildOutput(s string) string {
 // native by construction: there is no os/arch negotiation to get wrong,
 // because nothing platform-specific ever crossed a wire.
 func Build(ctx context.Context, src io.Reader, workRoot string) (binPath, moduleRoot string, p Probe, cleanup func(), err error) {
-	workDir, err := os.MkdirTemp(workRoot, ".build-*")
+	workDir, modRoot, cleanup, err := extractToTemp(src, workRoot, ".build-*")
 	if err != nil {
 		return "", "", Probe{}, func() {}, err
 	}
-	cleanup = func() { os.RemoveAll(workDir) }
 	fail := func(e error) (string, string, Probe, func(), error) {
 		cleanup()
 		return "", "", Probe{}, func() {}, e
-	}
-
-	extractDir := filepath.Join(workDir, "src")
-	if err := os.MkdirAll(extractDir, 0o755); err != nil {
-		return fail(err)
-	}
-	modRoot, err := extractSourceArchive(src, extractDir)
-	if err != nil {
-		return fail(err)
 	}
 
 	// Windows requires an executable to carry a recognized extension
@@ -513,9 +529,7 @@ func Build(ctx context.Context, src io.Reader, workRoot string) (binPath, module
 //
 // This is the same line install-linux.sh's source_version() greps for, and it
 // exists here for the same reason: it answers "what am I about to install?"
-// before committing to a ten-minute compile. A Manager pushing to a fleet can
-// show the target version up front, and a node already running it can skip
-// the build entirely rather than rebuilding what it is already running.
+// before committing to a ten-minute compile.
 func SourceVersion(moduleRoot string) string {
 	b, err := os.ReadFile(filepath.Join(moduleRoot, "cmd", "gravinet", "main.go"))
 	if err != nil {
@@ -529,3 +543,26 @@ func SourceVersion(moduleRoot string) string {
 }
 
 var sourceVersionRe = regexp.MustCompile(`(?m)^\s*version\s*=\s*"([^"]+)"`)
+
+// ExtractedVersion answers SourceVersion's own question — "what am I about
+// to install?" — straight from an unextracted archive, extracting just far
+// enough to read cmd/gravinet/main.go and then discarding the tree, so a
+// caller never pays for a `go build` merely to find out the candidate is the
+// version already running. A Manager pushing to a fleet can show the target
+// version up front this same way; controlOp's "apply" case (cmd/gravinet)
+// is what actually uses this to skip the build entirely when the archive
+// matches RunningVersion.
+//
+// Returns "" (never an error) when the version can't be read — a corrupt or
+// unrecognized archive, say — so a caller can treat that the same as "unknown,
+// proceed and let the real extraction inside Build report the actual
+// problem" rather than needing a second error path here that would just
+// duplicate Build's own.
+func ExtractedVersion(src io.Reader, workRoot string) string {
+	_, modRoot, cleanup, err := extractToTemp(src, workRoot, ".srcver-*")
+	if err != nil {
+		return ""
+	}
+	defer cleanup()
+	return SourceVersion(modRoot)
+}

@@ -60,7 +60,7 @@ func TestSystemL2DiscoGet(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"interfaces", "supported", "hint", "running", "neighbors", "neighbors_available", "neighbors_hint", "strays", "stray_hint"} {
+	for _, k := range []string{"interfaces", "enabled", "supported", "hint", "running", "neighbors", "neighbors_available", "neighbors_hint", "strays", "stray_hint"} {
 		if _, ok := out[k]; !ok {
 			t.Errorf("reply is missing %q; the page reads it directly", k)
 		}

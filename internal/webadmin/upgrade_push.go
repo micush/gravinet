@@ -110,10 +110,11 @@ func (s *Server) handleUpgradePush(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type result struct {
-		Node   string `json:"node"`
-		OK     bool   `json:"ok"`
-		Status int    `json:"status,omitempty"`
-		Error  string `json:"error,omitempty"`
+		Node    string `json:"node"`
+		OK      bool   `json:"ok"`
+		Status  int    `json:"status,omitempty"`
+		Skipped bool   `json:"skipped,omitempty"`
+		Error   string `json:"error,omitempty"`
 	}
 	results := make([]result, len(nodes))
 
@@ -135,12 +136,12 @@ func (s *Server) handleUpgradePush(w http.ResponseWriter, r *http.Request) {
 				results[i] = result{Node: node, OK: false, Error: msg}
 				return
 			}
-			status, perr := s.pushSourceTo(target, spooled, sum)
+			status, skipped, perr := s.pushSourceTo(target, spooled, sum)
 			if perr != nil {
 				results[i] = result{Node: node, OK: false, Status: status, Error: perr.Error()}
 				return
 			}
-			results[i] = result{Node: node, OK: true, Status: status}
+			results[i] = result{Node: node, OK: true, Status: status, Skipped: skipped}
 		}(i, node)
 	}
 	wg.Wait()
@@ -157,17 +158,19 @@ func (s *Server) handleUpgradePush(w http.ResponseWriter, r *http.Request) {
 
 // pushSourceTo streams one spooled source archive (digest first, then bytes) to
 // a single peer's remote-apply endpoint over the overlay. Returns the peer's
-// HTTP status and, on anything other than 200, an error carrying the peer's own
-// message so the operator sees why that specific node refused (most often: it
-// hasn't opted in, or it has no Go toolchain).
+// HTTP status, whether the peer's own apply op reported skipped (it was
+// already running this exact version, so nothing was built or restarted —
+// see controlOp's "apply" case), and, on anything other than 200, an error
+// carrying the peer's own message so the operator sees why that specific
+// node refused (most often: it hasn't opted in, or it has no Go toolchain).
 //
 // The file is reopened per peer rather than buffered in memory: a source tree
 // is only a few MiB, but N concurrent pushes each holding their own copy is a
 // cost with no upside when the bytes are already on disk.
-func (s *Server) pushSourceTo(target *clusterPeerTarget, srcPath, sum string) (int, error) {
+func (s *Server) pushSourceTo(target *clusterPeerTarget, srcPath, sum string) (status int, skipped bool, err error) {
 	f, err := os.Open(srcPath)
 	if err != nil {
-		return 0, fmt.Errorf("reopening the spooled archive: %w", err)
+		return 0, false, fmt.Errorf("reopening the spooled archive: %w", err)
 	}
 	defer f.Close()
 
@@ -206,7 +209,7 @@ func (s *Server) pushSourceTo(target *clusterPeerTarget, srcPath, sum string) (i
 	url := "https://" + hostport + "/api/upgrade/remote-apply"
 	req, err := http.NewRequest(http.MethodPost, url, pr)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 
@@ -218,7 +221,7 @@ func (s *Server) pushSourceTo(target *clusterPeerTarget, srcPath, sum string) (i
 	client := &http.Client{Timeout: 15 * time.Minute, Transport: proxyClient.Transport}
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
@@ -233,7 +236,17 @@ func (s *Server) pushSourceTo(target *clusterPeerTarget, srcPath, sum string) (i
 		if json.Unmarshal(body, &je) == nil && je.Error != "" {
 			msg = je.Error
 		}
-		return resp.StatusCode, fmt.Errorf("%s", msg)
+		return resp.StatusCode, false, fmt.Errorf("%s", msg)
 	}
-	return resp.StatusCode, nil
+	// A 200 carries the daemon apply op's own reply verbatim (see s.op) —
+	// {"ok":true,"skipped":true,"already_on":"..."} when the peer was
+	// already running this exact version, {"ok":true,"applied":"...",
+	// "restarting":true} otherwise. Unmarshal errors are deliberately
+	// ignored: a malformed body on an already-200 response just means
+	// skipped stays false, the same as an ordinary successful apply.
+	var jr struct {
+		Skipped bool `json:"skipped"`
+	}
+	_ = json.Unmarshal(body, &jr)
+	return resp.StatusCode, jr.Skipped, nil
 }

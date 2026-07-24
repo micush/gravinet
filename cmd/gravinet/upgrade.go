@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -337,6 +338,33 @@ func (u *upgradeSvc) controlOp(op string, body []byte) ([]byte, error) {
 		// turns a long wait followed by a rejection into an immediate answer.
 		if st := u.guard.Load(); st.Phase == upgrade.PhasePending && !req.DryRun {
 			return nil, fmt.Errorf("an upgrade (%s \u2192 %s) is already mid-trial on this node \u2014 wait for it to confirm or revert, or roll it back, before starting another", st.From, st.To)
+		}
+
+		// Read the candidate's baked-in version before spending a `go build`
+		// on it (see upgrade.ExtractedVersion's own comment): if it matches
+		// what is already running, applying it would rebuild and restart
+		// into an identical binary for nothing. This extraction is cheap —
+		// no compile — so it costs a fraction of a second regardless of how
+		// long the eventual build would have taken.
+		//
+		// A miss (corrupt archive, an unreadable version line) comes back as
+		// "", deliberately not an error, so it falls straight through to
+		// Build below, which extracts the very same archive again and
+		// reports the real problem through its own, already-tested error
+		// path rather than this needing a second one.
+		if srcVersion := upgrade.ExtractedVersion(f, u.stateDir); srcVersion != "" && srcVersion == u.version {
+			logx.Infof("upgrade: uploaded archive is already-running version %s \u2014 skipping build and apply", u.version)
+			if req.DryRun {
+				return json.Marshal(map[string]any{
+					"dry_run": true, "ok": true, "skipped": true, "already_on": u.version,
+				})
+			}
+			return json.Marshal(map[string]any{"ok": true, "skipped": true, "already_on": u.version})
+		}
+		// ExtractedVersion consumed f reading the archive once already;
+		// Build needs it again from the start.
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return nil, fmt.Errorf("rewinding the uploaded archive: %w", err)
 		}
 
 		// The build gets its own generous timeout: it is a full `go build`,

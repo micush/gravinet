@@ -1509,6 +1509,15 @@ func systemSNMPJSON(cfg config.SNMPConfig) map[string]any {
 // on an otherwise-successful save, never a rejection, the same split
 // Power/Time/Users/SNMP already use.
 //
+// req.Enabled maps straight onto config.DiscoveryConfig.Disabled (inverted
+// — see that field's own doc comment for why) and is independent of
+// req.Interfaces: the web UI's pill flips it without touching which
+// interfaces are picked, and the interface picker's own saves carry the
+// current Enabled value through unchanged (see secL2Disco's saveL2Disco).
+// Required on every POST, not just the pill's own toggle — a request that
+// omitted it would zero-value it to false and silently disable the feature
+// as a side effect of picking an interface.
+//
 // Neighbor status (service.LLDPNeighbors) is read fresh on every GET and
 // folded into the same reply rather than a separate endpoint: it's read
 // via lldpcli talking to whatever lldpd instance is actually running,
@@ -1528,6 +1537,14 @@ func (s *Server) handleSystemL2Disco(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
+		// Enabled is required on every save, not just the pill's own toggle
+		// — handleSystemL2Disco replaces cfg.Discovery wholesale, so an
+		// interface-picker save that omitted this would zero-value it to
+		// false and silently disable the feature as a side effect of
+		// picking an interface. The web UI always sends the current value
+		// either way (see secL2Disco's saveL2Disco), unchanged unless this
+		// specific request is the pill's own flip.
+		Enabled    bool `json:"enabled"`
 		Interfaces []struct {
 			Name string `json:"name"`
 			LLDP bool   `json:"lldp"`
@@ -1537,7 +1554,7 @@ func (s *Server) handleSystemL2Disco(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	discovery := config.DiscoveryConfig{}
+	discovery := config.DiscoveryConfig{Disabled: !req.Enabled}
 	for _, i := range req.Interfaces {
 		if !service.ValidLLDPIface(i.Name) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid interface name: " + i.Name})
@@ -1640,6 +1657,7 @@ func systemL2DiscoJSON(cfg config.DiscoveryConfig) map[string]any {
 
 	return map[string]any{
 		"interfaces": ifaces,
+		"enabled":    !cfg.Disabled,
 		"supported":  supported, "hint": hint,
 		"running":   running,
 		"neighbors": neighbors, "neighbors_available": neighborsAvailable, "neighbors_hint": neighborsHint,

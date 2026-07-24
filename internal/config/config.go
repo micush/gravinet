@@ -397,6 +397,22 @@ type DiscoveryIface struct {
 // and receives these protocols per-interface. Ported from parapet's
 // Discovery model.
 type DiscoveryConfig struct {
+	// Disabled is the master off switch, independent of which interfaces
+	// are picked below — the same "flag separate from what it gates" split
+	// SNMPConfig.Enabled and NAT/QoS/Bandwidth's per-network Enabled
+	// already use relative to their own fields/rules. Flipping it just
+	// starts or stops lldpd (see service.ApplyLLDP) without touching
+	// Interfaces at all.
+	//
+	// The zero value (false) means enabled — not a stylistic choice, but
+	// what makes this field backward compatible: a config saved before it
+	// existed, with interfaces already picked, was running with no
+	// separate flag at all, so it must keep running after an upgrade
+	// rather than reading as freshly disabled the moment this field
+	// appears in the struct. Same "zero value already means what the old
+	// behavior meant" polarity RejectRoute.Disabled uses elsewhere in this
+	// file, for the identical reason.
+	Disabled bool `json:"disabled,omitempty"`
 	// Interfaces holds only the rows an operator has actually touched —
 	// sparse, not one entry per host interface. An interface absent from
 	// this list is simply off (lldp:false, cdp:false), the same "absence
@@ -408,13 +424,18 @@ type DiscoveryConfig struct {
 	Interfaces []DiscoveryIface `json:"interfaces,omitempty"`
 }
 
-// IsRunnable reports whether lldpd should actually run: at least one
-// non-loopback interface has LLDP or CDP enabled. Mirrors parapet's
-// Discovery::is_runnable. lo is excluded here (not just at the UI layer)
-// since LLDP/CDP are link-layer discovery protocols and loopback has no
-// link partner to discover — the same reasoning parapet's own model applies,
-// and a defense against a hand-edited config file naming "lo" directly.
+// IsRunnable reports whether lldpd should actually run: not Disabled, and
+// at least one non-loopback interface has LLDP or CDP enabled. Mirrors
+// parapet's Discovery::is_runnable, plus the Disabled gate parapet's own
+// model has no equivalent of. lo is excluded here (not just at the UI
+// layer) since LLDP/CDP are link-layer discovery protocols and loopback has
+// no link partner to discover — the same reasoning parapet's own model
+// applies, and a defense against a hand-edited config file naming "lo"
+// directly.
 func (d DiscoveryConfig) IsRunnable() bool {
+	if d.Disabled {
+		return false
+	}
 	for _, i := range d.Interfaces {
 		if i.Name != "lo" && (i.LLDP || i.CDP) {
 			return true
