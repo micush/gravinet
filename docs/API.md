@@ -291,6 +291,7 @@ cookie, or a qualifying fleet-manager mesh session — see
 | GET/POST | `/api/system/resolver` | Read/set the host's hostname and default DNS servers |
 | GET/POST | `/api/system/time` | Read/set the host's clock, timezone, and NTP sync |
 | GET/POST | `/api/system/users` | Manage OS accounts permitted to sign in (pam/bsd_auth/windows auth modes) |
+| GET/POST | `/api/system/snmp` | Read-only SNMPv2c monitoring agent (net-snmp's snmpd) |
 | GET | `/api/about` | Version/OS/architecture/Go runtime info |
 | GET | `/api/readme` | This node's bundled README.md |
 | GET | `/api/license` | This node's bundled LICENSE |
@@ -1595,6 +1596,69 @@ platform. A rejected request (bad username/password, no such account for
 `password`/`expiry`/`delete`, this host having no usable account-management
 tooling at all) is `{"error": "..."}` with `400`.
 
+### `POST /api/system/snmp`
+
+Reads or replaces this node's read-only SNMPv2c monitoring agent
+configuration (net-snmp's `snmpd`) — like Power/Time/Users, follows the
+currently selected node. Ported from parapet's own SNMP page, with one
+architecture difference worth knowing: parapet spawns and supervises
+`snmpd` as a direct child of its own process; gravinet instead manages it
+as an ordinary OS service (`systemctl`/`service`+`sysrc`/`rcctl`/`brew
+services`), the same way it already treats FRR rather than running that as
+a child either — a child of gravinet's own process would die every time
+gravinet itself restarts, which happens far more often than an operator
+wants SNMP monitoring to blink.
+
+Unlike Time (several independent ops) or Users (a list of entries), this
+config is one cohesive settings blob: `GET` returns it, `POST` replaces it
+wholesale — the same shape parapet's own `PUT /api/snmp` uses.
+
+```json
+{"enabled": true, "community": "public", "listen_addr": "",
+ "interfaces": [], "location": "Server Room A", "contact": "noc@example.com",
+ "running": true, "supported": true, "hint": ""}
+```
+
+- `community` is returned in cleartext, the same way BGP neighbor
+  passwords already are elsewhere in this API — an authenticated session
+  can already read this node's full config, so hiding one field of it here
+  would be false security, not real security.
+- `listen_addr` is an optional snmpd listen spec (`"udp:161"`,
+  `"0.0.0.0:161"`); empty means snmpd's own default (every address, port
+  161).
+- `interfaces` is informational only — gravinet does not manage a host
+  firewall rule to scope who can reach the agent on your behalf; restrict
+  that with the host's own firewall if it matters in your environment.
+- `running`/`supported`/`hint` reflect live state: `supported` is whether
+  this host can run an agent at all (the platform is one gravinet manages a
+  service on, and `snmpd` is actually installed); `running` is whether the
+  service is active right now; `hint` explains a `false` in either.
+  **Windows always reports `supported: false`** — its own SNMP is a
+  built-in, registry-configured feature this endpoint doesn't speak, not
+  merely an untested platform.
+
+`POST` takes the same shape back (`enabled`, `community`, `listen_addr`,
+`interfaces`, `location`, `contact`):
+
+```json
+{"enabled": true, "community": "public", "listen_addr": "",
+ "interfaces": ["eth0"], "location": "Server Room A", "contact": "noc@example.com"}
+```
+
+Filling in `community` is the on switch; clearing it (or `enabled: false`)
+is the off switch — the same "filling in the field turns it on" convention
+Time's NTP-server field already uses. `enabled: true` with an empty
+`community` is rejected with `400`.
+
+The config write and the `snmpd` service reconciliation are deliberately
+allowed to disagree: a save always writes `config.snmp` first — that's
+gravinet's own source of truth — then tries to reconcile the actual
+service. A reconciliation failure (package not installed, service manager
+refused, ...) comes back as a `"note"` on an otherwise-successful `200`,
+never as a `400` — an operator fixing a stuck `snmpd` package shouldn't
+have to re-enter every field because the save itself was "rejected" for a
+reason that has nothing to do with the fields.
+
 ### `GET /api/about`
 
 ```json
@@ -1920,6 +1984,13 @@ curl -sk -b cookies.txt -X POST $HOST/api/system/users \
   -d '{"op":"add","username":"bob","password":"hunter2"}'
 # bob is now a member of the gravinet group and can sign in immediately —
 # no restart needed, membership is checked live on every login attempt.
+```
+
+### Turn on the SNMP agent
+
+```bash
+curl -sk -b cookies.txt -X POST $HOST/api/system/snmp \
+  -d '{"enabled":true,"community":"public","location":"Server Room A"}'
 ```
 
 ### Log out

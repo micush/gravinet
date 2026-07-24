@@ -308,8 +308,56 @@ type Config struct {
 	// /etc/frr/daemons. Ported from parapet's Bgp model.
 	BGP BGPConfig `json:"bgp,omitempty"`
 
+	// SNMP runs a read-only SNMPv2c agent (net-snmp's snmpd) on this host —
+	// System > SNMP. It's node-global, like BGP: one agent per host, not
+	// per network. Unlike BGP (which FRR runs and gravinet only configures)
+	// and unlike parapet's own SnmpManager (which spawns and supervises
+	// snmpd as a direct child of its own process), gravinet manages snmpd
+	// as an ordinary OS service — write snmpd.conf, then enable/restart or
+	// disable/stop it through systemctl/service/rcctl/launchctl/sc, the
+	// same way it already treats FRR. A child of gravinet's own process
+	// would die every time gravinet itself restarts (a config change, an
+	// upgrade, ...), which happens far more often than an operator wants
+	// SNMP monitoring to blink; a real OS service persists across that.
+	// Ported from parapet's Snmp model — see internal/service/snmp.go.
+	SNMP SNMPConfig `json:"snmp,omitempty"`
+
 	// path is where this config was loaded from / will be saved to.
 	path string
+}
+
+// SNMPConfig is this node's read-only SNMPv2c agent configuration, rendered
+// into net-snmp's snmpd.conf. Ported from parapet's Snmp model.
+type SNMPConfig struct {
+	Enabled bool `json:"enabled"`
+	// Community is the SNMPv2c read-only community string (e.g. "public").
+	// Required for the agent to actually run — see IsRunnable.
+	Community string `json:"community,omitempty"`
+	// ListenAddr is snmpd's listen spec, e.g. "udp:161" or "0.0.0.0:161".
+	// Empty means snmpd's own default (udp:161 on every address).
+	ListenAddr string `json:"listen_addr,omitempty"`
+	// Interfaces, if non-empty, is informational: which interfaces the
+	// agent is expected to be reached on, for an operator's own reference
+	// (e.g. when also configuring a host firewall rule by hand). Not
+	// passed to snmpd and not enforced by gravinet itself — snmpd has no
+	// native concept of "only listen on these interfaces" short of
+	// ListenAddr binding to one specific address, and gravinet doesn't
+	// manage the host firewall on SNMP's behalf (unlike the BGP/BFD ports,
+	// which install time always opens once FRR is present — SNMP is
+	// off by default and operator-toggled, not "present means used", so
+	// that isn't the right default here either). Empty = no stated scope.
+	Interfaces []string `json:"interfaces,omitempty"`
+	// Location/Contact become snmpd.conf's sysLocation/sysContact.
+	Location string `json:"location,omitempty"`
+	Contact  string `json:"contact,omitempty"`
+}
+
+// IsRunnable reports whether this config is enough to actually start snmpd:
+// enabled, with a community string (an agent with no community string can't
+// answer anything, so there's no point starting it — matches parapet's own
+// Snmp::is_runnable).
+func (s SNMPConfig) IsRunnable() bool {
+	return s.Enabled && s.Community != ""
 }
 
 // BGPConfig is this node's BGP configuration and the BFD settings attached to

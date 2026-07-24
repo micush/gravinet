@@ -31,6 +31,10 @@
 #                  (unwind/resolvd) has to be displaced for this, which is why
 #                  the installer does it for you — pass --no-unbound to skip
 #                  it if no network here uses DNS forwarding.
+#   --no-snmp      don't install the SNMP agent. By default, if snmpd isn't
+#                  already on the host, this installs net-snmp via pkg_add for
+#                  gravinet's System > SNMP page. Pass this if you don't use
+#                  SNMP and don't want this host's package set changed.
 set -eu
 
 PREFIX=/usr/local
@@ -43,6 +47,7 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 GO_MIN_MINOR=22   # go.mod requires go 1.22
 UNDERLAY_PORT=65432   # default gravinet underlay port (tcp+udp); the pf rule below opens it
 SETUP_UNBOUND=1       # default on: makes unbound the system resolver; --no-unbound opts out (see help)
+INSTALL_SNMP=1         # default on: installs net-snmp for System > SNMP; --no-snmp opts out (see help)
 
 # build_from_source() stages the freshly-built binary under a mktemp -d
 # directory (BUILD_TMP, set there) so it can be installed from a known path
@@ -67,6 +72,8 @@ while [ $# -gt 0 ]; do
     --start) START=1 ;;
     --unbound) SETUP_UNBOUND=1 ;;
     --no-unbound) SETUP_UNBOUND=0 ;;
+    --snmp) INSTALL_SNMP=1 ;;
+    --no-snmp) INSTALL_SNMP=0 ;;
     -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
@@ -175,6 +182,40 @@ ensure_go() {
   fi
   official_install_go || return 1
   [ "$(go_minor)" -ge "$GO_MIN_MINOR" ] 2>/dev/null
+}
+
+# snmpd_installed checks the same locations internal/service/snmp.go's own
+# snmpdBinary() checks, so "installed" here means exactly what it means
+# there.
+snmpd_installed() {
+  command -v snmpd >/dev/null 2>&1 && return 0
+  for p in /usr/sbin/snmpd /usr/local/sbin/snmpd; do
+    [ -x "$p" ] && return 0
+  done
+  return 1
+}
+
+# ensure_snmpd installs net-snmp via pkg_add if snmpd isn't already present,
+# for gravinet's System > SNMP page.
+ensure_snmpd() {
+  if snmpd_installed; then
+    echo "    snmpd is already installed"
+    return 0
+  fi
+  command -v pkg_add >/dev/null 2>&1 || { echo "    warning: pkg_add(8) not found; cannot install the SNMP agent automatically" >&2; return 0; }
+  echo "    snmpd is not installed; installing net-snmp"
+  if pkg_add -I net-snmp >/dev/null 2>&1 && snmpd_installed; then
+    echo "    installed net-snmp"
+    echo "    SNMP is ready — configure it from gravinet's System > SNMP page."
+    return 0
+  fi
+  cat <<'NOTE' >&2
+    warning: could not install the SNMP agent automatically. gravinet's
+             System > SNMP page will still let you author a config, but
+             nothing will actually run until snmpd is installed some other
+             way — check that pkg_add can reach its mirror and that
+             net-snmp exists for this release.
+NOTE
 }
 
 build_from_source() {
@@ -299,6 +340,13 @@ else
     netCount="$(printf '%s\n' "$netOut" | grep -c .)"
     echo "    keeping existing config ($netCount network(s) already defined)"
   fi
+fi
+
+echo "==> SNMP agent (snmpd)"
+if [ "$INSTALL_SNMP" = 1 ]; then
+  ensure_snmpd
+else
+  echo "    --no-snmp passed; leaving snmpd alone."
 fi
 
 echo "==> writing rc.d script $RCSCRIPT"

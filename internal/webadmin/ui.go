@@ -762,6 +762,7 @@ const NAV_GROUPS = [
     ['upgrade', 'check and apply a new gravinet binary on this node; local only, no peer can trigger this'],
     ['resolver', 'this host\u2019s hostname and default DNS servers'],
     ['time', 'this host\u2019s clock, timezone, and NTP synchronization'],
+    ['snmp', 'read-only SNMPv2c monitoring agent'],
     ['users', 'local OS accounts permitted to sign in to this console'],
     ['power', 'restart or shut down this host'],
   ]},
@@ -785,7 +786,7 @@ function label(s){
   if (s==='bgp-peers') return 'BGP Peers';
   if (s==='getting-started') return 'Getting Started';
   if (s==='capture') return 'Packet Capture';
-  return s==='nat'||s==='qos'||s==='dns'||s==='bgp'||s==='api' ? s.toUpperCase() : s.charAt(0).toUpperCase()+s.slice(1);
+  return s==='nat'||s==='qos'||s==='dns'||s==='bgp'||s==='api'||s==='snmp' ? s.toUpperCase() : s.charAt(0).toUpperCase()+s.slice(1);
 }
 
 // sectionVisible gates sections whose availability depends on a runtime
@@ -2310,7 +2311,7 @@ function renderSection() {
        upgrade:secUpgrade,
        metrics:infoMetrics, 'mesh-peers':infoMeshPeers, capture:infoCapture, speedtest:infoSpeedtest, latency:infoLatency,
        'route-table':infoRoutes, 'bgp-peers':secBgpPeers, 'hosts-file':infoHosts, 'dns-state':infoDNS,
-       resolver:secResolver, time:secTime, users:secUsers, power:secPower,
+       resolver:secResolver, time:secTime, snmp:secSNMP, users:secUsers, power:secPower,
        logs:secLogs, readme:secReadme, 'getting-started':secGettingStarted, api:secAPIDoc, license:secLicense, about:infoAbout }[state.section])(c, nets);
   }
   c.querySelectorAll('table').forEach(enhanceTable);
@@ -5892,6 +5893,101 @@ function secTime(c){
       };
     }
     body.appendChild(setCard);
+  };
+
+  load();
+}
+
+// secSNMP renders System > SNMP: a read-only SNMPv2c monitoring agent
+// (net-snmp's snmpd) on this host. Mirrors parapet's SNMP page almost
+// exactly — community string, listen address, interfaces (informational
+// only; see config.SNMPConfig's doc comment), sysLocation/sysContact — and
+// its "filling in the community string turns it on, clearing it turns it
+// off" convention, the same one Time's NTP-server field already uses in
+// this app, rather than a separate on/off toggle that could disagree with
+// what's actually in the field.
+//
+// All fields save together on any one field's blur, the same "several
+// fields, one write" pattern secResolver's DNS card uses \u2014 there's one
+// config.SNMPConfig on the wire per save, not independent per-field ops.
+function secSNMP(c){
+  secHint(c, 'A read-only SNMPv2c monitoring agent (net-snmp\u2019s snmpd) on this host. Acts on the node you\u2019re currently managing.');
+
+  const body = $('<div></div>');
+  body.innerHTML = '<div class="hint">loading\u2026</div>';
+  c.appendChild(body);
+
+  const load = async () => {
+    const r = await api('/api/system/snmp');
+    if (!r.ok || !r.body){ body.innerHTML = '<div class="hint">could not read this host\u2019s SNMP settings.</div>'; return; }
+    draw(r.body);
+  };
+
+  const draw = (snmp) => {
+    body.innerHTML = '';
+
+    if (snmp.supported === false){
+      body.appendChild($('<div class="card"></div>')).appendChild($('<div class="empty">'+esc(snmp.hint||'SNMP isn\u2019t supported on this host')+'</div>'));
+      return;
+    }
+
+    const card = $('<div class="card"></div>');
+    const row = $('<div style="display:flex;flex-direction:column;gap:10px"></div>');
+
+    row.appendChild($('<div><div class="hint" style="margin:0 0 4px">Community string</div>'
+      + '<span style="display:flex;gap:6px;align-items:center">'
+      + '<input id="snmp-community" type="password" autocomplete="new-password" value="'+esc(snmp.community||'')+'" placeholder="public" style="flex:1">'
+      + '<button class="ghost sm" id="snmp-pw-toggle" title="show while editing">\ud83d\udc41\ufe0f</button>'
+      + '</span></div>'));
+    row.appendChild($('<div><div class="hint" style="margin:0 0 4px">Listen address</div>'
+      + '<input id="snmp-listen" value="'+esc(snmp.listen_addr||'')+'" placeholder="udp:161 or 0.0.0.0:161 \u2014 blank = snmpd\u2019s own default" style="width:100%"></div>'));
+    row.appendChild($('<div><div class="hint" style="margin:0 0 4px">Interfaces</div>'
+      + '<input id="snmp-ifaces" value="'+esc((snmp.interfaces||[]).join(', '))+'" placeholder="blank = no stated scope \u2014 e.g. eth0, mgmt0" style="width:100%"></div>'));
+    row.appendChild($('<div style="border-top:1px solid var(--line);padding-top:10px;margin-top:2px"><div class="hint" style="margin:0 0 4px">sysLocation</div>'
+      + '<input id="snmp-location" value="'+esc(snmp.location||'')+'" placeholder="Server Room A, Rack 3" style="width:100%"></div>'));
+    row.appendChild($('<div><div class="hint" style="margin:0 0 4px">sysContact</div>'
+      + '<input id="snmp-contact" value="'+esc(snmp.contact||'')+'" placeholder="noc@example.com" style="width:100%"></div>'));
+    card.appendChild(row);
+    card.appendChild($('<div class="hint" style="margin:8px 0 0">Filling in the community string turns the agent <b>on</b>; clearing it turns it <b>off</b>. Interfaces is informational only \u2014 gravinet doesn\u2019t manage a host firewall rule to scope who can reach the agent; restrict that with the host\u2019s own firewall if it matters in your environment. Saves automatically when you click or tab away.</div>'));
+    body.appendChild(card);
+
+    const statusCard = $('<div class="card"></div>');
+    const runTag = '<span class="tag-toggle '+(snmp.running?'on':'off')+'">'+(snmp.running?'running':'not running')+'</span>';
+    statusCard.appendChild($('<div style="display:flex;align-items:center;gap:8px">'+runTag+'</div>'));
+    if (snmp.hint) statusCard.appendChild($('<div class="hint" style="margin:8px 0 0">'+esc(snmp.hint)+'</div>'));
+    body.appendChild(statusCard);
+
+    const communityIn = row.querySelector('#snmp-community');
+    const listenIn = row.querySelector('#snmp-listen');
+    const ifacesIn = row.querySelector('#snmp-ifaces');
+    const locationIn = row.querySelector('#snmp-location');
+    const contactIn = row.querySelector('#snmp-contact');
+    const pwToggle = card.querySelector('#snmp-pw-toggle');
+    pwToggle.onclick = (e) => { e.stopPropagation(); const showing = communityIn.type==='text'; communityIn.type = showing?'password':'text'; pwToggle.title = showing?'show while editing':'hide while editing'; };
+
+    let last = {
+      community: snmp.community||'', listen: snmp.listen_addr||'', ifaces: (snmp.interfaces||[]).join(', '),
+      location: snmp.location||'', contact: snmp.contact||'',
+    };
+    const saveSNMP = async () => {
+      const cur = {
+        community: communityIn.value.trim(), listen: listenIn.value.trim(),
+        ifaces: ifacesIn.value.split(/[\s,]+/).filter(Boolean).join(', '),
+        location: locationIn.value.trim(), contact: contactIn.value.trim(),
+      };
+      if (cur.community===last.community && cur.listen===last.listen && cur.ifaces===last.ifaces && cur.location===last.location && cur.contact===last.contact) return;
+      const res = await api('/api/system/snmp', { method:'POST', body: JSON.stringify({
+        enabled: !!cur.community, community: cur.community, listen_addr: cur.listen,
+        interfaces: cur.ifaces ? cur.ifaces.split(', ') : [], location: cur.location, contact: cur.contact,
+      }) });
+      if (!res.ok){ alert((res.body && res.body.error) || 'could not save SNMP settings'); return; }
+      if (res.body && res.body.note) alert(res.body.note);
+      load();
+    };
+    [communityIn, listenIn, ifacesIn, locationIn, contactIn].forEach(inp => {
+      inp.onblur = saveSNMP;
+      inp.onkeydown = (e) => { if (e.key === 'Enter'){ e.preventDefault(); inp.blur(); } };
+    });
   };
 
   load();

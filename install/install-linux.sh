@@ -44,6 +44,14 @@
 #                  prints a pointer to FRR's own repo instead of installing anything.
 #                  Pass this if you don't use BGP/BFD and don't want this host's
 #                  package set changed.
+#   --no-snmp      don't install the SNMP agent. By default, if snmpd isn't already
+#                  on the host, this installs it (the "snmpd" package on Debian/Ubuntu,
+#                  "net-snmp" everywhere else — same binary, different package name per
+#                  distro) via the distro's package manager, for gravinet's System > SNMP
+#                  page. Without it that page still lets you author a config, but the
+#                  agent itself won't run until the package shows up some other way.
+#                  Pass this if you don't use SNMP and don't want this host's package
+#                  set changed.
 set -euo pipefail
 
 PREFIX=/usr/local
@@ -55,6 +63,7 @@ ACTION=install
 FIREWALL=1
 ENABLE_RESOLVED=1
 INSTALL_FRR=1
+INSTALL_SNMP=1
 UNDERLAY_PORT_DEFAULT=65432 # config.DefaultUDPPort
 WEB_PORT_DEFAULT=8443       # config.Default()'s web_admin.listen
 REPO="$(cd "$(dirname "$0")/.." && pwd)" # repo root (parent of install/)
@@ -88,7 +97,9 @@ while [ $# -gt 0 ]; do
     --enable-systemd-resolved) ENABLE_RESOLVED=1 ;; # ditto
     --no-frr) INSTALL_FRR=0 ;;
     --frr) INSTALL_FRR=1 ;;
-    -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
+    --no-snmp) INSTALL_SNMP=0 ;;
+    --snmp) INSTALL_SNMP=1 ;;
+    -h|--help) sed -n '2,54p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -385,6 +396,54 @@ ensure_frr() {
                  <dnf|yum> install frr
              Elsewhere, check that this host's package manager can reach its
              repos and that a package named "frr" exists for this release.
+NOTE
+}
+
+# snmpd_installed reports whether snmpd (the net-snmp agent gravinet's
+# System > SNMP page configures and starts) is already on this host —
+# deliberately the same handful of paths internal/service/snmp.go's own
+# snmpdBinary() checks, so "installed" here means exactly what it means
+# there, the same way frr_installed already mirrors bgp.go's vtyshPath().
+snmpd_installed() {
+  command -v snmpd >/dev/null 2>&1 && return 0
+  local p
+  for p in /usr/sbin/snmpd /sbin/snmpd /usr/bin/snmpd /usr/local/sbin/snmpd /usr/local/bin/snmpd; do
+    [ -x "$p" ] && return 0
+  done
+  return 1
+}
+
+# ensure_snmpd installs the snmpd agent if it isn't already present, so
+# System > SNMP works out of the box. Unlike FRR, the *package* name isn't
+# uniform across distros even though the binary and service are both always
+# called snmpd: Debian/Ubuntu's package is literally named "snmpd", but
+# Fedora/RHEL/openSUSE/Arch all ship the exact same agent under "net-snmp"
+# instead. Rather than detect the distro to pick one name, this just tries
+# "snmpd" first (the apt case) and falls back to "net-snmp" (every other
+# pkg_install branch) only if that didn't actually produce the binary —
+# pkg_install itself already knows which manager it's using; this doesn't
+# need to duplicate that detection to also get the name right.
+ensure_snmpd() {
+  if snmpd_installed; then
+    echo "    snmpd is already installed"
+    return 0
+  fi
+  echo "    snmpd is not installed; installing it"
+  if pkg_install snmpd && snmpd_installed; then
+    echo "    installed snmpd"
+    return 0
+  fi
+  if pkg_install net-snmp && snmpd_installed; then
+    echo "    installed net-snmp (provides snmpd)"
+    return 0
+  fi
+  cat <<'NOTE' >&2
+    warning: could not install the SNMP agent automatically on this host.
+             gravinet's System > SNMP page will still let you author a
+             config, but nothing will actually run until snmpd is installed
+             some other way. Check that this host's package manager can
+             reach its repos and that a package named "snmpd" or "net-snmp"
+             exists for this release.
 NOTE
 }
 
@@ -794,6 +853,14 @@ if [ "$INSTALL_FRR" = 1 ]; then
 else
   echo "    --no-frr passed; leaving FRR alone. gravinet's Traffic > BGP page will still"
   echo "    let you author a config, but nothing runs until FRR is installed yourself."
+fi
+
+echo "==> SNMP agent (snmpd)"
+if [ "$INSTALL_SNMP" = 1 ]; then
+  ensure_snmpd
+else
+  echo "    --no-snmp passed; leaving snmpd alone. gravinet's System > SNMP page will"
+  echo "    still let you author a config, but nothing runs until snmpd is installed yourself."
 fi
 
 echo "==> writing systemd unit"

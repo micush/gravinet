@@ -12,12 +12,17 @@
 #   --prefix DIR   install prefix (default: /usr/local)
 #   --config PATH  config file (default: /etc/gravinet/config.json)
 #   --no-load      install but do not load (start) the daemon now
+#   --no-snmp      don't print the SNMP-agent note (see below). Purely cosmetic:
+#                  this installer never attempts to install net-snmp itself here
+#                  (see the note at the SNMP step for why), so this flag only
+#                  suppresses that reminder for a scripted/quiet install.
 set -euo pipefail
 
 PREFIX=/usr/local
 CONFIG=/etc/gravinet/config.json
 SRC=""
 LOAD=1
+INSTALL_SNMP=1
 ACTION=install
 PLIST=/Library/LaunchDaemons/com.gravinet.daemon.plist
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -44,6 +49,8 @@ while [ $# -gt 0 ]; do
     --config) CONFIG="$2"; shift ;;
     --no-load) LOAD=0 ;;
     --load) LOAD=1 ;;
+    --snmp) INSTALL_SNMP=1 ;;
+    --no-snmp) INSTALL_SNMP=0 ;;
     -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
@@ -393,6 +400,29 @@ else
   else
     netCount="$(printf '%s\n' "$netOut" | grep -c .)"
     echo "    keeping existing config ($netCount network(s) already defined)"
+  fi
+fi
+
+if [ "$INSTALL_SNMP" = 1 ]; then
+  if command -v snmpd >/dev/null 2>&1 || [ -x /usr/local/sbin/snmpd ] || [ -x /opt/homebrew/sbin/snmpd ]; then
+    echo "==> SNMP agent (snmpd)"
+    echo "    already installed"
+  else
+    cat <<'NOTE'
+==> SNMP agent (snmpd)
+    not installed. Unlike Linux/FreeBSD/OpenBSD, this installer does not
+    install it for you here: this script runs as root (via sudo), and
+    Homebrew refuses to operate as root (the same reason Go is fetched
+    straight from go.dev above rather than via brew). If you want
+    gravinet's System > SNMP page to actually run an agent, install it
+    yourself as your own (non-root) user first:
+        brew install net-snmp
+    gravinet drives it afterward via 'brew services' — which, for the same
+    root-vs-Homebrew reason, may also need to be run as that same user
+    rather than expecting gravinet's own (typically root) process to
+    manage it; see internal/service/snmp.go's package comment.
+    Pass --no-snmp to silence this note.
+NOTE
   fi
 fi
 

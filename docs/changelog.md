@@ -46,6 +46,131 @@ assuming it didn't happen.
 
 ---
 
+---
+
+## v615 — 2026-07-24
+
+**New: System > SNMP**, the fifth of parapet's System items recreated —
+sitting between Time and Users in the rail (matching parapet's own relative
+order: resolver, time, snmp, users, power there, minus the dhcp item
+gravinet already dropped). A read-only SNMPv2c monitoring agent (net-snmp's
+`snmpd`) on this host, ported from parapet's own SNMP page, plus install-time
+`snmpd` installation as requested — "if snmp isn't installed, then install
+during installation."
+
+**One deliberate architecture change from parapet's model**, stated plainly
+because it affects behavior an operator might expect to match parapet
+exactly: parapet spawns and supervises `snmpd` as a direct child of its own
+process — if parapet dies, so does snmpd, and it's relaunched on parapet's
+next start. gravinet instead manages `snmpd` as an ordinary OS service
+(`systemctl`/`service`+`sysrc`/`rcctl`/`brew services`), the same way it
+already treats FRR rather than running that as a child either. A child of
+gravinet's own process would die every time gravinet itself restarts — a
+config change, an upgrade, a crash-and-recover — which happens far more
+often than an operator wants their SNMP monitoring to blink; a real OS
+service persists across that. One upside falls out of this for free: no
+AppArmor/SELinux workaround was needed the way parapet's installer applies
+one (dropping snmpd's AppArmor profile to complain mode) — gravinet uses
+the OS's own packaged service rather than bypassing it, so that service's
+existing policy already expects to do exactly what it's being asked to do.
+
+- **`internal/config/config.go`**: new `SNMPConfig` (`Enabled`, `Community`,
+  `ListenAddr`, `Interfaces`, `Location`, `Contact`) + `IsRunnable()`,
+  ported from parapet's `Snmp` model.
+- **`internal/service/snmp.go`** (new): `renderSNMPConf` (injection-resistant
+  community/value sanitization ported from parapet's `clean_community`/
+  `conf_value`), `SNMPConfPath()`, `snmpdBinary()` lookup, `SNMPSupported()`,
+  `ApplySNMP()` (write conf, then enable+restart or disable+stop the
+  service), and `SNMPServiceRunning()` — implemented for **linux, freebsd,
+  openbsd, darwin**. `snmpd.conf` is written to the *standard* net-snmp path
+  (`/etc/snmp/snmpd.conf` on linux/freebsd/openbsd; a Homebrew-prefix search
+  on darwin), not a gravinet-specific one, for the identical AppArmor
+  reason parapet's own comment gives.
+  **Windows is deliberately unsupported**: its native SNMP is a built-in OS
+  feature configured through the registry, not a text file net-snmp reads —
+  different enough that adapting this same code to it would likely be
+  subtly wrong rather than honestly absent, so `SNMPSupported()` just says
+  so.
+  **A real, stated caveat on darwin**: gravinet's own process commonly runs
+  as root there (a launchd daemon needing tun/raw-socket access), and
+  Homebrew refuses to operate as root — the identical constraint
+  `install-macos.sh` already documents for why it fetches Go from go.dev
+  instead of via brew. `ApplySNMP`'s `brew services` calls can hit that same
+  refusal; the resulting error surfaces Homebrew's own "do not run this as
+  root" text verbatim rather than failing mysteriously, but there's no
+  workaround implemented — `ApplySNMP` still writes a correct `snmpd.conf`
+  either way, so that half always works even when the service-management
+  half can't.
+- **`internal/service/snmp_test.go`** (new): 7 tests, several ported
+  directly from parapet's own Rust test suite (community sanitization,
+  value quoting, listen-address validation, runnable checks, conf
+  rendering, injection resistance). Writing these caught two bugs in the
+  tests' own expectations (not the implementation) — traced against actual
+  output rather than guessed, the same discipline this project has used
+  everywhere else a doubled-escape or off-by-one has turned up.
+- **`handleSystemSNMP`** (`/api/system/snmp`, GET/POST): unlike Time
+  (several independent ops) or Users (per-row CRUD), SNMP config is one
+  cohesive settings blob, so this takes the same shape parapet's own `PUT
+  /api/snmp` does — GET returns it, POST replaces it wholesale. Saving
+  always writes `config.SNMP` first regardless of what the OS service does
+  with it afterward; a reconciliation failure comes back as a `"note"` on
+  an otherwise-successful save, never as a rejection — an operator fixing a
+  stuck `snmpd` package shouldn't have to re-enter every field because the
+  save itself looked like it failed. Like Power/Time/Users, follows the
+  currently selected node. `community` is returned in cleartext in `GET`,
+  the same way BGP neighbor passwords already are elsewhere in this API —
+  masked in the UI for shoulder-surfing, not withheld from the API itself.
+- **`secSNMP`** (`ui.go`): community (masked, with the same show/hide toggle
+  Users' password fields use), listen address, interfaces, sysLocation,
+  sysContact — all fields save together on any one field's blur, the same
+  "several fields, one write" pattern `secResolver`'s DNS card already
+  uses. Filling in the community string turns the agent on, clearing it
+  turns it off — the same convention Time's NTP-server field already uses,
+  rather than a separate toggle that could disagree with what's actually in
+  the field.
+- **Install-time `snmpd` installation, as requested, across every platform
+  that supports it**: `install-linux.sh` (`ensure_snmpd`, trying the
+  `snmpd` package name first for apt, falling back to `net-snmp` for
+  dnf/yum/zypper/pacman, since — unlike FRR — the package name genuinely
+  isn't uniform across distros even though the binary and service are both
+  always called snmpd), `install-freebsd.sh` (`pkg install net-snmp`, a
+  single uniform name there), `install-openbsd.sh` (`pkg_add net-snmp`).
+  Each gained a `--no-snmp`/`--snmp` flag pair, matching the existing
+  `--no-frr` convention.
+  **`install-macos.sh` deliberately does not attempt an install**: this
+  script runs as root via sudo, and Homebrew refuses to operate as root —
+  attempting `brew install net-snmp` here would just fail with a permission
+  complaint. Instead it prints a clear one-time note pointing the operator
+  at running `brew install net-snmp` themselves as their own non-root user,
+  with `--no-snmp` to silence it.
+  **`install-windows.ps1`** prints a one-line note explaining why nothing
+  runs there, rather than silently doing nothing.
+- **Found and fixed a pre-existing, unrelated bug while touching
+  `install-linux.sh`**: `--help`'s `sed -n '2,40p'` was already truncating
+  the header comment block before this change (the real end was well past
+  line 40), silently cutting off part of the existing `--no-frr` help text;
+  corrected the range while extending the same block for `--no-snmp`.
+- **Tests**: `internal/webadmin/systemsnmp_handler_test.go` (new) — GET
+  reply shape, the one POST case guaranteed to be rejected by validation
+  before ever reaching a real service enable/disable
+  (`enabled:true`+empty `community`), LOCAL_API placement, nav ordering.
+  Deliberately does **not** test a successful save: any request that gets
+  past validation reaches `service.ApplySNMP`, which really does call
+  `systemctl`/`service`/`rcctl`/`brew services` to enable or disable the
+  actual `snmpd` service — on a machine where a `snmpd`/`snmp` unit happens
+  to already exist, testing that path for real would toggle a real system
+  service as a side effect of running this test suite, the same risk
+  `sysusers_test.go`/`groups_test.go` already refuse to take for
+  `useradd`/`groupadd`, applied here to `systemctl` instead. Also caught a
+  real bug this way: `systemSNMPJSON` returned a bare `nil` `Interfaces`
+  slice, which Go's JSON encoder marshals as `null`, not `[]` — the page
+  expects a real array. Fixed.
+- **Docs**: `docs/API.md` gained the full `/api/system/snmp` reference, a
+  Quick Reference row, and a curl example; verified afterward that every
+  anchor link in the document still resolves and no `mdRender` placeholder
+  leaked (120 headings, 0 duplicate slugs, 43 anchor links, 0 broken, 194
+  code-fence lines — an even count).
+
 ## v614 — 2026-07-24
 
 **Fixed: adding a console user (System > Users) could trip an SELinux AVC

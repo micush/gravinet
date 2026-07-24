@@ -46,6 +46,12 @@
 #                        frr_daemons, driven via service(8)) — no separate setup
 #                        needed beyond this. Pass this if you don't want this
 #                        host's package set changed.
+#   --no-snmp            don't install the SNMP agent. By default, if snmpd isn't
+#                        already on the host, this installs net-snmp via pkg (a
+#                        single, version-agnostic package name here, unlike FRR's
+#                        per-major-version one) for gravinet's System > SNMP page.
+#                        Pass this if you don't use SNMP and don't want this
+#                        host's package set changed.
 #   --no-ifqmaxlen       don't touch net.link.ifqmaxlen. By default, if it isn't
 #                        already set to at least 1000 and nothing in
 #                        /boot/loader.conf already mentions it, this installer
@@ -71,6 +77,7 @@ START=1
 ACTION=install
 ENABLE_LOCAL_UNBOUND=1
 INSTALL_FRR=1
+INSTALL_SNMP=1
 ENABLE_IFQMAXLEN=1
 RCSCRIPT=/usr/local/etc/rc.d/gravinet
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -101,9 +108,11 @@ while [ $# -gt 0 ]; do
     --enable-local-unbound) ENABLE_LOCAL_UNBOUND=1 ;; # now the default; kept as a harmless no-op for anyone already scripting it
     --no-frr) INSTALL_FRR=0 ;;
     --frr) INSTALL_FRR=1 ;;
+    --no-snmp) INSTALL_SNMP=0 ;;
+    --snmp) INSTALL_SNMP=1 ;;
     --no-ifqmaxlen) ENABLE_IFQMAXLEN=0 ;;
     --ifqmaxlen) ENABLE_IFQMAXLEN=1 ;; # default; kept for symmetry with --frr/--enable-local-unbound
-    -h|--help) sed -n '2,64p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,70p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -570,6 +579,43 @@ ensure_frr() {
 NOTE
 }
 
+# snmpd_installed checks pkg's install location, the same locations
+# internal/service/snmp.go's own snmpdBinary() checks, so "installed" here
+# means exactly what it means there.
+snmpd_installed() {
+  command -v snmpd >/dev/null 2>&1 && return 0
+  for p in /usr/local/sbin/snmpd /usr/local/bin/snmpd; do
+    [ -x "$p" ] && return 0
+  done
+  return 1
+}
+
+# ensure_snmpd installs net-snmp via pkg if snmpd isn't already present, for
+# gravinet's System > SNMP page. Unlike FRR, FreeBSD's net-snmp package name
+# is uniform and version-agnostic — no FRR_PKG_CANDIDATES-style guessing
+# needed here.
+ensure_snmpd() {
+  if snmpd_installed; then
+    echo "    snmpd is already installed"
+    return 0
+  fi
+  command -v pkg >/dev/null 2>&1 || { echo "    warning: pkg(8) not found; cannot install the SNMP agent automatically" >&2; return 0; }
+  echo "    snmpd is not installed; installing net-snmp"
+  if pkg install -y net-snmp >/dev/null 2>&1 && snmpd_installed; then
+    echo "    installed net-snmp"
+    echo "    SNMP is ready — configure it from gravinet's System > SNMP page."
+    return 0
+  fi
+  cat <<'NOTE' >&2
+    warning: could not install the SNMP agent automatically. gravinet's
+             System > SNMP page will still let you author a config, but
+             nothing will actually run until snmpd is installed some other
+             way — check that pkg can reach its repos and that net-snmp
+             exists for this release.
+NOTE
+}
+
+
 echo "==> DNS forwarding (local-unbound)"
 if local_unbound_configured; then
   echo "    local-unbound is already configured on this host"
@@ -611,6 +657,13 @@ if [ "$INSTALL_FRR" = 1 ]; then
   ensure_frr
 else
   echo "    --no-frr passed; leaving FRR alone."
+fi
+
+echo "==> SNMP agent (snmpd)"
+if [ "$INSTALL_SNMP" = 1 ]; then
+  ensure_snmpd
+else
+  echo "    --no-snmp passed; leaving snmpd alone."
 fi
 
 echo "==> outbound queue depth (net.link.ifqmaxlen)"

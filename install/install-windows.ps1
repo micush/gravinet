@@ -615,6 +615,11 @@ if (-not (Test-Path $Config)) {
   }
 }
 
+Write-Host "==> SNMP agent"
+Write-Host "    gravinet's System > SNMP page isn't available on Windows: it drives net-snmp's"
+Write-Host "    snmpd, and Windows' own built-in SNMP Service is a completely different,"
+Write-Host "    registry-configured mechanism that page doesn't speak. Nothing to install here."
+
 # Re-register the service (clears any stale binPath from a prior version).
 # The daemon talks to the SCM itself (StartServiceCtrlDispatcher).
 Remove-GravinetService

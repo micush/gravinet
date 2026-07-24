@@ -1368,6 +1368,98 @@ func systemUsersJSON(authMode string) map[string]any {
 	}
 }
 
+// handleSystemSNMP reads or replaces this node's SNMP agent configuration —
+// the backend for System > SNMP. Unlike Time (several independent ops) or
+// Users (a list of entries with per-row CRUD), SNMP config is one cohesive
+// settings blob, so this takes the same shape parapet's own PUT /api/snmp
+// does: GET returns it, POST replaces it wholesale.
+//
+// Saving always writes config.SNMP first — that's gravinet's own source of
+// truth regardless of what the OS service does with it — then calls
+// service.ApplySNMP to reconcile the actual snmpd service to match. A
+// reconciliation failure (service won't start, package not installed, ...)
+// is surfaced as a "note" on an otherwise-successful save, the same
+// "config is truth, the daemon might still need attention" split
+// handleSystemPower/Time/Users all already use, never as a save failure —
+// an operator fixing a stuck snmpd package shouldn't first need to
+// re-enter every field because the save was rejected.
+//
+// Like Power/Time/Users, this follows the currently selected node (not in
+// LOCAL_API): the whole point is being able to turn on monitoring for a
+// remote peer from the console you're already logged into.
+func (s *Server) handleSystemSNMP(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		cfg, err := config.Load(s.configPath)
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, systemSNMPJSON(cfg.SNMP))
+		return
+	}
+
+	var req struct {
+		Enabled    bool     `json:"enabled"`
+		Community  string   `json:"community"`
+		ListenAddr string   `json:"listen_addr"`
+		Interfaces []string `json:"interfaces"`
+		Location   string   `json:"location"`
+		Contact    string   `json:"contact"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.Enabled && req.Community == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "SNMP requires a community string"})
+		return
+	}
+	snmp := config.SNMPConfig{
+		Enabled: req.Enabled, Community: req.Community, ListenAddr: req.ListenAddr,
+		Interfaces: req.Interfaces, Location: req.Location, Contact: req.Contact,
+	}
+
+	action := "disabling"
+	if snmp.IsRunnable() {
+		action = "enabling"
+	}
+	s.log.Infof("webadmin: %s the SNMP agent (requested from admin UI)", action)
+	if err := s.mutateConfig(func(cfg *config.Config) error {
+		cfg.SNMP = snmp
+		return nil
+	}); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+
+	resp := systemSNMPJSON(snmp)
+	resp["ok"] = true
+	if ok, hint := service.ApplySNMP(snmp); !ok {
+		resp["note"] = "saved, but the snmpd service could not be reconciled: " + hint
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// systemSNMPJSON flattens an SNMPConfig plus live service state for the
+// wire. community is returned in cleartext, the same way BGP neighbor
+// passwords already are in this API — an authenticated session can already
+// read this node's full config, so hiding one field of it here would be
+// false security, not real security; the page masks it for
+// shoulder-surfing, not from the API.
+func systemSNMPJSON(cfg config.SNMPConfig) map[string]any {
+	supported, hint := service.SNMPSupported()
+	interfaces := cfg.Interfaces
+	if interfaces == nil {
+		interfaces = []string{} // nil marshals to JSON null, not []; the page expects an array
+	}
+	return map[string]any{
+		"enabled": cfg.Enabled, "community": cfg.Community,
+		"listen_addr": cfg.ListenAddr, "interfaces": interfaces,
+		"location": cfg.Location, "contact": cfg.Contact,
+		"running":   supported && service.SNMPServiceRunning(),
+		"supported": supported, "hint": hint,
+	}
+}
+
 // minutesUntilClock returns whole minutes from now until the next occurrence of
 // a 24-hour "HH:MM" wall-clock time in the host's local zone. A time earlier
 // today (or exactly now) rolls to tomorrow, so "at 02:00" at 09:00 means 17h
