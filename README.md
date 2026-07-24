@@ -245,8 +245,9 @@ The UI has a left sidebar grouped into **Mesh** (Networks, Keys, Seeds, Peers,
 Bans), **Traffic** (Routes, Firewall, NAT, QoS, Bandwidth), **Naming** (DNS,
 Hosts), and **Monitor** (live metrics, mesh peer detail, packet capture,
 speedtest, latency, the live kernel route table, hosts file, DNS state, and
-logs), **System** (upgrade this node's binary, set its clock, timezone and NTP
-servers, restart or shut down the host),
+logs), **System** (upgrade this node's binary, set its hostname and default
+DNS servers, set its clock, timezone and NTP servers, manage console
+accounts, restart or shut down the host),
 and **Info** (this README, the getting-started walkthrough, the license, and
 build/host details) — plus
 Settings and Sign out pinned at the bottom, and a light/dark

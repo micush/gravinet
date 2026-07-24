@@ -288,6 +288,7 @@ cookie, or a qualifying fleet-manager mesh session — see
 | GET/POST | `/api/logsize` | Read/set the log file's size cap |
 | POST | `/api/restart` | Restart the gravinet service |
 | POST | `/api/system/power` | Reboot or shut down the host (not just the service) |
+| GET/POST | `/api/system/resolver` | Read/set the host's hostname and default DNS servers |
 | GET/POST | `/api/system/time` | Read/set the host's clock, timezone, and NTP sync |
 | GET/POST | `/api/system/users` | Manage OS accounts permitted to sign in (pam/bsd_auth/windows auth modes) |
 | GET | `/api/about` | Version/OS/architecture/Go runtime info |
@@ -1393,6 +1394,65 @@ Any rejection (bad action/when, no delay given for `"in"`, this platform
 having no usable shutdown tooling at all) is `{"error": "..."}` with
 `400`.
 
+### `POST /api/system/resolver`
+
+Reads or changes the host's hostname and default DNS configuration —
+the hostname and default nameservers/search domain used for everything
+that isn't more specifically claimed by [Mesh >
+DNS](#post-apidns)'s own conditional forwarding or [Naming >
+Hosts](#get-apilocalhosts)'s peer-name mappings, neither of which this
+endpoint can affect. Like Power and Time, follows the currently
+selected node rather than being local-only. As with Time, nothing here
+is stored in gravinet's own config — the OS is the source of truth for
+everything with a native persistent home (the hostname; `resolv.conf`;
+`systemd-resolved`'s or NetworkManager's own config), read live and
+written through. The one exception is noted in `GET`'s `manager` field
+when it applies: on FreeBSD/OpenBSD, when `local-unbound`/`unbound` is
+already the host's live resolver (a prerequisite for Mesh DNS
+forwarding to work there at all), the default DNS servers are applied
+as unbound's own `"."` forward zone through the same control tool Mesh
+DNS itself uses, rather than overwriting `resolv.conf`'s `nameserver`
+line out from under it — that zone lives only in the running daemon's
+memory, so gravinet keeps a small on-disk breadcrumb and reasserts it
+once at its own startup.
+
+`GET` returns the live state:
+
+```json
+{"hostname": "node7.example", "servers": ["1.1.1.1", "8.8.8.8"],
+ "search_domain": "corp.internal", "manager": "systemd-resolved",
+ "can_hostname": true, "can_dns": true, "hint": ""}
+```
+
+`POST` takes one op at a time:
+
+```json
+{"op": "hostname", "hostname": "node7.example"}
+{"op": "dns", "servers": ["1.1.1.1", "8.8.8.8"], "search_domain": "corp.internal"}
+```
+
+- `hostname`: RFC-1123-style — dot-separated labels of letters, digits,
+  and hyphens, no leading/trailing hyphen in a label. Empty is rejected
+  outright (there's no sensible "revert" for a hostname, unlike DNS
+  below); on Windows this takes effect only after the host next
+  restarts (`Rename-Computer`, which has no live equivalent), noted in
+  the reply's `note`. Setting this changes the OS hostname immediately;
+  it does **not** change what this node advertises to mesh peers
+  (`hostname` in `config.json`, which falls back to the OS hostname but
+  is only re-read from it once, at gravinet's own next startup).
+- `dns`: `servers` must each parse as a real IP address — unlike Time's
+  NTP `servers`, a hostname isn't accepted here, since resolving one is
+  the whole question this field answers. `search_domain` follows the
+  same label rules as `hostname`, plus a single unqualified label (e.g.
+  `"internal"`) is valid. An empty `servers` array reverts to whatever
+  the host would otherwise use (typically DHCP-provided) rather than
+  disabling anything — there's no NTP-style "off" state here, so
+  clearing this carries no special confirmation semantics.
+
+Every successful `POST` replies with the same shape `GET` does (freshly
+re-read from the host) plus `"ok": true` and, on a partial success, a
+`"note"`. A rejected request is `{"error": "..."}` with `400`.
+
 ### `POST /api/system/time`
 
 Reads or changes the host's clock, timezone, and NTP settings — and,
@@ -1832,6 +1892,13 @@ curl -sk -b cookies.txt -X POST $HOST/api/restart
 ```bash
 curl -sk -b cookies.txt -X POST $HOST/api/system/power \
   -d '{"action":"restart","when":"in","minutes":10}'
+```
+
+### Set the default DNS servers and search domain
+
+```bash
+curl -sk -b cookies.txt -X POST $HOST/api/system/resolver \
+  -d '{"op":"dns","servers":["1.1.1.1","8.8.8.8"],"search_domain":"corp.internal"}'
 ```
 
 ### Turn on NTP with two servers

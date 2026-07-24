@@ -754,10 +754,13 @@ const NAV_GROUPS = [
   // item here that takes the whole host down (not just the gravinet service —
   // that's the restart under Settings), so it shouldn't drift into the middle
   // of a list of routine settings pages as more of parapet's System items get
-  // recreated. Among the rest, parapet's own relative order is kept, which is
-  // where Time sits.
+  // recreated. Among the rest, parapet's own relative order is kept — its
+  // System menu is resolver, time, dhcp, snmp, users, power; gravinet skips
+  // dhcp and (for now) snmp, which is why Resolver sits directly above Time
+  // and Users sits directly above Power rather than adjacent to Resolver.
   { name:'system', items: [
     ['upgrade', 'check and apply a new gravinet binary on this node; local only, no peer can trigger this'],
+    ['resolver', 'this host\u2019s hostname and default DNS servers'],
     ['time', 'this host\u2019s clock, timezone, and NTP synchronization'],
     ['users', 'local OS accounts permitted to sign in to this console'],
     ['power', 'restart or shut down this host'],
@@ -2307,7 +2310,7 @@ function renderSection() {
        upgrade:secUpgrade,
        metrics:infoMetrics, 'mesh-peers':infoMeshPeers, capture:infoCapture, speedtest:infoSpeedtest, latency:infoLatency,
        'route-table':infoRoutes, 'bgp-peers':secBgpPeers, 'hosts-file':infoHosts, 'dns-state':infoDNS,
-       time:secTime, users:secUsers, power:secPower,
+       resolver:secResolver, time:secTime, users:secUsers, power:secPower,
        logs:secLogs, readme:secReadme, 'getting-started':secGettingStarted, api:secAPIDoc, license:secLicense, about:infoAbout }[state.section])(c, nets);
   }
   c.querySelectorAll('table').forEach(enhanceTable);
@@ -5561,6 +5564,117 @@ function secPower(c){
     if (!r.ok) { alert((r.body && r.body.error) || 'No pending power action to cancel.'); return; }
     alert('Pending power action cancelled.');
   };
+}
+
+// secResolver renders System > Resolver: this host's hostname and default DNS
+// configuration, recreated from parapet's Resolver tab and sitting directly
+// above Time in the rail (parapet's own order). Same silently-saves-on-blur
+// convention as every other field on System > Time — no Save button anywhere
+// on this page either.
+//
+// Deliberately a different concern from two other DNS-shaped things in this
+// app, and the top hint says so rather than leaving it for the operator to
+// guess: Mesh > DNS (per-domain conditional forwarding to mesh-provided
+// resolvers, scoped to gravinet's own tun interface) and Naming > Hosts (the
+// peer-name-to-overlay-address block) both keep working exactly as configured
+// no matter what's set here — see internal/service/hostresolver.go's package
+// doc for exactly how the one platform pair where that could otherwise
+// collide (FreeBSD/OpenBSD, where Mesh DNS depends on unbound already being
+// the box's live resolver) is kept safe.
+//
+// One naming wrinkle worth surfacing rather than hiding: gravinet has a
+// separate, older notion of a node's name — the "hostname" advertised to mesh
+// peers — which defaults to this same OS hostname but is only read from it
+// once, at daemon startup. Changing it here takes effect for the OS
+// immediately; it does not change what this node advertises to peers until
+// gravinet itself restarts. Said plainly in the hostname card rather than
+// implied by silence.
+function secResolver(c){
+  secHint(c, 'This host\u2019s hostname and default DNS servers \u2014 separate from Mesh > DNS (which forwards specific mesh domains to mesh-provided resolvers) and Naming > Hosts (which maps peer names to their tunnel addresses); neither is affected by anything on this page. Acts on the node you\u2019re currently managing.');
+
+  const body = $('<div></div>');
+  body.innerHTML = '<div class="hint">loading\u2026</div>';
+  c.appendChild(body);
+
+  const load = async () => {
+    const r = await api('/api/system/resolver');
+    if (!r.ok || !r.body){ body.innerHTML = '<div class="hint">could not read this host\u2019s resolver settings.</div>'; return; }
+    draw(r.body);
+  };
+
+  const draw = (r) => {
+    body.innerHTML = '';
+
+    // ---- hostname -----------------------------------------------------
+    const hostCard = $('<div class="card"></div>');
+    hostCard.appendChild($('<h3>Hostname</h3>'));
+    if (!r.can_hostname){
+      hostCard.appendChild($('<div class="empty">this host has no usable way to change its hostname</div>'));
+    } else {
+      const row = $('<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
+        + '<input id="res-host-in" value="'+esc(r.hostname||'')+'" placeholder="node7.example" style="flex:1;min-width:240px"></div>');
+      hostCard.appendChild(row);
+      hostCard.appendChild($('<div class="hint" style="margin:8px 0 0">Changes the OS hostname immediately. This is separate from the name (if any) this node advertises to mesh peers, which is only re-read from the OS hostname the next time gravinet itself starts \u2014 setting one here doesn\u2019t change what peers see until then.</div>'));
+      const hostIn = row.querySelector('#res-host-in');
+      let hostLast = r.hostname || '';
+      const saveHost = async () => {
+        const v = hostIn.value.trim();
+        if (!v || v === hostLast){ hostIn.value = hostLast; return; }
+        const res = await api('/api/system/resolver', { method:'POST', body: JSON.stringify({ op:'hostname', hostname: v }) });
+        if (!res.ok){ alert((res.body && res.body.error) || 'could not set the hostname'); hostIn.value = hostLast; return; }
+        if (res.body && res.body.note) alert(res.body.note);
+        load();
+      };
+      hostIn.onblur = saveHost;
+      hostIn.onkeydown = (e) => { if (e.key === 'Enter'){ e.preventDefault(); hostIn.blur(); } };
+    }
+    body.appendChild(hostCard);
+
+    if (r.hint) body.appendChild($('<div class="hint" style="margin:0 0 12px">'+esc(r.hint)+'</div>'));
+
+    // ---- default DNS ----------------------------------------------------
+    const dnsCard = $('<div class="card"></div>');
+    dnsCard.appendChild($('<h3>Default DNS</h3>'));
+    if (!r.can_dns){
+      dnsCard.appendChild($('<div class="empty">this host has no usable way to change its default DNS configuration</div>'));
+    } else {
+      const row = $('<div style="display:flex;flex-direction:column;gap:10px">'
+        + '<div><div class="hint" style="margin:0 0 4px">DNS servers</div>'
+        + '<input id="res-dns-in" value="'+esc((r.servers||[]).join(', '))+'" placeholder="1.1.1.1, 8.8.8.8" style="width:100%"></div>'
+        + '<div><div class="hint" style="margin:0 0 4px">Search domain</div>'
+        + '<input id="res-search-in" value="'+esc(r.search_domain||'')+'" placeholder="corp.internal" style="width:100%"></div>'
+        + '</div>');
+      dnsCard.appendChild(row);
+      dnsCard.appendChild($('<div class="hint" style="margin:8px 0 0">Filling in DNS servers overrides whatever this host would otherwise use (typically DHCP-provided); clearing it reverts to that.'
+        + (r.manager ? ' Applied via ' + esc(r.manager) + '.' : '')
+        + '</div>'));
+      const dnsIn = row.querySelector('#res-dns-in');
+      const searchIn = row.querySelector('#res-search-in');
+      let dnsLast = (r.servers||[]).join(', ');
+      let searchLast = r.search_domain || '';
+      // Both fields save together \u2014 several backends (systemd-resolved's
+      // global drop-in, a resolv.conf rewrite) apply servers and the search
+      // domain in the same write, so splitting this into two independent
+      // auto-saves would risk one clobbering the other mid-edit.
+      const saveDNS = async () => {
+        const rawServers = dnsIn.value.split(/[\s,]+/).filter(Boolean);
+        const joined = rawServers.join(', ');
+        const search = searchIn.value.trim();
+        if (joined === dnsLast && search === searchLast){ dnsIn.value = dnsLast; searchIn.value = searchLast; return; }
+        const res = await api('/api/system/resolver', { method:'POST', body: JSON.stringify({ op:'dns', servers: rawServers, search_domain: search }) });
+        if (!res.ok){ alert((res.body && res.body.error) || 'could not change the default DNS configuration'); dnsIn.value = dnsLast; searchIn.value = searchLast; return; }
+        if (res.body && res.body.note) alert(res.body.note);
+        load();
+      };
+      dnsIn.onblur = saveDNS;
+      dnsIn.onkeydown = (e) => { if (e.key === 'Enter'){ e.preventDefault(); dnsIn.blur(); } };
+      searchIn.onblur = saveDNS;
+      searchIn.onkeydown = (e) => { if (e.key === 'Enter'){ e.preventDefault(); searchIn.blur(); } };
+    }
+    body.appendChild(dnsCard);
+  };
+
+  load();
 }
 
 // secTime renders System > Time: the host's clock, timezone, and NTP settings.

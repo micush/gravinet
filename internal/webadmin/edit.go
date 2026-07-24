@@ -1099,6 +1099,104 @@ func hostTimeJSON(t service.TimeInfo) map[string]any {
 	}
 }
 
+// handleSystemResolver reads or changes this host's hostname and default DNS
+// configuration — the backend for System > Resolver, recreated from parapet's
+// Resolver tab. Like Power and Time, it acts on whichever node is currently
+// selected (not in LOCAL_API), for the same reason: fixing a node's default
+// resolver from the console you already have open on it, including a remote
+// peer, rather than needing to be logged into that node directly.
+//
+// This is deliberately a different concern from Mesh > DNS (per-domain
+// conditional forwarding, internal/resolver) and Naming > Hosts (the
+// peer-name-to-overlay-address block, internal/hosts): see
+// internal/service/hostresolver.go's package doc for exactly how the two
+// platforms where that could otherwise collide — FreeBSD and OpenBSD, where
+// Mesh DNS depends on local-unbound/unbound already being the box's live
+// resolver — are kept safe by cooperating with unbound's own "." forward zone
+// there instead of overwriting resolv.conf's nameserver line out from under
+// it.
+//
+// GET returns the live state (see service.HostResolver). As with Time, there
+// is no stored copy of any of this in gravinet's config — everything here has
+// a native persistent home (the OS hostname; resolv.conf; resolved's or
+// NetworkManager's own config), so gravinet reads it live and writes through,
+// the same reasoning as hosttime.go. The lone exception, noted in the reply's
+// own "manager" field when it applies, is the FreeBSD/OpenBSD unbound "."
+// zone, which needs the small on-disk breadcrumb and startup reassert
+// documented in that file.
+//
+// POST takes {op, ...}:
+//
+//	{op:"hostname", hostname:"node7.example"}
+//	{op:"dns", servers:["1.1.1.1", ...], search_domain:"corp.internal"}
+//
+// Each op replies {ok:true} plus the freshly re-read state, same convention as
+// Time: the page always redraws from what the host actually says, not from
+// what was requested, since the two can legitimately differ (a search domain
+// syntax the OS accepts but a manager silently drops, e.g.). A partial
+// success carries a "note" — see SetHostname's Windows path (a rename that
+// needs a restart to take effect) and setRootForward's breadcrumb-write
+// failure for the two cases that currently produce one.
+func (s *Server) handleSystemResolver(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		writeJSON(w, http.StatusOK, hostResolverJSON(service.HostResolver()))
+		return
+	}
+
+	var req struct {
+		Op           string   `json:"op"`
+		Hostname     string   `json:"hostname"`
+		Servers      []string `json:"servers"`
+		SearchDomain string   `json:"search_domain"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+
+	var ok bool
+	var note string
+	switch req.Op {
+	case "hostname":
+		s.log.Infof("webadmin: setting host hostname to %q (requested from admin UI)", req.Hostname)
+		ok, note = service.SetHostname(req.Hostname)
+	case "dns":
+		s.log.Infof("webadmin: setting host default DNS to %d server(s), search domain %q (requested from admin UI)",
+			len(req.Servers), req.SearchDomain)
+		ok, note = service.SetHostDNS(req.Servers, req.SearchDomain)
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "op must be 'hostname' or 'dns'"})
+		return
+	}
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": note})
+		return
+	}
+
+	resp := hostResolverJSON(service.HostResolver())
+	resp["ok"] = true
+	if note != "" {
+		resp["note"] = note
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// hostResolverJSON flattens a service.ResolverInfo for the wire.
+func hostResolverJSON(r service.ResolverInfo) map[string]any {
+	servers := r.DNSServers
+	if servers == nil {
+		servers = []string{}
+	}
+	return map[string]any{
+		"hostname":      r.Hostname,
+		"servers":       servers,
+		"search_domain": r.SearchDomain,
+		"manager":       r.Manager,
+		"can_hostname":  r.CanHostname,
+		"can_dns":       r.CanDNS,
+		"hint":          r.Hint,
+	}
+}
+
 // handleSystemUsers manages the OS accounts permitted to sign in under
 // gravinet's system-auth modes — the backend for System > Users. It is
 // deliberately restricted to auth_mode "pam" (linux/macos/freebsd), "system"

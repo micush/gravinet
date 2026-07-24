@@ -48,7 +48,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "611"
+	version = "612"
 	commit  = "none"
 )
 
@@ -499,6 +499,14 @@ func cmdRun(args []string) {
 		// repopulated as peers reconnect.
 		clearStaleHostsBlocks(cfg)
 		clearStaleDNSForwards(cfg)
+		// Opposite of the two calls above: those clear *stale* per-network state
+		// that only ever meant something while this exact process's mesh was up.
+		// This reasserts a *standing* host fact — the default resolver System >
+		// Resolver last configured — that an out-of-band unbound restart, or this
+		// very restart, would otherwise silently drop on FreeBSD/OpenBSD (see
+		// internal/service/hostresolver.go's package doc). No-op on every other
+		// platform and a no-op here too if System > Resolver was never used.
+		service.ReapplyBoot()
 
 		specs, devices := buildNetSpecs(cfg)
 		if len(specs) == 0 {

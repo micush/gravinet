@@ -46,6 +46,156 @@ assuming it didn't happen.
 
 ---
 
+## v612 — 2026-07-24
+
+**New: System > Resolver** — the fourth of parapet's System items recreated,
+sitting directly above **Time** in the rail (Upgrade → **Resolver** → Time →
+Users → Power), matching parapet's own item order (resolver, time, dhcp,
+snmp, users, power — gravinet skips dhcp and, for now, snmp). Hostname and
+default DNS servers/search domain for this host, same silently-saves-on-blur
+convention as every other field on System > Time — no Save button here
+either.
+
+This page is a deliberately different concern from two other DNS-shaped
+things already in this app, and it says so in its own top hint rather than
+leaving an operator to guess: **Mesh > DNS** (`internal/resolver`) registers
+*conditional-forwarding* domains — only queries under a specific mesh domain
+go anywhere near it, scoped to gravinet's own tun interface wherever the OS
+has a concept of interface scoping. **Naming > Hosts** writes a delimited
+block mapping *peer* names to their overlay addresses, never a self-entry.
+System > Resolver sets the host's *default* resolver — what answers
+everything else — and on Linux, macOS, and Windows the two live in
+structurally disjoint mechanisms (a global `resolved.conf.d` drop-in vs.
+per-link `resolvectl` state; the default DNS service config vs. per-domain
+`/etc/resolver/<domain>` files; the adapter's DNS settings vs. per-domain NRPT
+rules), so neither page can touch anything the other manages.
+
+**FreeBSD and OpenBSD are the one place that isn't automatically true, and
+got specific design attention rather than a straight port of parapet's
+model.** Mesh DNS on those two platforms only works when
+`local-unbound`/`unbound` is already the box's active resolver
+(`/etc/resolv.conf` → `127.0.0.1`, an installer-time step). Following
+parapet's own `resolver.rs` literally — overwrite `resolv.conf`'s
+`nameserver` line with whatever the operator types here — would have
+silently routed every query around unbound and taken Mesh DNS's per-domain
+forwarding down with it, not by touching a file Mesh DNS manages, but by
+unplugging the thing its forwarding depends on existing at all. So on these
+two platforms, when unbound is live, the DNS-servers field is applied as
+unbound's *own* default forward zone (`"."` — everything not more
+specifically claimed by one of Mesh DNS's own zones) through the exact same
+`*-control` tool Mesh DNS itself uses, and the search-domain field edits only
+`resolv.conf`'s `search` line — the `nameserver 127.0.0.1` line that keeps
+Mesh DNS alive is never touched. Only when unbound *isn't* active (so Mesh
+DNS forwarding isn't functioning on that host either) does this page fall
+back to owning `resolv.conf` outright, same as parapet.
+
+One naming wrinkle surfaced rather than left implicit: gravinet already has
+an older, separate notion of a node's name — `config.Hostname`, "advertised
+to peers; OS hostname if empty" — read from the OS exactly once, at daemon
+startup, and cached for the process's life. Changing the OS hostname here
+takes effect for the OS immediately; it does not change what this node
+advertises to mesh peers until gravinet itself restarts (and not at all if
+`config.Hostname` is set explicitly). The hostname card says this plainly.
+
+- **Backend** (`internal/service/hostresolver.go`, new, ~850 lines):
+  `HostResolver()` / `SetHostname()` / `SetHostDNS(servers, search)`,
+  structured exactly like `hosttime.go` — typed read, one setter per field,
+  each `(ok, hint)`, each dispatching on `runtime.GOOS`. As with Time, the OS
+  is the source of truth for everything with a native persistent home (the
+  hostname; `resolv.conf`; `resolved`'s/NetworkManager's own config) — read
+  live, written through, nothing duplicated into gravinet's config. The one
+  deliberate exception is the FreeBSD/OpenBSD `"."` zone: like every zone
+  Mesh DNS itself adds, a `*-control forward_add` lives only in the running
+  daemon's memory, gone on its next restart whether or not gravinet restarts
+  too — so (and only for that case) a small on-disk breadcrumb records the
+  last-applied server list, in the same parent directory
+  `internal/resolver`'s own per-network state uses but under a disjoint,
+  collision-proof `__system__-<platform>.json` name.
+- **`ReapplyBoot()`** (same file) reasserts that breadcrumb once at gravinet
+  startup, called from `main.go` right alongside `clearStaleHostsBlocks`/
+  `clearStaleDNSForwards` — but doing the opposite of those two: they clear
+  *stale* per-network state that only ever meant something while that exact
+  process's mesh was up; this reasserts a *standing* host fact that a
+  gravinet restart (every `System > Upgrade` apply, notably) or an unrelated
+  unbound restart could otherwise silently drop. No-op on every other
+  platform, and a no-op here too if System > Resolver was never used.
+- **Per-platform tooling**: linux uses `hostnamectl` (falling back to a
+  direct `/etc/hostname` write) for the hostname; `systemd-resolved`'s global
+  `resolved.conf.d` drop-in when active, else NetworkManager's `dns=none` +
+  a direct `resolv.conf` write, else a direct `resolv.conf` write, for DNS.
+  darwin uses `scutil --set HostName` (value piped via stdin, never an argv
+  argument) and `networksetup -setdnsservers`/`-setsearchdomains` on
+  whichever network *service* currently carries the default route — resolved
+  via `internal/tun.DefaultGateway` (the same cross-platform primitive
+  `internal/mesh`'s full-tunnel roam detection already uses) plus a parse of
+  `networksetup -listallhardwareports` mapping the interface name to a
+  service name; a default route sitting on an interface networksetup doesn't
+  manage (most plausibly gravinet's own tun, mid full-tunnel) fails with a
+  named, actionable error rather than guessing. freebsd uses `sysrc
+  hostname=` + a live `hostname` call, and local-unbound-control's `"."`
+  zone or direct `resolv.conf` ownership per the unbound-active check above.
+  openbsd is the same shape via `/etc/myname` and `unbound-control`. windows
+  uses `Rename-Computer -Force` (noted in the reply as taking effect only
+  after the host's next restart — Windows has no live hostname change) and
+  `Set-DnsClientServerAddress`/`Set-DnsClient -ConnectionSpecificSuffix` on
+  the default-route adapter's interface index (found the same way as
+  macOS's service, one `net.InterfaceByIndex` away from not needing an
+  alias lookup at all).
+- **Validation**: `validHostname` ports parapet's own `valid_hostname`
+  exactly (RFC-1123-style labels, no leading/trailing hyphen, ≤63
+  bytes/label, ≤253 total); `validSearchDomain` is the same rule (parapet's
+  own `valid_search_domain` is defined as literally calling
+  `valid_hostname`, so a bare single-label domain like `"internal"` already
+  passes without special-casing). `validDNSServerAddr` requires a real
+  `netip.Addr` — unlike Time's NTP servers, a hostname isn't accepted here,
+  since resolving one is the whole question this field answers.
+- **Handler** (`handleSystemResolver`, `/api/system/resolver`): GET reads
+  live state; POST takes `{op:"hostname", hostname}` or `{op:"dns", servers,
+  search_domain}`. Like Power/Time/Users, follows the currently selected
+  node (deliberately not in `LOCAL_API`) so a node's default resolver can be
+  fixed from the console you already have open on it.
+- **UI** (`secResolver`): a Hostname card and a Default DNS card (servers +
+  search domain sharing one save call — several backends apply both in a
+  single write, e.g. the `resolved.conf.d` drop-in's `DNS=`/`Domains=`
+  lines, so two independent auto-saves risked one clobbering the other
+  mid-edit). Clearing DNS servers reverts to whatever the host would
+  otherwise use (typically DHCP) rather than disabling anything, so — unlike
+  clearing NTP servers on System > Time — it carries no confirmation
+  prompt.
+- **Docs**: `docs/API.md` gained a full `POST /api/system/resolver`
+  section (Quick Reference row, request/reply shapes, a curl example)
+  between Power's and Time's, plus cross-references from it to Mesh > DNS
+  and Naming > Hosts explaining the non-overlap. `README.md`'s sidebar tour
+  updated for System's actual current contents (Resolver, and — previously
+  missing entirely — Users).
+- **Tests**: `internal/service/hostresolver_test.go` — validation/injection
+  refusals for all three fields, `resolvedConfSection`'s `[Resolve]`-only
+  parsing, `unixDirectResolvConf`'s full lifecycle (write, marker-gated
+  clear, an unowned file surviving a clear, a stale symlink replaced rather
+  than written through), and — the specific guarantee the whole
+  FreeBSD/OpenBSD design depends on —
+  `TestSetSearchLineOnlyPreservesNameserver`, confirming a search-domain
+  edit never disturbs a `nameserver 127.0.0.1` line. Also
+  `parseHardwarePorts`/`resolveServiceName`/`parseRootForward` against fixed
+  sample tool output, `TestDefaultServiceNameEndToEnd` exercising the real
+  gateway-to-service-name glue against the loopback interface (present on
+  every test host, so no real default route or `networksetup` is needed),
+  and the root-forward-zone state breadcrumb's save/load/clear and its
+  collision-proof naming.
+  `internal/webadmin/systemresolver_handler_test.go` — GET reply shape,
+  validation-only rejections that never reach a real OS command, LOCAL_API
+  placement, and nav ordering (reusing `timeTestServer`, since this endpoint
+  needs no network config either).
+
+One real bug the tests caught before shipping: the FreeBSD/OpenBSD
+`list_forwards` reader was written against an imagined multi-line, indented
+block format that doesn't match reality. `internal/resolver`'s own
+`parseListForwards` (already in this codebase, already presumably correct)
+shows the real shape — one line per zone, `<domain> IN forward <addr>
+<addr> ...` — and the rewritten parser matches it, reimplementing the same
+field-based approach rather than importing the other package's unexported
+helper.
+
 ## v611 — 2026-07-23
 
 **System > Users redesigned around a real OS group, replacing the
