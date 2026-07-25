@@ -2,6 +2,44 @@
 
 ---
 
+## v649 — 2026-07-25
+
+**Fixed:** System > L2 Disco on OpenBSD: enabling link-layer discovery
+failed with "saved, but the lldpd service could not be reconciled:
+couldn't rcctl set lldpd flags: rcctl: service lldpd does not exist" —
+confusing, since lldpd very much did exist on the host.
+
+Root cause: OpenBSD 7.8 shipped its own from-scratch `lldpd(8)` in base —
+same name, unrelated project, LLDP-only (no CDP, ever), queried via a
+different tool (`lldp(8)`, not `lldpcli`) — and, confirmed intentional on
+OpenBSD's own misc@ list, shipped without an `/etc/rc.d(8)` script at all
+(the ports `net/lldpd` package, the one this feature actually knows how
+to drive, already owns that script name; base can't cleanly take it over
+mid-upgrade). `lldpdBinary()` checked `/usr/sbin/lldpd` — where the new
+base daemon now unconditionally lives — before `/usr/local/sbin/lldpd`,
+where the compatible ports package installs, so `LLDPSupported()` reported
+"yes" for a binary gravinet can neither configure, service-manage, nor
+query.
+
+Fixed by excluding OpenBSD's base-system path from `lldpdBinary()`'s
+search entirely; only the ports package's own `/usr/local` install counts
+there now. A host with just the built-in `lldpd(8)` and no ports package
+now correctly reports unsupported, with a specific hint pointing at
+`pkg_add lldpd` instead of the previous confusing rcctl crash.
+
+While tracing this, found and fixed a sharper-edged sibling: gravinet's
+once-at-startup stray-process reaper treats "L2 Disco switched off" (the
+default state) as "every process named exactly `lldpd` on this host is a
+leftover and gets killed" — which was a safe assumption right up until
+two unrelated daemons could share that exact process name. An operator
+running OpenBSD's own built-in `lldpd(8)` independently, for their own
+reasons, with gravinet's L2 Disco off, would have had it silently
+terminated at every gravinet startup. `lldpProcs()` now excludes
+processes actually running from `/usr/sbin/lldpd` on OpenBSD before stray
+detection ever sees them, regardless of whether L2 Disco is configured.
+
+---
+
 ## v648 — 2026-07-25
 
 **Changed:** Monitor > L2 Peers: dropped the "L2 Neighbors" card title —

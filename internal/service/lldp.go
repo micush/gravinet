@@ -44,6 +44,14 @@ package service
 // unsupported: LLDP has no equivalent built-in Windows service the way SNMP
 // at least has *something* registry-based to point at, so there is nothing
 // to even honestly describe as "different" — it's just absent.
+//
+// OpenBSD caveat: since 7.8, OpenBSD ships its own unrelated, from-scratch
+// lldpd(8) in base (LLDP-only, queried via lldp(8) not lldpcli, no rc.d(8)
+// script by design). This package only ever drives the ports net/lldpd
+// package (the same one Linux/FreeBSD/macOS use) — see lldpdBinary's own
+// doc comment for how the two same-named binaries are told apart, and
+// lldpProcs' for why the base one is also kept out of stray-process
+// detection even when gravinet's own L2 Disco is switched off.
 
 import (
 	"encoding/json"
@@ -65,13 +73,54 @@ func LLDPSupported() (bool, string) {
 	default:
 		return false, "L2 discovery isn't supported on this operating system"
 	}
-	if lldpdBinary() == "" {
-		return false, "lldpd isn't installed on this host (is the lldpd package installed?)"
+	if lldpdBinary() != "" {
+		return true, ""
 	}
-	return true, ""
+	return false, lldpNotInstalledHint()
 }
 
+// lldpNotInstalledHint is LLDPSupported's message once lldpdBinary has come
+// back empty. Split out on its own so the OpenBSD branch's os.Stat check
+// isn't buried inline in LLDPSupported: on OpenBSD specifically, "nothing
+// gravinet can drive" and "genuinely nothing installed" need different
+// messages — a host with only the incompatible built-in lldpd(8) (see
+// lldpdBinary's own doc comment) is not in the same state as a host with
+// no lldpd at all, and the generic "is the lldpd package installed?"
+// phrasing would be actively misleading there — pkg_add would report
+// lldpd already present.
+func lldpNotInstalledHint() string {
+	if runtime.GOOS == "openbsd" && firstExisting("/usr/sbin/lldpd") != "" {
+		return "OpenBSD's built-in lldpd(8) (since 7.8) isn't compatible with gravinet's L2 Disco \u2014 no CDP support, no lldpcli, and OpenBSD ships it without an rc.d(8) script by design. Install the net/lldpd package instead (pkg_add lldpd)."
+	}
+	return "lldpd isn't installed on this host (is the lldpd package installed?)"
+}
+
+// lldpdBinary locates the lldpd binary gravinet can actually configure and
+// drive as a service.
+//
+// OpenBSD needs its own path list, deliberately excluding /usr/sbin (and
+// /sbin, /usr/bin — the other base-system candidates every other platform
+// checks): starting with 7.8, OpenBSD ships its own from-scratch lldpd(8)
+// in base, at /usr/sbin/lldpd — same name, unrelated project, and
+// incompatible with everything this package assumes about "the" lldpd.
+// It's LLDP-only (IEEE 802.1AB; no CDP support at all, ever — see
+// DiscoveryConfig's own doc comment on why CDP matters here), its query
+// tool is lldp(8), not lldpcli, and — confirmed on OpenBSD's own misc@
+// mailing list as an intentional decision, not an oversight — it ships
+// with no /etc/rc.d(8) script: the base system can't cleanly claim the rc
+// script name the ports net/lldpd package (the one this file actually
+// knows how to drive) already owns. Checking /usr/sbin/lldpd here would
+// make LLDPSupported report "yes" for a binary this package can neither
+// configure (no -c/-I flags to give it) nor service-manage (rcctl set
+// lldpd flags .../rcctl enable lldpd/rcctl start lldpd all fail outright:
+// "rcctl: service lldpd does not exist") nor query (no lldpcli) — exactly
+// the confusing crash a real bug report hit before this exclusion existed.
+// The ports package's own /usr/local install is unaffected and still
+// found normally.
 func lldpdBinary() string {
+	if runtime.GOOS == "openbsd" {
+		return firstExisting("/usr/local/sbin/lldpd", "/usr/local/bin/lldpd")
+	}
 	return firstExisting(
 		"/usr/sbin/lldpd", "/sbin/lldpd", "/usr/bin/lldpd",
 		"/usr/local/sbin/lldpd", "/usr/local/bin/lldpd", "/opt/homebrew/sbin/lldpd",
@@ -573,12 +622,48 @@ func parseLLDPProcs(pgrepOutput string) []lldpProc {
 // found", never an error, for the same reason removeStaleLLDPSockets is
 // silent: this is cleanup, and being unable to check is not itself a
 // condition worth failing a save over.
+//
+// On OpenBSD, excludeOpenBSDBaseLLDPD drops any process actually running
+// from /usr/sbin/lldpd — the OS's own unrelated base-system daemon (see
+// lldpdBinary's own doc comment) — before it ever reaches stray detection.
+// This matters even when gravinet's own L2 Disco is off: strayLLDPProcs
+// treats "not runnable" as "every lldpd-named process on the host is a
+// stray," which is the right call for a leftover gravinet-managed
+// instance but was never meant to reach a completely different daemon an
+// operator is running on purpose for their own, unrelated use of
+// OpenBSD's built-in LLDP receiver. Exact-name pgrep matching made that
+// assumption safe right up until two same-named, unrelated daemons could
+// exist on one host at once.
 func lldpProcs() []lldpProc {
 	out, err := exec.Command("pgrep", "-a", "-x", "lldpd").CombinedOutput()
 	if err != nil {
 		return nil
 	}
-	return parseLLDPProcs(string(out))
+	procs := parseLLDPProcs(string(out))
+	if runtime.GOOS == "openbsd" {
+		procs = excludeOpenBSDBaseLLDPD(procs)
+	}
+	return procs
+}
+
+// excludeOpenBSDBaseLLDPD drops any process whose argv[0] is exactly
+// OpenBSD's own base-system lldpd(8) (/usr/sbin/lldpd) from a process
+// list otherwise headed for stray-detection/termination — see lldpProcs'
+// own doc comment for why this can't just be left to the ordinary argv
+// comparison strayLLDPProcs already does. Matches "/usr/sbin/lldpd" alone
+// or followed by a space (its own flags); a hypothetical
+// "/usr/sbin/lldpd-something-else" binary, which does not exist today,
+// would not match. Pure — no process execution — so it's directly
+// testable against captured pgrep output, same as parseLLDPProcs above.
+func excludeOpenBSDBaseLLDPD(procs []lldpProc) []lldpProc {
+	var out []lldpProc
+	for _, p := range procs {
+		if p.Argv == "/usr/sbin/lldpd" || strings.HasPrefix(p.Argv, "/usr/sbin/lldpd ") {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 // dedupLLDPArgvs collapses procs to their distinct command lines, for

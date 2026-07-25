@@ -484,3 +484,42 @@ func TestStrayLLDPProcsRules(t *testing.T) {
 		t.Errorf("got %+v, want nothing when there's no argv to compare against", got)
 	}
 }
+
+// TestExcludeOpenBSDBaseLLDPD guards the fix for a real risk the OpenBSD
+// bug report exposed one layer down from lldpdBinary: strayLLDPProcs treats
+// "discovery switched off" as "every lldpd-named process on the host is a
+// stray" (see TestStrayLLDPProcsRules' own "switched off" case above) —
+// which is fine when the only thing that could ever be named exactly
+// "lldpd" is something gravinet itself started, but not once OpenBSD 7.8's
+// unrelated base lldpd(8) can be running independently, for an operator's
+// own reasons, while gravinet's own L2 Disco happens to be off (the
+// default state). Without this filter, gravinet's once-at-startup reaper
+// would kill that unrelated daemon outright.
+func TestExcludeOpenBSDBaseLLDPD(t *testing.T) {
+	base := lldpProc{PID: 100, Argv: "/usr/sbin/lldpd"}
+	baseWithFlags := lldpProc{PID: 101, Argv: "/usr/sbin/lldpd -d -s /var/run/lldp.sock"}
+	pkg := lldpProc{PID: 200, Argv: "/usr/local/sbin/lldpd -d -c -I em0"}
+	lookalike := lldpProc{PID: 300, Argv: "/usr/sbin/lldpd-something-else -d"}
+
+	got := excludeOpenBSDBaseLLDPD([]lldpProc{base, baseWithFlags, pkg, lookalike})
+	if len(got) != 2 {
+		t.Fatalf("excludeOpenBSDBaseLLDPD(...) = %+v, want exactly the pkg and lookalike procs left", got)
+	}
+	byPID := map[int]bool{}
+	for _, p := range got {
+		byPID[p.PID] = true
+	}
+	if !byPID[pkg.PID] {
+		t.Error("the ports net/lldpd instance must survive filtering — it's a real gravinet-managed candidate")
+	}
+	if !byPID[lookalike.PID] {
+		t.Error("a differently-named binary that merely starts with the same prefix must survive filtering")
+	}
+	if byPID[base.PID] || byPID[baseWithFlags.PID] {
+		t.Errorf("OpenBSD's base lldpd(8) (bare or with flags) must be filtered out, got %+v", got)
+	}
+
+	if got := excludeOpenBSDBaseLLDPD(nil); len(got) != 0 {
+		t.Errorf("excludeOpenBSDBaseLLDPD(nil) = %+v, want nothing", got)
+	}
+}
