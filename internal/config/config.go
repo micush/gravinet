@@ -100,6 +100,41 @@ type Config struct {
 	EnableIPv4    bool `json:"enable_ipv4"`    // underlay v4
 	EnableIPv6    bool `json:"enable_ipv6"`    // underlay v6
 	WorkerThreads int  `json:"worker_threads"` // 0 => runtime.NumCPU()-1, min 1
+	// TunQueues opts each overlay interface into Linux's IFF_MULTI_QUEUE (see
+	// internal/tun.NewMultiQueue): that many independent read queues on one
+	// tun device, each with its own goroutine, instead of the single
+	// goroutine/single read()-syscall-per-packet path every network gets
+	// otherwise. Unlike worker_threads (parallelizes processing *after* one
+	// read), this parallelizes the read itself — the actual origin-side
+	// throughput ceiling for a single network's outbound traffic — but it
+	// only helps aggregate throughput across many concurrent flows, since a
+	// single flow still tends to land on one queue (kernel flow-hash queue
+	// selection, done specifically to avoid reordering a flow's own
+	// packets). 0 or 1 = off (today's exact single-queue behavior, and the
+	// default): unlike worker_threads, this does not default to NumCPU()-1,
+	// because it changes how the interface itself is opened rather than
+	// adding concurrency behind an unchanged read, and gravinet's own history
+	// with that category of data-plane change (see docs/changelog.md's Phase
+	// B/C entries) is why it ships opt-in here too. No effect on
+	// platforms/configs where multi-queue TUN isn't implemented (everything
+	// but Linux, today) — the operator gets one queue, silently, same as
+	// leaving this unset.
+	TunQueues int `json:"tun_queues,omitempty"`
+	// EnableUDPGSO turns on UDP-side segmentation offload (UDP_SEGMENT send /
+	// UDP_GRO receive; see internal/transport/gso_linux.go) — the config-driven
+	// alternative to the GRAVINET_UDP_GSO=1 environment variable, which
+	// predates this field and is still honored (either enables it; see
+	// transport.Options.EnableUDPGSO). Off by default, same posture as
+	// tun_queues and for the same reason: this project's own field history
+	// with unproven data-plane changes (docs/changelog.md's Phase B/C
+	// entries) is why the env var existed in the first place, gating it
+	// behind deliberate operator action rather than a default. A config
+	// field (and the Settings-panel toggle built on it) trades away some of
+	// that deliberateness for discoverability — a judgment call, not a
+	// verification result; nothing about exposing the switch changes how
+	// unproven the mechanism itself still is on real hardware under real
+	// load. Linux amd64/arm64 only; a harmless no-op elsewhere.
+	EnableUDPGSO bool `json:"udp_gso,omitempty"`
 
 	// IPForwarding controls whether the daemon turns on host IPv4/IPv6 forwarding
 	// at startup (the on-ramp for redistributed routes and NAT). nil means the

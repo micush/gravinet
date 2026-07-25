@@ -356,7 +356,7 @@ const indexHTML = `<!doctype html>
 <script>
 const $ = (h) => { const d=document.createElement('div'); d.innerHTML=h.trim(); return d.firstChild; };
 const app = document.getElementById('app');
-const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, geoipLookup:false, enableUpnp:false, allowRemoteShell:false, shellSupported:true, bgpSupported:false, snmpSupported:false, l2discoSupported:false, syslogSupported:false, selfId:null, selfHostname:'', targetSeq:0, pendingBgpHighlight:null };
+const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, geoipLookup:false, enableUpnp:false, allowRemoteShell:false, shellSupported:true, bgpSupported:false, snmpSupported:false, l2discoSupported:false, syslogSupported:false, selfId:null, selfHostname:'', targetSeq:0, pendingBgpHighlight:null, workerThreads:0, tunQueues:0, tunQueuesSupported:true, udpGSO:false, udpGSOSupported:true, perfRestartPending:false };
 // setTarget is the only place state.target is ever assigned — bumping
 // targetSeq alongside it, once, exactly when the *selection itself* actually
 // changes. load()/startPolling()/refreshCluster() each capture targetSeq
@@ -996,6 +996,11 @@ async function load() {
   state.natStateTimeout = (c.body && c.body.nat_state_timeout) || 0;
   state.geoipLookup = !!(c.body && c.body.geoip_lookup);
   state.enableUpnp = !!(c.body && c.body.enable_upnp);
+  state.workerThreads = (c.body && c.body.worker_threads) || 0;
+  state.tunQueues = (c.body && c.body.tun_queues) || 0;
+  state.tunQueuesSupported = c.body ? !!c.body.tun_queues_supported : true;
+  state.udpGSO = !!(c.body && c.body.udp_gso);
+  state.udpGSOSupported = c.body ? !!c.body.udp_gso_supported : true;
   state.allowRemoteShell = !!(c.body && c.body.allow_remote_shell);
   state.shellSupported = c.body ? !!c.body.shell_supported : true;
   // Whether this host can serve dynamic-routing (BGP) status — true only when
@@ -1881,6 +1886,7 @@ async function edit(path, payload, autoRestart){
   const r = await api(path, { method:'POST', body: JSON.stringify(payload) });
   if (!r.ok){ alert((r.body && r.body.error) || 'request failed'); return false; }
   if (r.body && r.body.restart) {
+    if (typeof autoRestart === 'function') { autoRestart(); return true; }
     if (autoRestart) { quietRestart(); return true; }
     state.restartPending = true;
   }
@@ -2117,6 +2123,33 @@ async function quietPollBack(before, n, wentDown){
   if (isNew){ await refresh(); return; }
   if (n >= 20){ await refresh(); return; }
   setTimeout(function(){ quietPollBack(before, n+1, wentDown); }, 1000);
+}
+
+// schedulePerfRestart debounces the Performance (advanced) card's three
+// restart-triggering controls (worker threads, tun queues, udp gso) into a
+// single restart, instead of one per control changed. Deliberately separate
+// from every other autoRestart:true control on this page (GeoIP, UPnP,
+// remote shell), which still call quietRestart() immediately — see its own
+// doc comment: those are "operations the user expects to feel instant," a
+// single toggle flipped on its own in practice. This card is the one place
+// on the page where changing two or three values in the same sitting is the
+// normal case, not the exception (an operator profiling throughput plausibly
+// touches all three), and three sequential restarts to get there is not
+// just wasteful — a second /api/restart landing while the first is still
+// tearing the process down isn't a case anything here was built to handle
+// cleanly. Each change still saves immediately (the POST underneath already
+// happened by the time this is called); only the restart itself waits.
+let perfRestartTimer = null;
+const PERF_RESTART_DEBOUNCE_MS = 3000;
+function schedulePerfRestart(){
+  state.perfRestartPending = true;
+  const row = document.getElementById('perf-restart-pending');
+  if (row) row.textContent = 'Changes saved \u2014 restarting in a moment to apply them.';
+  clearTimeout(perfRestartTimer);
+  perfRestartTimer = setTimeout(() => {
+    state.perfRestartPending = false;
+    quietRestart();
+  }, PERF_RESTART_DEBOUNCE_MS);
 }
 
 // parseUnit turns a number + unit (Mbps/Gbps/Kbps) into bytes/sec.
@@ -2788,6 +2821,75 @@ function secSettings(c) {
   };
   gi.appendChild(giLabel); gi.appendChild(giSw);
   card.appendChild(gi);
+
+  c.appendChild(card); card = $('<div class="card"></div>');
+  card.appendChild($('<h3>Performance (advanced)</h3>'));
+  card.appendChild($('<div class="settings-desc" style="margin-bottom:10px">These size the outbound/inbound worker pools and the underlay\u2019s packet-batching path. Sane defaults for most setups; only worth touching if you\u2019ve profiled a real throughput ceiling. Changing one or more of these restarts the node once, a few seconds after your last edit here \u2014 not once per field.</div>'));
+  const perfPending = $('<div class="settings-desc" id="perf-restart-pending" style="color:var(--acc);min-height:1.2em"></div>');
+  if (state.perfRestartPending) perfPending.textContent = 'Changes saved \u2014 restarting in a moment to apply them.';
+  card.appendChild(perfPending);
+
+  // Worker threads — commits on change (blur/Enter, not per keystroke) like
+  // every other control on this page, but the restart itself is debounced
+  // (schedulePerfRestart) rather than firing immediately — see that
+  // function's doc comment for why this card specifically needs that and
+  // GeoIP/UPnP below it deliberately don't.
+  const wt = $('<div class="settings-row" id="worker-threads-row"></div>');
+  const wtLabel = $('<div><div class="settings-label">Worker threads</div><div class="settings-desc">How many goroutines process outbound TUN traffic and inbound UDP traffic. 0 uses the default (CPU cores minus one, minimum one).</div></div>');
+  const wtInp = $('<input type="number" min="0" step="1" style="width:80px">');
+  wtInp.value = state.workerThreads;
+  wtInp.onchange = async () => {
+    const v = parseInt(wtInp.value, 10);
+    if (isNaN(v) || v < 0) { alert('Enter 0 or a positive whole number.'); wtInp.value = state.workerThreads; return; }
+    if (v === state.workerThreads) return;
+    const ok = await edit('/api/worker-threads', { value: v }, schedulePerfRestart);
+    if (ok) { state.workerThreads = v; }
+    else { wtInp.value = state.workerThreads; }
+  };
+  wt.appendChild(wtLabel); wt.appendChild(wtInp);
+  card.appendChild(wt);
+
+  // TUN queues — same shape as worker threads above; description says so
+  // plainly on a platform where multi-queue TUN isn't wired up
+  // (config.Config.TunQueues has no build tags, so setting it elsewhere in
+  // a mixed-OS fleet is harmless, just inert on that particular host).
+  const tq = $('<div class="settings-row" id="tun-queues-row"></div>');
+  const tqDesc = state.tunQueuesSupported
+    ? 'How many independent read queues to open on each overlay interface (Linux IFF_MULTI_QUEUE). 0 or 1 is today\u2019s single-queue behavior. Helps aggregate throughput across many concurrent connections; a single flow still lands on one queue.'
+    : 'How many independent read queues to open on each overlay interface. Not available on this platform yet (Linux-only) \u2014 setting this here is harmless but has no effect on this node.';
+  const tqLabel = $('<div><div class="settings-label">TUN queues</div><div class="settings-desc">'+esc(tqDesc)+'</div></div>');
+  const tqInp = $('<input type="number" min="0" step="1" style="width:80px">');
+  tqInp.value = state.tunQueues;
+  tqInp.onchange = async () => {
+    const v = parseInt(tqInp.value, 10);
+    if (isNaN(v) || v < 0) { alert('Enter 0 or a positive whole number.'); tqInp.value = state.tunQueues; return; }
+    if (v === state.tunQueues) return;
+    const ok = await edit('/api/tun-queues', { value: v }, schedulePerfRestart);
+    if (ok) { state.tunQueues = v; }
+    else { tqInp.value = state.tunQueues; }
+  };
+  tq.appendChild(tqLabel); tq.appendChild(tqInp);
+  card.appendChild(tq);
+
+  // UDP GSO/GRO — experimental: off by default, and this project's own
+  // history with this class of data-plane change is why. Said plainly in
+  // the row description rather than left for the operator to discover.
+  const ug = $('<div class="settings-row" id="udp-gso-row"></div>');
+  const ugDesc = state.udpGSOSupported
+    ? 'Batch multiple packets per send/receive syscall on the underlay UDP socket. Experimental: not yet verified under sustained real-world load, off by default for that reason. Enabling this here is equivalent to the GRAVINET_UDP_GSO=1 environment variable, and takes effect the same way \u2014 either one turns it on.'
+    : 'Batch multiple packets per send/receive syscall on the underlay UDP socket. Not available on this platform/architecture (Linux amd64/arm64 only) \u2014 turning this on here is harmless but has no effect on this node.';
+  const ugLabel = $('<div><div class="settings-label">UDP GSO/GRO <span class="pill" style="margin-left:6px">experimental</span></div><div class="settings-desc">'+esc(ugDesc)+'</div></div>');
+  const ugSw = $('<label class="sw"><input type="checkbox" id="udp-gso-cb"><span class="sw-slider"></span></label>');
+  const ugCb = ugSw.querySelector('input');
+  ugCb.checked = state.udpGSO;
+  ugCb.onchange = async () => {
+    const want = ugCb.checked;
+    const ok = await edit('/api/udp-gso', { on: want }, schedulePerfRestart);
+    if (ok) { state.udpGSO = want; }
+    else { ugCb.checked = !want; }
+  };
+  ug.appendChild(ugLabel); ug.appendChild(ugSw);
+  card.appendChild(ug);
 
   c.appendChild(card);
 }

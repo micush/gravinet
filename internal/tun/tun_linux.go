@@ -16,18 +16,26 @@ import (
 
 // ioctl request numbers and flag bits (Linux, asm-generic).
 const (
-	cIFF_TUN        = 0x0001
-	cIFF_NO_PI      = 0x1000
-	cTUNSETIFF      = 0x400454ca
-	cSIOCSIFMTU     = 0x8922
-	cSIOCGIFFLAGS   = 0x8913
-	cSIOCSIFFLAGS   = 0x8914
-	cSIOCSIFADDR    = 0x8916
-	cSIOCSIFNETMASK = 0x891c
-	cSIOCGIFINDEX   = 0x8933
-	cSIOCSIFTXQLEN  = 0x8943
-	cIFF_UP         = 0x1
-	cIFF_RUNNING    = 0x40
+	cIFF_TUN   = 0x0001
+	cIFF_NO_PI = 0x1000
+	// cIFF_MULTI_QUEUE opts an interface into the kernel's multi-queue tun/tap
+	// support (Linux >= 3.8): the first open with this flag creates the
+	// interface as multi-queue-capable, and every subsequent open of
+	// /dev/net/tun with the same name and this same flag attaches one more
+	// independent queue (its own fd, its own kernel-side packet ring) to that
+	// one interface, rather than failing with "device busy" the way a second
+	// TUNSETIFF on a single-queue interface would. See NewMultiQueue.
+	cIFF_MULTI_QUEUE = 0x0100
+	cTUNSETIFF       = 0x400454ca
+	cSIOCSIFMTU      = 0x8922
+	cSIOCGIFFLAGS    = 0x8913
+	cSIOCSIFFLAGS    = 0x8914
+	cSIOCSIFADDR     = 0x8916
+	cSIOCSIFNETMASK  = 0x891c
+	cSIOCGIFINDEX    = 0x8933
+	cSIOCSIFTXQLEN   = 0x8943
+	cIFF_UP          = 0x1
+	cIFF_RUNNING     = 0x40
 
 	ifnameSize = 16
 	ifreqSize  = 40 // sizeof(struct ifreq) on 64-bit
@@ -61,10 +69,12 @@ func ctlSocket(family int) (int, error) {
 	return syscall.Socket(family, syscall.SOCK_DGRAM|syscall.SOCK_CLOEXEC, 0)
 }
 
-// New creates a TUN device. If name is empty the kernel assigns one (tunN).
-// It sets the MTU and brings the interface up. Addresses are assigned
-// separately via AddIPv4/AddIPv6 once the overlay address is chosen.
-func New(name string, mtu int) (*Device, error) {
+// openTunQueue opens one /dev/net/tun fd and binds it to name via TUNSETIFF,
+// optionally as a multi-queue queue (see cIFF_MULTI_QUEUE). If name is empty
+// the kernel assigns one (tunN) and assigned reports what it picked — every
+// later queue on the same interface must pass that name back in, not "".
+// Shared by New (single queue) and NewMultiQueue (queue 0 plus n-1 more).
+func openTunQueue(name string, multiQueue bool) (f *os.File, assigned string, err error) {
 	// O_CLOEXEC matters here specifically because this fd lives for the whole
 	// daemon lifetime: every exec.Command gravinet ever runs (useradd,
 	// chpasswd, hostnamectl, sysrc, ...) forks from this process, and without
@@ -77,24 +87,36 @@ func New(name string, mtu int) (*Device, error) {
 	// inherit it.
 	fd, err := syscall.Open("/dev/net/tun", syscall.O_RDWR|syscall.O_CLOEXEC, 0)
 	if err != nil {
-		return nil, fmt.Errorf("open /dev/net/tun: %w (need CAP_NET_ADMIN)", err)
+		return nil, "", fmt.Errorf("open /dev/net/tun: %w (need CAP_NET_ADMIN)", err)
 	}
 	var req [ifreqSize]byte
 	copy(req[:ifnameSize], name)
-	binary.NativeEndian.PutUint16(req[ifnameSize:], cIFF_TUN|cIFF_NO_PI)
+	flags := uint16(cIFF_TUN | cIFF_NO_PI)
+	if multiQueue {
+		flags |= cIFF_MULTI_QUEUE
+	}
+	binary.NativeEndian.PutUint16(req[ifnameSize:], flags)
 	if err := ioctl(uintptr(fd), cTUNSETIFF, unsafe.Pointer(&req[0])); err != nil {
 		syscall.Close(fd)
-		return nil, fmt.Errorf("TUNSETIFF: %w", err)
+		return nil, "", fmt.Errorf("TUNSETIFF: %w", err)
 	}
 	// Non-blocking + os.NewFile registers the fd with Go's network poller, so a
 	// blocked Read is interruptible by Close (clean shutdown).
 	if err := syscall.SetNonblock(fd, true); err != nil {
 		syscall.Close(fd)
-		return nil, fmt.Errorf("set nonblock: %w", err)
+		return nil, "", fmt.Errorf("set nonblock: %w", err)
 	}
-	f := os.NewFile(uintptr(fd), "/dev/net/tun")
+	return os.NewFile(uintptr(fd), "/dev/net/tun"), string(trimZero(req[:ifnameSize])), nil
+}
 
-	assigned := string(trimZero(req[:ifnameSize]))
+// New creates a TUN device. If name is empty the kernel assigns one (tunN).
+// It sets the MTU and brings the interface up. Addresses are assigned
+// separately via AddIPv4/AddIPv6 once the overlay address is chosen.
+func New(name string, mtu int) (*Device, error) {
+	f, assigned, err := openTunQueue(name, false)
+	if err != nil {
+		return nil, err
+	}
 	d := &Device{f: f, name: assigned, mtu: mtu}
 	if err := d.setMTU(mtu); err != nil {
 		f.Close()
@@ -109,6 +131,83 @@ func New(name string, mtu int) (*Device, error) {
 		return nil, err
 	}
 	return d, nil
+}
+
+// Queue is one additional multi-queue TUN queue beyond a Device's own
+// Read/Write (queue 0) — see NewMultiQueue. Read-only from the mesh engine's
+// point of view: every inbound (decrypted) packet is written back through
+// the Device itself, not through a Queue, so Queue only ever needs Read.
+type Queue struct{ f *os.File }
+
+// Read returns one IP packet from this queue.
+func (q *Queue) Read(p []byte) (int, error) { return q.f.Read(p) }
+
+// Close releases this queue's fd. The interface itself (and its other
+// queues) survive; a multi-queue tun interface is only actually torn down
+// when its last open fd closes.
+func (q *Queue) Close() error { return q.f.Close() }
+
+// NewMultiQueue creates a TUN device with n independent queues sharing one
+// interface — n-1 of them returned separately as *Queue, the first as the
+// usual *Device (queue 0, exactly what New returns). Each queue is its own
+// fd and kernel-side packet ring; the kernel spreads packets across them by
+// flow hash, the same way it spreads a REUSEPORT socket set's datagrams
+// across sockets (see transport.startWorkers) or a multi-queue NIC's
+// traffic across RX/TX rings. That's what makes this useful: gravinet's
+// outbound path is otherwise exactly one goroutine doing one read() syscall
+// per packet for an entire network's originated traffic, no matter how many
+// cores are free — see tunLoop's doc comment in internal/mesh/engine.go.
+// Multiple queues turn that into n independent goroutines, each with its own
+// fd, actually able to run in parallel.
+//
+// n<=1 behaves identically to New: single fd, no IFF_MULTI_QUEUE, nil Queue
+// slice. This is deliberately opt-in (config's tun_queues, 0/1 = off) rather
+// than defaulted on — unlike the outbound worker pool or UDP batching, which
+// only add concurrency *after* a single read, this changes how the read
+// itself is done, and gravinet's history with data-plane changes in that
+// category (see docs/changelog.md's Phase B/C entries) is why that
+// distinction matters enough to default conservatively here too.
+//
+// A single flow (one TCP connection, most kernels' flow-hash queue
+// selection) will still land on one queue — this helps aggregate throughput
+// across many concurrent flows, not a single stream's ceiling.
+func NewMultiQueue(name string, mtu, n int) (*Device, []*Queue, error) {
+	if n <= 1 {
+		d, err := New(name, mtu)
+		return d, nil, err
+	}
+	f0, assigned, err := openTunQueue(name, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	d := &Device{f: f0, name: assigned, mtu: mtu}
+	if err := d.setMTU(mtu); err != nil {
+		f0.Close()
+		return nil, nil, err
+	}
+	_ = d.setTxQueueLen(defaultTxQueueLen)
+	if err := d.Up(); err != nil {
+		f0.Close()
+		return nil, nil, err
+	}
+
+	queues := make([]*Queue, 0, n-1)
+	for i := 1; i < n; i++ {
+		fq, _, err := openTunQueue(assigned, true)
+		if err != nil {
+			// All-or-nothing: an interface with fewer queues than the caller
+			// asked for and expects to spawn readers against is worse than
+			// no interface at all — close everything opened so far, including
+			// queue 0, rather than hand back a partially multi-queue Device.
+			for _, q := range queues {
+				q.Close()
+			}
+			d.Close()
+			return nil, nil, fmt.Errorf("open queue %d/%d on %s: %w", i+1, n, assigned, err)
+		}
+		queues = append(queues, &Queue{f: fq})
+	}
+	return d, queues, nil
 }
 
 // setTxQueueLen sets the interface transmit queue length (in packets).

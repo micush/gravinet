@@ -75,6 +75,20 @@ func (ns *netState) dev() Device {
 // setDev installs d as the live overlay device.
 func (ns *netState) setDev(d Device) { ns.liveDev.Store(&d) }
 
+// queues returns the current live set of extra TUN queues (beyond dev()
+// itself), swapped atomically alongside dev() by a rebuild — see setQueues
+// and rebuildOverlayDevice. Falls back to spec.ExtraQueues before the first
+// rebuild, exactly like dev() falls back to spec.Dev.
+func (ns *netState) queues() []Queue {
+	if p := ns.liveQueues.Load(); p != nil {
+		return *p
+	}
+	return ns.spec.ExtraQueues
+}
+
+// setQueues installs qs as the live extra-queue set.
+func (ns *netState) setQueues(qs []Queue) { ns.liveQueues.Store(&qs) }
+
 // dpStateGet / dpStateSet are tiny helpers so callers don't each hand-roll the
 // dpMu dance.
 func (ns *netState) dpStateGet() int {
@@ -163,7 +177,7 @@ func (e *Engine) rebuildOverlayDevice(ns *netState) error {
 		return errDataplaneClosing
 	}
 	ns.dpState = dpRebuilding
-	newDev, err := ns.spec.NewDevice()
+	newDev, newQueues, err := ns.spec.NewDevice()
 	if err != nil {
 		// Leave rebuilding→healthy so the next attempt (or the maint reconcile)
 		// can try again; don't clobber a dpClosing that raced in.
@@ -175,10 +189,17 @@ func (e *Engine) rebuildOverlayDevice(ns *netState) error {
 	}
 	old := ns.dev()
 	ns.setDev(newDev)
+	ns.setQueues(newQueues)
 	ns.dpRebuilds++
 	if ns.dpState == dpRebuilding {
 		ns.dpState = dpHealthy
 	}
+	// Wake every tunQueueLoop currently blocked in awaitQueueRebuild so they
+	// pick up the fresh queue set instead of sitting on now-dead fds forever.
+	// Safe to close+replace unconditionally: dpGenCh is seeded non-nil in
+	// newNetState specifically so this never closes a nil channel.
+	close(ns.dpGenCh)
+	ns.dpGenCh = make(chan struct{})
 	ns.dpMu.Unlock()
 
 	if old != nil {

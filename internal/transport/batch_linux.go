@@ -641,7 +641,7 @@ func (t *Transport) initBatch() {
 // setsockopt failure just leaves the corresponding direction on the exact
 // v571 path, logged so the operator can see what engaged.
 func (t *Transport) initGSO() {
-	if os.Getenv("GRAVINET_UDP_GSO") != "1" {
+	if os.Getenv("GRAVINET_UDP_GSO") != "1" && !t.gsoRequested {
 		return // default: off, byte-for-byte v571 behaviour
 	}
 	all := make([]*net.UDPConn, 0, len(t.conns4)+len(t.conns6))
@@ -667,8 +667,12 @@ func (t *Transport) initGSO() {
 		}
 	}
 	t.batchGRO = groOn == len(all)
-	t.log.Infof("transport: udp gso tx=%v rx-gro=%v (GRAVINET_UDP_GSO=1; segments up to %d per send, gro slots %d x %d bytes)",
-		t.gsoTX, t.batchGRO, maxGSOSegs, rxBatchSizeGRO, groBufSize)
+	via := "GRAVINET_UDP_GSO=1"
+	if t.gsoRequested {
+		via = "udp_gso config setting"
+	}
+	t.log.Infof("transport: udp gso tx=%v rx-gro=%v (%s; segments up to %d per send, gro slots %d x %d bytes)",
+		t.gsoTX, t.batchGRO, via, maxGSOSegs, rxBatchSizeGRO, groBufSize)
 }
 
 // startFlushers builds a ring and flusher goroutine for each socket. A socket

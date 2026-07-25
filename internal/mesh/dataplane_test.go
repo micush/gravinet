@@ -31,9 +31,9 @@ func TestRebuildOverlayDeviceSwapsAndReasserts(t *testing.T) {
 		Dev:     d0,
 		Subnet4: netip.MustParsePrefix("10.20.0.0/24"),
 		Self4:   netip.MustParseAddr("10.20.0.5"),
-		NewDevice: func() (Device, error) {
+		NewDevice: func() (Device, []Queue, error) {
 			calls++
-			return d1, nil
+			return d1, nil, nil
 		},
 	}}})
 	ns := e.netSnapshot()[1]
@@ -78,7 +78,7 @@ func TestRebuildAbortsWhileClosing(t *testing.T) {
 		Dev:       d0,
 		Subnet4:   netip.MustParsePrefix("10.20.0.0/24"),
 		Self4:     netip.MustParseAddr("10.20.0.5"),
-		NewDevice: func() (Device, error) { t.Fatal("factory must not run during teardown"); return nil, nil },
+		NewDevice: func() (Device, []Queue, error) { t.Fatal("factory must not run during teardown"); return nil, nil, nil },
 	}}})
 	ns := e.netSnapshot()[1]
 
@@ -107,7 +107,7 @@ func TestReconcileClosesMissingInterface(t *testing.T) {
 		Dev:       dev,
 		Subnet4:   netip.MustParsePrefix("10.20.0.0/24"),
 		Self4:     netip.MustParseAddr("10.20.0.5"),
-		NewDevice: func() (Device, error) { return newFakeDev("gn-nonexistent-iface-zzz"), nil },
+		NewDevice: func() (Device, []Queue, error) { return newFakeDev("gn-nonexistent-iface-zzz"), nil, nil },
 	}}})
 	ns := e.netSnapshot()[1]
 

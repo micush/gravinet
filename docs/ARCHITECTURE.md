@@ -45,9 +45,19 @@ is laid out in one pooled buffer and the frame is encrypted in place (`Seal` wit
 lock-free and safe to parallelize. On receive, the packet is decrypted in place
 back into the transport's pooled read buffer. Versus the earlier allocate-and-copy
 path this is roughly 4 fewer allocations and ~280× less allocation volume per
-packet, which removes the GC pressure that otherwise caps throughput. (Per-flow
-throughput is still bounded by the single TUN-reader goroutine and one syscall per
-packet; segmentation offload and batched syscalls are the next levers.)
+packet, which removes the GC pressure that otherwise caps throughput. A
+single flow's throughput is still bounded by one goroutine doing one read()
+syscall per packet on the TUN device — true when this was first written and
+still true today, since none of what's landed since changes how that one
+read happens, only what runs after it or how many queues there are to spread
+across. Two levers have landed since, both opt-in rather than default-on
+(see docs/changelog.md for the field history behind that caution): UDP-side
+GSO/GRO batches the syscalls after a read (`GRAVINET_UDP_GSO=1`, 64-bit Linux
+only), and TUN multi-queue (`tun_queues` > 1, Linux only) opens several
+independent queues on one interface so several goroutines can each do their
+own read() in parallel — which helps aggregate throughput across many
+concurrent flows, not a single flow's ceiling, since kernel queue selection
+keeps one flow's packets on one queue to avoid reordering them.
 
 Handshake (no session yet, so keyed by key identity, not slot):
 ```

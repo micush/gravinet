@@ -48,7 +48,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "651"
+	version = "656"
 	commit  = "none"
 )
 
@@ -588,6 +588,7 @@ func cmdRun(args []string) {
 				Log:           logx.Default(),
 				Handler:       pktHandler,
 				OnSendMsgSize: engine.NoteSendTooLong,
+				EnableUDPGSO:  cfg.EnableUDPGSO,
 			})
 			if err != nil {
 				for _, d := range devices {
@@ -1231,6 +1232,7 @@ func cmdRun(args []string) {
 					Log:           logx.Default(),
 					Handler:       pktHandler,
 					OnSendMsgSize: engine.NoteSendTooLong,
+					EnableUDPGSO:  newCfg.EnableUDPGSO,
 				}); terr != nil {
 					logx.Errorf("underlay port change %d -> %d failed: %v — keeping port %d", prevPort, newCfg.PrimaryPort, terr, prevPort)
 				} else {
@@ -2192,18 +2194,31 @@ const tunOpenRetryBudget = 15 * time.Second
 // Retrying costs nothing when the interface opens first time, which is the
 // overwhelmingly common case.
 func newTunRetrying(name string, mtu int) (*tun.Device, error) {
+	d, _, err := newTunRetryingMQ(name, mtu, 1)
+	return d, err
+}
+
+// newTunRetryingMQ is newTunRetrying's multi-queue-aware counterpart:
+// queues<=1 behaves identically to newTunRetrying (single fd, no
+// IFF_MULTI_QUEUE); queues>1 opens that many queues on the same interface
+// (see tun.NewMultiQueue) so multiple goroutines can each own an independent
+// Read instead of sharing the single goroutine/single read()-syscall ceiling
+// one queue imposes on a network's whole outbound path. Same retry rationale
+// as newTunRetrying, and for the same reason: a rebuild races the kernel's
+// still-unwinding teardown of the previous interface, multi-queue or not.
+func newTunRetryingMQ(name string, mtu, queues int) (*tun.Device, []*tun.Queue, error) {
 	deadline := time.Now().Add(tunOpenRetryBudget)
 	delay := 100 * time.Millisecond
 	for attempt := 1; ; attempt++ {
-		d, err := tun.New(name, mtu)
+		d, qs, err := tun.NewMultiQueue(name, mtu, queues)
 		if err == nil {
 			if attempt > 1 {
 				logx.Infof("overlay interface %s created on attempt %d (the previous one was still being torn down by the kernel)", name, attempt)
 			}
-			return d, nil
+			return d, qs, nil
 		}
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("after %d attempt(s) over %s: %w", attempt, tunOpenRetryBudget, err)
+			return nil, nil, fmt.Errorf("after %d attempt(s) over %s: %w", attempt, tunOpenRetryBudget, err)
 		}
 		logx.Warnf("overlay interface %s: %v — retrying in %s (a previous instance's interface may still be going away)", name, err, delay)
 		time.Sleep(delay)
@@ -2211,6 +2226,33 @@ func newTunRetrying(name string, mtu int) (*tun.Device, error) {
 			delay *= 2
 		}
 	}
+}
+
+// tunQueuesOrDefault clamps a configured tun_queues to a sane value: <1
+// means off (the default — see config.Config.TunQueues's doc comment for why
+// this, unlike worker_threads, does not default to NumCPU()-1).
+func tunQueuesOrDefault(configured int) int {
+	if configured < 1 {
+		return 1
+	}
+	return configured
+}
+
+// toMeshQueues adapts concrete *tun.Queue values to the mesh package's
+// minimal Queue interface (just Read) — a plain per-element type conversion,
+// not a real adapter, kept as a named helper only so every call site does it
+// the same way. nil in, nil out: buildOneNetSpec and its NewDevice closure
+// both rely on a nil/empty ExtraQueues meaning "not multi-queue" the same way
+// spec.Dev already means "not yet rebuilt" for liveDev.
+func toMeshQueues(qs []*tun.Queue) []mesh.Queue {
+	if len(qs) == 0 {
+		return nil
+	}
+	out := make([]mesh.Queue, len(qs))
+	for i := range qs {
+		out[i] = qs[i]
+	}
+	return out
 }
 
 // buildNetSpecs creates the overlay interfaces and assembles per-network specs.
@@ -2241,8 +2283,8 @@ func buildNetSpecs(cfg *config.Config) ([]mesh.NetSpec, []*tun.Device) {
 		}
 		specs = append(specs, spec)
 		devices = append(devices, dev)
-		logx.Infof("network %s (%s): %s up, mtu %d, self4=%s self6=%s seeds=%d routes=%d hosts_sync=%v",
-			n.ID, n.Name, dev.Name(), dev.MTU(), spec.Self4, spec.Self6, len(spec.Seeds), len(spec.Routes), spec.HostsSync)
+		logx.Infof("network %s (%s): %s up, mtu %d, queues=%d, self4=%s self6=%s seeds=%d routes=%d hosts_sync=%v",
+			n.ID, n.Name, dev.Name(), dev.MTU(), len(spec.ExtraQueues)+1, spec.Self4, spec.Self6, len(spec.Seeds), len(spec.Routes), spec.HostsSync)
 	}
 	return specs, devices
 }
@@ -2263,34 +2305,36 @@ func buildOneNetSpec(n config.Network, cfg *config.Config, overlays []netip.Pref
 	if name == "" {
 		name = fmt.Sprintf("mesh%d", idx)
 	}
-	dev, err := newTunRetrying(name, n.MTU)
+	queues := tunQueuesOrDefault(cfg.TunQueues)
+	dev, extraQueues, err := newTunRetryingMQ(name, n.MTU, queues)
 	if err != nil {
 		return mesh.NetSpec{}, nil, fmt.Errorf("tun: %w", err)
 	}
 
 	spec := mesh.NetSpec{
-		ID:         netID,
-		Name:       n.Name,
-		Keys:       keys,
-		KeyLabels:  keyLabelMap(n),
-		KeyExpires: keyExpiryMap(n),
-		Dev:        dev,
-		AllowRelay: n.AllowRelay,
-		Ban:        cfg.AuthBan,
+		ID:          netID,
+		Name:        n.Name,
+		Keys:        keys,
+		KeyLabels:   keyLabelMap(n),
+		KeyExpires:  keyExpiryMap(n),
+		Dev:         dev,
+		ExtraQueues: toMeshQueues(extraQueues),
+		AllowRelay:  n.AllowRelay,
+		Ban:         cfg.AuthBan,
 	}
 	// Let the engine rebuild this interface if the OS tears it down at runtime
-	// (driver reset, `ip link del`, VM/Wi-Fi churn). Same name + MTU as the
-	// original. Explicit nil-on-error so a failed create never hands back a
-	// non-nil Device interface wrapping a nil *tun.Device.
-	spec.NewDevice = func() (mesh.Device, error) {
+	// (driver reset, `ip link del`, VM/Wi-Fi churn). Same name + MTU + queue
+	// count as the original. Explicit nil-on-error so a failed create never
+	// hands back a non-nil Device interface wrapping a nil *tun.Device.
+	spec.NewDevice = func() (mesh.Device, []mesh.Queue, error) {
 		// Retrying here too: a rebuild is triggered precisely when the OS has
 		// just destroyed the interface, so the kernel may still be unwinding the
-		// old netdev when we ask for the name back (see newTunRetrying).
-		d, derr := newTunRetrying(name, n.MTU)
+		// old netdev when we ask for the name back (see newTunRetryingMQ).
+		d, qs, derr := newTunRetryingMQ(name, n.MTU, queues)
 		if derr != nil {
-			return nil, derr
+			return nil, nil, derr
 		}
-		return d, nil
+		return d, toMeshQueues(qs), nil
 	}
 	spec.SeedTCPPort = n.SeedTCPPort
 	if n.Subnet4 != "" {

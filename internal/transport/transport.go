@@ -73,6 +73,12 @@ type Options struct {
 	//
 	// Leaving this nil is safe but lossy: PMTU discovery then re-finds a shrunk
 	// path through its own probes instead of being told immediately.
+	// EnableUDPGSO turns on UDP-side segmentation offload (see gso_linux.go)
+	// as a config-driven alternative to the GRAVINET_UDP_GSO=1 environment
+	// variable, which predates this field and is still honored — initGSO
+	// checks both, either enables it. False (the default) leaves initGSO's
+	// existing env-var-only check as the sole gate, unchanged.
+	EnableUDPGSO  bool
 	OnSendMsgSize func(to netip.AddrPort, size int)
 }
 
@@ -125,10 +131,14 @@ type Transport struct {
 	// support AND batching itself is on; see initBatch. gsoTX seeds each
 	// flusher's own per-socket flag, which can further self-disable on a
 	// driver error without affecting other sockets.
-	gsoTX     bool
-	batchGRO  bool
-	flushWG   sync.WaitGroup
-	onMsgSize func(netip.AddrPort, int)
+	gsoTX    bool
+	batchGRO bool
+	// gsoRequested is Options.EnableUDPGSO, captured at Open time — initGSO
+	// checks this alongside GRAVINET_UDP_GSO so either the config field or
+	// the env var enables Phase B; see Options.EnableUDPGSO's doc comment.
+	gsoRequested bool
+	flushWG      sync.WaitGroup
+	onMsgSize    func(netip.AddrPort, int)
 
 	pool   sync.Pool
 	wg     sync.WaitGroup
@@ -202,12 +212,13 @@ func openWith(o Options, bind binder) (*Transport, error) {
 	}
 
 	t := &Transport{
-		port:    port,
-		workers: o.Workers,
-		handler: o.Handler,
-		log:     log,
-		conns4:  conns4,
-		conns6:  conns6,
+		port:         port,
+		workers:      o.Workers,
+		handler:      o.Handler,
+		log:          log,
+		conns4:       conns4,
+		conns6:       conns6,
+		gsoRequested: o.EnableUDPGSO,
 	}
 	t.pool.New = func() any { b := make([]byte, protocol.MaxUDPPayload); return &b }
 

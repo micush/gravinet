@@ -2,6 +2,302 @@
 
 ---
 
+## v656 — 2026-07-25
+
+**Added: the Performance (advanced) card's three controls (worker threads,
+TUN queues, UDP GSO) now coalesce into one restart, a few seconds after the
+last edit, instead of one restart per field changed.**
+
+v655 made all three commit-on-change like every other Settings control —
+correct, but it left a real problem specific to this one card: it's the
+only place on the page where changing more than one setting in the same
+sitting is the normal case (an operator profiling throughput plausibly
+touches worker threads, TUN queues, *and* UDP GSO together), and each one
+independently firing `quietRestart()` meant up to three sequential restarts
+to get there. Worse than wasteful: a second `/api/restart` landing while the
+first is still tearing the process down isn't a case anything here was
+built to handle cleanly.
+
+**What changed:** `edit()`'s third parameter now also accepts a function
+(not just a boolean) — `typeof autoRestart === 'function'` calls it in
+place of the immediate `quietRestart()`. A new `schedulePerfRestart()`
+debounces: each change still saves immediately (the POST underneath already
+happened), but the actual restart waits `PERF_RESTART_DEBOUNCE_MS` (3s) of
+inactivity across *any* of the three controls, resetting on every new
+change rather than firing on a fixed schedule from the first one — so a
+burst of edits, however spread out within that window, still produces
+exactly one restart, timed from the last edit, not the first. A small
+`#perf-restart-pending` status line appears while a restart is queued so
+the wait isn't silent, and `state.perfRestartPending` persists that across
+a re-render (navigating away and back mid-wait doesn't lose the indicator).
+
+Deliberately scoped to only these three controls, not applied to `edit()`'s
+existing boolean `autoRestart` path used elsewhere (GeoIP, UPnP, remote
+shell): those are individually documented as "operations the user expects
+to feel instant" (`quietRestart`'s own doc comment) — a single toggle
+flipped on its own, not a multi-field tuning session. Generalizing the
+debounce to them wasn't asked for and wasn't free of risk to behavior this
+change had no reason to touch.
+
+**Verified:** `go build ./...`/`go vet ./...` clean, `gofmt -l` clean,
+`internal/webadmin`/`internal/config`/`internal/transport`/`cmd/gravinet`
+suites pass. Re-extracted the updated `secSettings`/`edit`/
+`schedulePerfRestart` source into the same jsdom harness prior entries
+built, this time with controllable fake timers (`setTimeout`/`clearTimeout`
+swapped for an in-test fake clock) rather than waiting on real 3-second
+windows: confirmed a single change saves immediately but doesn't restart
+until the full window elapses (not a moment before); confirmed two changes
+1.5s apart reset the window each time and still produce exactly one
+`quietRestart()` call, not two, timed from the second change; confirmed an
+unchanged or rejected value never schedules a restart at all; confirmed the
+pending-indicator text appears and clears at the right moments; confirmed
+UDP GSO shares the same coordinator as the two number fields. `node --check`
+on the full script stays clean.
+
+---
+
+## v655 — 2026-07-25
+
+**Fixed inconsistent UX from v654: Worker threads and TUN queues had a
+separate Save button, unlike every other control on the Settings page.
+Removed — they now commit on change and restart in the background, exactly
+like GeoIP, UPnP, and UDP GSO already do.**
+
+v654 deliberately chose an explicit Save step for these two, reasoned as
+"a restart-requiring numeric field shouldn't fire on every partial edit."
+That reasoning wasn't wrong on its own terms, but it solved a problem this
+page doesn't have: a plain `<input type=number>`'s `change` event fires on
+blur or Enter, not per keystroke, so committing on `change` was already
+never going to restart mid-edit — the Save button was solving nothing that
+`change` didn't already solve, while being the only control on the entire
+page that worked differently from every other one. Removed outright.
+
+Both number inputs now call `edit(path, {value}, true)` on `change` — the
+same `autoRestart:true` path GeoIP/UPnP/UDP GSO already use, backing onto
+`quietRestart()` (POST `/api/restart`, then poll `/api/ping` in the
+background until the node comes back, then refresh — no separate "Restart
+now" click). Two small additions the button's presence had been standing in
+for: committing a value unchanged from the current setting is now an
+explicit no-op (skips the request and the restart entirely, checked before
+calling `edit`), and an invalid value's `alert()` now reverts the input to
+the last good value instead of leaving a rejected number sitting in the
+field. Backend unchanged — `handleWorkerThreads`/`handleTunQueues` already
+returned `restart:true`; this was purely which frontend path consumes that.
+
+**Verified:** `go build ./...`/`go vet ./...` clean, `gofmt -l` clean,
+`internal/webadmin`/`internal/config`/`internal/transport`/`cmd/gravinet`
+suites pass. Re-extracted the actual updated `secSettings` source into the
+same jsdom harness v654 built and re-ran it end to end: both Save buttons
+confirmed gone, both fields confirmed to call their endpoint and
+`quietRestart()` (not the deferred-banner `refresh()` path) on change, an
+unchanged value confirmed to fire no request at all, and an invalid value
+confirmed to both block the request and revert the input. `node --check` on
+the full script still clean.
+
+---
+
+## v654 — 2026-07-25
+
+**Added: `worker_threads`, `tun_queues`, and UDP GSO/GRO are now editable from
+System > Settings, not just config.json — a deliberate discoverability
+tradeoff for the latter, made explicitly, not by default.**
+
+`worker_threads` and `tun_queues` had no UI exposure for the same reason
+most advanced tuning knobs don't: nobody had built it, not because anything
+blocked it — both are already plain `config.Config` fields, and "this
+setting needs a restart" is a first-class, already-existing pattern
+(`editResult(w, err, true)`, same as `handleGeoIPSetting`). Genuinely new
+work: `handleWorkerThreads`/`handleTunQueues` (bounds-checked: negative
+rejected, generous upper caps — 128 and 64 respectively — against a
+fat-fingered value opening hundreds of fds/goroutines), a new "Performance
+(advanced)" Settings card with a number input + explicit Save per field
+(deliberately not auto-commit-on-blur — a restart-requiring numeric field
+firing on every partial keystroke would be worse, not more responsive), and
+`handleConfig` now returns `worker_threads`/`tun_queues` in the payload the
+page already reads everything else from.
+
+UDP GSO is the different case, flagged three messages ago as a real design
+tension rather than a missing feature: `GRAVINET_UDP_GSO=1` was an
+environment variable, not a config field, read once via `os.Getenv` at
+transport startup — deliberately outside config.json's reach, functioning
+as a soft gate (you have to know to look it up) matching how unproven the
+mechanism still is on real hardware under real load. Putting a checkbox in
+Settings trades that friction for discoverability. That's the operator's
+call, made explicitly here, not a reversal of the caution itself — nothing
+about exposing the switch makes the underlying mechanism any more verified
+than v652's entry found it.
+
+**What changed:**
+- `config.Config.EnableUDPGSO` (`udp_gso`, off by default) — new field.
+  `transport.Options.EnableUDPGSO` / `Transport.gsoRequested` thread it into
+  `initGSO`, which now checks the config field *or* the env var — either
+  enables it, so an existing systemd-drop-in deployment keeps working
+  unchanged. The startup log line now says which source engaged it
+  (`GRAVINET_UDP_GSO=1` vs `udp_gso config setting`).
+- `handleUDPGSOSetting`, registered at `/api/udp-gso`, `restart:true`,
+  wired the same way `handleGeoIPSetting`/`handleUPnPSetting` already are
+  (self-restarts immediately on toggle, per the existing `edit(path,
+  payload, true)` convention).
+- Two new capability-flag file pairs
+  (`tunqueue_caps_{linux,other}.go`, `udpgso_caps_{linux,other}.go`,
+  mirroring the existing `ptySupported` pattern) so the Settings page can
+  say "not available on this platform" rather than presenting a control
+  that would silently do nothing — `tun_queues`/`udp_gso` are accepted on
+  every platform (no build tags on the config fields themselves), so a
+  value set on a mixed-OS fleet never errors, it's just inert where the
+  underlying mechanism doesn't exist yet.
+- The UDP GSO row is labeled "experimental" (reusing the existing `.pill`
+  class) and its description states the unproven-on-real-hardware caveat
+  directly, rather than leaving it for the operator to discover in a
+  changelog.
+
+**Verified:** `go build ./...`/`go vet ./...` clean; `gofmt -l` clean.
+`internal/webadmin`, `internal/config`, `internal/transport`, `internal/mesh`,
+and `cmd/gravinet` suites all pass (`-short`). Cross-compiles clean for all
+8 targets this project tracks.
+
+The new frontend code got more scrutiny than a typical UI change, on
+purpose: `go build` can't see inside a Go string literal, so a mistake in
+embedded JS is invisible to every check above. Extracted the actual
+`secSettings`/`edit`/`api` source (not a re-typed copy — regex-sliced
+straight out of `indexHTML`, so what's tested is byte-identical to what
+ships) into a headless jsdom harness and drove all three new controls
+through it against a mocked `fetch`: initial render matches state, saving
+worker threads/tun queues round-trips the right value to the right endpoint
+and defers to the restart-banner path (not an immediate self-restart),
+toggling UDP GSO round-trips correctly and *does* self-restart immediately,
+a negative value is rejected client-side before any request fires, and the
+platform-unsupported copy renders when the capability flags are false.
+`node --check` on the full extracted script also confirms no syntax error
+anywhere else in the file this edit could have silently broken.
+
+---
+
+## v653 — 2026-07-25
+
+**Small follow-up to v652:** the per-network startup log line now reports
+queue count (`queues=N`), so a `tun_queues` setting actually taking effect
+is visible directly in the log rather than only inferable from
+`/sys/class/net/<iface>/queues/`. `N` is always `len(ExtraQueues)+1`, so an
+untouched, non-multi-queue network now logs `queues=1` — the same single
+queue it always had, just stated rather than implied.
+
+Verified: `go build ./...` and `go vet ./...` clean; `gofmt -l` clean; no
+existing test asserts on this log line's exact format.
+
+---
+
+## v652 — 2026-07-25
+
+**Added, opt-in and off by default: multi-queue TUN (`tun_queues` config,
+Linux only) — several independent read queues on one overlay interface, so
+several goroutines can each own a `read()` instead of one goroutine reading
+the whole network's outbound traffic alone.**
+
+Every network's outbound path — TUN read, firewall/NAT/route, encrypt, UDP
+send — has always run its *read* on exactly one goroutine, one `read()`
+syscall per packet, no matter how many cores are free (the outbound worker
+pool added later parallelizes everything *after* that read, not the read
+itself). For a single network carrying many concurrent connections, that's
+a real ceiling: a field report on real 10Gbps hardware measured ~2.6Gbps
+aggregate before this, well under what the link or the cipher (measured at
+3–4.8 GB/s of AES-256-GCM seal throughput per core — nowhere near the
+bottleneck) could otherwise support.
+
+Linux's tun driver has had a fix for exactly this since kernel 3.8:
+`IFF_MULTI_QUEUE`. The first open of an interface with that flag makes it
+multi-queue-capable; every subsequent open with the same name and flag
+attaches one more independent queue — its own fd, its own kernel-side
+packet ring — to that one interface, instead of failing "device busy" the
+way a second `TUNSETIFF` would today. The kernel spreads packets across
+queues by flow hash, the same idea as `SO_REUSEPORT` spreading a socket
+set's datagrams across sockets (which this transport already uses on the
+UDP side) or a multi-queue NIC's RX/TX rings.
+
+**What actually changed:**
+- `internal/tun/tun_linux.go`: `NewMultiQueue(name, mtu, n)` — `n<=1` behaves
+  exactly like `New` (unchanged for every existing caller); `n>1` opens `n`
+  queues on one interface, all-or-nothing on a partial failure. New `Queue`
+  type (`Read`, `Close`) for queues 1..n-1; queue 0 is still the ordinary
+  `*Device` every other platform already gets.
+- `internal/tun/multiqueue_other.go` (new, `!linux`): the same call signature
+  everywhere else, always single-queue — darwin/freebsd/openbsd/windows have
+  no equivalent wired up yet, so `tun_queues` set on a mixed-OS fleet is a
+  silent no-op on those hosts rather than a config error.
+- `internal/mesh/engine.go`: `NetSpec.ExtraQueues`, a `Queue` interface
+  (`Read`, `Close`), and `tunQueueLoop` — one per extra queue, running the
+  exact same `processOutbound` the primary reader uses, in parallel with it.
+  `NewDevice`'s signature widened to `func() (Device, []Queue, error)` so an
+  interface rebuild (driver reset, `ip link del`, sleep/wake) recreates the
+  whole queue set, not just queue 0.
+- `internal/mesh/dataplane.go`: `queues()`/`setQueues()` mirror
+  `dev()`/`setDev()`. `tunLoop` (reading queue 0) stays the sole rebuild
+  owner, exactly as before — but now every extra-queue reader that hits a
+  Read error waits on a per-network generation channel (`dpGenCh`, closed
+  and replaced each successful rebuild) instead of racing `NewDevice` itself,
+  then re-fetches its queue from the new generation once woken.
+- `internal/config/config.go`: `tun_queues` (0/1 = off, the default).
+  Deliberately **not** defaulted to `NumCPU()-1` the way `worker_threads` is:
+  this changes how the interface is opened, not just how much runs behind an
+  unchanged read, and this project has a specific, expensive history with
+  that category of change (see v556 and the Phase C arc culminating in its
+  own revert two entries later) — so it ships opt-in, same posture as
+  `GRAVINET_UDP_GSO`.
+- `docs/ARCHITECTURE.md`'s throughput note updated: it had gone stale (still
+  describing batched syscalls as an unimplemented "next lever" long after
+  v556 shipped them by default); now states plainly that a *single* flow's
+  ceiling is unchanged by any of this — kernel queue selection keeps one
+  flow's packets on one queue precisely to avoid reordering them — and that
+  multi-queue only helps aggregate throughput across many concurrent
+  connections.
+
+**A real bug, caught by the existing shutdown test, not left for the field
+this time.** The first version of this hung on every teardown:
+`Stop()`/`RemoveNetwork()` have always closed the primary device to unblock
+`tunLoop`'s blocking `Read` before waiting on `ns.wg` — that's the whole
+mechanism clean shutdown depends on — but neither one knew to close the
+*extra* queues too, so a `tunQueueLoop` goroutine sitting in `Queue.Read`
+had nothing left to wake it, and `wg.Wait()` hung forever.
+`TestTunQueueLoopDeliversFromExtraQueue` caught it immediately (test timeout
+firing on `Stop()`, not a hang in CI); the fix is the obvious one — both
+teardown paths now close every entry in `queues()` alongside the device,
+under the same `dpMu` section, before `wg.Wait()`.
+
+**Verified:** `go build ./...` and `go vet ./...` clean; `gofmt -l` clean on
+every touched file. `internal/mesh` and `internal/tun` full suites pass
+(`-short`); two new tests
+(`TestTunQueueLoopDeliversFromExtraQueue`,
+`TestAwaitQueueRebuildWakesExtraQueueReader`) cover the actual new behavior —
+200 packets delivered end-to-end through an *extra* queue with the primary
+device never touched, and an extra-queue reader blocked in
+`awaitQueueRebuild` correctly waking and re-fetching after a rebuild. Full
+`internal/mesh` suite passes under `-race`; the new tests specifically pass
+5x under `-race` with repetition. Cross-compiles clean (`CGO_ENABLED=0`) for
+darwin/amd64, darwin/arm64, windows/amd64, freebsd/amd64, openbsd/amd64,
+linux/arm, linux/386, linux/arm64. The three existing `NewDevice`-constructing
+tests in `internal/mesh/dataplane_test.go` updated for the widened signature,
+otherwise unchanged. `TestKeyDisableReconnects` failed under the full
+`-race` run, reproduced in isolation to confirm it's the pre-existing
+documented single-core scheduling flake (unrelated to this change, unrelated
+to `internal/tun`/`internal/mesh`'s device/queue code) and not a new
+regression.
+
+**Not verified, and this matters given this project's history:** no real
+hardware has run a sustained bulk transfer over an actual multi-queue
+interface — everything above is synthetic (`fakeDev`, loopback). The exact
+lesson from Phase C (`docs/changelog.md`, two entries after v572) was that
+software-testable framing correctness is not the hard part for this class of
+change; sustained real traffic under real load is, and this environment
+cannot produce that. Multi-queue is a structurally simpler change than
+Phase C's `virtio_net_hdr` GSO/GRO framing — no segment coalescing math, no
+byte-level packet surgery, just "which of `n` plain fds do I read from" — but
+"simpler" is not "exempt," and this hasn't cleared the bar this project set
+for itself: a real rig, real cores, sustained TCP, before it's trusted
+default-on anywhere. It ships opt-in specifically because that bar hasn't
+been cleared yet.
+
+---
+
 ## v651 — 2026-07-24
 
 **Fixed:** System > L2 Disco on OpenBSD: even after v650 taught gravinet to

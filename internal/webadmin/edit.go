@@ -677,7 +677,76 @@ func (s *Server) handleUPnPSetting(w http.ResponseWriter, r *http.Request) {
 	s.editResult(w, err, true) // needs a restart — see doc comment above
 }
 
-// handlePort sets the UDP underlay port(s): the first in the list becomes
+// handleWorkerThreads sets worker_threads: the outbound TUN-processing and
+// inbound UDP worker-pool size (see config.Config.WorkerThreads's doc
+// comment; 0 => runtime.NumCPU()-1, min 1). Needs a restart — the pools are
+// sized once, when the engine and transport are constructed at startup, and
+// nothing re-reads this on a live config reload.
+func (s *Server) handleWorkerThreads(w http.ResponseWriter, r *http.Request) {
+	var req struct{ Value int }
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.Value < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "worker_threads can't be negative"})
+		return
+	}
+	const workerThreadsMax = 128 // generous headroom over any sane core count; guards a fat-fingered value, not a real limit
+	if req.Value > workerThreadsMax {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("worker_threads can't exceed %d", workerThreadsMax)})
+		return
+	}
+	err := s.mutateConfig(func(cfg *config.Config) error {
+		cfg.WorkerThreads = req.Value
+		return nil
+	})
+	s.editResult(w, err, true) // needs a restart — see doc comment above
+}
+
+// handleTunQueues sets tun_queues: how many IFF_MULTI_QUEUE queues to open
+// on each overlay interface (see config.Config.TunQueues's doc comment).
+// Linux-only; a harmless no-op elsewhere (see tunMultiQueueSupported, sent
+// alongside this value so the Settings page can say so). Needs a restart —
+// the queue count is decided when the TUN device is opened, at startup.
+func (s *Server) handleTunQueues(w http.ResponseWriter, r *http.Request) {
+	var req struct{ Value int }
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.Value < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "tun_queues can't be negative"})
+		return
+	}
+	const tunQueuesMax = 64 // generous headroom over any sane core count; guards a fat-fingered value, not a real limit
+	if req.Value > tunQueuesMax {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("tun_queues can't exceed %d", tunQueuesMax)})
+		return
+	}
+	err := s.mutateConfig(func(cfg *config.Config) error {
+		cfg.TunQueues = req.Value
+		return nil
+	})
+	s.editResult(w, err, true) // needs a restart — see doc comment above
+}
+
+// handleUDPGSOSetting toggles udp_gso: UDP-side segmentation offload (see
+// config.Config.EnableUDPGSO's doc comment), the config-driven alternative
+// to the GRAVINET_UDP_GSO=1 environment variable — either enables it.
+// Linux amd64/arm64 only; a harmless no-op elsewhere (see udpGSOSupported,
+// sent alongside this value so the Settings page can say so). Needs a
+// restart — initGSO runs once, when the transport is opened.
+func (s *Server) handleUDPGSOSetting(w http.ResponseWriter, r *http.Request) {
+	var req struct{ On bool }
+	if !decode(w, r, &req) {
+		return
+	}
+	err := s.mutateConfig(func(cfg *config.Config) error {
+		cfg.EnableUDPGSO = req.On
+		return nil
+	})
+	s.editResult(w, err, true) // needs a restart — see doc comment above
+}
+
 // the primary (used for outbound and advertised to peers), any rest become
 // extra listen-only ports (config extra_listen_ports) — one field for both,
 // not a separate one per concept, so "listen on 65432, 443, and 80" is just

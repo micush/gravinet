@@ -47,6 +47,24 @@ type Device interface {
 	IfIndex() (int32, error)
 }
 
+// Queue is one additional TUN read queue beyond a Device's own Read (queue
+// 0), for platforms/configs that opened the overlay interface multi-queue
+// (currently Linux's IFF_MULTI_QUEUE only — see internal/tun.NewMultiQueue).
+// Write is deliberately not part of this contract: nothing ever writes to an
+// extra queue, since every inbound (decrypted) packet is written back
+// through the Device itself in deliverInner, and concurrent writers on
+// separate goroutines already share that one fd safely without needing
+// per-queue write fan-out — the bottleneck this exists to fix is exclusively
+// on the read/origin side (see tunQueueLoop). Close is required, unlike
+// Write: teardown (Stop/RemoveNetwork) closes every queue exactly the way it
+// already closes the primary Device, which is what unblocks a tunQueueLoop
+// goroutine sitting in a blocking Read — without it, shutdown would hang
+// waiting on a read that nothing will ever wake.
+type Queue interface {
+	Read(p []byte) (int, error)
+	Close() error
+}
+
 // Sender abstracts the transport for testability.
 type Sender interface {
 	Send(to netip.AddrPort, payload []byte) error
@@ -84,14 +102,27 @@ type NetSpec struct {
 	// for authentication itself (key expiry enforcement reads config directly).
 	KeyExpires map[crypto.KeyID]string
 	Dev        Device
-	// NewDevice, if set, creates a fresh overlay Device for this network with
-	// the same name/MTU as Dev. The data-plane supervisor calls it to rebuild a
-	// tun the OS tore down out from under us (driver reset, `ip link del`, VM or
-	// Wi-Fi churn). Injected by the caller (cmd/gravinet) so the engine stays
-	// decoupled from internal/tun and tests keep substituting a fake. Nil
-	// disables interface recreation entirely — a read error then ends the data
-	// plane until process restart, exactly as before this existed.
-	NewDevice  func() (Device, error)
+	// ExtraQueues holds any additional TUN read queues beyond Dev itself
+	// (queue 0) — populated only by a caller that opened the interface
+	// multi-queue (config's tun_queues > 1; see internal/tun.NewMultiQueue).
+	// nil/empty is the overwhelmingly common case and means exactly what it
+	// always has: one goroutine reads Dev for this network's whole outbound
+	// path. startNetwork spawns one extra tunQueueLoop per entry here,
+	// running in parallel with Dev's own reader.
+	ExtraQueues []Queue
+	// NewDevice, if set, creates a fresh overlay Device (and, if this network
+	// was opened multi-queue, a matching fresh ExtraQueues) for this network
+	// with the same name/MTU/queue-count as Dev/ExtraQueues. The data-plane
+	// supervisor calls it to rebuild a tun the OS tore down out from under us
+	// (driver reset, `ip link del`, VM or Wi-Fi churn). Injected by the caller
+	// (cmd/gravinet) so the engine stays decoupled from internal/tun and
+	// tests keep substituting a fake. Nil disables interface recreation
+	// entirely — a read error then ends the data plane until process
+	// restart, exactly as before this existed. A non-nil factory that only
+	// ever returns a single Device (nil queues) is exactly the pre-multi-queue
+	// contract — this field is additive, not a behavior change for existing
+	// callers.
+	NewDevice  func() (Device, []Queue, error)
 	Subnet4    netip.Prefix
 	Subnet6    netip.Prefix
 	Self4      netip.Addr // this node's overlay v4 (advertised in handshakes)
@@ -746,6 +777,22 @@ type netState struct {
 	dpRebuilds          int       // count of successful rebuilds (diagnostics)
 	dpLastLog           time.Time // rate-limit for repeated rebuild-failure logs
 	dpLastRouteReassert time.Time // last defensive base-route re-add (dataplane reconcile)
+	// liveQueues mirrors liveDev for a multi-queue network's extra queues:
+	// swapped alongside liveDev, atomically, by the same rebuild that
+	// replaces the device — see queues()/setQueues() and
+	// rebuildOverlayDevice. nil (falling back to spec.ExtraQueues via
+	// queues()) for the overwhelmingly common non-multi-queue network,
+	// exactly like liveDev/spec.Dev.
+	liveQueues atomic.Pointer[[]Queue]
+	// dpGenCh is closed and replaced with a fresh channel every time
+	// rebuildOverlayDevice successfully installs a new device+queue set.
+	// tunLoop (reading Dev/queue 0) is the sole rebuild owner — see
+	// dataplane.go's package doc — so every *extra*-queue reader that hits
+	// its own Read error waits on the current value of this channel
+	// (awaitQueueRebuild) instead of calling NewDevice itself, then refetches
+	// its queue from the new generation. Guarded by dpMu, same as the state
+	// it's signaling a change to.
+	dpGenCh chan struct{}
 
 	// Distributed control plane (step 6).
 	bans          map[string]*banRecord   // key = origin|target
@@ -1297,6 +1344,7 @@ func (e *Engine) newNetState(spec NetSpec) *netState {
 		hsSeen:               make(map[string]time.Time),
 		pendingPeerAdds:      make(map[string]int),
 		done:                 make(chan struct{}),
+		dpGenCh:              make(chan struct{}),
 	}
 	if spec.Dev != nil {
 		ns.setDev(spec.Dev) // seed the live-device holder; swapped later by a rebuild
@@ -1416,17 +1464,21 @@ func (e *Engine) RemoveNetwork(id uint64) error {
 	}
 	// Pull it from the routing map first so the data path stops handing it work.
 	e.mutateNets(func(m map[uint64]*netState) { delete(m, id) })
-	// Signal the loops, then close the TUN so tunLoop's blocking Read unblocks;
-	// only then can we wait for a clean exit. The dpClosing flag + dpMu ensure a
-	// concurrent data-plane rebuild can't swap in a fresh device after we've
-	// closed the current one (which tunLoop would then block reading forever,
-	// hanging wg.Wait): either the rebuild aborts, or it completes and we close
-	// the device it installed.
+	// Signal the loops, then close the TUN (and every extra multi-queue queue)
+	// so tunLoop's and tunQueueLoop's blocking Reads unblock; only then can we
+	// wait for a clean exit. The dpClosing flag + dpMu ensure a concurrent
+	// data-plane rebuild can't swap in a fresh device/queue set after we've
+	// closed the current ones (which tunLoop/tunQueueLoop would then block
+	// reading forever, hanging wg.Wait): either the rebuild aborts, or it
+	// completes and we close what it installed.
 	close(ns.done)
 	ns.dpMu.Lock()
 	ns.dpState = dpClosing
 	if d := ns.dev(); d != nil {
 		d.Close()
+	}
+	for _, q := range ns.queues() {
+		q.Close()
 	}
 	ns.dpMu.Unlock()
 	ns.wg.Wait()
@@ -1496,8 +1548,12 @@ func (e *Engine) startNetwork(ns *netState) {
 	if eg := ns.egress.Load(); eg != nil {
 		go eg.run()
 	}
-	ns.wg.Add(4)
+	extraQueues := len(ns.spec.ExtraQueues)
+	ns.wg.Add(4 + extraQueues)
 	go e.tunLoop(ns)
+	for i := 0; i < extraQueues; i++ {
+		go e.tunQueueLoop(ns, i)
+	}
 	go e.initLoop(ns)
 	go e.maintLoop(ns)
 	go e.pmtuLoop(ns)
@@ -1737,16 +1793,20 @@ func (e *Engine) Start() {
 // Stop halts the engine loops.
 func (e *Engine) Stop() {
 	close(e.stop)
-	// Close every TUN so each tunLoop's blocking Read returns (covers networks
-	// added live, whose devices the caller doesn't track). Mark dpClosing first
-	// so an in-flight rebuild can't install a fresh device past the close (see
-	// RemoveNetwork). Close the live device, which may differ from spec.Dev if a
-	// rebuild swapped it.
+	// Close every TUN (and every extra multi-queue queue) so each tunLoop's
+	// and tunQueueLoop's blocking Read returns (covers networks added live,
+	// whose devices the caller doesn't track). Mark dpClosing first so an
+	// in-flight rebuild can't install a fresh device/queue set past the
+	// close (see RemoveNetwork). Close the live ones, which may differ from
+	// spec.Dev/spec.ExtraQueues if a rebuild swapped them.
 	for _, ns := range e.netSnapshot() {
 		ns.dpMu.Lock()
 		ns.dpState = dpClosing
 		if d := ns.dev(); d != nil {
 			d.Close()
+		}
+		for _, q := range ns.queues() {
+			q.Close()
 		}
 		ns.dpMu.Unlock()
 	}
@@ -2114,6 +2174,85 @@ func (e *Engine) tunLoopSerial(ns *netState) {
 			continue
 		}
 		e.processOutbound(ns, buf[:n])
+	}
+}
+
+// tunQueueLoop reads outbound packets from one extra multi-queue TUN queue
+// and feeds them straight into processOutbound — the same per-packet shape
+// as tunLoopSerial, just against a Queue's Read instead of the network's
+// primary Device, and running concurrently with every other queue's reader
+// (the primary included, still driven by tunLoop/tunLoopSerial/
+// tunLoopPooled). This is what actually buys origin-side throughput past one
+// core for a single network: tunLoopPooled's worker pool only parallelizes
+// *processing* after one goroutine's Read; multi-queue parallelizes the Read
+// itself, by giving each goroutine its own kernel-assigned queue on the same
+// interface — the TUN-side equivalent of what SO_REUSEPORT already does for
+// the UDP side (see transport.startWorkers). A single flow will still tend
+// to land on one queue (most kernels pick a queue by flow hash, precisely to
+// avoid reordering a flow's own packets), so this helps aggregate throughput
+// across many concurrent connections, not one stream's ceiling.
+//
+// idx identifies which of ns.queues() this goroutine owns. That set is
+// re-fetched fresh after every rebuild (see below), always in the same
+// order NewDevice produced it, so idx keeps meaning "the same queue slot"
+// across a rebuild even though the underlying fd is new.
+//
+// Recovery: this goroutine never drives recoverDataplane itself. tunLoop
+// (reading the primary Device) is the sole rebuild owner — see dataplane.go's
+// package doc for why that matters — so on a Read error this instead calls
+// awaitQueueRebuild and, once that returns true, loops back to refetch its
+// queue from the freshly rebuilt set. If the rebuilt set turns out to have
+// fewer queues than this goroutine's idx (nothing in this codebase's own
+// wiring produces that today, since NewDevice always recreates with the same
+// configured count, but a future caller might), it simply exits — one fewer
+// reader is a throughput regression, not a correctness problem.
+func (e *Engine) tunQueueLoop(ns *netState, idx int) {
+	defer ns.wg.Done()
+	for {
+		qs := ns.queues()
+		if idx >= len(qs) {
+			return
+		}
+		q := qs[idx]
+		buf := make([]byte, ns.dev().MTU()+128)
+		for {
+			select {
+			case <-e.stop:
+				return
+			case <-ns.done:
+				return
+			default:
+			}
+			n, err := q.Read(buf)
+			if err != nil {
+				if e.shuttingDown(ns) {
+					return
+				}
+				if !e.awaitQueueRebuild(ns) {
+					return // shutting down while we waited
+				}
+				break // back to the outer loop: refetch this idx's queue from the new generation
+			}
+			e.processOutbound(ns, buf[:n])
+		}
+	}
+}
+
+// awaitQueueRebuild blocks until tunLoop (the sole rebuild owner — see
+// tunQueueLoop) has published a freshly rebuilt device+queue set via
+// rebuildOverlayDevice, or the network/engine is stopping. Returns false in
+// the latter case, meaning the caller should exit rather than retry.
+func (e *Engine) awaitQueueRebuild(ns *netState) bool {
+	ns.dpMu.Lock()
+	ch := ns.dpGenCh
+	ns.dpMu.Unlock()
+	select {
+	case <-ch:
+		return true
+	case <-e.stop:
+		return false
+	case <-ns.done:
+		return false
 	}
 }
 
