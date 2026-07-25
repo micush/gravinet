@@ -8197,8 +8197,8 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
     nbrBody.innerHTML = '';
     let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>peer address</th><th>remote AS</th><th>description</th>'
       + '<th title="MD5 session password">MD5 password</th><th title="Bidirectional Forwarding Detection for this peer">BFD</th>'
-      + '<th title="administrative state of this session">state</th>'
-      + '<th title="what BGP itself accepts from / advertises to this one neighbor \u2014 click to view or edit">filters</th></tr>';
+      + '<th title="what BGP itself accepts from / advertises to this one neighbor \u2014 click to view or edit">filters</th>'
+      + '<th title="administrative state of this session">state</th></tr>';
     if (!neighbors.length) h += '<tr><td colspan="8" class="empty">No neighbors \u2014 click + to define a BGP peer.</td></tr>';
     else neighbors.forEach((n, i) => {
       const bfdOn = !!n.bfd;
@@ -8210,8 +8210,8 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
         + '<td class="nbr-field nbr-desc-cell">'+esc(n.description||'')+'</td>'
         + '<td class="nbr-pw-cell">'+nbrPwCell(n)+'</td>'
         + '<td><span class="tag-toggle '+(bfdOn?'on':'off')+'" data-nbrbfd="1" title="double-click to '+(bfdOn?'disable':'enable')+' BFD for this peer">'+(bfdOn?'on':'off')+'</span></td>'
-        + '<td><span class="tag-toggle '+(shutdown?'off':'on')+'" data-nbrstate="1" title="double-click to '+(shutdown?'enable':'disable')+' this neighbor">'+(shutdown?'disabled':'enabled')+'</span></td>'
-        + '<td><span class="pill tag-toggle '+(filtersActive(n)?'on':'off')+'" data-nbrfilters="1" title="click to show/hide this neighbor\u2019s BGP route filters">'+filterSummary(n)+'</span></td></tr>';
+        + '<td><span class="pill tag-toggle '+(filtersActive(n)?'on':'off')+'" data-nbrfilters="1" title="click to show/hide this neighbor\u2019s BGP route filters">'+filterSummary(n)+'</span></td>'
+        + '<td><span class="tag-toggle '+(shutdown?'off':'on')+'" data-nbrstate="1" title="double-click to '+(shutdown?'enable':'disable')+' this neighbor">'+(shutdown?'disabled':'enabled')+'</span></td></tr>';
     });
     const t = $('<div></div>'); t.innerHTML = h+'</table>'; nbrBody.appendChild(t);
     const table = t.querySelector('table');
@@ -8417,8 +8417,8 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
       + '<td><input class="nbre-desc" style="width:150px" placeholder="optional" autocomplete="off"></td>'
       + '<td><input class="nbre-pw" type="password" style="width:90px" placeholder="optional" autocomplete="off"> <button class="ghost sm nbre-pw-toggle" title="show while editing">\ud83d\udc41\ufe0f</button> <button class="sm nbre-save">save</button> <button class="ghost sm nbre-cancel">cancel</button></td>'
       + '<td><span class="hint">on</span></td>'
-      + '<td><span class="hint">enabled</span></td>'
-      + '<td><span class="hint" title="save this neighbor first, then click here to set filters">save first</span></td>';
+      + '<td><span class="hint" title="save this neighbor first, then click here to set filters">save first</span></td>'
+      + '<td><span class="hint">enabled</span></td>';
     if (!insertNewRow(table, tr)) return;
     wireNbrForm(tr, null);
   }

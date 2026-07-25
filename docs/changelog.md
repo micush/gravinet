@@ -2,6 +2,14 @@
 
 ---
 
+## v644 — 2026-07-25
+
+**Changed:** Traffic > BGP Neighbors table: the "filters" column (v643)
+now sits before "state" instead of after it. Cosmetic only — no change to
+what's stored or how it's edited.
+
+---
+
 ## v643 — 2026-07-25
 
 **Changed:** Traffic > BGP neighbors' filter in/filter out (v642) moved off
