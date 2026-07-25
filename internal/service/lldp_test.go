@@ -523,3 +523,32 @@ func TestExcludeOpenBSDBaseLLDPD(t *testing.T) {
 		t.Errorf("excludeOpenBSDBaseLLDPD(nil) = %+v, want nothing", got)
 	}
 }
+
+// TestOpenBSDLLDPServiceNameFrom pins the exact rename that produced the
+// second half of the real bug report this fix addresses: "couldn't rcctl
+// set lldpd flags: rcctl: service lldpd does not exist" persisted even
+// after excluding the base binary (TestExcludeOpenBSDBaseLLDPD above),
+// because on OpenBSD 7.9 the ports net/lldpd package's own rc.d(8) script
+// — the one gravinet actually drives — was itself renamed from "lldpd" to
+// "elldpd", confirmed on OpenBSD's own 7.8->7.9 upgrade guide ("to free up
+// the rc script name for future use in base"). Hardcoding "lldpd" broke
+// the moment that guide took effect; this checks the three states that
+// matter instead.
+func TestOpenBSDLLDPServiceNameFrom(t *testing.T) {
+	cases := []struct {
+		name                                  string
+		lldpdScriptExists, elldpdScriptExists bool
+		want                                  string
+	}{
+		{"pre-7.9: only the old lldpd script exists", true, false, "lldpd"},
+		{"7.9+: only the renamed elldpd script exists", false, true, "elldpd"},
+		{"both exist (hypothetical transition moment): prefer the unrenamed one", true, true, "lldpd"},
+		{"neither exists (lldpd not installed): fall back to the recognizable name", false, false, "lldpd"},
+	}
+	for _, c := range cases {
+		if got := openBSDLLDPServiceNameFrom(c.lldpdScriptExists, c.elldpdScriptExists); got != c.want {
+			t.Errorf("%s: openBSDLLDPServiceNameFrom(%v, %v) = %q, want %q",
+				c.name, c.lldpdScriptExists, c.elldpdScriptExists, got, c.want)
+		}
+	}
+}

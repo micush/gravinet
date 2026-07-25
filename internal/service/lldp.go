@@ -184,6 +184,49 @@ func lldpArgs(cfg config.DiscoveryConfig) []string {
 	return args
 }
 
+// openBSDLLDPServiceName returns the rc.d(8) service name gravinet should
+// actually pass to rcctl on this OpenBSD host. This can't be hardcoded as
+// "lldpd": OpenBSD is mid-migration, release by release, over which
+// program that name refers to. 7.8 added a base lldpd(8) with no rc.d
+// script of its own — deliberately, so it wouldn't collide with the ports
+// net/lldpd package's existing "lldpd" script (see lldpdBinary's own doc
+// comment). 7.9 then renamed the ports package's script to "elldpd" —
+// specifically, per OpenBSD's own 7.8->7.9 upgrade guide, "to free up the
+// rc script name for future use in base." A later release giving base's
+// own lldpd(8) an actual "lldpd" script (at which point that name would
+// mean something gravinet still can't drive — see lldpdBinary again) is
+// the obvious next step in that migration, though not confirmed yet.
+//
+// Rather than encode that release-by-release schedule here and have it go
+// stale the next time OpenBSD moves the name again, this checks the
+// filesystem directly for whichever rc.d script actually exists —
+// "lldpd" (pre-7.9) or "elldpd" (7.9 and, presumably, later) — which is
+// the same thing rcctl itself would need to find to succeed. Falls back
+// to "lldpd" when neither is found (lldpd not installed at all, or some
+// future rename this hasn't caught up with yet), so an error at least
+// names the service an operator would recognize rather than an empty
+// string.
+func openBSDLLDPServiceName() string {
+	return openBSDLLDPServiceNameFrom(fileExists("/etc/rc.d/lldpd"), fileExists("/etc/rc.d/elldpd"))
+}
+
+// openBSDLLDPServiceNameFrom is openBSDLLDPServiceName's actual decision,
+// taking the two rc.d(8) script checks as plain values rather than
+// deriving them internally — the same "take runnable/wantArgv as
+// arguments instead of a config" shape strayLLDPProcs above already uses,
+// and for the identical reason: it's what makes the decision itself pure
+// and directly testable without needing a real /etc/rc.d/lldpd or
+// /etc/rc.d/elldpd to exist on whatever machine runs the test suite.
+func openBSDLLDPServiceNameFrom(lldpdScriptExists, elldpdScriptExists bool) string {
+	if lldpdScriptExists {
+		return "lldpd"
+	}
+	if elldpdScriptExists {
+		return "elldpd"
+	}
+	return "lldpd"
+}
+
 func activeLLDPIfaces(cfg config.DiscoveryConfig) []string {
 	var out []string
 	for _, i := range cfg.Interfaces {
@@ -235,9 +278,10 @@ func writeLLDPFlags(cfg config.DiscoveryConfig) (bool, string) {
 		}
 		return true, ""
 	case "openbsd":
+		svc := openBSDLLDPServiceName()
 		flags := strings.Join(args[1:], " ")
-		if out, err := exec.Command("rcctl", "set", "lldpd", "flags", flags).CombinedOutput(); err != nil {
-			return false, cmdErr("rcctl set lldpd flags", out, err)
+		if out, err := exec.Command("rcctl", "set", svc, "flags", flags).CombinedOutput(); err != nil {
+			return false, cmdErr("rcctl set "+svc+" flags", out, err)
 		}
 		return true, ""
 	case "darwin":
@@ -416,7 +460,7 @@ func lldpServiceStopQuietly() {
 	case "freebsd":
 		exec.Command("service", "lldpd", "stop").Run()
 	case "openbsd":
-		exec.Command("rcctl", "stop", "lldpd").Run()
+		exec.Command("rcctl", "stop", openBSDLLDPServiceName()).Run()
 	case "darwin":
 		exec.Command("brew", "services", "stop", "lldpd").Run()
 	}
@@ -449,9 +493,10 @@ func lldpServiceStart() (bool, string) {
 		}
 		return true, ""
 	case "openbsd":
-		exec.Command("rcctl", "enable", "lldpd").Run()
-		if out, err := exec.Command("rcctl", "start", "lldpd").CombinedOutput(); err != nil {
-			return false, cmdErr("rcctl start lldpd", out, err)
+		svc := openBSDLLDPServiceName()
+		exec.Command("rcctl", "enable", svc).Run()
+		if out, err := exec.Command("rcctl", "start", svc).CombinedOutput(); err != nil {
+			return false, cmdErr("rcctl start "+svc, out, err)
 		}
 		return true, ""
 	case "darwin":
@@ -491,9 +536,10 @@ func lldpServiceStop() (bool, string) {
 			ok, hint = false, cmdErr("service lldpd stop", out, err)
 		}
 	case "openbsd":
-		exec.Command("rcctl", "disable", "lldpd").Run()
-		if out, err := exec.Command("rcctl", "stop", "lldpd").CombinedOutput(); err != nil && !strings.Contains(strings.ToLower(string(out)), "not running") {
-			ok, hint = false, cmdErr("rcctl stop lldpd", out, err)
+		svc := openBSDLLDPServiceName()
+		exec.Command("rcctl", "disable", svc).Run()
+		if out, err := exec.Command("rcctl", "stop", svc).CombinedOutput(); err != nil && !strings.Contains(strings.ToLower(string(out)), "not running") {
+			ok, hint = false, cmdErr("rcctl stop "+svc, out, err)
 		}
 	case "darwin":
 		if out, err := exec.Command("brew", "services", "stop", "lldpd").CombinedOutput(); err != nil {
@@ -516,7 +562,7 @@ func LLDPServiceRunning() bool {
 	case "freebsd":
 		return exec.Command("service", "lldpd", "status").Run() == nil
 	case "openbsd":
-		return exec.Command("rcctl", "check", "lldpd").Run() == nil
+		return exec.Command("rcctl", "check", openBSDLLDPServiceName()).Run() == nil
 	case "darwin":
 		out, err := exec.Command("brew", "services", "list").CombinedOutput()
 		if err != nil {
@@ -564,8 +610,9 @@ func RestartLLDPIfRunning() (bool, string) {
 			return false, cmdErr("service lldpd restart", out, err)
 		}
 	case "openbsd":
-		if out, err := exec.Command("rcctl", "restart", "lldpd").CombinedOutput(); err != nil {
-			return false, cmdErr("rcctl restart lldpd", out, err)
+		svc := openBSDLLDPServiceName()
+		if out, err := exec.Command("rcctl", "restart", svc).CombinedOutput(); err != nil {
+			return false, cmdErr("rcctl restart "+svc, out, err)
 		}
 	case "darwin":
 		if out, err := exec.Command("brew", "services", "restart", "lldpd").CombinedOutput(); err != nil {

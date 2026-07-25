@@ -2,6 +2,34 @@
 
 ---
 
+## v650 — 2026-07-25
+
+**Fixed:** System > L2 Disco on OpenBSD: v649 stopped gravinet from being
+fooled by OpenBSD 7.8's new base-system `lldpd(8)` into thinking a binary
+it can't actually drive was usable — but "couldn't rcctl set lldpd flags:
+rcctl: service lldpd does not exist" kept happening anyway on OpenBSD 7.9,
+for a second, unrelated reason: 7.9 renamed the ports `net/lldpd`
+package's own rc.d(8) script from `lldpd` to `elldpd` — confirmed on
+OpenBSD's own 7.8→7.9 upgrade guide, "to free up the rc script name for
+future use in base." Every `rcctl` call in this file still hardcoded the
+literal string `"lldpd"`, which stopped resolving to anything the moment
+that rename took effect — the exact same symptom as v649's bug, but with
+v649's own fix already correctly finding the real, compatible ports
+binary at `/usr/local/sbin/lldpd`.
+
+Since OpenBSD is now visibly mid-migration on this name release to
+release — 7.8 deliberately withheld an rc.d script from base's own
+lldpd(8) specifically to avoid this exact collision, 7.9 renamed the
+package's script to make room for base's eventual one — hardcoding
+either name would just break again at the next release. `rcctl set
+lldpd/elldpd flags`, `enable`, `start`, `stop`, `disable`, `check`, and
+`restart` now all resolve the actual service name by checking which of
+`/etc/rc.d/lldpd` / `/etc/rc.d/elldpd` exists at the time, the same thing
+rcctl itself would need to find to succeed, instead of a name gravinet
+guesses once and stops re-checking.
+
+---
+
 ## v649 — 2026-07-25
 
 **Fixed:** System > L2 Disco on OpenBSD: enabling link-layer discovery
