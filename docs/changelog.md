@@ -2,6 +2,37 @@
 
 ---
 
+## v643 — 2026-07-25
+
+**Changed:** Traffic > BGP neighbors' filter in/filter out (v642) moved off
+raw comma-separated text crammed into two table cells and onto a proper
+chip-based editor: each neighbor row now has one "filters" pill
+(`unfiltered`, or e.g. `2 in, 1 out`) that opens a shared panel below the
+table with a labeled CIDR chip list per direction — type a prefix, hit
+Enter or "add", it becomes a removable chip; a bad CIDR is rejected inline
+(`isPlausibleCidr`) instead of silently saved and only discovered later.
+The comma-separated columns were hard to read past a couple of entries,
+gave no feedback on a malformed CIDR until the server quietly dropped it,
+and left no room to grow.
+
+Also fixes a latent bug the original layout would have hit the first time
+anyone actually used it: the initial version rendered each neighbor's
+filter panel as a second `<tr>` directly under its row, but this table's
+column-sort (`enhanceTable`) treats any row containing a `colspan` cell as
+a placeholder and moves it to the end of the table body on every sort —
+exactly the panel row's shape. Sorting the Neighbors table by any column
+would have silently detached every open filter panel from the neighbor it
+belonged to. The panel is now one shared element rendered below the table
+(outside it, not part of any row), rebuilt for whichever neighbor is
+currently open, which sidesteps the sort behavior entirely rather than
+fighting it.
+
+The saved shape is unchanged — `BGPNeighbor.filter_in`/`filter_out` on
+`GET/POST /api/bgp/config` are exactly as of v642 — so this is UI-only; no
+config migration, no FRR-rendering change.
+
+---
+
 ## v642 — 2026-07-25
 
 **New:** Traffic > BGP neighbors can now filter what BGP itself accepts

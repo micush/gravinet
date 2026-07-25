@@ -422,37 +422,56 @@ func TestUpgradeAllThenLocalOption(t *testing.T) {
 	}
 }
 
-// TestBgpNeighborFilterColumnsWired guards the BGP neighbor editor's
-// filter-in/filter-out columns: they must be double-click-editable like
-// every other .nbr-field, and their values must actually reach the saved
-// payload — the same three checkpoints (render, edit, save) a silent typo in
-// any one of the class names used to wire them together would otherwise slip
-// through undetected in every other test here, since none of them exercise
-// this specific pair of columns.
-func TestBgpNeighborFilterColumnsWired(t *testing.T) {
-	// Rendered as part of the same .nbr-field set the peer/AS/description
-	// cells use, so the existing "double-click any .nbr-field to edit the
-	// row" wiring picks them up automatically.
-	if !strings.Contains(indexHTML, "nbr-filterin-cell") || !strings.Contains(indexHTML, "nbr-filterout-cell") {
-		t.Fatal("neighbor render is missing the filter-in/filter-out cells")
+// TestBgpNeighborFiltersPillWired guards the BGP neighbor editor's filters
+// UI: a clickable per-neighbor summary pill that opens a shared panel with
+// two CIDR chip editors (filter in/out), rather than raw comma-separated
+// text crammed into a table cell — the panel must actually be built from
+// buildCidrChipEditor, its edits must reach the neighbors array (not just
+// sit in the widget), and the outer save payload must carry filter_in/
+// filter_out through to /api/bgp/config. Four checkpoints a silent typo in
+// any of the wiring between them would otherwise slip through undetected.
+func TestBgpNeighborFiltersPillWired(t *testing.T) {
+	// The per-row summary pill and its single-click (not double-click, since
+	// it opens a panel rather than editing a value in place — see
+	// TestBgpNeighborMd5CellIsEditable for the precedent this follows).
+	if !strings.Contains(indexHTML, "data-nbrfilters") {
+		t.Fatal("neighbor render is missing the filters pill")
 	}
-	// The row-edit form must build actual inputs for both, keyed by the
-	// class names wireNbrForm's save handler reads back.
-	if !strings.Contains(indexHTML, "nbre-filterin") || !strings.Contains(indexHTML, "nbre-filterout") {
-		t.Fatal("neighbor row-edit form is missing the filter-in/filter-out inputs")
+	if !strings.Contains(indexHTML, "if (openIdx === idx) closeFiltersPanel(); else openFiltersPanel(idx);") {
+		t.Error("the filters pill no longer opens/closes the shared filters panel")
 	}
-	// The save handler must actually read those inputs (via parseCidrList)
-	// and put them on the saved entry — the same shape rcList/rsList/rmList
-	// use for the redistribute pickers, applied per-neighbor here instead.
-	if !strings.Contains(indexHTML, "filter_in: parseCidrList(tr.querySelector('.nbre-filterin').value)") {
-		t.Error("neighbor save no longer parses the filter-in input into the saved entry")
+	// The panel must live outside the <table> — a sibling in nbrBody, not a
+	// second <tr> per neighbor. A per-row detail row would get silently
+	// detached from its neighbor by enhanceTable's column sort, which moves
+	// any colspan row to the end of the table as a "placeholder" (the same
+	// mechanism the empty-state row relies on).
+	if !strings.Contains(indexHTML, "nbrBody.appendChild(filtersPanel)") {
+		t.Fatal("the filters panel is no longer appended to nbrBody (outside the table)")
 	}
-	if !strings.Contains(indexHTML, "filter_out: parseCidrList(tr.querySelector('.nbre-filterout').value)") {
-		t.Error("neighbor save no longer parses the filter-out input into the saved entry")
+	if strings.Contains(indexHTML, "nbr-filters-detail") {
+		t.Error("a per-neighbor <tr> detail row reappeared — enhanceTable's sort will detach it from its neighbor (see filtersPanel's own doc comment)")
+	}
+	// The panel must actually be built from the free-text chip editor, fed
+	// this neighbor's current filter_in/filter_out, and write edits back
+	// into the neighbors array so doSave picks them up.
+	if !strings.Contains(indexHTML, "function buildCidrChipEditor(") {
+		t.Fatal("buildCidrChipEditor is missing")
+	}
+	if !strings.Contains(indexHTML, "buildCidrChipEditor(n.filter_in,") || !strings.Contains(indexHTML, "buildCidrChipEditor(n.filter_out,") {
+		t.Error("openFiltersPanel no longer builds a chip editor for filter_in/filter_out")
+	}
+	if !strings.Contains(indexHTML, "neighbors[idx].filter_in = v;") || !strings.Contains(indexHTML, "neighbors[idx].filter_out = v;") {
+		t.Error("the chip editors' onChange no longer writes back into the neighbors array")
+	}
+	// A basic peer/AS/description/password edit must not clobber an existing
+	// neighbor's filters — this is the regression this feature's own row-edit
+	// form is most likely to reintroduce, since filter_in/filter_out live
+	// outside that form entirely now.
+	if !strings.Contains(indexHTML, "filter_in: idx != null ? neighbors[idx].filter_in : [],") {
+		t.Error("the row-edit form no longer preserves an existing neighbor's filter_in across a basic edit")
 	}
 	// And the outer payload sent to /api/bgp/config must carry each
-	// neighbor's filter_in/filter_out through, not just the fields that
-	// existed before this feature.
+	// neighbor's filter_in/filter_out through.
 	if !strings.Contains(indexHTML, "filter_in:n.filter_in||[], filter_out:n.filter_out||[]") {
 		t.Error("the BGP config save payload no longer includes each neighbor's filter_in/filter_out")
 	}

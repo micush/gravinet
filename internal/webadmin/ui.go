@@ -4789,6 +4789,91 @@ function buildRouteChipPicker(available, selected, onChange, opts){
   };
 }
 
+// isPlausibleCidr is a light client-side sanity check for buildCidrChipEditor
+// (currently only the BGP neighbor filter-in/filter-out editors): a rough
+// shape check on a CIDR string, not a substitute for the server's own
+// validation — renderFRR's safeToken already drops anything unsafe at render
+// time regardless of what reaches it here. This exists purely so a typo is
+// caught at the point of typing it, with the actual bad token still visible
+// on screen, rather than silently saved and only discoverable later by
+// noticing a route that should be filtered isn't.
+function isPlausibleCidr(v){
+  const parts = v.split('/');
+  if (parts.length !== 2 || !/^\d{1,3}$/.test(parts[1])) return false;
+  const addr = parts[0], len = parseInt(parts[1], 10);
+  if (addr.indexOf(':') >= 0) return len <= 128 && /^[0-9a-fA-F:]+$/.test(addr);
+  const octets = addr.split('.');
+  return len <= 32 && octets.length === 4 && octets.every(o => /^\d{1,3}$/.test(o) && +o <= 255);
+}
+
+// buildCidrChipEditor is buildRouteChipPicker's free-text sibling: instead of
+// picking from a known "available" pool, the operator types a CIDR directly
+// and it becomes a chip — used where there's nothing to pick *from* (a BGP
+// neighbor's own filter-in/filter-out is prefixes that peer sends, or this
+// speaker carries, not something gravinet already has a catalog of the way
+// it does for connected/static/mesh routes). Shares buildRouteChipPicker's
+// chip styling (.route-chips/.route-chip/.route-chip-x) so a typed filter
+// list reads the same as every other "chips below an input" picker here.
+//
+// Accepts a comma/whitespace-separated batch pasted into the input in one
+// go (parity with how a filter list might arrive from elsewhere, e.g.
+// copied out of another router's config) — each token is validated on its
+// own via isPlausibleCidr; the valid ones are added and any invalid ones are
+// named back to the operator instead of being silently dropped, so a typo
+// in a five-CIDR paste doesn't just quietly lose one entry.
+function buildCidrChipEditor(selected, onChange, opts){
+  opts = opts || {};
+  const wrap = $('<div class="route-picker" style="max-width:340px"></div>');
+  const addRow = $('<div style="display:flex;gap:6px"></div>');
+  const inp = $('<input class="ss-input" type="text" autocomplete="off" spellcheck="false" style="flex:1" placeholder="'+esc(opts.placeholder || 'e.g. 10.0.0.0/24')+'">');
+  const addBtn = $('<button type="button" class="ghost sm">add</button>');
+  addRow.appendChild(inp); addRow.appendChild(addBtn);
+  const err = $('<div class="hint" style="color:var(--danger);display:none;margin:4px 0 0"></div>');
+  const chipBox = $('<div class="route-chips" style="margin-top:8px"></div>');
+  wrap.appendChild(addRow); wrap.appendChild(err); wrap.appendChild(chipBox);
+
+  let list = (selected||[]).slice();
+
+  const drawChips = () => {
+    chipBox.innerHTML = '';
+    if (!list.length){
+      chipBox.appendChild($('<div class="hint" style="padding:2px 0">unfiltered \u2014 every prefix is currently permitted</div>'));
+      return;
+    }
+    list.forEach((cidr, i) => {
+      const chip = $('<span class="route-chip"></span>');
+      chip.appendChild(document.createTextNode(cidr));
+      const x = $('<button type="button" class="route-chip-x" aria-label="remove '+esc(cidr)+'">\u00d7</button>');
+      x.onclick = () => { list.splice(i, 1); drawChips(); onChange(list.slice()); };
+      chip.appendChild(x);
+      chipBox.appendChild(chip);
+    });
+  };
+  const tryAdd = () => {
+    const raw = inp.value.trim();
+    if (!raw) return;
+    const bad = [];
+    raw.split(/[,\s]+/).map(s => s.trim()).filter(s => s.length).forEach(v => {
+      if (!isPlausibleCidr(v)){ bad.push(v); return; }
+      if (list.indexOf(v) === -1) list.push(v);
+    });
+    err.style.display = bad.length ? '' : 'none';
+    if (bad.length) err.textContent = 'not a CIDR, not added: '+bad.join(', ')+' (e.g. 10.0.0.0/24 or fd00::/64)';
+    inp.value = '';
+    drawChips(); onChange(list.slice());
+  };
+  addBtn.onclick = tryAdd;
+  inp.onkeydown = (e) => { if (e.key === 'Enter'){ e.preventDefault(); tryAdd(); } };
+  inp.oninput = () => { err.style.display = 'none'; };
+
+  drawChips();
+  return {
+    wrap,
+    get: () => list.slice(),
+    set: (v) => { list = (v||[]).slice(); drawChips(); },
+  };
+}
+
 function fwAddRow(table, net){
   const tr = document.createElement('tr');
   tr.innerHTML = '<td class="selcol"></td>'
@@ -7737,7 +7822,7 @@ function infoRoutes(c){
 // The whole section is only reachable when state.bgpSupported is true (vtysh
 // present); see sectionVisible().
 function secBgp(c){
-  secHint(c, 'BGP configuration for dynamic routing. For neighbors and advertised networks: use + to add a row, double-click a field to edit it (double-click BFD to toggle it), tick rows and \u2212 to remove. Click the \ud83d\udc41\ufe0f next to a neighbor\u2019s MD5 password to reveal or mask it. \u201cFilter in\u201d/\u201cfilter out\u201d restrict which prefixes are accepted from, or advertised to, that one neighbor \u2014 a comma-separated CIDR list, or blank for unfiltered (the default). This is separate from the Redistribute pickers below, which control what gets fed into BGP from elsewhere on this host, not what BGP itself exchanges with a neighbor.');
+  secHint(c, 'BGP configuration for dynamic routing. For neighbors and advertised networks: use + to add a row, double-click a field to edit it (double-click BFD to toggle it), tick rows and \u2212 to remove. Click the \ud83d\udc41\ufe0f next to a neighbor\u2019s MD5 password to reveal or mask it. Click a neighbor\u2019s \u201cfilters\u201d pill to restrict which prefixes BGP itself accepts from, or advertises to, that one neighbor \u2014 blank means unfiltered (the default). This is separate from the Redistribute pickers below, which control what gets fed into BGP from elsewhere on this host, not what BGP itself exchanges with a neighbor.');
   const editWrap = $('<div></div>'); c.appendChild(editWrap);
 
   const fail = (msg) => {
@@ -8090,20 +8175,31 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
     ? '<span class="kval masked nbr-pw-val">\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022</span> <button class="ghost sm nbr-pw-toggle" title="show this neighbor\u2019s MD5 password">\ud83d\udc41\ufe0f</button>'
     : '<span class="hint">none</span>';
 
-  // cidrListCell renders a compact summary for a FilterIn/FilterOut cell: a
-  // dash when unset (the default, unfiltered state — see BGPNeighbor's doc
-  // comment), or the comma-joined CIDR list otherwise. Shared by the two
-  // filter columns since they're symmetric.
-  const cidrListCell = (list) => list.length ? esc(list.join(', ')) : '<span class="hint">\u2014</span>';
+  // filterSummary/filtersActive describe a neighbor's current FilterIn/
+  // FilterOut state for the clickable summary pill in its row: "unfiltered"
+  // (muted, the default — every neighbor's state before this feature
+  // existed) or e.g. "2 in, 1 out" (highlighted) once either direction has
+  // anything in it. Kept separate from rendering the pill itself so
+  // refreshFiltersPill (below) can recompute just the pill's text/class
+  // after a chip editor edit, without re-rendering the whole table and
+  // losing whatever detail panels happen to be open.
+  const filterSummary = (n) => {
+    const fi = (n.filter_in||[]).length, fo = (n.filter_out||[]).length;
+    if (!fi && !fo) return 'unfiltered';
+    const parts = [];
+    if (fi) parts.push(fi+' in');
+    if (fo) parts.push(fo+' out');
+    return parts.join(', ');
+  };
+  const filtersActive = (n) => !!((n.filter_in||[]).length || (n.filter_out||[]).length);
 
   function renderNbrs(){
     nbrBody.innerHTML = '';
     let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>peer address</th><th>remote AS</th><th>description</th>'
       + '<th title="MD5 session password">MD5 password</th><th title="Bidirectional Forwarding Detection for this peer">BFD</th>'
       + '<th title="administrative state of this session">state</th>'
-      + '<th title="only these prefixes are accepted from this neighbor; blank means unfiltered (accept everything, gravinet\u2019s behavior before this column existed)">filter in</th>'
-      + '<th title="only these prefixes are advertised to this neighbor; blank means unfiltered (advertise everything this speaker carries, gravinet\u2019s behavior before this column existed)">filter out</th></tr>';
-    if (!neighbors.length) h += '<tr><td colspan="9" class="empty">No neighbors \u2014 click + to define a BGP peer.</td></tr>';
+      + '<th title="what BGP itself accepts from / advertises to this one neighbor \u2014 click to view or edit">filters</th></tr>';
+    if (!neighbors.length) h += '<tr><td colspan="8" class="empty">No neighbors \u2014 click + to define a BGP peer.</td></tr>';
     else neighbors.forEach((n, i) => {
       const bfdOn = !!n.bfd;
       const shutdown = !!n.shutdown;
@@ -8115,8 +8211,7 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
         + '<td class="nbr-pw-cell">'+nbrPwCell(n)+'</td>'
         + '<td><span class="tag-toggle '+(bfdOn?'on':'off')+'" data-nbrbfd="1" title="double-click to '+(bfdOn?'disable':'enable')+' BFD for this peer">'+(bfdOn?'on':'off')+'</span></td>'
         + '<td><span class="tag-toggle '+(shutdown?'off':'on')+'" data-nbrstate="1" title="double-click to '+(shutdown?'enable':'disable')+' this neighbor">'+(shutdown?'disabled':'enabled')+'</span></td>'
-        + '<td class="nbr-field nbr-filterin-cell">'+cidrListCell(n.filter_in)+'</td>'
-        + '<td class="nbr-field nbr-filterout-cell">'+cidrListCell(n.filter_out)+'</td></tr>';
+        + '<td><span class="pill tag-toggle '+(filtersActive(n)?'on':'off')+'" data-nbrfilters="1" title="click to show/hide this neighbor\u2019s BGP route filters">'+filterSummary(n)+'</span></td></tr>';
     });
     const t = $('<div></div>'); t.innerHTML = h+'</table>'; nbrBody.appendChild(t);
     const table = t.querySelector('table');
@@ -8178,6 +8273,80 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
         }
       };
     });
+    // refreshFiltersPill recomputes one neighbor's filters pill in place —
+    // used by the chip editors' onChange below so editing a filter updates
+    // its own row's summary without a full renderNbrs() re-render (which
+    // would also blow away whatever's currently open in filtersPanel below).
+    function refreshFiltersPill(idx){
+      const tag = t.querySelector('tr.nbrrow[data-idx="'+idx+'"] [data-nbrfilters]');
+      if (!tag) return;
+      const n = neighbors[idx];
+      tag.className = 'pill tag-toggle ' + (filtersActive(n) ? 'on' : 'off');
+      tag.textContent = filterSummary(n);
+    }
+    // filtersPanel is one shared, collapsible panel below the table — not a
+    // second <tr> per neighbor. It has to live outside <table> entirely:
+    // enhanceTable's column sort (above) treats any row containing a
+    // colspan cell as a placeholder and moves it to the end of the table
+    // body on every sort (the same mechanism the "no neighbors yet" empty
+    // row relies on) — a real per-neighbor detail row built that way would
+    // get silently detached from the neighbor it belongs to the first time
+    // the operator sorts this table by a column. One shared panel, whose
+    // content is rebuilt for whichever neighbor is currently open, sidesteps
+    // that entirely.
+    const filtersPanel = $('<div class="card" style="margin-top:10px;padding:12px"></div>');
+    filtersPanel.style.display = 'none';
+    nbrBody.appendChild(filtersPanel);
+    let openIdx = null;
+    function closeFiltersPanel(){
+      openIdx = null;
+      filtersPanel.style.display = 'none';
+      filtersPanel.innerHTML = '';
+    }
+    // openFiltersPanel builds the panel content fresh each time it opens (or
+    // switches to a different neighbor): the peer address as a heading, then
+    // two chip editors — see buildCidrChipEditor's own doc comment for why
+    // this can't just reuse buildRouteChipPicker (there's no "available"
+    // pool to pick from here; a neighbor's filter is prefixes it sends, or
+    // this speaker carries, typed in directly, not chosen from a catalog
+    // gravinet already knows about).
+    function openFiltersPanel(idx){
+      openIdx = idx;
+      const n = neighbors[idx];
+      filtersPanel.innerHTML = '';
+      filtersPanel.style.display = '';
+      filtersPanel.appendChild($('<div class="settings-label" style="margin-bottom:10px">Route filters for '+esc(n.peer||'this neighbor')+'</div>'));
+      filtersPanel.appendChild($('<div class="settings-label" style="margin-bottom:2px">Accept from this neighbor (filter in)</div>'));
+      filtersPanel.appendChild($('<div class="settings-desc" style="margin:0 0 8px">Only these prefixes are accepted from this neighbor; blank permits everything, same as before this feature existed.</div>'));
+      const inEditor = buildCidrChipEditor(n.filter_in, (v) => {
+        neighbors[idx].filter_in = v; refreshFiltersPill(idx); scheduleSave(true);
+      });
+      filtersPanel.appendChild(inEditor.wrap);
+      filtersPanel.appendChild($('<div class="settings-label" style="margin:14px 0 2px">Advertise to this neighbor (filter out)</div>'));
+      filtersPanel.appendChild($('<div class="settings-desc" style="margin:0 0 8px">Only these prefixes are advertised to this neighbor; blank advertises everything this speaker carries, same as before this feature existed.</div>'));
+      const outEditor = buildCidrChipEditor(n.filter_out, (v) => {
+        neighbors[idx].filter_out = v; refreshFiltersPill(idx); scheduleSave(true);
+      });
+      filtersPanel.appendChild(outEditor.wrap);
+      const closeBtn = $('<button type="button" class="ghost sm" style="margin-top:12px">close</button>');
+      closeBtn.onclick = closeFiltersPanel;
+      filtersPanel.appendChild(closeBtn);
+    }
+    // The filters pill is a single click (not the row's usual double-click),
+    // matching the MD5 reveal button's precedent above: this reveals/hides a
+    // panel rather than editing a stored value in place, the same
+    // distinction that already separates nbr-pw-toggle's single click from
+    // every dblclick elsewhere in this row. Clicking the pill for whichever
+    // neighbor is already open closes it; clicking a different neighbor's
+    // pill switches the panel to that neighbor instead of stacking a second
+    // one.
+    t.querySelectorAll('[data-nbrfilters]').forEach(tag => {
+      tag.onclick = (e) => {
+        e.stopPropagation();
+        const idx = parseInt(tag.closest('tr').dataset.idx, 10);
+        if (openIdx === idx) closeFiltersPanel(); else openFiltersPanel(idx);
+      };
+    });
     selAllWire(t);
     table._rowAdd = () => nbrAddRow(table);
     table._rowRemove = () => {
@@ -8193,14 +8362,13 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
   // wireNbrForm wires the shared peer/AS/description/password edit form —
   // used by both a brand-new row (idx null, appended on save) and an
   // existing row being edited in place (idx is its position in neighbors).
-  // parseCidrList splits a comma/whitespace-separated free-text field (the
-  // filter-in/filter-out inputs) into a trimmed, non-empty CIDR list — the
-  // same free-text shape Advertised networks already uses per-row, just
-  // allowing several prefixes in one cell instead of one prefix per row,
-  // since a neighbor's filter is typically more than a single CIDR.
-  function parseCidrList(v){
-    return (v||'').split(/[,\s]+/).map(s => s.trim()).filter(s => s.length);
-  }
+  // FilterIn/FilterOut are deliberately not part of this form — they're
+  // edited through the filters pill's own panel above (renderNbrs), which
+  // saves immediately on every add/remove the same way BFD/state do, rather
+  // than waiting on this form's save button. An existing neighbor's
+  // filter_in/filter_out are carried forward untouched here for exactly that
+  // reason: this save must never clobber them just because the operator
+  // happened to edit the description at the same time.
   function wireNbrForm(tr, idx){
     const pwInp = tr.querySelector('.nbre-pw'), pwToggle = tr.querySelector('.nbre-pw-toggle');
     pwToggle.onclick = (e) => {
@@ -8224,8 +8392,8 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
         // neighbor being edited keeps whatever it actually has.
         bfd: idx != null ? neighbors[idx].bfd : true,
         shutdown: idx != null ? neighbors[idx].shutdown : false,
-        filter_in: parseCidrList(tr.querySelector('.nbre-filterin').value),
-        filter_out: parseCidrList(tr.querySelector('.nbre-filterout').value),
+        filter_in: idx != null ? neighbors[idx].filter_in : [],
+        filter_out: idx != null ? neighbors[idx].filter_out : [],
       };
       if (idx != null) neighbors[idx] = entry; else neighbors.push(entry);
       renderNbrs(); scheduleSave(true);
@@ -8239,8 +8407,6 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
     tr.querySelector('.nbr-desc-cell').innerHTML = '<input class="nbre-desc" style="width:150px" placeholder="optional" autocomplete="off" value="'+esc(n.description||'')+'">';
     tr.querySelector('.nbr-pw-cell').innerHTML = '<input class="nbre-pw" type="password" style="width:90px" placeholder="optional" autocomplete="off" value="'+esc(n.password||'')+'"> '
       + '<button class="ghost sm nbre-pw-toggle" title="show while editing">\ud83d\udc41\ufe0f</button> <button class="sm nbre-save">save</button> <button class="ghost sm nbre-cancel">cancel</button>';
-    tr.querySelector('.nbr-filterin-cell').innerHTML = '<input class="nbre-filterin" style="width:150px" placeholder="blank = unfiltered" autocomplete="off" value="'+esc((n.filter_in||[]).join(', '))+'">';
-    tr.querySelector('.nbr-filterout-cell').innerHTML = '<input class="nbre-filterout" style="width:150px" placeholder="blank = unfiltered" autocomplete="off" value="'+esc((n.filter_out||[]).join(', '))+'">';
     wireNbrForm(tr, idx);
   }
   function nbrAddRow(table){
@@ -8252,8 +8418,7 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
       + '<td><input class="nbre-pw" type="password" style="width:90px" placeholder="optional" autocomplete="off"> <button class="ghost sm nbre-pw-toggle" title="show while editing">\ud83d\udc41\ufe0f</button> <button class="sm nbre-save">save</button> <button class="ghost sm nbre-cancel">cancel</button></td>'
       + '<td><span class="hint">on</span></td>'
       + '<td><span class="hint">enabled</span></td>'
-      + '<td><input class="nbre-filterin" style="width:150px" placeholder="blank = unfiltered" autocomplete="off"></td>'
-      + '<td><input class="nbre-filterout" style="width:150px" placeholder="blank = unfiltered" autocomplete="off"></td>';
+      + '<td><span class="hint" title="save this neighbor first, then click here to set filters">save first</span></td>';
     if (!insertNewRow(table, tr)) return;
     wireNbrForm(tr, null);
   }
