@@ -280,6 +280,7 @@ cookie, or a qualifying fleet-manager mesh session — see
 | POST | `/api/speedtest/sink` | Upload-test data sink (peer-facing) |
 | POST | `/api/speedtest/run` | Run a two-way speed test against a peer |
 | GET | `/api/localroutes` | This host's kernel routing table |
+| GET | `/api/l2neighbors` | Live LLDP/CDP neighbor table (Monitor > L2 Peers) |
 | GET | `/api/localhosts` | This host's `/etc/hosts` (or platform equivalent) contents |
 | GET | `/api/localdns` | This host's live OS resolver registration, per network |
 | GET | `/api/latency` | Ping every peer on every network |
@@ -1330,6 +1331,26 @@ platforms, the raw text of the OS's native route-listing command.
 On non-Linux: `{"entries": [], "text": "...", "os": "darwin"}` (or
 similarly for other platforms), possibly with an `error` field.
 
+### `GET /api/l2neighbors`
+
+Live LLDP/CDP neighbor state for Monitor > L2 Peers — the link-layer
+analogue of `/api/localroutes` above and `/api/bgp`/`/api/bfd` (BGP's own
+"configure vs observe" split: the editor is `/api/system/l2disco`, this is
+the read-only view). Read-only all the way down; the response is exactly
+`/api/system/l2disco`'s own shape (see that endpoint's own doc comment for
+why the two share one implementation), so every field documented there —
+`neighbors`/`neighbors_available`/`neighbors_hint`/`running`/`supported`/
+`hint`/`strays`/`stray_hint` — means the same thing here, `interfaces`/
+`enabled` included even though this page has no use for them:
+
+```json
+{"neighbors": [{"local_iface": "eth0", "system_name": "switch1.example",
+                "port": "GigabitEthernet0/1", "mgmt_ip": "10.0.0.1", "protocol": "LLDP"}],
+ "neighbors_available": true, "neighbors_hint": "",
+ "running": true, "supported": true, "hint": "",
+ "strays": [], "stray_hint": ""}
+```
+
 ### `GET /api/localhosts`
 
 Raw contents of this host's hosts file (the same file the daemon writes
@@ -1730,11 +1751,14 @@ reason that has nothing to do with the fields.
 
 Reads or replaces this node's link-layer discovery (LLDP, and optionally
 Cisco CDP) configuration, and reports live neighbor status — like
-Power/Time/Users/SNMP, follows the currently selected node. Duplicates
-parapet's Network > L2 Discovery config page and its separate Monitor >
-Status: LLDP/CDP neighbor table onto one page, combining config and live
-status the same way SNMP's own endpoint does here, rather than parapet's
-split across two different nav locations.
+Power/Time/Users/SNMP, follows the currently selected node. Originally
+duplicated parapet's Network > L2 Discovery config page and its separate
+Monitor > Status: LLDP/CDP neighbor table onto one page, combining config
+and live status the same way SNMP's own endpoint does here, rather than
+parapet's split across two different nav locations — see
+`GET /api/l2neighbors` below for why gravinet now also has a dedicated
+Monitor page again, reusing this endpoint's own neighbor data rather than
+computing it twice.
 
 Same architecture note as SNMP, restated because it applies again here:
 parapet spawns and supervises `lldpd` as a direct child of its own
@@ -1747,7 +1771,7 @@ than running either as a child.
 {"interfaces": [{"name": "eth0", "lldp": true, "cdp": false}],
  "supported": true, "hint": "", "running": true,
  "neighbors": [{"local_iface": "eth0", "system_name": "switch1.example",
-                "port": "GigabitEthernet0/1", "mgmt_ip": "10.0.0.1"}],
+                "port": "GigabitEthernet0/1", "mgmt_ip": "10.0.0.1", "protocol": "LLDP"}],
  "neighbors_available": true, "neighbors_hint": ""}
 ```
 
@@ -1764,7 +1788,12 @@ than running either as a child.
   `neighbors_available: false` (with `neighbors_hint` explaining why —
   lldpcli not installed, or lldpd not running) is different from
   `neighbors_available: true` with an empty `neighbors` array, which just
-  means no neighbors have been heard from yet.
+  means no neighbors have been heard from yet. Each neighbor's `protocol`
+  is lldpd's own reported value — `"LLDP"`, `"CDPv1"`, or `"CDPv2"` in
+  practice, since only those two protocols can be turned on via `cdp` above
+  — and can be empty if lldpd's own output omits it. A switch answering
+  both LLDP and CDP on the same port produces two separate entries (same
+  `local_iface`, different `protocol`), not one merged row.
 
 `POST` takes the same `interfaces` shape back:
 

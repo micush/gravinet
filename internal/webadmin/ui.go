@@ -750,6 +750,11 @@ const NAV_GROUPS = [
     // Read-only; the editor lives under Traffic > BGP. Gated on vtysh like the
     // editor (sectionVisible), so it's hidden on hosts without FRR.
     ['bgp-peers', 'live BGP peer sessions reported by FRR (shown only when vtysh is present on this host)'],
+    // Live LLDP/CDP neighbor table — the link-layer analogue of bgp-peers.
+    // Read-only; the editor (which interfaces run LLDP/CDP) lives under
+    // System > L2 Disco. Gated on lldpd like that editor (sectionVisible),
+    // so it's hidden on hosts without lldpd.
+    ['l2-peers', 'live LLDP/CDP neighbors seen on this host\u2019s interfaces (shown only when lldpd is present on this host)'],
     ['hosts-file', 'the live contents of this host\u2019s hosts file'],
     ['dns-state', 'what\u2019s actually registered with this host\u2019s OS resolver right now'],
     ['logs', 'the daemon\u2019s recent log output'],
@@ -803,6 +808,7 @@ function label(s){
   if (s==='mesh-peers') return 'Mesh Peers';
   if (s==='routes') return 'Mesh Routes';
   if (s==='bgp-peers') return 'BGP Peers';
+  if (s==='l2-peers') return 'L2 Peers';
   if (s==='getting-started') return 'Getting Started';
   if (s==='capture') return 'Packet Capture';
   if (s==='l2disco') return 'l2disco';
@@ -828,7 +834,7 @@ function sectionHeading(s){
 function sectionVisible(sec){
   if (sec === 'bgp' || sec === 'bgp-peers') return !!state.bgpSupported;
   if (sec === 'snmp') return !!state.snmpSupported;
-  if (sec === 'l2disco') return !!state.l2discoSupported;
+  if (sec === 'l2disco' || sec === 'l2-peers') return !!state.l2discoSupported;
   if (sec === 'syslog') return !!state.syslogSupported;
   return true;
 }
@@ -2358,7 +2364,7 @@ function renderSection() {
        firewall:secFirewall, nat:secNAT, qos:secQoS, bandwidth:secBandwidth, bgp:secBgp, seeds:secSeeds, hosts:secHosts, dns:secDNS,
        upgrade:secUpgrade,
        metrics:infoMetrics, 'mesh-peers':infoMeshPeers, capture:infoCapture, speedtest:infoSpeedtest, latency:infoLatency,
-       'route-table':infoRoutes, 'bgp-peers':secBgpPeers, 'hosts-file':infoHosts, 'dns-state':infoDNS,
+       'route-table':infoRoutes, 'bgp-peers':secBgpPeers, 'l2-peers':secL2Peers, 'hosts-file':infoHosts, 'dns-state':infoDNS,
        resolver:secResolver, time:secTime, snmp:secSNMP, l2disco:secL2Disco, syslog:secSyslog, users:secUsers, power:secPower,
        logs:secLogs, readme:secReadme, 'getting-started':secGettingStarted, api:secAPIDoc, license:secLicense, about:infoAbout }[state.section])(c, nets);
   }
@@ -8042,6 +8048,64 @@ async function bgpTableLiveStatus(body){
   body.innerHTML = '';
   const pre = $('<pre class="mono-block"></pre>'); pre.textContent = text; body.appendChild(pre);
   addLineFilter(body, pre, text);
+}
+
+// secL2Peers is the Monitor › L2 Peers view: the live LLDP/CDP neighbor
+// table lldpd reports, read-only — the link-layer analogue of Monitor ›
+// BGP Peers (secBgpPeers above). Kept separate from the System › L2 Disco
+// editor (which interfaces run LLDP/CDP) so "configure" and "observe" stay
+// cleanly split, matching the rest of the app. Gated on lldpd's presence,
+// same as the editor — see sectionVisible.
+function secL2Peers(c){
+  secHint(c, 'Live LLDP/CDP neighbor table as reported by lldpd on this host. Read-only \u2014 pick which interfaces run LLDP/CDP under System \u203a L2 Disco.');
+  const card = $('<div class="card"></div>');
+  card.appendChild($('<h3>L2 Neighbors</h3>'));
+  const body = $('<div></div>'); body.innerHTML = '<div class="hint">loading\u2026</div>'; card.appendChild(body);
+  c.appendChild(card);
+  l2PeersLiveStatus(body);
+}
+
+// l2PeersLiveStatus fills the L2 Neighbors card body with lldpd's current
+// LLDP/CDP neighbor table (GET /api/l2neighbors), degrading to an
+// explanatory line when L2 discovery isn't supported on this host at all,
+// or when it's supported but lldpd's control socket isn't answering right
+// now — same two-tier "available" check, and the same shape, bgpLiveStatus/
+// bfdLiveStatus already use against FRR/vtysh. protocol renders as its own
+// pill (LLDP vs CDPv1/CDPv2 — see LLDPNeighbor's own doc comment for why
+// gravinet never reports anything else there) so a switch answering both
+// protocols on the same port shows as two distinct rows rather than being
+// silently merged into one. stray_hint (a leftover lldpd process gravinet
+// couldn't stop) is appended as its own warning line when present — it can
+// mean neighbors are being learned by an instance outside gravinet's own
+// management, which the table above alone wouldn't explain.
+async function l2PeersLiveStatus(body){
+  const r = await api('/api/l2neighbors');
+  if (!r.ok || !r.body || r.body.error){ body.innerHTML = '<div class="hint">could not read L2 neighbor state.</div>'; return; }
+  if (r.body.supported === false){
+    body.innerHTML = '<div class="empty">'+esc(r.body.hint || 'L2 discovery isn\u2019t supported on this host.')+'</div>';
+    return;
+  }
+  if (r.body.neighbors_available === false){
+    body.innerHTML = '<div class="empty">'+esc(r.body.neighbors_hint || 'lldpd\u2019s neighbor table is unavailable.')+'</div>';
+    return;
+  }
+  const rows = r.body.neighbors || [];
+  let h;
+  if (!rows.length){
+    h = '<div class="empty">No LLDP/CDP neighbors seen yet.</div>';
+  } else {
+    h = '<table><tr><th>local interface</th><th>protocol</th><th>remote system</th><th>remote port</th><th>mgmt IP</th></tr>';
+    for (const n of rows){
+      const proto = n.protocol ? '<span class="pill">'+esc(n.protocol)+'</span>' : '\u2013';
+      h += '<tr><td>'+esc(n.local_iface||'\u2013')+'</td><td>'+proto+'</td><td>'+esc(n.system_name||'\u2013')+
+        '</td><td>'+esc(n.port||'\u2013')+'</td><td>'+esc(n.mgmt_ip||'\u2013')+'</td></tr>';
+    }
+    h += '</table>';
+  }
+  if (r.body.stray_hint) h += '<div class="hint" style="margin-top:10px;color:var(--danger)">'+esc(r.body.stray_hint)+'</div>';
+  body.innerHTML = h;
+  const t = body.querySelector('table');
+  if (t) enhanceTable(t);
 }
 
 // renderBgpEditor builds the editable BGP/BFD form into host from the stored

@@ -1553,11 +1553,19 @@ func systemSNMPJSON(cfg config.SNMPConfig) map[string]any {
 
 // handleSystemL2Disco reads or replaces this node's link-layer discovery
 // (LLDP/CDP) configuration and reports live neighbor status — the backend
-// for System > L2 Disco. Duplicates parapet's Network > L2 Discovery
-// config page and its separate Monitor > Status: LLDP/CDP neighbor table
-// onto one gravinet page, the same "config plus live status together"
-// shape Time and SNMP already use here, rather than parapet's own split
-// across two different nav locations.
+// for System > L2 Disco. Originally duplicated parapet's Network > L2
+// Discovery config page and its separate Monitor > Status: LLDP/CDP
+// neighbor table onto one gravinet page, the same "config plus live status
+// together" shape Time and SNMP use here, rather than parapet's own split
+// across two different nav locations — but Monitor > L2 Peers
+// (handleL2Neighbors, sysinfo.go) has since reintroduced a version of that
+// split anyway, once it became clear the neighbor data folded into this
+// reply was never actually rendered on the System > L2 Disco page itself
+// (config-page real estate turned out to be the wrong place to browse a
+// growing neighbor table). This endpoint's own reply keeps neighbors/
+// neighbors_available/etc. regardless — existing API consumers still get
+// them here — handleL2Neighbors just reuses the same systemL2DiscoJSON
+// rather than the two ever answering the question differently.
 //
 // Like SNMP, config is one cohesive blob (a sparse per-interface list, not
 // several independent ops), so this takes the same GET-returns/POST-replaces
@@ -1696,7 +1704,7 @@ func systemL2DiscoJSON(cfg config.DiscoveryConfig) map[string]any {
 	for _, n := range neighborRows {
 		neighbors = append(neighbors, map[string]any{
 			"local_iface": n.LocalIface, "system_name": n.SystemName,
-			"port": n.Port, "mgmt_ip": n.MgmtIP,
+			"port": n.Port, "mgmt_ip": n.MgmtIP, "protocol": n.Protocol,
 		})
 	}
 

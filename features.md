@@ -96,8 +96,8 @@ Open an HTTPS page served by the node itself — no extra software to install.
   session detail; round-trip latency to every peer; and a map of where peers are.
 - **Live metrics:** CPU, memory, disk, and per-interface throughput graphs.
 - **Diagnose on the spot:** run a speed test between two nodes, capture packets on
-  an overlay interface and download the pcap, and inspect the live routing table,
-  DNS state, and daemon logs.
+  an overlay interface and download the pcap, inspect the live routing table,
+  DNS state, and daemon logs, and see LLDP/CDP neighbors on the wire.
 - **Remote shell** (off by default): a real terminal on the node, right in the
   browser, for when you need it.
 - **Light and dark themes.**

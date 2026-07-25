@@ -122,6 +122,7 @@ func TestParseLLDPNeighborsObjectShape(t *testing.T) {
 		"lldp": {
 			"interface": {
 				"eth0": {
+					"via": "LLDP",
 					"chassis": {
 						"switch1.example": {
 							"id": {"type": "mac", "value": "aa:bb:cc:dd:ee:ff"},
@@ -154,6 +155,9 @@ func TestParseLLDPNeighborsObjectShape(t *testing.T) {
 	}
 	if r.MgmtIP != "10.0.0.1" {
 		t.Errorf("MgmtIP = %q, want 10.0.0.1", r.MgmtIP)
+	}
+	if r.Protocol != "LLDP" {
+		t.Errorf("Protocol = %q, want LLDP", r.Protocol)
 	}
 }
 
@@ -201,6 +205,73 @@ func TestParseLLDPNeighborsArrayShape(t *testing.T) {
 	// recognized name field either — falls back to the sole map key, "edge-sw".
 	if eth1.SystemName != "edge-sw" {
 		t.Errorf("eth1 SystemName = %q, want edge-sw (fallback to sole chassis key)", eth1.SystemName)
+	}
+}
+
+// TestParseLLDPNeighborsProtocolCDPAndMixed covers what motivated adding
+// Protocol in the first place: lldpd (started with -c whenever any
+// interface has CDP on — see lldpArgs) reports CDP-discovered neighbors in
+// exactly the same "show neighbors" JSON as LLDP ones, distinguished only
+// by "via". A switch that speaks both protocols on the same port shows up
+// as two separate array entries under the same interface name (the array
+// shape, not the object shape, since a JSON object can't repeat a key) —
+// this is the real-world case Monitor › L2 Peers needs to tell apart.
+func TestParseLLDPNeighborsProtocolCDPAndMixed(t *testing.T) {
+	data := []byte(`{
+		"lldp": {
+			"interface": [
+				{"eth0": {
+					"via": "LLDP",
+					"chassis": {"switch1.example": {"mgmt-ip": "10.0.0.1"}},
+					"port": {"descr": "Gi0/1"}
+				}},
+				{"eth0": {
+					"via": "CDPv2",
+					"chassis": {"switch1": {"mgmt-ip": "10.0.0.1"}},
+					"port": {"descr": "GigabitEthernet0/1"}
+				}},
+				{"eth1": {
+					"chassis": {"legacy-switch": {}},
+					"port": {}
+				}}
+			]
+		}
+	}`)
+	rows, err := parseLLDPNeighborsJSON(data)
+	if err != nil {
+		t.Fatalf("parseLLDPNeighborsJSON: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("got %d rows, want 3 (both eth0 protocols plus eth1): %+v", len(rows), rows)
+	}
+	var lldpRow, cdpRow, noViaRow *LLDPNeighbor
+	for i := range rows {
+		switch {
+		case rows[i].LocalIface == "eth0" && rows[i].Protocol == "LLDP":
+			lldpRow = &rows[i]
+		case rows[i].LocalIface == "eth0" && rows[i].Protocol == "CDPv2":
+			cdpRow = &rows[i]
+		case rows[i].LocalIface == "eth1":
+			noViaRow = &rows[i]
+		}
+	}
+	if lldpRow == nil {
+		t.Fatal("missing eth0's LLDP-via row")
+	}
+	if cdpRow == nil {
+		t.Fatal("missing eth0's CDPv2-via row")
+	}
+	// Both protocols saw the same switch on the same port; each is its own
+	// row, not merged into one — merging would hide that the two protocols
+	// independently confirm the same physical neighbor.
+	if lldpRow.SystemName != "switch1.example" || cdpRow.SystemName != "switch1" {
+		t.Errorf("eth0 rows = LLDP:%+v CDPv2:%+v, want distinct SystemName per protocol (LLDP and CDP name the same box differently in practice)", lldpRow, cdpRow)
+	}
+	if noViaRow == nil {
+		t.Fatal("missing eth1 row")
+	}
+	if noViaRow.Protocol != "" {
+		t.Errorf("eth1 Protocol = %q, want empty when lldpd's JSON omits \"via\" entirely", noViaRow.Protocol)
 	}
 }
 

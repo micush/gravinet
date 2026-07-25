@@ -783,13 +783,22 @@ func ReapStrayLLDPD(cfg config.DiscoveryConfig) (killed, remaining []string) {
 }
 
 // LLDPNeighbor is one discovered link-layer neighbor, as reported by
-// `lldpcli show neighbors`. Mirrors parapet's discovery_row shape exactly
-// (local_iface/system_name/port/mgmt_ip).
+// `lldpcli show neighbors`. Mirrors parapet's discovery_row shape, plus
+// Protocol (parapet has no equivalent — it never distinguished LLDP from
+// CDP in its own neighbor table, since it only ever spoke LLDP itself).
 type LLDPNeighbor struct {
 	LocalIface string
 	SystemName string
 	Port       string
 	MgmtIP     string
+	// Protocol is lldpd's own "via" field verbatim — "LLDP", "CDPv1", or
+	// "CDPv2" in practice, since AnyCDP/lldpArgs only ever turn on those two
+	// protocols (lldpd itself also understands EDP/FDP/SONMP, but nothing in
+	// gravinet's own config surface ever enables them, so those values are
+	// never actually produced here even though lldpd's binary supports
+	// them). Empty if a fixture or lldpd version omits "via" — Monitor › L2
+	// Peers falls back to showing "\u2013" rather than guessing.
+	Protocol string
 }
 
 // LLDPNeighbors queries the running lldpd (via lldpcli, which talks to
@@ -864,6 +873,9 @@ func lldpNeighborRow(ifname string, body any) LLDPNeighbor {
 	port := bm["port"]
 
 	row := LLDPNeighbor{LocalIface: ifname, SystemName: lldpFirstName(chassis)}
+	if via, ok := bm["via"].(string); ok {
+		row.Protocol = via
+	}
 
 	if pm, ok := port.(map[string]any); ok {
 		if descr, ok := pm["descr"].(string); ok && descr != "" {

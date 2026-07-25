@@ -2,6 +2,32 @@
 
 ---
 
+## v646 — 2026-07-25
+
+**New:** Monitor > L2 Peers — a live LLDP/CDP neighbor table, read-only,
+in the same "configure vs observe" split Monitor > BGP Peers already uses
+against Traffic > BGP: pick which interfaces run LLDP/CDP under System >
+L2 Disco, watch what's actually being seen under this new page. Columns:
+local interface, protocol, remote system, remote port, management IP.
+
+Two things worth knowing:
+
+- Each neighbor now carries its discovery protocol (`LLDP`, `CDPv1`, or
+  `CDPv2` — lldpd's own "via" field, not previously parsed at all) as its
+  own column, so a switch answering both LLDP and CDP on the same port
+  shows as two distinct rows instead of one that doesn't say which
+  protocol found it. `LLDPNeighbor` gained a `Protocol` field;
+  `systemL2DiscoJSON`'s (and now this page's) `neighbors` rows carry a new
+  `protocol` key.
+- The neighbor/availability/stray-process data this page shows was already
+  being computed on every `GET /api/system/l2disco` — it just never
+  actually rendered anywhere; the System > L2 Disco config page only ever
+  showed the interface picker. `GET /api/l2neighbors` (new) reuses that
+  same computation rather than a second implementation, so the two can
+  never disagree about what "available" or "running" means.
+
+---
+
 ## v645 — 2026-07-25
 
 **Fixed:** System > Time on Windows: setting time servers failed with
