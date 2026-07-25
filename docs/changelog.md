@@ -2,6 +2,26 @@
 
 ---
 
+## v645 — 2026-07-25
+
+**Fixed:** System > Time on Windows: setting time servers failed with
+"couldn't set the time servers: The following error occurred: The service
+has not been started. (0x80070426)" whenever the Windows Time service
+(w32time) wasn't already running — the common case the first time an
+operator sets time servers on a fresh host, since w32time ships
+demand-start on a lot of Windows installs rather than always running.
+
+Root cause: `SetHostNTP` called `w32tm /config /manualpeerlist:...
+/update` — whose whole job is to signal the *already-running* service to
+reload its configuration — before starting w32time, not after. The
+service-start calls (`sc config w32time start= auto`, `net start
+w32time`) were already there, just in the wrong order (after the /config
+call instead of before it), so they could never help a /config call that
+had already failed. Reordered so the service is started first;
+`/config .../update` and `/resync` are unchanged otherwise.
+
+---
+
 ## v644 — 2026-07-25
 
 **Changed:** Traffic > BGP Neighbors table: the "filters" column (v643)

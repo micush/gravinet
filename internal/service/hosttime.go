@@ -571,6 +571,19 @@ func SetHostNTP(enabled bool, servers []string) (bool, string) {
 			return false, "NTP changes need w32tm.exe, which isn't on this host"
 		}
 		if enabled {
+			// w32time has to actually be running before /config ...
+			// /update below: /update's whole job is to signal the live
+			// service to reload its configuration, so it fails outright —
+			// "The service has not been started. (0x80070426)" — on any
+			// host where w32time wasn't already running, which is the
+			// common case the very first time an operator sets time
+			// servers (w32time ships demand-start/manual on a lot of
+			// Windows installs, not running until something starts it).
+			// This has to happen before /config, not after: starting the
+			// service can't retroactively un-fail a /config call that
+			// already bailed out.
+			runQuiet("sc", "config", "w32time", "start=", "auto")
+			runQuiet("net", "start", "w32time")
 			if len(clean) > 0 {
 				// 0x9 = client mode with SpecialInterval, the flag Microsoft's
 				// own docs use for a manual peer list.
@@ -579,8 +592,6 @@ func SetHostNTP(enabled bool, servers []string) (bool, string) {
 					return false, cmdErr("set the time servers", out, err)
 				}
 			}
-			runQuiet("sc", "config", "w32time", "start=", "auto")
-			runQuiet("net", "start", "w32time")
 			if out, err := exec.Command("w32tm", "/resync").CombinedOutput(); err != nil {
 				// A resync can fail simply because the servers aren't reachable
 				// yet; the configuration itself did land, so report success with
