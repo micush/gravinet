@@ -86,6 +86,38 @@ func TestL2PeersNavAndWiring(t *testing.T) {
 	}
 }
 
+// TestL2PeersNoTitleAlwaysFiltered pins two deliberate UI choices for
+// Monitor > L2 Peers: no "L2 Neighbors" <h3> above the table (the section's
+// own <h2> plus secHint's description already say what the page is), and
+// the filter box present from the very first render rather than only
+// appearing once a neighbor shows up — enhanceTable otherwise skips the
+// filter/toolbar entirely for a table with no rows and no +/- buttons (see
+// its own doc comment on table._forceFilter), which would make the box pop
+// into existence later and read as the page rearranging itself.
+func TestL2PeersNoTitleAlwaysFiltered(t *testing.T) {
+	idx := strings.Index(indexHTML, "function secL2Peers(")
+	if idx < 0 {
+		t.Fatal("secL2Peers not found")
+	}
+	body := indexHTML[idx : idx+600]
+	if strings.Contains(body, "<h3>L2 Neighbors</h3>") {
+		t.Error("secL2Peers still renders a card title; it should be gone")
+	}
+	idx2 := strings.Index(indexHTML, "async function l2PeersLiveStatus(")
+	if idx2 < 0 {
+		t.Fatal("l2PeersLiveStatus not found")
+	}
+	body2 := indexHTML[idx2 : idx2+800]
+	if !strings.Contains(body2, "_forceFilter = true") {
+		t.Error("l2PeersLiveStatus no longer forces the filter box on for an empty table")
+	}
+	// The mechanism itself: enhanceTable must actually honor _forceFilter in
+	// its early-return gate, or setting the flag above does nothing.
+	if !strings.Contains(indexHTML, "table._rowButtons && !table._forceFilter) return;") {
+		t.Error("enhanceTable no longer honors table._forceFilter in its early-return gate")
+	}
+}
+
 // TestL2NeighborsIsProxyable mirrors TestSystemL2DiscoIsProxyable: Monitor >
 // L2 Peers follows the currently selected node like every other Monitor
 // page (BGP Peers, Route Table, ...), so its endpoint must NOT be pinned in

@@ -2,6 +2,20 @@
 
 ---
 
+## v648 — 2026-07-25
+
+**Changed:** Monitor > L2 Peers: dropped the "L2 Neighbors" card title —
+the section's own heading plus its description line already said what
+the page was — and the filter box now shows from the first render instead
+of only appearing once a neighbor's actually been seen. The latter needed
+a small addition to the shared table helper: `enhanceTable` previously
+skipped the filter/toolbar entirely for a table with no rows and no +/-
+buttons (nothing to filter, nothing to click); a new `table._forceFilter`
+flag (the opt-in mirror of the existing `table._noFilter` opt-out) lets a
+caller ask for it anyway. L2 Peers is the first table to set it.
+
+---
+
 ## v647 — 2026-07-25
 
 **Changed:** Monitor > L2 Peers (v646) is now just the neighbor table —

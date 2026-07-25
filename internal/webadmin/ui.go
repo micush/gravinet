@@ -2283,7 +2283,11 @@ function enhanceTable(table){
   // Render the filter + toolbar whenever the table is interactive (has data to
   // sort/filter, or exposes +/- actions). An empty table that can grow still
   // needs its + button, so don't bail just because there are no rows yet.
-  if (!hasData && !table._rowAdd && !table._rowRemove && !table._rowButtons) return;
+  // table._forceFilter (the mirror of table._noFilter below) opts a table
+  // into the filter box even with neither — Monitor > L2 Peers wants its
+  // filter box present from the first render, before any neighbor has ever
+  // been seen, rather than have it appear only once a row does.
+  if (!hasData && !table._rowAdd && !table._rowRemove && !table._rowButtons && !table._forceFilter) return;
 
   const bar = $('<div class="tbar"></div>');
   // table._noFilter opts a table out of the filter box — for a table that
@@ -8055,11 +8059,13 @@ async function bgpTableLiveStatus(body){
 // BGP Peers (secBgpPeers above). Kept separate from the System › L2 Disco
 // editor (which interfaces run LLDP/CDP) so "configure" and "observe" stay
 // cleanly split, matching the rest of the app. Gated on lldpd's presence,
-// same as the editor — see sectionVisible.
+// same as the editor — see sectionVisible. No card title — the section's
+// own <h2> (from sectionHeading) plus secHint's description already say
+// what this is; a "L2 Neighbors" <h3> above a card holding nothing else
+// was redundant with both.
 function secL2Peers(c){
   secHint(c, 'Live LLDP/CDP neighbor table as reported by lldpd on this host. Read-only \u2014 pick which interfaces run LLDP/CDP under System \u203a L2 Disco.');
   const card = $('<div class="card"></div>');
-  card.appendChild($('<h3>L2 Neighbors</h3>'));
   const body = $('<div></div>'); card.appendChild(body);
   c.appendChild(card);
   l2PeersLiveStatus(body);
@@ -8076,6 +8082,13 @@ function secL2Peers(c){
 // that's part of the table, not a status message. Anything the fetch
 // itself doesn't hand back (no response, lldpd not installed, zero
 // neighbors seen) simply renders as an empty table.
+//
+// table._forceFilter is set before enhanceTable runs so the filter box is
+// present from the very first render — an empty table with neither rows
+// nor +/- buttons would otherwise never get one (see enhanceTable's own
+// doc comment), leaving the box to pop into existence only once the first
+// neighbor shows up, which reads as the page rearranging itself underneath
+// whoever's looking at it.
 async function l2PeersLiveStatus(body){
   const r = await api('/api/l2neighbors');
   const rows = (r.body && r.body.neighbors) || [];
@@ -8086,7 +8099,9 @@ async function l2PeersLiveStatus(body){
       '</td><td>'+esc(n.port||'\u2013')+'</td><td>'+esc(n.mgmt_ip||'\u2013')+'</td></tr>';
   }
   body.innerHTML = h+'</table>';
-  enhanceTable(body.querySelector('table'));
+  const t = body.querySelector('table');
+  t._forceFilter = true;
+  enhanceTable(t);
 }
 
 // renderBgpEditor builds the editable BGP/BFD form into host from the stored
