@@ -8060,52 +8060,33 @@ function secL2Peers(c){
   secHint(c, 'Live LLDP/CDP neighbor table as reported by lldpd on this host. Read-only \u2014 pick which interfaces run LLDP/CDP under System \u203a L2 Disco.');
   const card = $('<div class="card"></div>');
   card.appendChild($('<h3>L2 Neighbors</h3>'));
-  const body = $('<div></div>'); body.innerHTML = '<div class="hint">loading\u2026</div>'; card.appendChild(body);
+  const body = $('<div></div>'); card.appendChild(body);
   c.appendChild(card);
   l2PeersLiveStatus(body);
 }
 
 // l2PeersLiveStatus fills the L2 Neighbors card body with lldpd's current
-// LLDP/CDP neighbor table (GET /api/l2neighbors), degrading to an
-// explanatory line when L2 discovery isn't supported on this host at all,
-// or when it's supported but lldpd's control socket isn't answering right
-// now — same two-tier "available" check, and the same shape, bgpLiveStatus/
-// bfdLiveStatus already use against FRR/vtysh. protocol renders as its own
-// pill (LLDP vs CDPv1/CDPv2 — see LLDPNeighbor's own doc comment for why
-// gravinet never reports anything else there) so a switch answering both
-// protocols on the same port shows as two distinct rows rather than being
-// silently merged into one. stray_hint (a leftover lldpd process gravinet
-// couldn't stop) is appended as its own warning line when present — it can
-// mean neighbors are being learned by an instance outside gravinet's own
-// management, which the table above alone wouldn't explain.
+// LLDP/CDP neighbor table (GET /api/l2neighbors) — the table only, on
+// purpose: no unsupported/unavailable/empty/stray-process messaging mixed
+// in with it, unlike the other Monitor live-status loaders in this file.
+// protocol still renders as its own pill (LLDP vs CDPv1/CDPv2 — see
+// LLDPNeighbor's own doc comment for why gravinet never reports anything
+// else there), so a switch answering both protocols on the same port still
+// shows as two distinct rows rather than being silently merged into one —
+// that's part of the table, not a status message. Anything the fetch
+// itself doesn't hand back (no response, lldpd not installed, zero
+// neighbors seen) simply renders as an empty table.
 async function l2PeersLiveStatus(body){
   const r = await api('/api/l2neighbors');
-  if (!r.ok || !r.body || r.body.error){ body.innerHTML = '<div class="hint">could not read L2 neighbor state.</div>'; return; }
-  if (r.body.supported === false){
-    body.innerHTML = '<div class="empty">'+esc(r.body.hint || 'L2 discovery isn\u2019t supported on this host.')+'</div>';
-    return;
+  const rows = (r.body && r.body.neighbors) || [];
+  let h = '<table><tr><th>local interface</th><th>protocol</th><th>remote system</th><th>remote port</th><th>mgmt IP</th></tr>';
+  for (const n of rows){
+    const proto = n.protocol ? '<span class="pill">'+esc(n.protocol)+'</span>' : '\u2013';
+    h += '<tr><td>'+esc(n.local_iface||'\u2013')+'</td><td>'+proto+'</td><td>'+esc(n.system_name||'\u2013')+
+      '</td><td>'+esc(n.port||'\u2013')+'</td><td>'+esc(n.mgmt_ip||'\u2013')+'</td></tr>';
   }
-  if (r.body.neighbors_available === false){
-    body.innerHTML = '<div class="empty">'+esc(r.body.neighbors_hint || 'lldpd\u2019s neighbor table is unavailable.')+'</div>';
-    return;
-  }
-  const rows = r.body.neighbors || [];
-  let h;
-  if (!rows.length){
-    h = '<div class="empty">No LLDP/CDP neighbors seen yet.</div>';
-  } else {
-    h = '<table><tr><th>local interface</th><th>protocol</th><th>remote system</th><th>remote port</th><th>mgmt IP</th></tr>';
-    for (const n of rows){
-      const proto = n.protocol ? '<span class="pill">'+esc(n.protocol)+'</span>' : '\u2013';
-      h += '<tr><td>'+esc(n.local_iface||'\u2013')+'</td><td>'+proto+'</td><td>'+esc(n.system_name||'\u2013')+
-        '</td><td>'+esc(n.port||'\u2013')+'</td><td>'+esc(n.mgmt_ip||'\u2013')+'</td></tr>';
-    }
-    h += '</table>';
-  }
-  if (r.body.stray_hint) h += '<div class="hint" style="margin-top:10px;color:var(--danger)">'+esc(r.body.stray_hint)+'</div>';
-  body.innerHTML = h;
-  const t = body.querySelector('table');
-  if (t) enhanceTable(t);
+  body.innerHTML = h+'</table>';
+  enhanceTable(body.querySelector('table'));
 }
 
 // renderBgpEditor builds the editable BGP/BFD form into host from the stored

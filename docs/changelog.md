@@ -2,6 +2,21 @@
 
 ---
 
+## v647 — 2026-07-25
+
+**Changed:** Monitor > L2 Peers (v646) is now just the neighbor table —
+local interface, protocol, remote system, remote port, management IP,
+nothing else. Dropped every status message that used to surround it:
+"L2 discovery isn't supported," "lldpd's neighbor table is unavailable,"
+"No LLDP/CDP neighbors seen yet," and the stray-leftover-process warning.
+`GET /api/l2neighbors`'s own response is unchanged (still carries
+`supported`/`neighbors_available`/`stray_hint`/etc. — see its API docs);
+this page just stopped reading any of that back out. An empty or
+unreachable result now renders as an empty table rather than an
+explanatory line.
+
+---
+
 ## v646 — 2026-07-25
 
 **New:** Monitor > L2 Peers — a live LLDP/CDP neighbor table, read-only,
