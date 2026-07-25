@@ -36,6 +36,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os/exec"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -301,7 +302,17 @@ func mergeAutoBGPNeighbors(existing, desired []config.BGPNeighbor) (result, adde
 		}
 		if d, ok := desiredByPeer[nb.Peer]; ok {
 			result = append(result, d)
-			if d != nb {
+			// BGPNeighbor now carries FilterIn/FilterOut ([]string), which
+			// makes it non-comparable with == / != (Go rejects that at
+			// compile time for any struct containing a slice) — reflect.
+			// DeepEqual is the direct replacement for what was a plain value
+			// comparison. desired never sets FilterIn/FilterOut itself (see
+			// mergeAutoBGPNeighbors' own doc comment on desired's
+			// construction), so an autobgp-managed neighbor that was hand-
+			// given a filter has it reset to unfiltered on the next refresh
+			// here, same "enforced on every pass" treatment Shutdown/BFD
+			// already get.
+			if !reflect.DeepEqual(d, nb) {
 				changed = true
 			}
 		} else {

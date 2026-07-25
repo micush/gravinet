@@ -596,6 +596,43 @@ type BGPNeighbor struct {
 	// the other neighbors on this router; disabling one doesn't touch the
 	// rest.
 	Shutdown bool `json:"shutdown,omitempty"`
+	// FilterIn/FilterOut are this neighbor's own inbound/outbound route
+	// filters — the BGP-itself counterpart to BGPConfig's
+	// RedistributeConnectedRoutes/RedistributeStaticRoutes/
+	// RedistributeMeshRoutes. Those three control what gets fed *into* BGP
+	// from elsewhere on this host; nothing before this field controlled what
+	// BGP itself accepts from, or advertises to, a given peer — every prefix
+	// a neighbor sent was accepted, and every route this speaker carried was
+	// sent to every neighbor, unfiltered, which is `no bgp
+	// ebgp-requires-policy`'s whole point (see renderFRR's doc comment on
+	// that line). FilterIn/FilterOut are each a CIDR allow-list scoped to
+	// this one neighbor: a non-empty list means only those exact prefixes
+	// are permitted in that direction on this session — anything else is
+	// implicitly denied by the route-map's own trailing deny, the standard
+	// FRR/Cisco route-map convention. An empty list (the default, and every
+	// neighbor's state before this field existed) means no filtering at all
+	// in that direction, so upgrading to a build with this field is a no-op
+	// for every session already configured — filtering is opt-in per
+	// neighbor, per direction, not a blanket default that could silently cut
+	// off a working session.
+	//
+	// Rendered as a per-neighbor `ip prefix-list`/`ipv6 prefix-list`/
+	// `route-map`, the same selective-filter shape as the redistribute
+	// fields, just attached to `neighbor <peer> route-map <name> in`/`out`
+	// instead of a `redistribute` line (see renderFRR/renderNeighborFilter).
+	// Unlike those three fields, this can't share one route-map across every
+	// neighbor — each neighbor's allow-list is its own, so each gets its own
+	// named route-map. Outbound is the one direction that can collide with
+	// ASPrepend, which also wants to own this neighbor's single outbound
+	// route-map slot; when both are set for the same neighbor, renderFRR
+	// folds the prepend into that neighbor's own filter route-map rather
+	// than losing one or the other (see renderNeighborFilter's doc comment).
+	// A CIDR here that no longer matches anything a peer actually sends (or
+	// that this speaker no longer carries) simply matches nothing — not
+	// pruned automatically, same non-pruning reasoning as the redistribute
+	// fields above.
+	FilterIn  []string `json:"filter_in,omitempty"`
+	FilterOut []string `json:"filter_out,omitempty"`
 }
 
 // Upgrade configures this node's own upgrades. Upgrades are always from

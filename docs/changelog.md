@@ -2,6 +2,39 @@
 
 ---
 
+## v642 — 2026-07-25
+
+**New:** Traffic > BGP neighbors can now filter what BGP itself accepts
+from, or advertises to, that one peer — `filter in`/`filter out`, a
+comma-separated CIDR allow-list per neighbor, per direction. Until now
+gravinet could only filter what gets *redistributed into* BGP
+(`RedistributeConnectedRoutes`/`RedistributeStaticRoutes`/
+`RedistributeMeshRoutes`); nothing controlled what a BGP session itself
+exchanged with a given peer, which ran wide open (`no bgp
+ebgp-requires-policy`) — every prefix a neighbor sent was accepted, and
+every route this speaker carried was sent to every neighbor, unfiltered.
+Blank (the default, and every neighbor's behavior before this) still
+means unfiltered — upgrading is a no-op for every session already
+configured.
+
+Rendered as a per-neighbor `ip prefix-list`/`ipv6 prefix-list`/
+`route-map`, attached as `neighbor <peer> route-map <name> in`/`out`
+(`internal/webadmin/frr.go`'s `renderNeighborFilterStanza`). The one
+wrinkle: FRR allows only one outbound route-map per neighbor, so a
+neighbor with both `filter out` set and AS Prepend on can't get both
+`GRAVINET-AS-PREPEND out` and its own filter attached — the prepend is
+now folded into that neighbor's own filter route-map's permit entry
+instead of one silently losing to the other. A neighbor with no `filter
+out` of its own is untouched, still getting the shared
+`GRAVINET-AS-PREPEND` route-map exactly as before.
+
+New in the web UI: two columns on the Neighbors table, double-click to
+edit like every other field there. New in the API:
+`BGPNeighbor.filter_in`/`filter_out` (arrays of CIDR strings) on
+`GET/POST /api/bgp/config` — see docs/API.md.
+
+---
+
 ## v641 — 2026-07-24
 
 **Fixed:** build break introduced in v636 — a stray pair of backticks in

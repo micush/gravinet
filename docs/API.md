@@ -1932,7 +1932,15 @@ driving this by hand).
 
 **`BGPNeighbor`**: `peer` (address), `remote_as`, `description`,
 `password` (MD5 session password), `bfd` (bool), `shutdown` (bool —
-administratively holds this one session down without removing it).
+administratively holds this one session down without removing it),
+`filter_in`/`filter_out` (arrays of CIDR strings — the prefixes permitted
+from/to this one neighbor; blank means unfiltered, the default and every
+neighbor's behavior before these fields existed). These filter what BGP
+itself accepts from or advertises to that peer, which is a different thing
+from `BGPConfig`'s own `redistribute_connected_routes`/
+`redistribute_static_routes`/`redistribute_mesh_routes` above — those
+control what gets fed *into* BGP from elsewhere on this host, not what a
+BGP session itself exchanges with a given neighbor.
 
 **`seedInfoResult`** (from `/api/seed-info`/`/api/peer-info`): `host`,
 `isIP`, `forward` (array)/`forwardErr`, `reverseTarget`/`reverse`

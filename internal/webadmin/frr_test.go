@@ -1122,3 +1122,162 @@ func TestSafeToken(t *testing.T) {
 		}
 	}
 }
+
+// TestFRRNeighborFilterIn covers BGPNeighbor.FilterIn: a per-neighbor
+// prefix-list/route-map, attached as that neighbor's own inbound route-map —
+// the "filter BGP itself" counterpart to the redistribute fields, which only
+// ever filter what's fed *into* BGP from elsewhere on the host.
+func TestFRRNeighborFilterIn(t *testing.T) {
+	b := config.BGPConfig{
+		Enabled: true, ASN: 65001,
+		Neighbors: []config.BGPNeighbor{
+			{Peer: "10.0.0.2", RemoteAS: 65002, FilterIn: []string{"10.1.0.0/24", "10.2.0.0/24"}},
+		},
+	}
+	c := renderFRR(b)
+	frrHas(t, c, "ip prefix-list GRAVINET-NEIGH-1-IN-V4 seq 5 permit 10.1.0.0/24\n")
+	frrHas(t, c, "ip prefix-list GRAVINET-NEIGH-1-IN-V4 seq 10 permit 10.2.0.0/24\n")
+	frrHas(t, c, "route-map GRAVINET-NEIGH-1-IN permit 10\n match ip address prefix-list GRAVINET-NEIGH-1-IN-V4\n")
+	frrHas(t, c, "  neighbor 10.0.0.2 route-map GRAVINET-NEIGH-1-IN in\n")
+	// The stanza is a top-level sibling of `router bgp`, same requirement as
+	// every other route-map/prefix-list this file renders.
+	if strings.Index(c, "route-map GRAVINET-NEIGH-1-IN") > strings.Index(c, "router bgp 65001") {
+		t.Error("neighbor filter route-map appears after `router bgp` — it must be a sibling stanza, rendered before it")
+	}
+	// FilterIn never touches the outbound direction.
+	frrLacks(t, c, "GRAVINET-NEIGH-1-OUT")
+	frrLacks(t, c, " out\n")
+}
+
+// TestFRRNeighborFilterOut is FilterIn's outbound mirror, with no ASPrepend
+// involved — the simple case where the neighbor's own route-map is all
+// that's needed.
+func TestFRRNeighborFilterOut(t *testing.T) {
+	b := config.BGPConfig{
+		Enabled: true, ASN: 65001,
+		Neighbors: []config.BGPNeighbor{
+			{Peer: "10.0.0.2", RemoteAS: 65002, FilterOut: []string{"10.5.0.0/24"}},
+		},
+	}
+	c := renderFRR(b)
+	frrHas(t, c, "ip prefix-list GRAVINET-NEIGH-1-OUT-V4 seq 5 permit 10.5.0.0/24\n")
+	frrHas(t, c, "route-map GRAVINET-NEIGH-1-OUT permit 10\n match ip address prefix-list GRAVINET-NEIGH-1-OUT-V4\n")
+	frrHas(t, c, "  neighbor 10.0.0.2 route-map GRAVINET-NEIGH-1-OUT out\n")
+	frrLacks(t, c, "set as-path prepend")
+	frrLacks(t, c, "GRAVINET-AS-PREPEND")
+}
+
+// A neighbor with neither field set must render byte-identical to a build
+// that never had FilterIn/FilterOut at all — every existing config upgrades
+// with zero behavior change, since filtering is opt-in.
+func TestFRRNeighborFilterEmptyOmitsEverything(t *testing.T) {
+	b := config.BGPConfig{
+		Enabled: true, ASN: 65001,
+		Neighbors: []config.BGPNeighbor{{Peer: "10.0.0.2", RemoteAS: 65002}},
+	}
+	c := renderFRR(b)
+	frrLacks(t, c, "GRAVINET-NEIGH")
+	frrLacks(t, c, "route-map")
+	frrLacks(t, c, "prefix-list")
+}
+
+// TestFRRNeighborFilterOutFoldsASPrepend covers the one interaction between
+// FilterOut and BGPConfig.ASPrepend: FRR allows only one outbound route-map
+// per neighbor, so a neighbor with its own FilterOut can't also get
+// "GRAVINET-AS-PREPEND out" — the prepend is folded into that neighbor's own
+// route-map instead, while an unrelated neighbor with no FilterOut of its
+// own keeps using the shared route-map exactly as before.
+func TestFRRNeighborFilterOutFoldsASPrepend(t *testing.T) {
+	b := config.BGPConfig{
+		Enabled: true, ASN: 65001, ASPrepend: true,
+		Neighbors: []config.BGPNeighbor{
+			{Peer: "10.0.0.2", RemoteAS: 65002, FilterOut: []string{"10.5.0.0/24"}},
+			{Peer: "10.0.0.3", RemoteAS: 65003},
+		},
+	}
+	c := renderFRR(b)
+	// The filtered neighbor's own route-map carries both the match and the
+	// prepend in the same permit entry.
+	frrHas(t, c, "route-map GRAVINET-NEIGH-1-OUT permit 10\n match ip address prefix-list GRAVINET-NEIGH-1-OUT-V4\n set as-path prepend 65001 65001\n")
+	frrHas(t, c, "  neighbor 10.0.0.2 route-map GRAVINET-NEIGH-1-OUT out\n")
+	frrLacks(t, c, "neighbor 10.0.0.2 route-map GRAVINET-AS-PREPEND")
+	// The unfiltered neighbor is untouched: still the shared route-map,
+	// exactly as TestFRRASPrepend expects when FilterOut never enters the
+	// picture at all.
+	frrHas(t, c, "  neighbor 10.0.0.3 route-map GRAVINET-AS-PREPEND out\n")
+	frrHas(t, c, "route-map GRAVINET-AS-PREPEND permit 10\n set as-path prepend 65001 65001\n")
+}
+
+// TestFRRNeighborFilterPerFamily proves a neighbor's filter attachment only
+// ever appears in the address-family block that neighbor is actually
+// activated in — the same per-family scoping TestFRRASPrepend already
+// covers for the outbound AS-prepend attachment.
+func TestFRRNeighborFilterPerFamily(t *testing.T) {
+	b := config.BGPConfig{
+		Enabled: true, ASN: 65001,
+		Neighbors: []config.BGPNeighbor{
+			{Peer: "10.0.0.2", RemoteAS: 65002, FilterIn: []string{"10.1.0.0/24"}},
+			{Peer: "fd00::2", RemoteAS: 65003, FilterIn: []string{"fd00:1::/64"}},
+		},
+	}
+	c := renderFRR(b)
+	v4Block, v6Block, found := strings.Cut(c, " address-family ipv6 unicast\n")
+	if !found {
+		t.Fatalf("expected an address-family ipv6 unicast block\n--- got ---\n%s", c)
+	}
+	frrHas(t, v4Block, "neighbor 10.0.0.2 route-map GRAVINET-NEIGH-1-IN in")
+	frrLacks(t, v4Block, "neighbor fd00::2 route-map")
+	frrHas(t, v6Block, "neighbor fd00::2 route-map GRAVINET-NEIGH-2-IN in")
+	frrLacks(t, v6Block, "neighbor 10.0.0.2 route-map")
+}
+
+// TestNeighborFilterRemovesSomething extends bgpConfigRemovesSomething's own
+// coverage to FilterIn/FilterOut: losing a previously-permitted CIDR (or the
+// filter turning off) is exactly as unretractable by a reload/vtysh -b as
+// RedistributeConnectedRoutes/RedistributeStaticRoutes shrinking, and needs
+// the same forced restart; gaining one, or a brand-new filtered neighbor, is
+// a pure addition and doesn't.
+func TestNeighborFilterRemovesSomething(t *testing.T) {
+	base := config.BGPConfig{
+		Enabled: true, ASN: 65001,
+		Neighbors: []config.BGPNeighbor{
+			{Peer: "10.0.0.2", RemoteAS: 65002, FilterIn: []string{"10.1.0.0/24", "10.2.0.0/24"}, FilterOut: []string{"10.5.0.0/24"}},
+			{Peer: "10.0.0.3", RemoteAS: 65003},
+		},
+	}
+	if bgpConfigRemovesSomething(base, base) {
+		t.Error("unchanged filters shouldn't force a restart")
+	}
+
+	shrunkIn := config.BGPConfig{Enabled: true, ASN: 65001, Neighbors: []config.BGPNeighbor{
+		{Peer: "10.0.0.2", RemoteAS: 65002, FilterIn: []string{"10.1.0.0/24"}, FilterOut: base.Neighbors[0].FilterOut},
+		base.Neighbors[1],
+	}}
+	if !bgpConfigRemovesSomething(base, shrunkIn) {
+		t.Error("a neighbor losing a FilterIn CIDR should force a restart")
+	}
+
+	filterOutTurnedOff := config.BGPConfig{Enabled: true, ASN: 65001, Neighbors: []config.BGPNeighbor{
+		{Peer: "10.0.0.2", RemoteAS: 65002, FilterIn: base.Neighbors[0].FilterIn},
+		base.Neighbors[1],
+	}}
+	if !bgpConfigRemovesSomething(base, filterOutTurnedOff) {
+		t.Error("a neighbor's FilterOut turning off should force a restart")
+	}
+
+	grownIn := config.BGPConfig{Enabled: true, ASN: 65001, Neighbors: []config.BGPNeighbor{
+		{Peer: "10.0.0.2", RemoteAS: 65002, FilterIn: []string{"10.1.0.0/24", "10.2.0.0/24", "10.3.0.0/24"}, FilterOut: base.Neighbors[0].FilterOut},
+		base.Neighbors[1],
+	}}
+	if bgpConfigRemovesSomething(base, grownIn) {
+		t.Error("a neighbor gaining a FilterIn CIDR is a pure addition and shouldn't force a restart")
+	}
+
+	newFilteredNeighbor := config.BGPConfig{Enabled: true, ASN: 65001, Neighbors: append(
+		append([]config.BGPNeighbor{}, base.Neighbors...),
+		config.BGPNeighbor{Peer: "10.0.0.4", RemoteAS: 65004, FilterIn: []string{"10.9.0.0/24"}},
+	)}
+	if bgpConfigRemovesSomething(base, newFilteredNeighbor) {
+		t.Error("a brand-new filtered neighbor is a pure addition and shouldn't force a restart")
+	}
+}

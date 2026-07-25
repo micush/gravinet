@@ -83,7 +83,8 @@ point of a mesh.
 - **Names, not just numbers.** Hostnames sync into each machine's hosts file
   automatically.
 - **BGP and BFD** for anyone running dynamic routing (through FRR), including a
-  live view of BGP peer sessions.
+  live view of BGP peer sessions, selective redistribution in and out of the
+  mesh, and per-neighbor inbound/outbound route filtering.
 
 ## A real admin console, built in
 

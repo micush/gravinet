@@ -216,6 +216,26 @@ func effectiveBGPNetworks(b config.BGPConfig, meshRoutes []string) []string {
 // so redistribution would just be an expensive no-op — but omitting it
 // keeps frr.conf from claiming a redistribution that can never fire).
 func renderRedistributeRouteMap(name string, cidrs []string) (stanza string, hasV4, hasV6 bool) {
+	return renderFilterRouteMap(name, cidrs, "")
+}
+
+// renderFilterRouteMap is the actual prefix-list + route-map builder behind
+// renderRedistributeRouteMap; renderNeighborFilterStanza (BGPNeighbor's
+// FilterIn/FilterOut) uses it directly, via its extra setLine parameter,
+// which renderRedistributeRouteMap itself always passes as "". setLine, when
+// non-empty, is spliced in verbatim as its own indented line right after
+// each entry's "match ..." line — the caller is responsible for it already
+// being valid FRR route-map syntax (e.g. " set as-path prepend 65001
+// 65001"), the same way name and cidrs are only ever passed pre-sanitized
+// (name is always one of this file's own GRAVINET-* constants/derived
+// names, never anything user-supplied). Splicing a set clause in here,
+// rather than layering a second route-map, is what lets
+// renderNeighborFilterStanza fold BGPConfig.ASPrepend into a neighbor's own
+// FilterOut route-map — FRR only allows one route-map attached per neighbor
+// per direction, so the two actions (match a prefix-list, set as-path
+// prepend) have to live in the same permit entry when both apply to the
+// same neighbor.
+func renderFilterRouteMap(name string, cidrs []string, setLine string) (stanza string, hasV4, hasV6 bool) {
 	var v4, v6 []string
 	for _, c := range cidrs {
 		if !safeToken(c) {
@@ -240,13 +260,78 @@ func renderRedistributeRouteMap(name string, cidrs []string) (stanza string, has
 	seq := 10
 	if len(v4) > 0 {
 		fmt.Fprintf(&out, "route-map %s permit %d\n match ip address prefix-list %s-V4\n", name, seq, name)
+		if setLine != "" {
+			fmt.Fprintf(&out, "%s\n", setLine)
+		}
 		seq += 10
 	}
 	if len(v6) > 0 {
 		fmt.Fprintf(&out, "route-map %s permit %d\n match ipv6 address prefix-list %s-V6\n", name, seq, name)
+		if setLine != "" {
+			fmt.Fprintf(&out, "%s\n", setLine)
+		}
 	}
 	out.WriteString("!\n")
 	return out.String(), len(v4) > 0, len(v6) > 0
+}
+
+// neighborFilterRouteMapName is the per-neighbor, per-direction
+// prefix-list/route-map name stem for BGPNeighbor.FilterIn/FilterOut:
+// "GRAVINET-NEIGH-<idx>-IN"/"-OUT", where idx is this neighbor's 1-based
+// position in BGPConfig.Neighbors. Unlike the redistribute fields' shared
+// GRAVINET-REDIST-CONNECTED/-STATIC names, a neighbor's own filter can't be
+// shared with any other neighbor's, so each needs a name distinct from
+// every other neighbor's — and from the fixed GRAVINET-REDIST-*/
+// GRAVINET-AS-PREPEND names above, which idx (always >= 1, never a
+// standalone word) can't collide with.
+func neighborFilterRouteMapName(idx int, dir string) string {
+	return fmt.Sprintf("GRAVINET-NEIGH-%d-%s", idx, dir)
+}
+
+// renderNeighborFilterStanza renders one neighbor's FilterIn/FilterOut as
+// prefix-list/route-map stanzas (top-level, siblings of `router bgp` — same
+// as renderRedistributeRouteMap's output), and reports which route-map name,
+// if any, renderFRR should attach in each direction: `neighbor <peer>
+// route-map <name> in`/`out`. An empty inName/outName means nothing to
+// attach in that direction — renderFRR's neighbor loop skips the line
+// entirely rather than attaching an empty string.
+//
+// idx is this neighbor's position (see neighborFilterRouteMapName). asPrepend
+// and asn are BGPConfig.ASPrepend/ASN — needed here, not just by the caller,
+// because of the one place FilterOut and ASPrepend interact: FRR allows only
+// one outbound route-map per neighbor, so a neighbor that sets FilterOut
+// while ASPrepend is also on can't have both "GRAVINET-AS-PREPEND out" and
+// its own filter attached — the prepend's "set as-path prepend" is folded
+// into that neighbor's own filter route-map's permit entry instead (via
+// renderFilterRouteMap's setLine), so the neighbor gets the combination of
+// both behaviors from a single attachment rather than silently losing one.
+// A neighbor with no FilterOut of its own is untouched by any of this: it
+// still gets the shared GRAVINET-AS-PREPEND route-map exactly as it always
+// has (outName is set to that literal name), preserving every existing
+// ASPrepend-only render byte for byte. If FilterOut is set but yields no
+// usable entries (e.g. every CIDR fails safeToken) it's treated the same as
+// unset — falls back to the shared route-map when ASPrepend is on, rather
+// than leaving the neighbor with no outbound route-map merely because its
+// own filter turned out empty.
+func renderNeighborFilterStanza(idx int, n config.BGPNeighbor, asPrepend bool, asn uint32) (stanza string, inName string, outName string) {
+	var out strings.Builder
+
+	if s, hasV4, hasV6 := renderFilterRouteMap(neighborFilterRouteMapName(idx, "IN"), n.FilterIn, ""); hasV4 || hasV6 {
+		out.WriteString(s)
+		inName = neighborFilterRouteMapName(idx, "IN")
+	}
+
+	var setLine string
+	if asPrepend {
+		setLine = fmt.Sprintf(" set as-path prepend %d %d", asn, asn)
+	}
+	if s, hasV4, hasV6 := renderFilterRouteMap(neighborFilterRouteMapName(idx, "OUT"), n.FilterOut, setLine); hasV4 || hasV6 {
+		out.WriteString(s)
+		outName = neighborFilterRouteMapName(idx, "OUT")
+	} else if asPrepend {
+		outName = "GRAVINET-AS-PREPEND"
+	}
+	return out.String(), inName, outName
 }
 
 // renderASPrependRouteMap emits the GRAVINET-AS-PREPEND route-map — a
@@ -288,6 +373,31 @@ func renderFRR(b config.BGPConfig, meshRoutes ...string) string {
 	out.WriteString(staticStanza)
 	if b.ASPrepend {
 		out.WriteString(renderASPrependRouteMap(b.ASN))
+	}
+	// Per-neighbor FilterIn/FilterOut stanzas — see renderNeighborFilterStanza.
+	// neighborInName/neighborOutName record which route-map name (if any) each
+	// neighbor's peer address should get attached to below, in whichever
+	// address-family block it's actually activated in; a peer absent from a
+	// map has nothing to attach in that direction. Built once here, ahead of
+	// `router bgp`, rather than inside the address-family loops below, since
+	// both loops need to agree on the same name for the same peer and the
+	// stanzas themselves — like every other route-map/prefix-list this
+	// function emits — must be siblings of `router bgp`, not nested inside
+	// it.
+	neighborInName := make(map[string]string, len(b.Neighbors))
+	neighborOutName := make(map[string]string, len(b.Neighbors))
+	for i, n := range b.Neighbors {
+		if !safeToken(n.Peer) || n.RemoteAS == 0 {
+			continue
+		}
+		stanza, inName, outName := renderNeighborFilterStanza(i+1, n, b.ASPrepend, b.ASN)
+		out.WriteString(stanza)
+		if inName != "" {
+			neighborInName[n.Peer] = inName
+		}
+		if outName != "" {
+			neighborOutName[n.Peer] = outName
+		}
 	}
 
 	fmt.Fprintf(&out, "router bgp %d\n", b.ASN)
@@ -396,8 +506,11 @@ func renderFRR(b config.BGPConfig, meshRoutes ...string) string {
 	}
 	for _, n := range v4Neighbors {
 		fmt.Fprintf(&out, "  neighbor %s activate\n", n.Peer)
-		if b.ASPrepend {
-			fmt.Fprintf(&out, "  neighbor %s route-map GRAVINET-AS-PREPEND out\n", n.Peer)
+		if name, ok := neighborInName[n.Peer]; ok {
+			fmt.Fprintf(&out, "  neighbor %s route-map %s in\n", n.Peer, name)
+		}
+		if name, ok := neighborOutName[n.Peer]; ok {
+			fmt.Fprintf(&out, "  neighbor %s route-map %s out\n", n.Peer, name)
 		}
 	}
 	for _, n := range v6Neighbors {
@@ -445,8 +558,11 @@ func renderFRR(b config.BGPConfig, meshRoutes ...string) string {
 		}
 		for _, n := range v6Neighbors {
 			fmt.Fprintf(&out, "  neighbor %s activate\n", n.Peer)
-			if b.ASPrepend {
-				fmt.Fprintf(&out, "  neighbor %s route-map GRAVINET-AS-PREPEND out\n", n.Peer)
+			if name, ok := neighborInName[n.Peer]; ok {
+				fmt.Fprintf(&out, "  neighbor %s route-map %s in\n", n.Peer, name)
+			}
+			if name, ok := neighborOutName[n.Peer]; ok {
+				fmt.Fprintf(&out, "  neighbor %s route-map %s out\n", n.Peer, name)
 			}
 		}
 		out.WriteString(" exit-address-family\n")
@@ -684,6 +800,28 @@ func bgpConfigRemovesSomething(prev, next config.BGPConfig) bool {
 	// of this function, so there's nothing further to catch for that case.
 	if prev.ASPrepend && !next.ASPrepend {
 		return true
+	}
+	// A neighbor's own FilterIn/FilterOut (see BGPNeighbor's doc comment)
+	// losing a previously-permitted CIDR needs the identical restart
+	// treatment as RedistributeConnectedRoutes/RedistributeStaticRoutes
+	// above, and for the same reason: the retracted prefix-list entry simply
+	// isn't in the freshly-rendered frr.conf for a reload or vtysh -b to
+	// notice and undo. Matched by Peer, so this only ever compares a
+	// neighbor against its own previous self — a neighbor whose peer address
+	// changed is already caught by the haveNeighbor check above as a
+	// removal+addition, not an edit, and going the other way (a filter
+	// gaining entries, or turning on where it was off) is a pure addition, a
+	// reload handles that fine.
+	prevByPeer := make(map[string]config.BGPNeighbor, len(prev.Neighbors))
+	for _, n := range prev.Neighbors {
+		prevByPeer[n.Peer] = n
+	}
+	for _, n := range next.Neighbors {
+		if p, ok := prevByPeer[n.Peer]; ok {
+			if stringSetShrank(p.FilterIn, n.FilterIn) || stringSetShrank(p.FilterOut, n.FilterOut) {
+				return true
+			}
+		}
 	}
 	return false
 }

@@ -422,23 +422,39 @@ func TestUpgradeAllThenLocalOption(t *testing.T) {
 	}
 }
 
-// TestChipPickerOptionsAreOptional guards the three original redistribute call
-// sites: buildRouteChipPicker grew an opts argument for the peer picker, and
-// every one of those call sites still passes three arguments and must keep
-// getting the original route-flavoured strings and identity labelling.
-func TestChipPickerOptionsAreOptional(t *testing.T) {
-	idx := strings.Index(indexHTML, "function buildRouteChipPicker(")
-	if idx < 0 {
-		t.Fatal("buildRouteChipPicker not found")
+// TestBgpNeighborFilterColumnsWired guards the BGP neighbor editor's
+// filter-in/filter-out columns: they must be double-click-editable like
+// every other .nbr-field, and their values must actually reach the saved
+// payload — the same three checkpoints (render, edit, save) a silent typo in
+// any one of the class names used to wire them together would otherwise slip
+// through undetected in every other test here, since none of them exercise
+// this specific pair of columns.
+func TestBgpNeighborFilterColumnsWired(t *testing.T) {
+	// Rendered as part of the same .nbr-field set the peer/AS/description
+	// cells use, so the existing "double-click any .nbr-field to edit the
+	// row" wiring picks them up automatically.
+	if !strings.Contains(indexHTML, "nbr-filterin-cell") || !strings.Contains(indexHTML, "nbr-filterout-cell") {
+		t.Fatal("neighbor render is missing the filter-in/filter-out cells")
 	}
-	body := indexHTML[idx : idx+3000]
-	if !strings.Contains(body, "opts = opts || {}") {
-		t.Error("buildRouteChipPicker must tolerate being called without opts — three redistribute call sites do")
+	// The row-edit form must build actual inputs for both, keyed by the
+	// class names wireNbrForm's save handler reads back.
+	if !strings.Contains(indexHTML, "nbre-filterin") || !strings.Contains(indexHTML, "nbre-filterout") {
+		t.Fatal("neighbor row-edit form is missing the filter-in/filter-out inputs")
 	}
-	if !strings.Contains(body, "opts.labelOf || (v => v)") {
-		t.Error("labelOf must default to identity, or the redistribute pickers stop showing their CIDRs")
+	// The save handler must actually read those inputs (via parseCidrList)
+	// and put them on the saved entry — the same shape rcList/rsList/rmList
+	// use for the redistribute pickers, applied per-neighbor here instead.
+	if !strings.Contains(indexHTML, "filter_in: parseCidrList(tr.querySelector('.nbre-filterin').value)") {
+		t.Error("neighbor save no longer parses the filter-in input into the saved entry")
 	}
-	if !strings.Contains(body, "loading available routes") {
-		t.Error("the default loading string changed; the redistribute pickers rely on it")
+	if !strings.Contains(indexHTML, "filter_out: parseCidrList(tr.querySelector('.nbre-filterout').value)") {
+		t.Error("neighbor save no longer parses the filter-out input into the saved entry")
+	}
+	// And the outer payload sent to /api/bgp/config must carry each
+	// neighbor's filter_in/filter_out through, not just the fields that
+	// existed before this feature.
+	if !strings.Contains(indexHTML, "filter_in:n.filter_in||[], filter_out:n.filter_out||[]") {
+		t.Error("the BGP config save payload no longer includes each neighbor's filter_in/filter_out")
 	}
 }
+

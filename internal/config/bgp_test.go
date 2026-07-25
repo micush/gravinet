@@ -61,7 +61,8 @@ func TestBGPRoundTrip(t *testing.T) {
 	in := BGPConfig{
 		Enabled: true, ASN: 65001, RouterID: "10.0.0.1",
 		Neighbors: []BGPNeighbor{
-			{Peer: "10.0.0.2", RemoteAS: 65002, Description: "core", Password: "s3cr3t", BFD: false},
+			{Peer: "10.0.0.2", RemoteAS: 65002, Description: "core", Password: "s3cr3t", BFD: false,
+				FilterIn: []string{"10.9.0.0/24"}, FilterOut: []string{"10.8.0.0/24", "fd00:8::/64"}},
 			{Peer: "fd00::2", RemoteAS: 65010, BFD: true},
 		},
 		Networks:                    []string{"10.0.0.0/24"},
@@ -81,6 +82,38 @@ func TestBGPRoundTrip(t *testing.T) {
 	}
 	if len(out.Neighbors) != 2 || out.Neighbors[0].Password != "s3cr3t" || !out.Neighbors[1].BFD {
 		t.Errorf("neighbor round-trip mismatch: %+v", out.Neighbors)
+	}
+	if got := out.Neighbors[0].FilterIn; len(got) != 1 || got[0] != "10.9.0.0/24" {
+		t.Errorf("neighbor filter_in round-trip mismatch: %+v", got)
+	}
+	if got := out.Neighbors[0].FilterOut; len(got) != 2 || got[0] != "10.8.0.0/24" || got[1] != "fd00:8::/64" {
+		t.Errorf("neighbor filter_out round-trip mismatch: %+v", got)
+	}
+	if len(out.Neighbors[1].FilterIn) != 0 || len(out.Neighbors[1].FilterOut) != 0 {
+		t.Errorf("neighbor with no filters set should round-trip empty, got: %+v", out.Neighbors[1])
+	}
+	// omitempty: a neighbor with no filters shouldn't put filter_in/filter_out
+	// keys in the marshaled JSON at all.
+	var rawNeighbors []map[string]any
+	var rawTop map[string]any
+	if err := json.Unmarshal(raw, &rawTop); err != nil {
+		t.Fatal(err)
+	}
+	nb, _ := json.Marshal(rawTop["neighbors"])
+	if err := json.Unmarshal(nb, &rawNeighbors); err != nil {
+		t.Fatal(err)
+	}
+	if len(rawNeighbors) != 2 {
+		t.Fatalf("expected 2 raw neighbor objects, got %d", len(rawNeighbors))
+	}
+	if _, ok := rawNeighbors[0]["filter_in"]; !ok {
+		t.Errorf("expected filter_in key present for the first neighbor: %v", rawNeighbors[0])
+	}
+	if _, ok := rawNeighbors[1]["filter_in"]; ok {
+		t.Errorf("neighbor with no filters set should omit filter_in from JSON: %v", rawNeighbors[1])
+	}
+	if _, ok := rawNeighbors[1]["filter_out"]; ok {
+		t.Errorf("neighbor with no filters set should omit filter_out from JSON: %v", rawNeighbors[1])
 	}
 	if len(out.Networks) != 1 || out.Networks[0] != "10.0.0.0/24" {
 		t.Errorf("networks round-trip mismatch: %+v", out.Networks)
