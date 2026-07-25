@@ -2,6 +2,34 @@
 
 ---
 
+## v651 — 2026-07-24
+
+**Fixed:** System > L2 Disco on OpenBSD: even after v650 taught gravinet to
+resolve the right rc.d(8) service name (`lldpd` or `elldpd`, whichever
+actually exists), turning discovery on for the first time on a fresh
+7.9+ host still failed — now with "saved, but the lldpd service could
+not be reconciled: couldn't rcctl set elldpd flags: rcctl: elldpd is
+not enabled".
+
+Root cause: `elldpd` ships via the ports `pkg_scripts` mechanism, not
+OpenBSD's base rc.d scripts. `rcctl set <svc> flags ...` only works
+unconditionally for a base script, whose `flags` variable rc.subr
+pre-declares regardless of enabled state; a pkg_scripts service has no
+such pre-declaration; rcctl rejects `set` for it outright until it's
+been enabled at least once. `ApplyLLDP` writes flags before starting
+the service — `writeLLDPFlags` runs first, `lldpServiceStart` (which
+calls `rcctl enable`) runs after — so on a host where L2 Disco had
+never been turned on before, the enable that would have satisfied
+`rcctl set` simply hadn't happened yet.
+
+`writeLLDPFlags`'s OpenBSD branch now runs its own best-effort `rcctl
+enable <svc>` immediately before `rcctl set <svc> flags`, the same
+idempotent pattern `lldpServiceStart`/`lldpServiceStop` already use for
+their own enable/disable calls, rather than relying on a later step to
+have already done it.
+
+---
+
 ## v650 — 2026-07-25
 
 **Fixed:** System > L2 Disco on OpenBSD: v649 stopped gravinet from being

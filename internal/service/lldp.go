@@ -279,6 +279,17 @@ func writeLLDPFlags(cfg config.DiscoveryConfig) (bool, string) {
 		return true, ""
 	case "openbsd":
 		svc := openBSDLLDPServiceName()
+		// rcctl only pre-declares a flags variable for base rc.d scripts.
+		// lldpd/elldpd ships via the ports pkg_scripts mechanism instead,
+		// where `rcctl set <svc> flags ...` is rejected outright —
+		// "rcctl: <svc> is not enabled" — until the service has been
+		// enabled at least once; on a host where L2 Disco is being turned
+		// on for the first time, that hasn't happened yet, since enabling
+		// only otherwise happens later, in lldpServiceStart, which this
+		// flags write always runs before (see ApplyLLDP). Best-effort and
+		// idempotent, mirroring the `rcctl enable` calls already made
+		// elsewhere in this file.
+		exec.Command("rcctl", "enable", svc).Run()
 		flags := strings.Join(args[1:], " ")
 		if out, err := exec.Command("rcctl", "set", svc, "flags", flags).CombinedOutput(); err != nil {
 			return false, cmdErr("rcctl set "+svc+" flags", out, err)
