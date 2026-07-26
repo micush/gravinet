@@ -109,9 +109,10 @@ const indexHTML = `<!doctype html>
   .rail-foot .rail-tab { text-transform:uppercase; letter-spacing:.04em; }
   .rail-divider { height:1px; background:var(--line); margin:0 0 8px; }
   .rail-logout:hover { color:var(--danger); background:var(--hover); }
-  .settings-row { display:flex; align-items:center; justify-content:space-between; padding:12px 0; border-bottom:1px solid var(--line); }
+  .settings-row { display:flex; align-items:center; justify-content:space-between; gap:24px; padding:12px 0; border-bottom:1px solid var(--line); }
   .settings-row:has(.route-picker) { flex-direction:column; align-items:stretch; justify-content:flex-start; gap:10px; }
   .settings-row:last-child { border-bottom:0; }
+  .settings-row > input, .settings-row > .sw { flex-shrink:0; }
   .local-only-disabled { opacity:.5; }
   .settings-label { font-size:14px; }
   .settings-desc { font-size:12px; color:var(--mut); margin-top:2px; }
@@ -2773,7 +2774,7 @@ function secSettings(c) {
 
   // Log level.
   const lg = $('<div class="settings-row" id="loglevel-row"></div>');
-  const lgLabel = $('<div><div class="settings-label">Log level</div><div class="settings-desc">How much this node logs. <b>debug</b> is the one worth knowing about. Most <i>rejection</i> paths in the mesh log only at debug: a replayed handshake, a clock-skew mismatch, a handshake claiming our own node id, a failed TLS dial. At <b>info</b>, a node that is receiving handshakes and refusing every one of them looks exactly like a node receiving nothing at all. Applied immediately; no restart, no sessions dropped. Leave it on info in normal operation; debug is chatty.</div></div>');
+  const lgLabel = $('<div><div class="settings-label">Log level</div><div class="settings-desc">How much this node logs (error, warn, info, debug). Switch to <b>debug</b> to see rejected handshakes and connection failures that don\u2019t show at info. Applied immediately, no restart. Leave on info normally; debug is chatty.</div></div>');
   const lgSel = $('<select class="sel" id="loglevel-sel"><option value="error">error</option><option value="warn">warn</option><option value="info">info</option><option value="debug">debug</option></select>');
   lgSel.value = state.logLevel || 'info';
   lgSel.onchange = async () => {
@@ -2793,7 +2794,7 @@ function secSettings(c) {
   // byte count. Committed on Enter or blur (not per keystroke); the box snaps to
   // the canonical form the server echoes back, and reverts on a rejected value.
   const lz = $('<div class="settings-row" id="logsize-row"></div>');
-  const lzLabel = $('<div><div class="settings-label">Log size</div><div class="settings-desc">Maximum size of the log file. Once it fills, the oldest lines are dropped to make room for new ones (FIFO), so the file stays a rolling window of the most recent activity rather than growing without bound. Enter a size like <b>200M</b>, <b>1G</b>, or <b>99K</b>. Default is 200M.</div></div>');
+  const lzLabel = $('<div><div class="settings-label">Log size</div><div class="settings-desc">Maximum size of the log file; oldest lines are dropped once it\u2019s full. e.g. <b>200M</b>, <b>1G</b>, <b>99K</b>. Default 200M.</div></div>');
   const lzInput = $('<input type="text" class="sel" id="logsize-input" style="width:90px" placeholder="200M">');
   lzInput.value = state.logMaxSize || '200M';
   let lzLast = lzInput.value;
@@ -2819,7 +2820,7 @@ function secSettings(c) {
   card = $('<div class="card"></div>');
   card.appendChild($('<h3>Routing</h3>'));
   const ra = $('<div class="settings-row" id="routeadv-row"></div>');
-  const raLabel = $('<div><div class="settings-label">Route advertisement interval</div><div class="settings-desc">How often (seconds) this node re-advertises the routes it originates. Lower values recover lost routes faster and re-propagate routes sooner after a reject is removed; 0 uses the default (10s).</div></div>');
+  const raLabel = $('<div><div class="settings-label">Route advertisement interval</div><div class="settings-desc">How often (seconds) this node re-advertises the routes it originates. 0 uses the default (10s).</div></div>');
   const raBox = $('<div style="display:flex;gap:6px;align-items:center"></div>');
   const raInput = $('<input type="text" inputmode="numeric" id="routeadv-input" style="width:80px">');
   raBox.appendChild(raInput);
@@ -2841,7 +2842,7 @@ function secSettings(c) {
   c.appendChild(card); card = $('<div class="card"></div>');
   card.appendChild($('<h3>Liveness</h3>'));
   const ka = $('<div class="settings-row" id="keepalive-row"></div>');
-  const kaLabel = $('<div><div class="settings-label">Keepalive interval</div><div class="settings-desc">How often (seconds) this node pings each connected peer to hold NAT mappings open and measure round-trip time (used for relay selection). Lower values detect a dead link faster (see peer timeout below), at the cost of more background traffic. 0 uses the default (10s).</div></div>');
+  const kaLabel = $('<div><div class="settings-label">Keepalive interval</div><div class="settings-desc">How often (seconds) this node pings each connected peer, keeping NAT mappings open and measuring round-trip time. Lower detects a dead link faster at the cost of more background traffic. 0 uses the default (10s).</div></div>');
   const kaBox = $('<div style="display:flex;gap:6px;align-items:center"></div>');
   const kaInput = $('<input type="text" inputmode="numeric" id="keepalive-input" style="width:80px">');
   kaBox.appendChild(kaInput);
@@ -2861,7 +2862,7 @@ function secSettings(c) {
   kaInput.onkeydown = (e) => { if (e.key === 'Enter') { kaInput.blur(); } };
 
   const pt = $('<div class="settings-row" id="peertimeout-row"></div>');
-  const ptLabel = $('<div><div class="settings-label">Peer timeout</div><div class="settings-desc">How long (seconds) a peer may go silent before its session is dropped. This is what governs how long a peer that\u2019s actually gone still shows as connected in the peers table. 0 uses the default (20s). Clamped up to the keepalive interval above if set lower: timing a session out before a single keepalive round trip could complete would just cause constant reconnection thrashing, not faster detection.</div></div>');
+  const ptLabel = $('<div><div class="settings-label">Peer timeout</div><div class="settings-desc">How long (seconds) a peer may go silent before its session is dropped. 0 uses the default (20s). Clamped up to the keepalive interval above if set lower.</div></div>');
   const ptBox = $('<div style="display:flex;gap:6px;align-items:center"></div>');
   const ptInput = $('<input type="text" inputmode="numeric" id="peertimeout-input" style="width:80px">');
   ptBox.appendChild(ptInput);
@@ -2917,7 +2918,7 @@ function secSettings(c) {
   ntInput.onkeydown = (e) => { if (e.key === 'Enter') { ntInput.blur(); } };
 
   const up = $('<div class="settings-row" id="upnp-row"></div>');
-  const upLabel = $('<div><div class="settings-label">UPnP</div><div class="settings-desc">Ask this node\u2019s LAN router, via UPnP, to forward every port this node listens on \u2014 the UDP port, the TCP fallback port, and any extra ports configured above \u2014 from its WAN side to this host, so a node behind a home/office router with no manual port forward configured can still be reached directly by peers. Off by default: unlike the settings above (this host\u2019s own kernel), this reaches out and asks a different device \u2014 the router \u2014 to reconfigure itself. Best-effort per port: a router with UPnP off, or without it at all, is a silent no-op, not an error, and one port being rejected doesn\u2019t stop the others from mapping. This node restarts to apply a change here.</div></div>');
+  const upLabel = $('<div><div class="settings-label">UPnP</div><div class="settings-desc">Ask this node\u2019s LAN router to forward its ports (UDP, TCP fallback, and any extras above) automatically, so a node behind a home/office router can be reached without a manual port forward. Off by default. Best-effort \u2014 a router without UPnP just silently skips it. Restarts to apply.</div></div>');
   const upSw = $('<label class="sw"><input type="checkbox" id="upnp-toggle-cb"><span class="sw-slider"></span></label>');
   const upCb = upSw.querySelector('input');
   upCb.checked = state.enableUpnp;
@@ -2933,7 +2934,7 @@ function secSettings(c) {
   c.appendChild(card); card = $('<div class="card"></div>');
   card.appendChild($('<h3>Privacy</h3>'));
   const gi = $('<div class="settings-row" id="geoip-row"></div>');
-  const giLabel = $('<div><div class="settings-label">Geo-IP lookups</div><div class="settings-desc">Show an approximate location (city/region/country) and a map on a peer or seed\u2019s info (\ud83d\udec8) panel, looked up from its public endpoint address. On by default, alongside that same panel\u2019s forward/reverse DNS and WHOIS. Unlike those, which use the internet\u2019s own decentralized lookup protocols, this sends the address to one specific third-party service (ipapi.co) over HTTPS, so turn it off here if you\u2019d rather this node never contact one. This node restarts immediately to apply a change here.</div></div>');
+  const giLabel = $('<div><div class="settings-label">Geo-IP lookups</div><div class="settings-desc">Show an approximate location and map on a peer or seed\u2019s info panel, looked up from its public address. On by default. Sends the address to a third-party service (ipapi.co) over HTTPS \u2014 turn off to avoid that. Restarts to apply.</div></div>');
   const giSw = $('<label class="sw"><input type="checkbox" id="geoip-toggle-cb"><span class="sw-slider"></span></label>');
   const giCb = giSw.querySelector('input');
   giCb.checked = state.geoipLookup;
@@ -2948,7 +2949,7 @@ function secSettings(c) {
 
   c.appendChild(card); card = $('<div class="card"></div>');
   card.appendChild($('<h3>Performance (advanced)</h3>'));
-  card.appendChild($('<div class="settings-desc" style="margin-bottom:10px">These size the outbound/inbound worker pools and the underlay\u2019s packet-batching path. Sane defaults for most setups; only worth touching if you\u2019ve profiled a real throughput ceiling. Changing one or more of these restarts the node once, a few seconds after your last edit here \u2014 not once per field.</div>'));
+  card.appendChild($('<div class="settings-desc" style="margin-bottom:10px">These size the outbound/inbound worker pools and the underlay\u2019s packet-batching path. Sane defaults for most setups; only worth touching if you\u2019ve profiled a real throughput ceiling.</div>'));
   const perfPending = $('<div class="settings-desc" id="perf-restart-pending" style="color:var(--acc);min-height:1.2em"></div>');
   if (state.perfRestartPending) perfPending.textContent = 'Changes saved \u2014 restarting in a moment to apply them.';
   card.appendChild(perfPending);
@@ -3001,7 +3002,7 @@ function secSettings(c) {
   // are read as MB), so the number stored in the config file is the same
   // number typed here rather than its byte expansion.
   const sb = $('<div class="settings-row" id="socket-buffer-row"></div>');
-  const sbLabel = $('<div><div class="settings-label">Socket buffer (MB)</div><div class="settings-desc">Per-UDP-socket receive and send buffer. This is how much traffic the kernel can hold while the receive loop is busy \u2014 when it overflows the kernel drops datagrams and TCP sees it as ordinary loss (the counter is <b>UdpRcvbufErrors</b> in <code>nstat</code>). 16 MB is roughly 1,900 jumbo datagrams. Raise it if that counter climbs under load; note a buffer absorbs bursts, it cannot fix a receive path that is slower than the offered rate. 0 uses the default.</div></div>');
+  const sbLabel = $('<div><div class="settings-label">Socket buffer (MB)</div><div class="settings-desc">Per-UDP-socket receive/send buffer. When it overflows, the kernel drops datagrams (visible as <b>UdpRcvbufErrors</b> in <code>nstat</code>). 16 MB \u2248 1,900 jumbo datagrams. Raise it if that counter climbs under load. 0 uses the default.</div></div>');
   const sbInp = $('<input type="number" min="0" step="1" style="width:80px">');
   sbInp.max = state.socketBufferMaxMB;
   sbInp.value = state.socketBufferMB;
@@ -3021,8 +3022,8 @@ function secSettings(c) {
   // the row description rather than left for the operator to discover.
   const ug = $('<div class="settings-row" id="udp-gso-row"></div>');
   const ugDesc = state.udpGSOSupported
-    ? 'Batch multiple packets per send/receive syscall on the underlay UDP socket. Experimental: not yet verified under sustained real-world load, off by default for that reason. Enabling this here is equivalent to the GRAVINET_UDP_GSO=1 environment variable, and takes effect the same way \u2014 either one turns it on.'
-    : 'Batch multiple packets per send/receive syscall on the underlay UDP socket. Not available on this platform/architecture (Linux amd64/arm64 only) \u2014 turning this on here is harmless but has no effect on this node.';
+    ? 'Batch multiple packets per send/receive syscall on the underlay UDP socket. Experimental, off by default. Same effect as the GRAVINET_UDP_GSO=1 environment variable.'
+    : 'Batch multiple packets per send/receive syscall on the underlay UDP socket. Not available on this platform (Linux amd64/arm64 only) \u2014 harmless to enable here, just has no effect on this node.';
   const ugLabel = $('<div><div class="settings-label">UDP GSO/GRO <span class="pill" style="margin-left:6px">experimental</span></div><div class="settings-desc">'+esc(ugDesc)+'</div></div>');
   const ugSw = $('<label class="sw"><input type="checkbox" id="udp-gso-cb"><span class="sw-slider"></span></label>');
   const ugCb = ugSw.querySelector('input');
@@ -3192,7 +3193,7 @@ async function exemptRemoveChecked(table){
 
 function secKeys(c) {
   if (!state.cfg.length) return emptyCard(c, 'No networks yet — create one first.');
-  secHint(c, 'Manage network keys. Select an empty slot and use Generate or Import to fill it; select filled slots for Enable/Disable/Reveal/Copy/Delete. Double-click a label, state, or key to change it in place. All enabled keys authenticate joiners.<br><br>To rotate keys, generate a new key, tick <b>distributed</b> to push it to every peer currently connected over the mesh itself (no copy/paste needed, and it lands in the same slot number there when that slot is free), then disable the old one once you\'re sure it reached everyone. Untick <b>distributed</b> to retract the key from every peer holding a copy — the key stays here, just pulled from everyone else. Renaming a distributed key\'s label, or changing its expiry, pushes the new value to those peers automatically. Set a date and time to enable key expiry.');
+  secHint(c, 'Manage network keys. Select an empty slot and use Generate or Import to fill it; select filled slots for Enable/Disable/Reveal/Copy/Delete. Double-click a label, state, or key to change it in place. All enabled keys authenticate joiners.<br><br>To rotate keys, generate a new key, tick <b>distributed</b> to push it to every connected peer (no copy/paste needed), then disable the old one once it\'s reached everyone. Untick <b>distributed</b> to retract it from every peer that has it. Renaming a distributed key\'s label, or changing its expiry, pushes the update automatically. Set a date and time to enable key expiry.');
   for (const cf of state.cfg) {
     const card = $('<div class="card"></div>');
     card.appendChild($('<h3><span class="net-name">'+esc(cf.name)+'</span> <span class="net-id">'+esc(cf.id)+'</span></h3>'));
@@ -3955,7 +3956,7 @@ function secBans(c) {
 function secRoutes(c) {
   if (!state.cfg.length) return emptyCard(c, 'No networks.');
   secHint(c, 'CIDRs advertised into the mesh from this node. Double-click a cidr or metric to edit it (lower metric wins); double-click the state tag to toggle the route.');
-  secHint(c, 'This node\u2019s current BGP-learned routes (FRR\u2019s RIB), gossiped to this network\u2019s peers alongside the Advertise table above \u2014 the reverse of the "Redistribute mesh routes" toggle on the BGP page. Every route redistributed this way carries the one metric set here (lower wins, same as an Advertise route\u2019s own). Needs FRR/bgpd actually running; a route this node already advertises above is never redistributed back to avoid a loop.');
+  secHint(c, 'This node\u2019s current BGP-learned routes (FRR\u2019s RIB), gossiped to this network\u2019s peers alongside the Advertise table above \u2014 the reverse of the "Redistribute mesh routes" toggle on the BGP page. Carries the metric set here (lower wins). Needs FRR/bgpd running; a route already advertised above is never redistributed back.');
   secHint(c, 'CIDRs rejected when advertised by other nodes. A reject matches only that exact CIDR; tick inclusive to also reject every more-specific network inside it. Double-click a cidr to edit it, the inclusive cell to toggle it, or the state tag to toggle the entry.');
   // The "Redistribute from BGP" subcard's picker needs this node's current
   // BGP-learned routes — node-global, not per-network, but the subcard
@@ -4042,7 +4043,7 @@ function secRoutes(c) {
       if (!ar.ok){ alert((ar.body&&ar.body.error)||'edit failed'); refresh(); }
     };
     const rbRow = $('<div class="settings-row"></div>');
-    rbRow.appendChild($('<div><div class="settings-label">BGP-learned routes</div><div class="settings-desc">Pick which of this node\u2019s current BGP-learned routes to gossip into this network\u2019s mesh. Needs FRR/bgpd actually running; a route this node already advertises above is never redistributed back, to avoid a loop.</div></div>'));
+    rbRow.appendChild($('<div><div class="settings-label">BGP-learned routes</div><div class="settings-desc">Pick which of this node\u2019s current BGP-learned routes to gossip into this network\u2019s mesh. Needs FRR/bgpd running. A route already advertised above is never redistributed back.</div></div>'));
     // available starts undefined (picker shows "loading…") — filled in once
     // the shared fetch at the top of secRoutes resolves; rbPickers is that
     // fetch's list of every network's picker to refresh.
@@ -4521,7 +4522,7 @@ function hostRejectAddRow(table, net){
 function secDNS(c, nets){
   const cfgs = state.cfg;
   if (!cfgs.length){ emptyCard(c, 'no networks — create one under Networks first'); return; }
-  secHint(c, 'Domains this node forwards to specific DNS servers, advertised mesh-wide. Peers register them with their OS resolver (systemd-resolved on Linux, /etc/resolver on macOS, NRPT on Windows); only queries under the domain are affected; the machine\'s default DNS and plain hostnames (still resolved via Hosts first) are untouched. Double-click a domain, servers, or state to edit.');
+  secHint(c, 'Domains this node forwards to specific DNS servers, advertised mesh-wide. Peers register them with their OS resolver (systemd-resolved on Linux, /etc/resolver on macOS, NRPT on Windows); only queries under the domain are affected \u2014 default DNS and Hosts-based names are untouched. Double-click a domain, servers, or state to edit.');
   secHint(c, 'Domains never registered with this node\'s resolver, even if a peer advertises a forward for them: a local-only filter, the DNS analog of rejecting a hosts record. Double-click state to toggle; + to add, tick rows and \u2212 to remove.');
   secHint(c, 'Each domain above also acts as a search suffix: an unqualified query like "grafana" is retried as "grafana.corp.internal". Linux and Windows only. Windows uses just the first domain (one suffix per adapter); macOS/FreeBSD have no per-interface equivalent.');
   for (const cf of cfgs){
@@ -5254,7 +5255,7 @@ function startFwEdit(tr, net){
 // per network either). Whole-list save, applied live via /api/firewall
 // op:objects (no restart).
 function secFwObjects(c){
-  secHint(c, 'Reusable address objects a rule can name in its <b>src</b>/<b>dst</b>; shared by every network on this node, edited once and usable everywhere. <b>kind</b>: host (literal IPs), subnet (CIDRs), range (a\u2011b), fqdn (domain names, re\u2011resolved live; an entry can be a literal name or a <b>*.domain.tld</b> wildcard covering every subdomain, learned passively from real DNS traffic; see docs), or group (a bundle of other objects, by name). Edit an object once and every rule that names it, on any network, follows. Double\u2011click a cell to edit; + adds a row, tick rows and \u2212 removes. Every well\u2011known domain gravinet knows about is already a real row here; nothing to add, nothing to click.');
+  secHint(c, 'Reusable address objects a rule can name in its <b>src</b>/<b>dst</b>; shared by every network, edited once. <b>kind</b>: host (literal IPs), subnet (CIDRs), range (a\u2011b), fqdn (domain names, re\u2011resolved live; supports a <b>*.domain.tld</b> wildcard, learned passively from DNS traffic), or group (a bundle of other objects, by name). Double\u2011click a cell to edit; + adds a row, tick rows and \u2212 removes. Every well\u2011known domain gravinet knows about is already a row here.');
   const objs = (state.fwObjects || []).map(cloneObj);
   const card = $('<div class="card"></div>');
   const t = $('<div></div>');
@@ -5571,7 +5572,7 @@ var FW_COMMON_SERVICES = [
 // every network on this node, not one per network, so this is one table,
 // not one per network either).
 function secFwServices(c){
-  secHint(c, 'Reusable protocol/port bundles a rule can name in its <b>services</b> field; shared by every network on this node, edited once and usable everywhere. e.g. a "DNS" service carrying udp/53 and tcp/53. Write ports as <i>proto/port</i> or <i>proto/lo\u2011hi</i>, comma\u2011separated; a proto alone (like <i>icmp</i>) matches any port. Double\u2011click a cell to edit; + adds a row, tick rows and \u2212 removes. Every well\u2011known service gravinet knows about is already a real row here; nothing to add, nothing to click.');
+  secHint(c, 'Reusable protocol/port bundles a rule can name in its <b>services</b> field; shared by every network, edited once. e.g. a "DNS" service carrying udp/53 and tcp/53. Write ports as <i>proto/port</i> or <i>proto/lo\u2011hi</i>, comma\u2011separated; a proto alone (like <i>icmp</i>) matches any port. Double\u2011click a cell to edit; + adds a row, tick rows and \u2212 removes. Every well\u2011known service gravinet knows about is already a row here.');
   const svcs = (state.fwServices || []).map(cloneSvc);
   const card = $('<div class="card"></div>');
   const t=$('<div></div>');
@@ -6023,7 +6024,7 @@ function secResolver(c){
       const row = $('<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
         + '<input id="res-host-in" value="'+esc(r.hostname||'')+'" placeholder="node7.example" style="flex:1;min-width:240px"></div>');
       hostCard.appendChild(row);
-      hostCard.appendChild($('<div class="hint" style="margin:8px 0 0">Changes the OS hostname immediately, then restarts the [gravinet] service so the name this node advertises to mesh peers \u2014 which is only ever read from the OS hostname at startup \u2014 picks it up too. A brief reconnect blip for this node\u2019s mesh sessions is expected.</div>'));
+      hostCard.appendChild($('<div class="hint" style="margin:8px 0 0">Changes the OS hostname immediately and restarts [gravinet] so peers see the new name. Expect a brief reconnect blip.</div>'));
       const hostIn = row.querySelector('#res-host-in');
       let hostLast = r.hostname || '';
       const saveHost = async () => {
@@ -6298,7 +6299,7 @@ function secTime(c){
       const save = $('<button class="sm">Set</button>');
       row.appendChild(save);
       setCard.appendChild(row);
-      setCard.appendChild($('<div class="hint" style="margin:8px 0 0">One-shot, in this host\u2019s own timezone as shown above. Nothing is stored \u2014 the clock is set once and left alone. Unlike the fields above, this needs an explicit click: it\u2019s a one-time action applied at the moment you press it, not a setting that should fire just because the field lost focus.</div>'));
+      setCard.appendChild($('<div class="hint" style="margin:8px 0 0">One-shot, in this host\u2019s own timezone as shown above. Nothing is stored \u2014 the clock is set once and left alone. Needs an explicit click to apply.</div>'));
       save.onclick = async () => {
         const v = row.querySelector('#clk-in').value;
         if (!v){ alert('Pick a date and time.'); return; }
@@ -6482,7 +6483,7 @@ function secSNMP(c){
 // each one's save carries the other's current value unchanged — see
 // saveL2Disco below.
 function secL2Disco(c){
-  secHint(c, 'Link-layer discovery: LLDP, plus Cisco CDP, together on whichever interfaces you pick below. Advertises and listens for neighbor information on picked interfaces. Acts on the node you\u2019re currently managing.');
+  secHint(c, 'Link-layer discovery: LLDP plus Cisco CDP, advertised and listened for on whichever interfaces you pick below. Acts on the node you\u2019re currently managing.');
 
   const body = $('<div></div>');
   body.innerHTML = '<div class="hint">loading\u2026</div>';
@@ -6585,7 +6586,7 @@ function secL2Disco(c){
 // clearing it turns it off, and the pill is a second, independent way to
 // flip the same flag without touching the field values.
 function secSyslog(c){
-  secHint(c, 'Forward this host\u2019s syslog to a remote collector. Local logging keeps working exactly as it already does \u2014 this only adds a copy going out, never a replacement. Acts on the node you\u2019re currently managing.');
+  secHint(c, 'Forward this host\u2019s syslog to a remote collector. Local logging keeps working as before \u2014 this only adds a copy going out, never a replacement. Acts on the node you\u2019re currently managing.');
 
   const body = $('<div></div>');
   body.innerHTML = '<div class="hint">loading\u2026</div>';
@@ -6998,7 +6999,7 @@ async function drawUpgrade(host){
     // (buildRouteChipPicker), keyed on node_id but labelled with the hostname:
     // a checkbox list is fine for three peers and unreadable for thirty.
     const peerRow = $('<div class="settings-row"></div>');
-    peerRow.appendChild($('<div><div class="settings-label">Peers</div><div class="settings-desc">Pick specific peers to build and apply the same archive on them (this node is left untouched), or pick <b>all peers, then this node</b> to roll the whole fleet and finish with this node last. This node is upgraded only after every peer has applied, so a bad build reverts on the peers before it can reach the node you\u2019re logged into. Leave it empty to upgrade only this node. Each peer must have <b>Accept Manager-pushed upgrades</b> turned on or it refuses (shown per peer), and each reverts on its own if it can\u2019t rejoin the mesh.</div></div>'));
+    peerRow.appendChild($('<div><div class="settings-label">Peers</div><div class="settings-desc">Pick specific peers to upgrade (this node stays untouched), or <b>all peers, then this node</b> to roll the whole fleet, applying to this node last. Leave empty to upgrade only this node. Each target peer needs <b>Accept Manager-pushed upgrades</b> turned on, and reverts on its own if it can\u2019t rejoin the mesh.</div></div>'));
     targets = computeSortedManageablePeers();
     // Offer the "all peers, then this node" sentinel only when there is at least
     // one peer to roll; with none it would just mean "this node", which the
@@ -8093,7 +8094,7 @@ function infoRoutes(c){
 // The whole section is only reachable when state.bgpSupported is true (vtysh
 // present); see sectionVisible().
 function secBgp(c){
-  secHint(c, 'BGP configuration for dynamic routing. For neighbors and advertised networks: use + to add a row, double-click a field to edit it (double-click BFD to toggle it), tick rows and \u2212 to remove. Click the \ud83d\udc41\ufe0f next to a neighbor\u2019s MD5 password to reveal or mask it. Click a neighbor\u2019s \u201cfilters\u201d pill to restrict which prefixes BGP itself accepts from, or advertises to, that one neighbor \u2014 blank means unfiltered (the default). This is separate from the Redistribute pickers below, which control what gets fed into BGP from elsewhere on this host, not what BGP itself exchanges with a neighbor.');
+  secHint(c, 'BGP configuration for dynamic routing. For neighbors and advertised networks: use + to add a row, double-click a field to edit it (double-click BFD to toggle it), tick rows and \u2212 to remove. Click the \ud83d\udc41\ufe0f next to a neighbor\u2019s MD5 password to reveal or mask it. Click a neighbor\u2019s \u201cfilters\u201d pill to restrict which prefixes BGP itself accepts from, or advertises to, that one neighbor \u2014 blank means unfiltered (the default). This is separate from the Redistribute pickers below, which control what feeds into BGP, not what BGP exchanges with a neighbor.');
   const editWrap = $('<div></div>'); c.appendChild(editWrap);
 
   const fail = (msg) => {
@@ -8917,7 +8918,7 @@ function infoHosts(c){
 // reflects reality even if a sync silently failed. This is the direct way to
 // answer "is conditional forwarding actually working" without a shell.
 function infoDNS(c){
-  secHint(c, 'What\'s actually registered with this host\'s OS resolver right now, per network. Read live from the OS, not from gravinet\'s own records; if this is empty or missing an entry you expect, the last sync failed or hasn\'t happened yet; check the DNS section\'s advertise/reject lists and this node\'s logs.');
+  secHint(c, 'What\'s actually registered with this host\'s OS resolver right now, per network. Read live from the OS, not from gravinet\'s own records. If an expected entry is missing, the last sync may have failed \u2014 check the DNS section\'s advertise/reject lists and this node\'s logs.');
   const card = $('<div class="card"></div>');
   const body = $('<div></div>'); body.innerHTML = '<div class="hint">loading\u2026</div>'; card.appendChild(body); c.appendChild(card);
   (async () => {

@@ -2,6 +2,157 @@
 
 ---
 
+## v676 — 2026-07-26
+
+**Changed: removed the same debounce sentence from the Performance card
+that v673 already cut from Login, and fixed settings-row layout so long
+descriptions no longer crowd the value field.**
+
+The Performance (advanced) card's own top-level description was the
+original source of "Changing one or more of these restarts the node once,
+a few seconds after your last edit here — not once per field" \u2014 the
+Login card note removed in v673 was explicitly copied from this one, but
+the original was never actually removed. Gone now too; the card keeps only
+"Sane defaults for most setups; only worth touching if you\u2019ve profiled
+a real throughput ceiling."
+
+**Layout fix:** `.settings-row` is a flex container with
+`justify-content:space-between` and no `gap`, so a long description had
+nothing stopping it from wrapping right up against the value field on
+long-text rows (Keepalive interval, UDP port, TCP port, etc. \u2014 visible
+in a screenshot at typical card width). Added `gap:24px` to the row and
+`flex-shrink:0` to the input/switch side, so there\u2019s now a guaranteed
+minimum gap between the description text and its control regardless of
+how much the text wraps, and the control itself never gets squeezed to
+make room.
+
+**Verified:** the embedded UI script re-extracted from `indexHTML` and
+checked with `node --check` \u2014 clean. Confirmed the whole file still
+has exactly one backtick pair (the Go raw string's own delimiters) after
+the CSS edit, and no stray characters that would break `indexHTML`'s
+string literal. UI-only change; no Go touched.
+
+---
+
+## v675 — 2026-07-26
+
+**Changed: extended the wordiness pass from v674 to the whole UI, not just
+Settings.**
+
+Read all 37 `secHint()` calls (the top-of-page instructions shown on every
+section) individually. Most of them turned out to be genuine usage
+instructions for a genuinely complex tool \u2014 which button does what,
+field semantics for BGP/NAT/QoS/DNS rules, platform caveats \u2014 not the
+"why we built it this way" pattern from the original complaint, so most
+were left alone rather than cut for the sake of cutting. Nine did have real
+fat and got trimmed:
+
+- **Keys**: cut the parenthetical explaining why a distributed key lands in
+  the same slot number on peers \u2014 kept what "distributed" actually does.
+- **Redistribute (BGP-learned routes)**: cut the restated metric
+  explanation and the "to avoid a loop" justification.
+- **DNS forward**: shortened the "default DNS and Hosts are untouched"
+  reassurance to one clause instead of a full sentence.
+- **Address objects / Service objects**: each had the same tell \u2014
+  "shared by every network, edited once" followed later by a second
+  sentence restating the identical fact a different way. Cut the second
+  one in both; also dropped a vague "see docs" pointer with no actual link.
+- **L2 Disco**: cut "on picked interfaces" repeating what "whichever
+  interfaces you pick below" already said one clause earlier.
+- **BGP config**: shortened the Redistribute-pickers disambiguation clause.
+- **Resolver state**: tightened the troubleshooting guidance to one
+  sentence.
+- **Syslog**: "keeps working exactly as it already does" \u2192 "keeps
+  working as before."
+
+Also found and cut one `hint`-class block outside Settings with the exact
+debounce-style problem: the one-shot NTP sync button's note explained *why*
+it needs an explicit click (onblur vs onclick, "not a setting that should
+fire just because the field lost focus") instead of just saying it needs a
+click.
+
+Beyond the individually-read secHint set, ran targeted searches across the
+entire file for the rationale-signal phrasing that actually characterizes
+this problem (\`so a\`, \`the reason\`, \`rather than\`, \`deliberately\`,
+\`not because\`, \`worth noting\`, \`exists because\`, code-identifier
+leakage like a function name inside quoted UI text) rather than re-running
+the same length-based ranking from v674 across ~140 hint-class divs and
+100+ tooltip \`title=\` attributes \u2014 length alone doesn't distinguish
+"this needs real explaining" (NAT rule semantics, DNS resolver mechanics)
+from "this is padding." That search came back clean beyond what's already
+listed above.
+
+**Scope, stated plainly (again):** every `secHint()` call was read
+individually; the rest of the file was searched by pattern, not read
+line-by-line. If something in a hint or tooltip still reads like this
+after all that, it slipped past both the phrase search and my own
+judgment on what counts as "necessary domain knowledge" vs. "padding" for
+a tool that configures BGP and NAT rules \u2014 flag it and it gets fixed
+directly rather than re-litigated.
+
+**Verified:** the embedded UI script re-extracted from `indexHTML` and
+checked with `node --check` \u2014 clean. UI-only change; no Go touched.
+
+---
+
+## v674 — 2026-07-26
+
+**Changed: trimmed the wordiest end-user-facing descriptions in Settings.**
+
+Prompted by the same complaint that led to v673 (the Login card's debounce
+explanation nobody asked for): several Settings fields carried the same
+habit at greater length — internal reasoning, design-decision
+justification, and edge-case explanation mixed into what's supposed to be
+"what does this do." Reviewed every `settings-desc` string in the Settings
+section (17 of them) and trimmed the worst offenders, roughly halving their
+total length (about 4,740 characters down to about 2,760):
+
+- **UPnP** (703 chars \u2192 much shorter): dropped the "unlike the settings
+  above, this reaches out and asks a different device" aside and the
+  per-port best-effort elaboration; kept what it does, that it's off by
+  default, and that it restarts to apply.
+- **Upgrade peers picker** (542 chars): dropped the "so a bad build reverts
+  on the peers before it can reach the node you're logged into" rationale;
+  kept the actual ordering behavior and prerequisites.
+- **Geo-IP lookups** (522 chars): dropped the comparison to the info
+  panel's DNS/WHOIS lookups and their decentralized-protocol framing; kept
+  the privacy-relevant fact (third-party service, HTTPS) and the toggle's
+  effect.
+- **Log level** (474 chars): dropped the walk-through of which specific
+  mesh events log only at debug (replay, clock skew, id conflict, TLS
+  dial); kept the one actionable reason to switch to debug and that it's
+  applied live.
+- **Socket buffer** (464 \u2192 shorter, kept technical): this one stays
+  fairly technical since the card it's on already says "only worth
+  touching if you've profiled a real throughput ceiling" \u2014 kept the
+  `UdpRcvbufErrors`/`nstat` diagnostic pointer since that's the actual
+  answer to "how would I know to raise this," cut the restatement of what
+  a buffer is and the "cannot fix a receive path" caveat.
+- **Peer timeout, Log size, Keepalive interval, Route advertisement
+  interval, BGP-learned routes, UDP GSO/GRO**: smaller trims, each cutting
+  one clause of justification or restated definition while keeping the
+  unit, default, and any real trade-off.
+- One `hint`-class note (OS hostname change) also trimmed: kept the
+  warning that matters (restarts immediately, expect a brief reconnect
+  blip), cut the aside about mesh peers only reading the hostname at
+  startup.
+
+**Scope, stated plainly:** this covers every `settings-desc` string in
+Settings and one hint block, not an exhaustive pass over the whole file.
+`ui.go` also has ~37 per-section hint blocks (Firewall, NAT, QoS, BGP,
+Keys, etc.) and ~100+ tooltip `title=` attributes that weren't reviewed
+here — many of those are genuine usage instructions (double-click to edit,
+tick+minus to remove, field semantics needed to configure a rule
+correctly) rather than the kind of internal-mechanism explanation this
+pass targeted, so they weren't assumed to need the same treatment without
+looking at each individually. Worth a follow-up pass if more of that
+turns out to have the same problem.
+
+**Verified:** the embedded UI script re-extracted from `indexHTML` and
+checked with `node --check` — clean. UI-only change; no Go touched.
+
+---
+
 ## v673 — 2026-07-26
 
 **Changed: removed the Login card's explanatory blurb about debouncing.**
