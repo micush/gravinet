@@ -2,6 +2,24 @@
 
 ---
 
+## v670 — 2026-07-26
+
+**Changed: the login lockout message now shows minutes, not raw seconds.**
+
+`showLogin()`'s 429 handler previously rendered the server's
+`retry_after_seconds` verbatim — "Locked out. Retry in 846s." — which forces
+the operator to do the seconds-to-minutes math themselves for a number that's
+only ever meaningful in minutes anyway. It now rounds to the nearest minute
+and pluralizes correctly ("Retry in 1 minute." / "Retry in 14 minutes."). If
+the server response is missing `retry_after_seconds` for any reason, it falls
+back to "Locked out. Try again shortly." instead of the old "Retry in ?s."
+
+**Verified:** the embedded UI script re-extracted from `indexHTML` and checked
+with `node --check` — clean. No Go toolchain available in this environment to
+run `go build`/`go vet`/`go test`; only the JS was verified here.
+
+---
+
 ## v669 — 2026-07-26
 
 **Removed: the `notify()` corner-toast mechanism added in v668, and the

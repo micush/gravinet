@@ -703,7 +703,15 @@ function showLogin(msg) {
     const u = box.querySelector('#u').value, p = box.querySelector('#p').value;
     const r = await api('/api/login', { method:'POST', body: JSON.stringify({user:u, pass:p}) });
     if (r.ok) return dashboard();
-    if (r.status === 429) err.textContent = 'Locked out. Retry in ' + (r.body.retry_after_seconds||'?') + 's.';
+    if (r.status === 429) {
+      const secs = r.body.retry_after_seconds;
+      if (secs) {
+        const mins = Math.round(secs / 60);
+        err.textContent = 'Locked out. Retry in ' + mins + (mins === 1 ? ' minute.' : ' minutes.');
+      } else {
+        err.textContent = 'Locked out. Try again shortly.';
+      }
+    }
     else err.textContent = r.body.error || 'Login failed';
   };
   box.querySelector('#go').onclick = submit;
