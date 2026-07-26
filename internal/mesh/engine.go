@@ -1061,6 +1061,11 @@ type peerSession struct {
 	effMTU  atomic.Int32 // discovered underlay MTU for this peer (outer datagram bytes)
 	maxFrag atomic.Int32 // largest overlay slice per datagram at effMTU (send hot path)
 
+	// fragWarned latches the "overlay MTU doesn't fit this path" warning so a
+	// periodic pmtuLoop re-probe that rediscovers the same ceiling doesn't
+	// reprint it every cycle — see noteFragmentationRisk.
+	fragWarned atomic.Bool
+
 	// Fragmentation/reassembly diagnostics (atomic; surfaced per-peer in the UI so
 	// an "it hangs" report can be localized: clean counters here mean the loss is
 	// upstream of the mesh, climbing reasmDrop/fragSendDrop point at the path).
@@ -1070,6 +1075,41 @@ type peerSession struct {
 	reasmOK      atomic.Uint64 // overlay packets fully reassembled and delivered
 	reasmDrop    atomic.Uint64 // reassembly groups dropped incomplete (evicted, expired, inconsistent)
 	spoofDrop    atomic.Uint64 // inbound packets dropped: source address not owned by this peer (anti-spoofing)
+
+	// replayDrop counts inbound datagrams this peer's session rejected as
+	// replayed or stale — crypto.ErrReplay out of Session.Open, i.e. a
+	// counter at or behind the receive window's trailing edge
+	// (replayWindowSize, 64) — as distinct from authDrop below, which is
+	// every *other* Open failure (a genuine AEAD tag mismatch).
+	//
+	// The two are split because they mean opposite things. An AEAD failure
+	// is corruption or forgery. An ErrReplay on a link with no attacker on
+	// it is almost always neither: it is a legitimate packet that arrived
+	// too far out of order, and the window threw it away. That case is
+	// worth its own counter precisely because it is *self-inflicted and
+	// invisible* — the sender spent a full encrypt and a full send on a
+	// packet the receiver silently discarded, the inner TCP retransmits it,
+	// and the only symptom at the endpoints is loss that looks exactly like
+	// underlay loss. Nothing in the mesh distinguished those two before
+	// this counter, so "the path is dropping packets" and "our own receive
+	// window is dropping packets" were indistinguishable from the outside.
+	//
+	// This matters more since the outbound worker pool landed: tunLoopPooled
+	// hands packets to tunWorkers goroutines that seal (and therefore take
+	// their session counter) in one order and reach the wire in another, so
+	// the reordering the receiver has to absorb now scales with worker count
+	// and send-batch depth rather than with scheduler jitter alone. That
+	// tradeoff was reasoned about when the pool was written but never
+	// measured; this is the measurement. A replayDrop that stays at zero
+	// under load says the 64-packet window is comfortably wide and the
+	// reordering assumption holds. One that climbs in step with throughput
+	// says it does not, and that the window itself is costing capacity.
+	replayDrop atomic.Uint64
+	// authDrop counts inbound datagrams that decrypted-failed for any reason
+	// other than replay: the AEAD tag did not verify. Unlike replayDrop this
+	// should be flat at zero on a healthy link — a non-zero, climbing value
+	// means corruption on the path or traffic forged at this session index.
+	authDrop atomic.Uint64
 
 	// txBytes/rxBytes count outer-datagram bytes exchanged with this peer —
 	// encrypted wire bytes at the mesh layer, counted where the session is
@@ -1904,7 +1944,15 @@ func (e *Engine) onData(payload []byte, from netip.AddrPort, via *peerSession) {
 	pt, err := ps.sess.Open(ct[:0], ct, aad, h.Counter) // decrypt in place into the RX buffer
 	ps.recvMu.Unlock()
 	if err != nil {
-		return // replay or authentication failure
+		// Split the two failure modes apart rather than dropping both
+		// silently: they have completely different causes and completely
+		// different fixes. See peerSession.replayDrop/authDrop.
+		if errors.Is(err, crypto.ErrReplay) {
+			ps.replayDrop.Add(1)
+		} else {
+			ps.authDrop.Add(1)
+		}
+		return
 	}
 	ps.rxBytes.Add(uint64(len(payload)))
 	ps.rxPkts.Add(1)

@@ -108,6 +108,17 @@ type PeerInfo struct {
 	ReasmOK      uint64 `json:"reasm_ok"`       // packets fully reassembled from this peer
 	ReasmDrop    uint64 `json:"reasm_drop"`     // incomplete reassemblies dropped (lost fragments)
 	SpoofDrop    uint64 `json:"spoof_drop"`     // inbound packets dropped: source not owned by this peer (anti-spoofing)
+
+	// ReplayDrop/AuthDrop split the session's decrypt failures by cause —
+	// see peerSession.replayDrop for why the distinction is the whole point.
+	// ReplayDrop is a packet whose counter fell outside (or behind) the
+	// 64-packet receive window: on a link with no attacker, that is a
+	// legitimate packet discarded for arriving too far out of order, and it
+	// costs a retransmit. AuthDrop is a tag mismatch: corruption or forgery.
+	// Both omitted from JSON when zero so a healthy peer's payload doesn't
+	// grow two always-zero fields.
+	ReplayDrop uint64 `json:"replay_drop,omitempty"`
+	AuthDrop   uint64 `json:"auth_drop,omitempty"`
 }
 
 func banKey(origin, target string) string { return origin + "\x00" + target }
@@ -864,6 +875,8 @@ func (e *Engine) ListPeers(networkID uint64) []PeerInfo {
 			ReasmOK:       ps.reasmOK.Load(),
 			ReasmDrop:     ps.reasmDrop.Load(),
 			SpoofDrop:     ps.spoofDrop.Load(),
+			ReplayDrop:    ps.replayDrop.Load(),
+			AuthDrop:      ps.authDrop.Load(),
 			TxBytes:       ps.txBytes.Load(),
 			RxBytes:       ps.rxBytes.Load(),
 			TxPackets:     ps.txPkts.Load(),

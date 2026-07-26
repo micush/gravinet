@@ -24,7 +24,34 @@ const (
 
 // MTU/fragmentation constants.
 const (
-	DefaultTunnelMTU = 9216 // jumbo-frame default for the overlay interface
+	// DefaultTunnelMTU is the overlay interface's default MTU, sized so a
+	// full-size overlay packet fits in ONE underlay datagram at the default
+	// path-MTU-discovery ceiling — not merely "jumbo-ish".
+	//
+	// The arithmetic (mirrored by mesh.computeMaxInnerFrag, and pinned against
+	// it by TestDefaultTunnelMTUFitsDefaultUnderlay):
+	//
+	//	9000  config.UnderlayMTUMaxValue() default — the largest datagram
+	//	      path-MTU discovery will ever settle on out of the box
+	//	 -48  worst-case outer headers (IPv6 40 + UDP 8)
+	//	 -31  DataHeaderLen 14 + innerType 1 + GCM tag 16
+	//	  -6  fragment header, charged even to a packet that doesn't need one
+	//	----
+	//	8915
+	//
+	// This was 9216 through v658, which is larger than that ceiling permits.
+	// The consequence was not "occasionally fragments" but "fragments every
+	// single full-size packet, on every path, forever": discovery is capped at
+	// 9000, so no network however good could carry a 9216-byte overlay packet
+	// whole, and the two defaults could never be simultaneously satisfied.
+	// Lowering the overlay MTU can only ever reduce a packet's fragment count
+	// (ceil is monotonic in the numerator), so this is a strict improvement at
+	// every underlay size — on a 9000 path it goes from two datagrams to one,
+	// and on a 1500 path it stays at the seven it already took.
+	//
+	// Operators with a genuinely larger underlay can still raise both
+	// underlay_mtu_max and a network's mtu; nothing here caps them below 9216.
+	DefaultTunnelMTU = 8915
 	MinTunnelMTU     = 576
 
 	// DataHeaderLen is bytes consumed by a data packet header before ciphertext.

@@ -3437,7 +3437,8 @@ function peerRowsForNet(n) {
       version:p.Version||p.version||'',
       notes:p.Notes||p.notes||'',
       fsent:p.FragsSent||p.frags_sent||0, fsdrop:p.FragSendDrop||p.frag_send_drop||0,
-      frcvd:p.FragsRcvd||p.frags_rcvd||0, rdrop:p.ReasmDrop||p.reasm_drop||0 });
+      frcvd:p.FragsRcvd||p.frags_rcvd||0, rdrop:p.ReasmDrop||p.reasm_drop||0,
+      repdrop:p.ReplayDrop||p.replay_drop||0, authdrop:p.AuthDrop||p.auth_drop||0 });
   }
   const seen = new Set(rows.map(r => r.id));
   const disabledSet = new Set();
@@ -3696,7 +3697,7 @@ function infoMeshPeers(c) {
   perNet(c, (card, n) => {
     const rows = peerRowsForNet(n);
 
-    let h = '<table class="peers-table"><colgroup><col class="c-sel"><col class="c-target"><col class="c-version"><col class="c-key"><col class="c-overlay"><col class="c-endpoint"><col class="c-reach"><col class="c-time"><col class="c-transport"></colgroup><tr><th class="selcol"><input type="checkbox" class="rall"></th><th>target</th><th title="the gravinet build this peer is running, as it advertises in its own handshake. A dash means the peer predates this field \u2014 not that it has no version.">version</th><th title="the label (from this node\'s own Keys table) of the key currently authenticating this peer\'s session">key</th><th>overlay</th><th>endpoint</th><th>reach</th><th title="how long the current session with this peer has been established; resets on every reconnect">time</th><th title="discovered path MTU to the peer, fragment counts (tx/rx), and fragment loss (send/reassembly). Clean counters here mean a connectivity problem is not inside the mesh.">transport</th></tr>';
+    let h = '<table class="peers-table"><colgroup><col class="c-sel"><col class="c-target"><col class="c-version"><col class="c-key"><col class="c-overlay"><col class="c-endpoint"><col class="c-reach"><col class="c-time"><col class="c-transport"></colgroup><tr><th class="selcol"><input type="checkbox" class="rall"></th><th>target</th><th title="the gravinet build this peer is running, as it advertises in its own handshake. A dash means the peer predates this field \u2014 not that it has no version.">version</th><th title="the label (from this node\'s own Keys table) of the key currently authenticating this peer\'s session">key</th><th>overlay</th><th>endpoint</th><th>reach</th><th title="how long the current session with this peer has been established; resets on every reconnect">time</th><th title="discovered path MTU to the peer, fragment counts (tx/rx), and fragment loss (send/reassembly), plus session decrypt drops (replay/auth) when there are any. Clean counters here, with no replay or auth drops alongside them, mean a connectivity problem is not inside the mesh.">transport</th></tr>';
     if (!rows.length) h += '<tr><td colspan="9" class="empty">no peers</td></tr>';
     for (const p of rows) {
       // None of reach/key/time/transport describe a connection to yourself,
@@ -3714,8 +3715,20 @@ function infoMeshPeers(c) {
         const health = (sd+rd > 0)
           ? '<span class="off" title="lost fragments to/from this peer: '+sd+' on send (path too small / EMSGSIZE), '+rd+' on reassembly (missing pieces). A climbing count localizes packet loss to the underlay path here.">drops '+sd+'/'+rd+'</span>'
           : '<span class="on" title="no fragment loss to or from this peer">clean</span>';
+        // Session decrypt drops are a different failure from fragment loss
+        // and only appear when non-zero, so a healthy peer's cell reads
+        // exactly as it did before this existed. replay = the packet
+        // arrived intact and our own 64-packet receive window discarded it
+        // for being too far out of order (costs a retransmit, and is
+        // self-inflicted); auth = the AEAD tag did not verify, which is
+        // corruption or forgery and should never be non-zero on a healthy
+        // link. They are deliberately worded to point at different places.
+        const repd = p.repdrop||0, autd = p.authdrop||0;
+        let sessDrops = '';
+        if (repd > 0) sessDrops += ' <span class="off" title="inbound packets this peer\'s session rejected as replayed or stale: they arrived more than 64 packets out of order and the receive window threw them away. On a link with no attacker these are legitimate packets, and each one cost a full encrypt and send on the far side plus a retransmit. A count that climbs in step with throughput means the replay window itself is limiting this path.">replay '+repd+'</span>';
+        if (autd > 0) sessDrops += ' <span class="off" title="inbound packets whose AEAD tag did not verify: corruption on the path, or traffic forged at this session index. Unlike replay drops this should stay flat at zero on a healthy link.">auth '+autd+'</span>';
         xport = proto + ' <span class="hint" title="discovered underlay datagram size to this peer">'+esc(mtu)+'</span> '
-          + '<span class="hint" title="fragment datagrams sent / received">tx '+(p.fsent||0)+' rx '+(p.frcvd||0)+'</span> '+health;
+          + '<span class="hint" title="fragment datagrams sent / received">tx '+(p.fsent||0)+' rx '+(p.frcvd||0)+'</span> '+health+sessDrops;
       }
       const timeCell = (p.disabled || p.pending || p.self) ? '' : '<span class="hint" title="established '+esc(new Date(p.est/1e6).toLocaleString())+'">'+esc(fmtElapsed(p.est))+'</span>';
       const keyCell = (p.disabled || p.pending || p.self) ? '' : '<span class="hint">'+esc(p.keyLabel||'')+'</span>';

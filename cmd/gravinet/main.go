@@ -48,7 +48,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "656"
+	version = "659"
 	commit  = "none"
 )
 
@@ -1842,10 +1842,26 @@ func printPeers(peers []mesh.PeerInfo) {
 			}
 			up = formatUptime(uint64(secs))
 		}
-		fmt.Printf("  %-18s %-20s v4=%s v6=%s  public=%s (%s/%s)  key=%-10s up=%-10s mtu=%-8s frags-tx=%d frags-rx=%d %-14s bytes-tx=%s bytes-rx=%s\n",
+		// Session-level decrypt drops are appended rather than folded into
+		// the health column, and only when non-zero: they are a different
+		// failure from fragment loss (the packet arrived intact and was
+		// thrown away by our own receive window, or failed its tag), they
+		// are rare enough that a permanent always-zero column would be
+		// noise on every line, and keeping them out of the fixed columns
+		// means a healthy peer's row renders exactly as it did before this
+		// field existed. replay= climbing under load is the interesting
+		// one — see mesh.PeerInfo.ReplayDrop.
+		var drops string
+		if p.ReplayDrop > 0 {
+			drops += fmt.Sprintf(" replay=%d", p.ReplayDrop)
+		}
+		if p.AuthDrop > 0 {
+			drops += fmt.Sprintf(" auth=%d", p.AuthDrop)
+		}
+		fmt.Printf("  %-18s %-20s v4=%s v6=%s  public=%s (%s/%s)  key=%-10s up=%-10s mtu=%-8s frags-tx=%d frags-rx=%d %-14s bytes-tx=%s bytes-rx=%s%s\n",
 			p.NodeID, p.Hostname, p.Overlay4, p.Overlay6, p.Endpoint, reach, xport,
 			key, up, mtu, p.FragsSent, p.FragsRcvd, health,
-			humanBytes(p.TxBytes), humanBytes(p.RxBytes))
+			humanBytes(p.TxBytes), humanBytes(p.RxBytes), drops)
 	}
 }
 

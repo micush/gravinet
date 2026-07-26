@@ -62,11 +62,55 @@ func computeMaxInnerFrag(underlayMTU int) int {
 // sendFragmented splits an oversized overlay packet into fragments and seals each
 // one independently. If the packet somehow needs more than maxFragments pieces
 // it is dropped (cannot happen with a 9216 ceiling and a sane underlay MTU).
-func (e *Engine) sendFragmented(ps *peerSession, packet []byte, per int) {
+//
+// The split is *balanced*, not greedy. `per` is the largest slice the path can
+// carry, so the obvious implementation is to fill each fragment to `per` and let
+// the last one take whatever remains — but that produces the worst possible size
+// distribution. A 9216-byte overlay packet on a 9000-byte path (per = 8915)
+// becomes one 8952-byte datagram and one 338-byte runt: two full trips through
+// the receiver's per-packet path, one of which carries 3% of the payload.
+//
+// Dividing the same byte count evenly across the same number of fragments costs
+// nothing and fixes two things at once:
+//
+//   - Uniform sizes let the GSO send path actually coalesce. gsoRunLen takes the
+//     first datagram's length as the stride and stops at anything larger, so an
+//     alternating big/runt pattern yields runs of 1-2 where a uniform run reaches
+//     maxGSOSegs. Greedy fragmentation silently defeated UDP GSO entirely on any
+//     path where the overlay MTU didn't divide evenly into the path MTU.
+//   - No runt datagrams, so the receiver's fixed per-packet cost (recvmmsg slot,
+//     AEAD open, reassembly bookkeeping) is spent on packets that carry a useful
+//     amount of payload.
+//
+// The rebalance can only ever shrink `per`, never grow it past what the path
+// accepts, and it provably yields the same fragment count with no empty piece:
+// per' = ceil(L/count) satisfies count*per' >= L, so ceil(L/per') <= count, while
+// per' <= per gives ceil(L/per') >= count — so the two are equal, and the last
+// fragment is non-empty because (count-1)*per' < L.
+//
+// Wire format is unchanged and this is purely a send-side decision: the receiver
+// concatenates pieces in index order and never assumed a fixed chunk size, so a
+// node running this talks to an older node in either direction without issue.
+// fragPlan decides how an oversized overlay packet is divided: how many
+// fragments, and how many payload bytes each carries. `per` in is the largest
+// slice this path can carry; `size` out is what each fragment actually gets,
+// which is never larger. Pure and separate from sendFragmented so the size
+// arithmetic can be tested exhaustively without an engine, a session, or a
+// socket — see fragbalance_test.go, which is the authority on its invariants.
+func fragPlan(length, per int) (count, size int) {
 	if per < 1 {
 		per = 1
 	}
-	count := (len(packet) + per - 1) / per
+	count = (length + per - 1) / per
+	if count > 1 {
+		// Same number of datagrams, evenly sized. See sendFragmented.
+		per = (length + count - 1) / count
+	}
+	return count, per
+}
+
+func (e *Engine) sendFragmented(ps *peerSession, packet []byte, per int) {
+	count, per := fragPlan(len(packet), per)
 	if count > maxFragments {
 		e.log.Debugf("mesh: packet too large to fragment (%d bytes, %d pieces)", len(packet), count)
 		ps.fragSendDrop.Add(1)

@@ -286,6 +286,7 @@ func (e *Engine) pmtuTick(ps *peerSession) {
 	if int32(eff) != ps.effMTU.Load() {
 		ps.setEff(eff)
 		e.log.Debugf("mesh: path mtu to %s now %d bytes", ps.nodeID, eff)
+		e.noteFragmentationRisk(ps, eff)
 	}
 	if send && e.probeReachable(ps) {
 		e.sendProbe(ps, size, id)
@@ -355,7 +356,53 @@ func (e *Engine) onMTUAck(ps *peerSession, body []byte) {
 	if int32(eff) != ps.effMTU.Load() {
 		ps.setEff(eff)
 		e.log.Debugf("mesh: path mtu to %s now %d bytes", ps.nodeID, eff)
+		e.noteFragmentationRisk(ps, eff)
 	}
+}
+
+// noteFragmentationRisk warns when this network's overlay MTU is larger than
+// what the discovered path to this peer can carry in a single datagram, which
+// means *every* full-size packet to that peer is split by frag.go and rebuilt
+// on the far side.
+//
+// This is worth a Warn rather than leaving it to be inferred, because the
+// symptom is pure throughput loss with nothing that looks like an error: no
+// drop counter moves, the link reports clean, and the only visible trace is a
+// climbing frags-tx on one peer's row. The cost is real — double the datagrams,
+// double the per-packet receive work, plus reassembly — and the fix is a config
+// change the operator can only make if they know the number to use, so the
+// message names it.
+//
+// Fires at most once per peer per direction of change: fragWarned latches so a
+// pmtuLoop re-probe that rediscovers the same ceiling doesn't reprint it, and
+// clears (with a matching recovery line) if a later probe finds a path big
+// enough that fragmentation stops.
+func (e *Engine) noteFragmentationRisk(ps *peerSession, eff int) {
+	ns := ps.net
+	if ns == nil {
+		return
+	}
+	dev := ns.dev()
+	if dev == nil {
+		return
+	}
+	overlay := dev.MTU()
+	per := computeMaxInnerFrag(eff)
+	if overlay <= 0 || per <= 0 {
+		return
+	}
+	if overlay <= per {
+		if ps.fragWarned.Swap(false) {
+			e.log.Infof("mesh: path to %s now carries the full %d-byte overlay MTU in one datagram — packets to this peer are no longer being fragmented", ps.nodeID, overlay)
+		}
+		return
+	}
+	if ps.fragWarned.Swap(true) {
+		return // already warned for this peer and nothing has improved
+	}
+	pieces := (overlay + per - 1) / per
+	e.log.Warnf("mesh: overlay MTU %d exceeds what the path to %s can carry in one datagram (%d bytes, at a discovered path MTU of %d) — every full-size packet to this peer is being split into %d fragments and reassembled, roughly %dx the datagrams and per-packet work for the same throughput. Set this network's mtu to %d or lower (or raise the underlay path MTU) to stop it; watch frags-tx on this peer in `gravinet mesh peers`.",
+		overlay, ps.nodeID, per, eff, pieces, pieces, per)
 }
 
 // localSourceIP returns the local address the kernel would use to reach dst.

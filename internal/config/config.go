@@ -16,6 +16,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"gravinet/internal/protocol"
 )
 
 // DefaultUDPPort is tried first; FallbackUDPPorts are tried in order if the
@@ -204,7 +206,7 @@ type Config struct {
 
 	// UnderlayMTU caps the size of a single UDP datagram we put on the wire.
 	// Overlay packets larger than what fits are fragmented at the application
-	// layer and reassembled by the peer, so the jumbo tunnel MTU (9216) works
+	// layer and reassembled by the peer, so the jumbo tunnel MTU works
 	// across underlays that can't carry it — notably mobile/5G paths that drop
 	// IP-fragmented or oversized datagrams. Default 1280 (the IPv6 minimum, safe
 	// almost everywhere); raise it on clean networks for less per-packet overhead.
@@ -796,7 +798,10 @@ type Network struct {
 	Address6 string `json:"address6"`
 
 	TUNName string `json:"tun_name"` // interface name; auto if empty
-	MTU     int    `json:"mtu"`      // tunnel MTU, default 9216
+	// MTU is the overlay interface MTU. Defaults to protocol.DefaultTunnelMTU
+	// (8915), which is the largest packet that still fits one underlay datagram
+	// at the default underlay_mtu_max of 9000 — see that constant for why.
+	MTU int `json:"mtu"`
 
 	// Seeds are underlay addresses (host:port) used to bootstrap into the mesh,
 	// each with an optional operator-facing note (see Seed). SeedList accepts
@@ -1811,7 +1816,7 @@ func (r RejectRoute) MarshalJSON() ([]byte, error) {
 func NewNetworkDefaults() Network {
 	return Network{
 		Enabled:      true,
-		MTU:          9216,
+		MTU:          protocol.DefaultTunnelMTU,
 		StormControl: StormControl{BroadcastPPS: 100, MulticastPPS: 200, Burst: 200},
 		HostsSync:    HostsSync{Enabled: true, GossipPPS: 5, TTLSeconds: 300},
 		// DNSSync defaults on, same as HostsSync: control happens through the
@@ -2096,7 +2101,7 @@ func (c *Config) Validate() error {
 		}
 		seenNet[n.ID] = true
 		if n.MTU == 0 {
-			n.MTU = 9216
+			n.MTU = protocol.DefaultTunnelMTU
 		}
 		if n.MTU < 576 || n.MTU > 65535 {
 			return fmt.Errorf("network %s: mtu %d out of range", n.ID, n.MTU)

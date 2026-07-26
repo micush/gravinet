@@ -2,6 +2,233 @@
 
 ---
 
+## v659 — 2026-07-25
+
+**Fixed: the default overlay MTU (9216) was larger than the default underlay
+ceiling could ever carry, so a stock configuration fragmented every full-size
+packet on every path, permanently.** `DefaultTunnelMTU` is now **8915**.
+
+**This was not a tuning nit, it was an unsatisfiable pair of defaults.**
+`UnderlayMTUMaxValue()` defaults to 9000 — that is the largest datagram
+path-MTU discovery will ever settle on out of the box. A 9000-byte datagram
+carries at most `9000 − 48 (IPv6+UDP) − 31 (header+type+tag) − 6 (frag header)`
+= **8915** bytes of overlay packet. The overlay interface defaulted to 9216.
+Since 9216 > 8915, no network — however clean, however jumbo — could carry a
+full-size overlay packet whole, because discovery was capped below the size
+required to do it. The two numbers could not both be honoured, on any path, at
+any time.
+
+The symptom was invisible by construction: no error, no drop counter, the link
+reports `clean`, and the only trace is a `frags-tx` count on a peer row that
+nothing draws attention to. The field case that surfaced it showed 3.4M
+fragments against 14.9 GiB to one peer — every packet, split.
+
+**Why 8915 and not a rounder number.** It is exactly the limit, so it gives
+away no payload. Rounding down to 8900 would cost 15 bytes on every packet
+forever to buy nothing, and rounding up reintroduces the bug.
+
+**No regression at any smaller underlay.** `ceil` is monotonic in its
+numerator, so lowering the overlay MTU can only reduce a packet's fragment
+count. Measured across the path MTUs a real mesh sees (logged by
+`TestLowerDefaultNeverIncreasesFragmentCount`): underlay 9000 goes **2
+fragments → 1**, 9216 goes **2 → 1**, 590 goes 19 → 18, and 1280/1500/1520/4000
+are unchanged at 8/7/7/3. Nothing anywhere gets worse; the jumbo case halves
+its datagram count.
+
+**What changed:** `protocol.DefaultTunnelMTU` 9216 → 8915, carrying the full
+derivation in its doc comment. `config` now imports `protocol` and references
+the constant from both places it previously hardcoded 9216
+(`NewNetworkDefaults` and the zero-value fill in validation) so there is one
+source of truth. The clamp ceilings are deliberately left at 9216: an operator
+with a genuinely larger underlay can still raise `underlay_mtu_max` and a
+network's `mtu` together, and nothing here caps them below what they had.
+
+**Note for existing deployments:** a config that already records `mtu: 9216`
+explicitly keeps it — defaults only apply where the field is absent. Those
+nodes will now get v658's `noteFragmentationRisk` warning naming 8915 as the
+value to set. Changing it requires the same value on both ends of a link to be
+useful, since each side sizes its own TUN.
+
+**Verified:** `go build ./...`, `go vet ./...`, `gofmt -l` clean; full
+`internal/mesh`, `internal/transport`, `internal/crypto`, `internal/config`,
+`internal/protocol`, and `cmd/gravinet` suites pass. The new
+`TestDefaultTunnelMTUFitsDefaultUnderlay` asserts the *relationship* rather
+than the literal — it reads config's live default ceiling, runs mesh's real
+overhead accounting over it, and requires `protocol.DefaultTunnelMTU` to equal
+the result exactly (too large fails as fragmentation, too small fails as wasted
+payload), then confirms a full-size default packet plans to exactly one
+fragment. Those three numbers are owned by three packages and nothing connected
+them before, which is precisely how 9216 sat above a 9000 ceiling unnoticed;
+changing any one of them now fails this test instead. Existing tests that pass
+9216 explicitly (fragmentation round-trip, PMTU) are untouched and still pass —
+they exercise fragmentation deliberately — as do config's clamp tests, since
+the clamp ceilings did not move.
+
+---
+
+## v658 — 2026-07-25
+
+**Fixed: application-layer fragmentation now splits a packet into evenly-sized
+pieces instead of filling each one to the path limit and leaving a runt.** Same
+number of datagrams, same total bytes, dramatically better shape.
+
+**What was wrong.** `sendFragmented` chunked greedily: fill to `per`, last
+fragment takes the remainder. On the deployment that surfaced this, a 9216-byte
+overlay MTU over a 9000-byte path (`computeMaxInnerFrag` → 8915) meant every
+full-size packet went out as **8915 + 301** — one full datagram followed by a
+338-byte runt on the wire carrying 3% of the payload. Field counters: 3,452,862
+fragments for 14.9 GiB to a single peer, which works out to 1,726,431 packets ×
+(8952 + 338) ≈ 16.0 GB against 16.0 GB reported. Effectively *every* packet on
+that link, not an occasional oversized one.
+
+**Why it mattered more than it looks.** Three separate costs, none of which
+raise an error or move a drop counter:
+
+- **UDP GSO was silently defeated.** `gsoRunLen` takes the first datagram's
+  length as the stride, stops at anything larger, and tolerates one shorter
+  segment only as the last. An alternating big/runt pattern therefore yields
+  runs of 2, then 1, then 2 — where uniform fragments reach `maxGSOSegs`. Every
+  measurement taken with GSO on and off on such a path was comparing two
+  variants of "no coalescing"; the lever could not have moved.
+- **Double the datagrams**, half of them runts, through a receive path whose
+  per-packet cost is fixed and (see v657's note on `SO_REUSEPORT` and the
+  single 4-tuple) pinned to one core per peer.
+- **The replay window's reach is halved in overlay-packet terms**, since each
+  overlay packet now consumes two session counters against a 64-packet window.
+
+**What changed:** the size decision moved into a new pure `fragPlan(length,
+per) (count, size)`; when more than one fragment is needed it divides the
+length evenly across the count the path already required. The rebalance can
+only shrink the per-fragment size, never grow it past what the path accepts,
+and provably yields the same count with no empty piece: `size = ceil(L/count)`
+gives `count*size >= L` so `ceil(L/size) <= count`, while `size <= per` gives
+`ceil(L/size) >= count` — equal, and `(count-1)*size < L` so the last fragment
+is non-empty. Wire format is untouched and this is purely a send-side decision:
+the receiver concatenates pieces in index order and never assumed a fixed chunk
+size, so a node running this interoperates with an older one in both directions
+and the mesh can be upgraded a node at a time.
+
+**Added: a warning when the overlay MTU cannot fit the discovered path.**
+`noteFragmentationRisk`, called from both places PMTU publishes a new effective
+MTU, warns once per peer when the network's overlay MTU exceeds
+`computeMaxInnerFrag(effMTU)` — i.e. when *every* full-size packet to that peer
+will be fragmented. This previously had no symptom at all beyond a climbing
+`frags-tx` on one row: no error, no drop counter, link reports clean. The
+message names the MTU to set rather than leaving the operator to derive it, and
+latches (`peerSession.fragWarned`) so `pmtuLoop`'s periodic re-probe doesn't
+reprint it, clearing with a matching recovery line if a later probe finds a
+path big enough that fragmentation stops.
+
+**Worth noting for defaults:** gravinet's default overlay MTU of 9216 needs an
+underlay of ≥ 9301 to avoid fragmenting every full-size packet. On a 9000-MTU
+jumbo underlay — the most common jumbo configuration there is — the default
+fragments everything. Balanced splitting takes most of the sting out of that,
+but the warning now says so explicitly, and the default itself is worth
+revisiting separately.
+
+**Verified:** `go build ./...`, `go vet ./...` clean; `gofmt -l` clean on every
+file touched. New `internal/mesh/fragbalance_test.go` calls the real `fragPlan`
+rather than reimplementing its arithmetic, and checks the invariants
+exhaustively across every length from 1 to 9300 against eleven path limits
+(1, 2, 37, 300, 1195, 1317, 1435, 4608, 8915, 9103, 9131): no fragment exceeds
+the path limit, none is empty, they sum to the original length, and the count
+always matches what the greedy split would have used — balancing must never
+cost an extra datagram. On top of that: the GSO stride property (no fragment
+larger than the first, and no final runt under half the first) across five
+real-world MTU pairings; the exact field regression (9216 on a 9000 path must
+give two 4608-byte halves, not 8915 + 301); and that a packet needing only one
+piece is left alone. The pre-existing `TestOverlayFragmentationRoundTrip` —
+real handshake, real fragmentation, real reassembly, byte-for-byte comparison —
+passes unchanged, which is the compatibility check that matters.
+
+---
+
+## v657 — 2026-07-25
+
+**Added: per-peer `replay_drop` and `auth_drop` counters, splitting session
+decrypt failures by cause.** `onData` has always discarded a failed
+`Session.Open` under one silent `return` marked "replay or authentication
+failure". Those are opposite problems and this makes them separately
+countable, per peer, in `PeerInfo`, the CLI peer table, and Monitor → Mesh
+Peers.
+
+**Why this specific instrumentation.** An AEAD tag failure is corruption or
+forgery. A `crypto.ErrReplay` on a link with no attacker on it is usually
+neither: it is a legitimate packet that arrived more than `replayWindowSize`
+(64) packets out of order, and the receive window threw it away. That case is
+worth counting precisely because it is self-inflicted and otherwise invisible
+— the sender spent a full encrypt and a full send on a packet the receiver
+discarded, the inner TCP retransmits it, and at the endpoints the result is
+indistinguishable from underlay loss. Nothing in the mesh could tell "the path
+is dropping packets" apart from "our own receive window is dropping packets".
+
+That distinction got more load-bearing when the outbound worker pool landed:
+`tunLoopPooled` hands packets to `tunWorkers` goroutines that take their
+session counter in one order and reach the wire in another, so the reordering
+the receiver must absorb now scales with worker count and send-batch depth
+rather than with scheduler jitter alone. `tunLoopPooled`'s own doc comment
+asserts the 64-packet window "comfortably absorbs" it. That was reasoned
+about but never measured. This is the measurement, and it is deliberately
+*only* the measurement: the window is left at 64 in this version. Widening it
+in the same change would drive the new counter to zero and destroy the
+evidence for whether it was ever the problem.
+
+**Not fixed here, but found while looking — worth reading before tuning
+anything.** `transport.startWorkers` opens one `SO_REUSEPORT` socket per
+worker and one read goroutine per socket, described as "kernel-balanced
+parallel receive". The kernel balances by hashing the 4-tuple, and *all*
+traffic between two gravinet peers is a single 4-tuple. So every datagram from
+a given peer hashes to one socket and is handled start to finish — `recvmmsg`,
+`recvMu`, AES-GCM open, anti-spoof, NAT, firewall, ingress policing, TUN write
+— by one goroutine on one core, no matter how `workers` is set and no matter
+how many overlay streams are multiplexed inside the tunnel. Raising `workers`
+adds goroutines on sockets that will never receive a packet of that peer's
+traffic. `tunQueueLoop` already documents exactly this caveat for the TUN side
+("a single flow will still tend to land on one queue ... this helps aggregate
+throughput across many concurrent connections, not one stream's ceiling"); the
+same caveat applies to the UDP side and is not stated there. Left alone
+deliberately — fixing it means an inbound fan-out with its own reordering
+consequences, which is precisely what the counter above exists to measure
+first. Confirmable without any code: `mpstat -P ALL 1` on the receiving node
+during a load test, looking for one core pegged while the rest idle.
+
+**What changed:** `peerSession` gains `replayDrop`/`authDrop` (`atomic.Uint64`,
+next to `spoofDrop`); `onData` branches on `errors.Is(err, crypto.ErrReplay)`
+to pick between them; `PeerInfo` gains `ReplayDrop`/`AuthDrop`, both
+`omitempty` so a healthy peer's JSON does not grow two permanently-zero
+fields. `printPeers` appends `replay=N`/`auth=N` only when non-zero and
+outside the fixed-width columns, so a healthy peer's row renders byte-for-byte
+as it did before — the existing `TestPrintPeersRendersAllFields` needed no
+change, which was the point. Monitor → Mesh Peers renders them the same way,
+appended to the transport cell only when non-zero, with hover text pointing at
+the two different causes; that column's header tooltip previously promised
+that clean fragment counters mean the problem is not inside the mesh, which is
+now qualified rather than left overstating the case.
+
+**Verified:** `go build ./...` and `go vet ./...` clean; `gofmt -l` clean on
+every file touched (the 11 pre-existing entries in the tree are unchanged and
+unrelated — they are formatting skew from a newer gofmt than the `go 1.22`
+this was built against). Full suites pass: `internal/mesh` (607s — this one is
+slow because it stands up real UDP loopback handshakes and waits on them),
+`internal/webadmin`, `internal/transport`, `internal/protocol`,
+`internal/crypto`, and `cmd/gravinet`. The CLI suite passes with no test
+edits, which was the point of appending the new fields outside the
+fixed-width columns rather than folding them in. New
+`internal/mesh/replaydrop_test.go` drives real sealed datagrams through the
+actual `onData` path against a matched session pair rather than poking
+counters directly: a duplicate datagram counts as replay and not auth; a
+valid, never-seen packet delivered 65 counters behind the window counts as
+replay *and* is confirmed not delivered to the overlay; a run of packets
+reordered to within one of the full window width is absorbed with the counter
+still at zero (the property the worker pool depends on, now pinned by a test);
+a tag-flipped packet counts as auth and not replay, and is likewise confirmed
+undelivered; and both counters are asserted to survive the trip out through
+`ListPeers`. The window-boundary tests assert against a named constant, so
+widening the window later moves them with it instead of silently leaving them
+asserting the old edge.
+
+---
+
 ## v656 — 2026-07-25
 
 **Added: the Performance (advanced) card's three controls (worker threads,
