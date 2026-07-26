@@ -1850,6 +1850,27 @@ func (b BanPolicy) Window() time.Duration   { return time.Duration(b.WindowSecon
 func (b BanPolicy) Ban() time.Duration      { return time.Duration(b.BanSeconds) * time.Second }
 func (b BanPolicy) Coalesce() time.Duration { return time.Duration(b.CoalesceSeconds) * time.Second }
 
+// EffectiveMaxFailures returns MaxFailures, or the default (3) if it is 0 or
+// unset. Shared by Server.New (which builds the throttle from it) and the web
+// UI's /api/config response (which shows the operator the value actually in
+// effect), so the two can never silently disagree about what "default" means.
+func (b BanPolicy) EffectiveMaxFailures() int {
+	if b.MaxFailures <= 0 {
+		return 3
+	}
+	return b.MaxFailures
+}
+
+// EffectiveBanSeconds returns BanSeconds, or the default (900s/15min) if it
+// is 0 or unset. See EffectiveMaxFailures's doc comment for why this exists
+// rather than each caller re-deriving the same default independently.
+func (b BanPolicy) EffectiveBanSeconds() int {
+	if b.BanSeconds <= 0 {
+		return 900
+	}
+	return b.BanSeconds
+}
+
 func (h HostsSync) TTL() time.Duration { return time.Duration(h.TTLSeconds) * time.Second }
 
 // Default returns a config with sane defaults and one empty disabled network.

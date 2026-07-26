@@ -356,7 +356,7 @@ const indexHTML = `<!doctype html>
 <script>
 const $ = (h) => { const d=document.createElement('div'); d.innerHTML=h.trim(); return d.firstChild; };
 const app = document.getElementById('app');
-const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, geoipLookup:false, enableUpnp:false, allowRemoteShell:false, shellSupported:true, bgpSupported:false, snmpSupported:false, l2discoSupported:false, syslogSupported:false, selfId:null, selfHostname:'', targetSeq:0, pendingBgpHighlight:null, workerThreads:0, tunQueues:0, tunQueuesSupported:true, udpGSO:false, udpGSOSupported:true, socketBufferMB:16, socketBufferMaxMB:256, perfRestartPending:false };
+const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, geoipLookup:false, enableUpnp:false, allowRemoteShell:false, loginBanMaxFailures:3, loginBanSeconds:900, shellSupported:true, bgpSupported:false, snmpSupported:false, l2discoSupported:false, syslogSupported:false, selfId:null, selfHostname:'', targetSeq:0, pendingBgpHighlight:null, workerThreads:0, tunQueues:0, tunQueuesSupported:true, udpGSO:false, udpGSOSupported:true, socketBufferMB:16, socketBufferMaxMB:256, perfRestartPending:false, loginBanRestartPending:false };
 // setTarget is the only place state.target is ever assigned — bumping
 // targetSeq alongside it, once, exactly when the *selection itself* actually
 // changes. load()/startPolling()/refreshCluster() each capture targetSeq
@@ -1011,6 +1011,8 @@ async function load() {
   state.udpGSO = !!(c.body && c.body.udp_gso);
   state.udpGSOSupported = c.body ? !!c.body.udp_gso_supported : true;
   state.allowRemoteShell = !!(c.body && c.body.allow_remote_shell);
+  state.loginBanMaxFailures = (c.body && c.body.login_ban_max_failures) || 3;
+  state.loginBanSeconds = (c.body && c.body.login_ban_seconds) || 900;
   state.shellSupported = c.body ? !!c.body.shell_supported : true;
   // Whether this host can serve dynamic-routing (BGP) status — true only when
   // FRR's vtysh is installed here (see the server's bgpSupported()). Gates the
@@ -1083,6 +1085,8 @@ function buildSearchIndex(){
   // their local-node text, the one most people would actually search for.
   const settingsRows = [
     ['dark-mode-row', 'Dark mode', 'Switch between dark and light interface theme.'],
+    ['loginban-attempts-row', 'Lockout attempts', 'How many failed logins from one source before it is locked out.'],
+    ['loginban-duration-row', 'Lockout duration', 'How long a lockout lasts once triggered, in minutes.'],
     ['cluster-managed-row', 'Managed mode', 'Let Manager-mode peers in the cluster remotely configure this node.'],
     ['cluster-manager-row', 'Manager mode', 'Let this node browse and remotely configure other Managed-mode peers in the cluster.'],
     ['shell-allow-row', 'Remote shell', 'Let a Manager peer open a real OS shell on this node through the web admin.'],
@@ -2208,6 +2212,27 @@ function schedulePerfRestart(){
   }, PERF_RESTART_DEBOUNCE_MS);
 }
 
+let loginBanRestartTimer = null;
+const LOGIN_BAN_RESTART_DEBOUNCE_MS = 3000;
+
+// scheduleLoginBanRestart debounces the Login card's two lockout fields
+// (attempts, duration) into a single restart when both are edited in the
+// same sitting \u2014 the same rationale as schedulePerfRestart just above
+// (an operator setting a lockout policy plausibly touches both fields at
+// once), but scoped to this card's own two fields rather than sharing that
+// timer, matching schedulePerfRestart's own doc comment on why a page-wide
+// debounce isn't the right shape either.
+function scheduleLoginBanRestart(){
+  state.loginBanRestartPending = true;
+  const row = document.getElementById('loginban-restart-pending');
+  if (row) row.textContent = 'Changes saved \u2014 restarting in a moment to apply them.';
+  clearTimeout(loginBanRestartTimer);
+  loginBanRestartTimer = setTimeout(() => {
+    state.loginBanRestartPending = false;
+    quietRestart();
+  }, LOGIN_BAN_RESTART_DEBOUNCE_MS);
+}
+
 // parseUnit turns a number + unit (Mbps/Gbps/Kbps) into bytes/sec.
 function toBps(num, unit){ const bits={Gbps:1e9,Mbps:1e6,Kbps:1e3}[unit]||1e6; return Math.round(parseFloat(num)*bits/8); }
 
@@ -2576,6 +2601,49 @@ function secSettings(c) {
   dmCb.onchange = () => { setTheme(dmCb.checked ? 'dark' : 'light'); };
   dm.appendChild(dmLabel); dm.appendChild(dmSw);
   card.appendChild(dm);
+
+  c.appendChild(card); card = $('<div class="card"></div>');
+  card.appendChild($('<h3>Login</h3>'));
+  const loginBanPending = $('<div class="settings-desc" id="loginban-restart-pending" style="color:var(--acc);min-height:1.2em"></div>');
+  if (state.loginBanRestartPending) loginBanPending.textContent = 'Changes saved \u2014 restarting in a moment to apply them.';
+  card.appendChild(loginBanPending);
+
+  // Lockout attempts/duration — same shape as Worker threads/TUN queues in
+  // the Performance card below (commits on change, restart debounced rather
+  // than immediate — see scheduleLoginBanRestart's doc comment), but each
+  // field posts both values together since the backend takes the whole
+  // policy in one call (config.Config.WebAdminLoginBanSet) rather than two
+  // independent setters.
+  const lba = $('<div class="settings-row" id="loginban-attempts-row"></div>');
+  const lbaLabel = $('<div><div class="settings-label">Lockout attempts</div><div class="settings-desc">How many failed logins from one source before it is locked out. 0 uses the default (3).</div></div>');
+  const lbaInp = $('<input type="number" min="0" step="1" style="width:80px">');
+  lbaInp.value = state.loginBanMaxFailures;
+  lbaInp.onchange = async () => {
+    const v = parseInt(lbaInp.value, 10);
+    if (isNaN(v) || v < 0) { alert('Enter 0 or a positive whole number.'); lbaInp.value = state.loginBanMaxFailures; return; }
+    if (v === state.loginBanMaxFailures) return;
+    const ok = await edit('/api/loginban', { maxFailures: v, banSeconds: state.loginBanSeconds }, scheduleLoginBanRestart);
+    if (ok) { state.loginBanMaxFailures = v; }
+    else { lbaInp.value = state.loginBanMaxFailures; }
+  };
+  lba.appendChild(lbaLabel); lba.appendChild(lbaInp);
+  card.appendChild(lba);
+
+  const lbd = $('<div class="settings-row" id="loginban-duration-row"></div>');
+  const lbdLabel = $('<div><div class="settings-label">Lockout duration</div><div class="settings-desc">How long a lockout lasts once triggered, in minutes. 0 uses the default (15).</div></div>');
+  const lbdInp = $('<input type="number" min="0" step="1" style="width:80px">');
+  lbdInp.value = Math.round(state.loginBanSeconds / 60);
+  lbdInp.onchange = async () => {
+    const mins = parseInt(lbdInp.value, 10);
+    if (isNaN(mins) || mins < 0) { alert('Enter 0 or a positive whole number of minutes.'); lbdInp.value = Math.round(state.loginBanSeconds / 60); return; }
+    const secs = mins * 60;
+    if (secs === state.loginBanSeconds) return;
+    const ok = await edit('/api/loginban', { maxFailures: state.loginBanMaxFailures, banSeconds: secs }, scheduleLoginBanRestart);
+    if (ok) { state.loginBanSeconds = secs; }
+    else { lbdInp.value = Math.round(state.loginBanSeconds / 60); }
+  };
+  lbd.appendChild(lbdLabel); lbd.appendChild(lbdInp);
+  card.appendChild(lbd);
 
   c.appendChild(card); card = $('<div class="card"></div>');
   card.appendChild($('<h3>Cluster</h3>'));

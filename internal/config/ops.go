@@ -1188,6 +1188,27 @@ func (c *Config) NATStateTimeoutSet(seconds int) error {
 	return nil
 }
 
+// WebAdminLoginBanSet sets the web admin login lockout policy: how many
+// failed attempts from one source trigger a lockout, and how long that
+// lockout lasts. 0 for either restores its default (3 attempts, 900s/15min —
+// see BanPolicy.EffectiveMaxFailures/EffectiveBanSeconds).
+//
+// Unlike NATStateTimeoutSet just above, this needs a restart to take effect:
+// the throttle that actually tracks failures is built once, from these
+// values, when Server.New runs — the same "captured at startup" shape as
+// AuthMode/Users/GeoIPLookup (see config.WebAdmin's doc comments on those).
+func (c *Config) WebAdminLoginBanSet(maxFailures, banSeconds int) error {
+	if maxFailures < 0 || maxFailures > 100 {
+		return fmt.Errorf("lockout attempts must be 0..100 (0 restores the default of 3)")
+	}
+	if banSeconds < 0 || banSeconds > 86400 {
+		return fmt.Errorf("lockout duration must be 0..86400 seconds (0 restores the default of 900)")
+	}
+	c.WebAdmin.LoginBan.MaxFailures = maxFailures
+	c.WebAdmin.LoginBan.BanSeconds = banSeconds
+	return nil
+}
+
 // ---- Custom hosts records ----------------------------------------------------
 
 // HostAdd adds (or updates) a custom name -> IP record this node advertises.

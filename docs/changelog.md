@@ -2,6 +2,114 @@
 
 ---
 
+## v673 — 2026-07-26
+
+**Changed: removed the Login card's explanatory blurb about debouncing.**
+
+v672 added "Changing either of these restarts the node once, a few seconds
+after your last edit here — not once per field" as a card-level note,
+copied from the Performance card's own phrasing. Feedback from the field:
+an operator changing a lockout setting doesn't need to know it's debounced,
+only whether their change saved — mechanism explanation, not something
+worth putting in front of every person who opens this card. Removed
+outright rather than shortened. The transient "Changes saved — restarting
+in a moment to apply them" indicator stays, since that's the one thing
+actually worth telling someone: their edit landed and something is about
+to happen.
+
+**Verified:** the embedded UI script re-extracted from `indexHTML` and
+checked with `node --check` — clean. UI-only change; no Go touched.
+
+---
+
+## v672 — 2026-07-26
+
+**Changed: the Login card's lockout settings now restart the node
+automatically (debounced), instead of leaving a restart pending silently.**
+
+v671 shipped these two fields wired the same way as NAT state
+timeout/GeoIP-style structural settings that need a manual restart later —
+each said "takes effect on next restart" and just flagged
+`state.restartPending`. That was inconsistent with every other
+`restart:true` control on this page: GeoIP, UPnP, and Remote shell all call
+`quietRestart()` immediately because they're operations expected to feel
+instant, and the Performance card debounces its four fields into one
+restart because editing several of them in one sitting is the normal case
+there.
+
+Lockout attempts and lockout duration have exactly that second shape — an
+operator setting a lockout policy plausibly sets both in the same sitting —
+so they now follow the Performance card's pattern rather than GeoIP's or
+NAT-timeout's: a new `scheduleLoginBanRestart()` debounces both fields (3s,
+same window as `schedulePerfRestart`) into a single `quietRestart()`, with
+its own "Changes saved — restarting in a moment to apply them" indicator on
+the card. Deliberately its own timer/flag rather than sharing
+`schedulePerfRestart`'s, mirroring that function's own doc comment on why a
+single page-wide debounce isn't the right shape either — Performance's
+four fields and Login's two are edited in unrelated sittings, and sharing a
+timer between them would restart on behalf of a card the operator wasn't
+even touching.
+
+Dropped "Takes effect on next restart." from each field's own description
+in favor of one card-level note above both fields, again matching how the
+Performance card explains its own debounced restart once rather than
+per-field.
+
+**Verified:** the embedded UI script re-extracted from `indexHTML` and
+checked with `node --check` — clean. No Go changes in this release — this
+was UI-only. No Go toolchain available in this environment to re-run
+`go build`/`go vet`/`go test` on the unaffected Go code either.
+
+---
+
+## v671 — 2026-07-26
+
+**Added: login lockout policy is now configurable from Settings, instead of
+only from the config file.**
+
+A new "Login" card in Settings (right after Appearance) exposes two fields:
+
+- **Lockout attempts** — how many failed logins from one source trigger a
+  lockout. 0 restores the default (3).
+- **Lockout duration** — how long a lockout lasts once triggered, shown and
+  edited in minutes (converted to/from seconds under the hood, consistent
+  with v670's rounding of the lockout message itself). 0 restores the
+  default (15 minutes).
+
+Both post to a new `/api/loginban` endpoint, backed by
+`config.Config.WebAdminLoginBanSet` (validated: 0–100 attempts, 0–86400s
+duration). Like AuthMode/Users/GeoIPLookup, this takes effect on the next
+restart rather than live — the throttle that actually tracks failures is
+built once, from these values, when `Server.New` runs; changing the config
+file underneath a running process doesn't reach it. The Settings UI flags
+this the same way those other startup-captured settings do (saves
+immediately, marks a restart pending).
+
+`BanPolicy` gained `EffectiveMaxFailures()`/`EffectiveBanSeconds()` so the
+"0 means default" logic used by `Server.New` and the `/api/config` response
+(which now includes `login_ban_max_failures`/`login_ban_seconds`) can't drift
+out of sync with each other — previously that default-3/default-900 logic
+was only inlined in `Server.New`.
+
+**Caught during review, not after shipping:** the two Settings fields
+originally posted `{max_failures, ban_seconds}` (snake_case) to match this
+endpoint's own JSON response naming, but every other request body in this
+file relies on Go's default case-insensitive struct-field matching against
+*camelCase* keys (e.g. `newName` → `NewName`) — which doesn't bridge an
+underscore. Sent as written, both fields would have silently decoded as
+zero. Fixed to `{maxFailures, banSeconds}` before this went out.
+
+**Verified:** the embedded UI script re-extracted from `indexHTML` and
+checked with `node --check` — clean. Every new/changed Go symbol
+(`BanPolicy.EffectiveMaxFailures`, `EffectiveBanSeconds`,
+`Config.WebAdminLoginBanSet`, `Server.handleLoginBan`, the `/api/loginban`
+route, the `Server.New` refactor) checked by hand for exactly one
+definition each and no stray syntax. No Go toolchain available in this
+environment to run `go build`/`go vet`/`go test`; that should still be run
+before this is treated as fully verified on the Go side.
+
+---
+
 ## v670 — 2026-07-26
 
 **Changed: the login lockout message now shows minutes, not raw seconds.**

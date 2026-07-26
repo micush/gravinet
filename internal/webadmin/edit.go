@@ -656,6 +656,21 @@ func (s *Server) handleNATState(w http.ResponseWriter, r *http.Request) {
 	s.editResult(w, err, false) // applied live; no restart
 }
 
+// handleLoginBan sets the web admin login lockout policy (how many failed
+// attempts trigger a lockout, and how long it lasts). Unlike handleNATState
+// just above, this needs a restart to take effect — see
+// config.Config.WebAdminLoginBanSet's doc comment for why.
+func (s *Server) handleLoginBan(w http.ResponseWriter, r *http.Request) {
+	var req struct{ MaxFailures, BanSeconds int }
+	if !decode(w, r, &req) {
+		return
+	}
+	err := s.mutateConfig(func(cfg *config.Config) error {
+		return cfg.WebAdminLoginBanSet(req.MaxFailures, req.BanSeconds)
+	})
+	s.editResult(w, err, true) // needs a restart — see doc comment above
+}
+
 // handleGeoIPSetting toggles the peer/seed info panel's Geo-IP lookup (on by
 // default — see config.WebAdmin.GeoIPLookup's doc comment). Unlike
 // handleNATState/handlePort just below — mesh-level settings the running

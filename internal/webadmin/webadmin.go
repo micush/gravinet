@@ -270,18 +270,12 @@ func New(cfg config.WebAdmin, be Backend, log *logx.Logger) *Server {
 		}
 	}
 	lb := cfg.LoginBan
-	maxF := lb.MaxFailures
-	if maxF <= 0 {
-		maxF = 3
-	}
+	maxF := lb.EffectiveMaxFailures()
 	win := lb.Window()
 	if win <= 0 {
 		win = time.Minute
 	}
-	ban := lb.Ban()
-	if ban <= 0 {
-		ban = 15 * time.Minute
-	}
+	ban := time.Duration(lb.EffectiveBanSeconds()) * time.Second
 	return &Server{
 		cfg:      cfg,
 		be:       be,
@@ -417,6 +411,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/port", s.authed(s.handlePort))
 	mux.HandleFunc("/api/tcpport", s.authed(s.handleTCPPort))
 	mux.HandleFunc("/api/natstate", s.authed(s.handleNATState))
+	mux.HandleFunc("/api/loginban", s.authed(s.handleLoginBan))
 	mux.HandleFunc("/api/geoip", s.authed(s.handleGeoIPSetting))
 	mux.HandleFunc("/api/upnp", s.authed(s.handleUPnPSetting))
 	mux.HandleFunc("/api/worker-threads", s.authed(s.handleWorkerThreads))
@@ -933,7 +928,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	l2discoSupported, _ := service.LLDPSupported()
 	syslogSupported, _ := service.SyslogSupported()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"nets": out, "primary_port": cfg.PrimaryPort, "tcp_fallback_port": cfg.TCPFallbackPortValue(), "tcp_fallback_disabled": !cfg.TCPFallbackEnabled(), "extra_listen_ports": cfg.ExtraListenPorts, "extra_tcp_listen_ports": cfg.ExtraTCPListenPorts, "nat_state_timeout": cfg.NATStateTimeout, "geoip_lookup": s.cfg.GeoIPEnabled(), "enable_upnp": cfg.EnableUPnP, "allow_remote_shell": s.cfg.AllowRemoteShell, "shell_supported": ptySupported, "bgp_supported": bgpSupported(), "snmp_supported": snmpSupported, "l2disco_supported": l2discoSupported, "syslog_supported": syslogSupported, "log_level": s.be.LogLevel(), "log_max_size": cfg.LogMaxSizeString(),
+		"nets": out, "primary_port": cfg.PrimaryPort, "tcp_fallback_port": cfg.TCPFallbackPortValue(), "tcp_fallback_disabled": !cfg.TCPFallbackEnabled(), "extra_listen_ports": cfg.ExtraListenPorts, "extra_tcp_listen_ports": cfg.ExtraTCPListenPorts, "nat_state_timeout": cfg.NATStateTimeout, "geoip_lookup": s.cfg.GeoIPEnabled(), "enable_upnp": cfg.EnableUPnP, "allow_remote_shell": s.cfg.AllowRemoteShell, "login_ban_max_failures": s.cfg.LoginBan.EffectiveMaxFailures(), "login_ban_seconds": s.cfg.LoginBan.EffectiveBanSeconds(), "shell_supported": ptySupported, "bgp_supported": bgpSupported(), "snmp_supported": snmpSupported, "l2disco_supported": l2discoSupported, "syslog_supported": syslogSupported, "log_level": s.be.LogLevel(), "log_max_size": cfg.LogMaxSizeString(),
 		"worker_threads": cfg.WorkerThreads, "tun_queues": cfg.TunQueues, "tun_queues_supported": tunMultiQueueSupported, "udp_gso": cfg.UDPGSOEnabled(), "udp_gso_supported": udpGSOSupported, "socket_buffer_mb": cfg.SocketBufferMB(), "socket_buffer_max_mb": config.SocketBufferMaxBytes >> 20,
 		// Node-global firewall object/service catalog (see Config.FirewallObjects'
 		// doc comment) — shared by every network above, not nested under any one
