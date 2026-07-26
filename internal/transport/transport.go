@@ -206,6 +206,28 @@ func openWith(o Options, bind binder) (*Transport, error) {
 	}
 
 	candidates := append([]int{o.PrimaryPort}, o.FallbackPorts...)
+	// An ephemeral request (port 0) has to be resolved to a concrete port
+	// before the worker sockets are bound, because every one of those sets
+	// SO_REUSEPORT — and SO_REUSEPORT explicitly permits the kernel to hand
+	// out a port another SO_REUSEPORT socket already holds. Two independent
+	// Transports asking for port 0 at the same moment can therefore land on
+	// the *same* port and silently split each other's inbound datagrams
+	// between them, which looks exactly like a peer that won't handshake.
+	// (Production always names a port; primary_port=0 means "UDP disabled"
+	// and never reaches here. This is the test harness's path, where it made
+	// timing-dependent failures that read as real connectivity bugs.)
+	//
+	// probeEphemeralPort binds without SO_REUSEPORT, so the kernel must pick
+	// a genuinely free port; concurrent probes are guaranteed to differ. The
+	// close-then-rebind window is narrow and, unlike the shared-port case,
+	// requires an actual race rather than being the documented behaviour.
+	if len(candidates) > 0 && candidates[0] == 0 && reusePort {
+		if p, err := probeEphemeralPort(o.BindAddr, o.EnableV4); err == nil {
+			candidates[0] = p
+		}
+		// On failure fall through with 0: the old behaviour, which binds
+		// fine and is only at risk of the collision described above.
+	}
 	port, conns4, conns6, err := bindGroup(bind, candidates, o, socketsPerFamily)
 	if err != nil {
 		return nil, err
@@ -548,4 +570,33 @@ func (t *Transport) Close() error {
 	}
 	t.wg.Wait()
 	return nil
+}
+
+// probeEphemeralPort asks the kernel for a free UDP port by binding a plain
+// socket — deliberately without SO_REUSEPORT, so the port cannot be one that
+// another Transport already shares — reads the port it was given, and releases
+// it. See the call site in Open for why an ephemeral request has to be pinned
+// down before the SO_REUSEPORT worker sockets are created.
+func probeEphemeralPort(bindAddr string, v4 bool) (int, error) {
+	network, host := "udp6", bindAddr
+	if v4 {
+		network = "udp4"
+	}
+	if host == "" {
+		if v4 {
+			host = "0.0.0.0"
+		} else {
+			host = "::"
+		}
+	}
+	c, err := net.ListenPacket(network, net.JoinHostPort(host, "0"))
+	if err != nil {
+		return 0, err
+	}
+	defer c.Close()
+	ua, ok := c.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		return 0, fmt.Errorf("unexpected local addr %T", c.LocalAddr())
+	}
+	return ua.Port, nil
 }

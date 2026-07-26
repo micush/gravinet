@@ -749,6 +749,28 @@ func (s *Server) handleTunQueues(w http.ResponseWriter, r *http.Request) {
 	s.editResult(w, err, true) // needs a restart — see doc comment above
 }
 
+// handleSocketBuffer sets socket_buffer, denominated in megabytes to match the
+// Settings card's field (config.Config.SocketBuffer accepts either unit — see
+// SocketBufferMBThreshold — and storing the MB figure is what keeps the config
+// file readable as the same number the operator typed). Needs a restart: the
+// buffer is set with setsockopt when each UDP socket is bound, at startup.
+func (s *Server) handleSocketBuffer(w http.ResponseWriter, r *http.Request) {
+	var req struct{ Value int }
+	if !decode(w, r, &req) {
+		return
+	}
+	maxMB := config.SocketBufferMaxBytes >> 20
+	if req.Value < 0 || req.Value > maxMB {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("socket buffer must be between 0 (default) and %d MB", maxMB)})
+		return
+	}
+	err := s.mutateConfig(func(cfg *config.Config) error {
+		cfg.SocketBuffer = req.Value
+		return nil
+	})
+	s.editResult(w, err, true) // needs a restart — see doc comment above
+}
+
 // handleUDPGSOSetting toggles udp_gso: UDP-side segmentation offload (see
 // config.Config.EnableUDPGSO's doc comment), the config-driven alternative
 // to the GRAVINET_UDP_GSO=1 environment variable — either enables it.
@@ -761,7 +783,8 @@ func (s *Server) handleUDPGSOSetting(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err := s.mutateConfig(func(cfg *config.Config) error {
-		cfg.EnableUDPGSO = req.On
+		on := req.On
+		cfg.EnableUDPGSO = &on
 		return nil
 	})
 	s.editResult(w, err, true) // needs a restart — see doc comment above

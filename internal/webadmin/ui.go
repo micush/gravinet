@@ -356,7 +356,7 @@ const indexHTML = `<!doctype html>
 <script>
 const $ = (h) => { const d=document.createElement('div'); d.innerHTML=h.trim(); return d.firstChild; };
 const app = document.getElementById('app');
-const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, geoipLookup:false, enableUpnp:false, allowRemoteShell:false, shellSupported:true, bgpSupported:false, snmpSupported:false, l2discoSupported:false, syslogSupported:false, selfId:null, selfHostname:'', targetSeq:0, pendingBgpHighlight:null, workerThreads:0, tunQueues:0, tunQueuesSupported:true, udpGSO:false, udpGSOSupported:true, perfRestartPending:false };
+const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, geoipLookup:false, enableUpnp:false, allowRemoteShell:false, shellSupported:true, bgpSupported:false, snmpSupported:false, l2discoSupported:false, syslogSupported:false, selfId:null, selfHostname:'', targetSeq:0, pendingBgpHighlight:null, workerThreads:0, tunQueues:0, tunQueuesSupported:true, udpGSO:false, udpGSOSupported:true, socketBufferMB:16, socketBufferMaxMB:256, perfRestartPending:false };
 // setTarget is the only place state.target is ever assigned — bumping
 // targetSeq alongside it, once, exactly when the *selection itself* actually
 // changes. load()/startPolling()/refreshCluster() each capture targetSeq
@@ -999,6 +999,8 @@ async function load() {
   state.workerThreads = (c.body && c.body.worker_threads) || 0;
   state.tunQueues = (c.body && c.body.tun_queues) || 0;
   state.tunQueuesSupported = c.body ? !!c.body.tun_queues_supported : true;
+  state.socketBufferMB = (c.body && c.body.socket_buffer_mb) || 16;
+  state.socketBufferMaxMB = (c.body && c.body.socket_buffer_max_mb) || 256;
   state.udpGSO = !!(c.body && c.body.udp_gso);
   state.udpGSOSupported = c.body ? !!c.body.udp_gso_supported : true;
   state.allowRemoteShell = !!(c.body && c.body.allow_remote_shell);
@@ -2139,7 +2141,7 @@ async function quietPollBack(before, n, wentDown){
   setTimeout(function(){ quietPollBack(before, n+1, wentDown); }, 1000);
 }
 
-// schedulePerfRestart debounces the Performance (advanced) card's three
+// schedulePerfRestart debounces the Performance (advanced) card's four
 // restart-triggering controls (worker threads, tun queues, udp gso) into a
 // single restart, instead of one per control changed. Deliberately separate
 // from every other autoRestart:true control on this page (GeoIP, UPnP,
@@ -2884,6 +2886,27 @@ function secSettings(c) {
   };
   tq.appendChild(tqLabel); tq.appendChild(tqInp);
   card.appendChild(tq);
+
+  // Socket buffer — in megabytes, because that is the unit an operator
+  // actually reasons in here and typing 33554432 into a settings field is
+  // hostile. config.Config.SocketBuffer accepts either unit (values <=1024
+  // are read as MB), so the number stored in the config file is the same
+  // number typed here rather than its byte expansion.
+  const sb = $('<div class="settings-row" id="socket-buffer-row"></div>');
+  const sbLabel = $('<div><div class="settings-label">Socket buffer (MB)</div><div class="settings-desc">Per-UDP-socket receive and send buffer. This is how much traffic the kernel can hold while the receive loop is busy \u2014 when it overflows the kernel drops datagrams and TCP sees it as ordinary loss (the counter is <b>UdpRcvbufErrors</b> in <code>nstat</code>). 16 MB is roughly 1,900 jumbo datagrams. Raise it if that counter climbs under load; note a buffer absorbs bursts, it cannot fix a receive path that is slower than the offered rate. 0 uses the default.</div></div>');
+  const sbInp = $('<input type="number" min="0" step="1" style="width:80px">');
+  sbInp.max = state.socketBufferMaxMB;
+  sbInp.value = state.socketBufferMB;
+  sbInp.onchange = async () => {
+    const v = parseInt(sbInp.value, 10);
+    if (isNaN(v) || v < 0 || v > state.socketBufferMaxMB) { alert('Enter a whole number of megabytes between 0 and '+state.socketBufferMaxMB+'.'); sbInp.value = state.socketBufferMB; return; }
+    if (v === state.socketBufferMB) return;
+    const ok = await edit('/api/socket-buffer', { value: v }, schedulePerfRestart);
+    if (ok) { state.socketBufferMB = v; }
+    else { sbInp.value = state.socketBufferMB; }
+  };
+  sb.appendChild(sbLabel); sb.appendChild(sbInp);
+  card.appendChild(sb);
 
   // UDP GSO/GRO — experimental: off by default, and this project's own
   // history with this class of data-plane change is why. Said plainly in

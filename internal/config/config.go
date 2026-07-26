@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -99,9 +100,14 @@ type Config struct {
 	// handleUPnPSetting.
 	EnableUPnP bool `json:"enable_upnp,omitempty"`
 
-	EnableIPv4    bool `json:"enable_ipv4"`    // underlay v4
-	EnableIPv6    bool `json:"enable_ipv6"`    // underlay v6
-	WorkerThreads int  `json:"worker_threads"` // 0 => runtime.NumCPU()-1, min 1
+	EnableIPv4 bool `json:"enable_ipv4"` // underlay v4
+	EnableIPv6 bool `json:"enable_ipv6"` // underlay v6
+	// WorkerThreads is the size of the outbound worker pool and the number of
+	// SO_REUSEPORT receive sockets. 0 selects DefaultWorkerThreads, capped at
+	// NumCPU so a small machine is not oversubscribed (and a single-core host
+	// still resolves to 1, which routes to tunLoopSerial — the pooled path
+	// measured ~70% slower there; see mesh.tunLoop).
+	WorkerThreads int `json:"worker_threads"`
 	// TunQueues opts each overlay interface into Linux's IFF_MULTI_QUEUE (see
 	// internal/tun.NewMultiQueue): that many independent read queues on one
 	// tun device, each with its own goroutine, instead of the single
@@ -136,7 +142,10 @@ type Config struct {
 	// verification result; nothing about exposing the switch changes how
 	// unproven the mechanism itself still is on real hardware under real
 	// load. Linux amd64/arm64 only; a harmless no-op elsewhere.
-	EnableUDPGSO bool `json:"udp_gso,omitempty"`
+	// Nil means enabled (the default since v665); false explicitly disables.
+	// Pointer rather than plain bool so "absent" and "set to false" stay
+	// distinguishable, same shape as PMTUDiscovery above.
+	EnableUDPGSO *bool `json:"udp_gso,omitempty"`
 
 	// IPForwarding controls whether the daemon turns on host IPv4/IPv6 forwarding
 	// at startup (the on-ramp for redistributed routes and NAT). nil means the
@@ -221,8 +230,10 @@ type Config struct {
 	UnderlayMTUMax int `json:"underlay_mtu_max,omitempty"`
 
 	// SocketBuffer is the per-UDP-socket SO_RCVBUF/SO_SNDBUF target in bytes.
-	// Default 16 MiB; clamped to [256 KiB, 256 MiB]. The daemon runs as root
-	// and sets it with SO_RCVBUFFORCE, so net.core.rmem_max does not cap it.
+	// Accepts megabytes or bytes: a value of 1024 or less is read as MB, so
+	// "socket_buffer": 32 is 32 MiB (see SocketBufferMBThreshold). Default
+	// 16 MiB; clamped to [256 KiB, 256 MiB]. The daemon runs as root and sets
+	// it with SO_RCVBUFFORCE, so net.core.rmem_max does not cap it.
 	//
 	// This is a real throughput knob at multi-Gbps, not a micro-optimisation.
 	// The receive goroutine drains the socket while also decrypting, filtering
@@ -1232,28 +1243,100 @@ func (c *Config) TCPFallbackPortValue() int {
 	return c.TCPFallbackPort
 }
 
+// SocketBufferMinBytes/SocketBufferMaxBytes/SocketBufferDefaultBytes bound and
+// default the per-socket buffer. Exported so the web admin's Performance card
+// and its handler validate against the same numbers this resolves with.
+const (
+	SocketBufferDefaultBytes = 16 << 20
+	SocketBufferMinBytes     = 256 << 10
+	SocketBufferMaxBytes     = 256 << 20
+
+	// SocketBufferMBThreshold is the value at or below which socket_buffer is
+	// read as megabytes rather than bytes. Both units are accepted because the
+	// two ranges cannot overlap in practice: the smallest meaningful byte
+	// value is SocketBufferMinBytes (262144), and the largest meaningful
+	// megabyte value is 256. Anything at or under 1024 is therefore
+	// unambiguously megabytes — "socket_buffer": 32 means 32 MiB, and so does
+	// typing 32 into the Settings card, so the file and the UI agree instead
+	// of one wanting 33554432 and the other 32.
+	SocketBufferMBThreshold = 1024
+)
+
 // SocketBufferValue is the resolved per-socket buffer target in bytes.
-// Default 16 MiB; clamped to [256 KiB, 256 MiB] so a typo can neither
-// re-create the overflow this exists to avoid nor ask the kernel for something
-// absurd. Note this is a limit, not a reservation: the kernel allocates
-// against it on demand.
+// Accepts megabytes or bytes (see SocketBufferMBThreshold); 0 selects
+// SocketBufferDefaultBytes; the result is clamped to
+// [SocketBufferMinBytes, SocketBufferMaxBytes] so a typo can neither recreate
+// the overflow this exists to avoid nor ask the kernel for something absurd.
+// Note this is a limit, not a reservation: the kernel allocates against it on
+// demand.
 func (c *Config) SocketBufferValue() int {
-	const (
-		def = 16 << 20
-		min = 256 << 10
-		max = 256 << 20
-	)
-	if c.SocketBuffer == 0 {
-		return def
+	n := c.SocketBuffer
+	if n == 0 {
+		return SocketBufferDefaultBytes
 	}
-	if c.SocketBuffer < min {
-		return min
+	if n > 0 && n <= SocketBufferMBThreshold {
+		n <<= 20 // megabytes
 	}
-	if c.SocketBuffer > max {
-		return max
+	if n < SocketBufferMinBytes {
+		return SocketBufferMinBytes
 	}
-	return c.SocketBuffer
+	if n > SocketBufferMaxBytes {
+		return SocketBufferMaxBytes
+	}
+	return n
 }
+
+// SocketBufferMB is the resolved buffer in whole megabytes, for display in the
+// Settings card (which is denominated in MB).
+func (c *Config) SocketBufferMB() int { return c.SocketBufferValue() >> 20 }
+
+// DefaultWorkerThreads is the worker-pool / receive-socket count used when
+// worker_threads is unset. Fixed at 4 rather than NumCPU()-1: past that, each
+// additional worker mostly adds flow-hash buckets and contention rather than
+// throughput, and the outbound pool now pins a flow to a worker (see
+// mesh.tunLoopPooled) so what matters is having enough buckets to spread
+// concurrent flows, not one per core.
+const DefaultWorkerThreads = 4
+
+// DefaultTunQueues is the IFF_MULTI_QUEUE read-queue count used when
+// tun_queues is unset. Set tun_queues=1 to force the old single-queue path.
+const DefaultTunQueues = 4
+
+// WorkerThreadsValue resolves the worker count: the configured value, or
+// DefaultWorkerThreads capped at NumCPU, floored at 1.
+func (c *Config) WorkerThreadsValue() int {
+	n := c.WorkerThreads
+	if n <= 0 {
+		n = DefaultWorkerThreads
+		if cpus := runtime.NumCPU(); n > cpus {
+			n = cpus
+		}
+	}
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
+// TunQueuesValue resolves the overlay interface's read-queue count. A no-op
+// on platforms without multi-queue TUN, which silently get one queue.
+func (c *Config) TunQueuesValue() int {
+	n := c.TunQueues
+	if n <= 0 {
+		n = DefaultTunQueues
+		if cpus := runtime.NumCPU(); n > cpus {
+			n = cpus
+		}
+	}
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
+// UDPGSOEnabled reports whether UDP segmentation offload (UDP_SEGMENT send /
+// UDP_GRO receive) should be requested. Nil means enabled.
+func (c *Config) UDPGSOEnabled() bool { return c.EnableUDPGSO == nil || *c.EnableUDPGSO }
 
 func (c *Config) UnderlayMTUValue() int {
 	m := c.UnderlayMTU

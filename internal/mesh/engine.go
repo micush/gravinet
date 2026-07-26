@@ -1298,7 +1298,13 @@ func NewEngine(o Options) *Engine {
 	e.pmtuFloor, e.pmtuCeil = floor, ceil
 	e.tunWorkers = o.TunWorkers
 	if e.tunWorkers <= 0 {
-		e.tunWorkers = runtime.NumCPU() - 1
+		// Mirrors config.DefaultWorkerThreads. Only reached when a caller
+		// (tests, embedders) leaves Options.TunWorkers unset — the daemon
+		// always passes config's resolved value.
+		e.tunWorkers = 4
+		if cpus := runtime.NumCPU(); e.tunWorkers > cpus {
+			e.tunWorkers = cpus
+		}
 		if e.tunWorkers < 1 {
 			e.tunWorkers = 1
 		}

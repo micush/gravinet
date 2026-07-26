@@ -2,6 +2,161 @@
 
 ---
 
+## v667 — 2026-07-26
+
+**Fixed: a Transport asking for an ephemeral port (`PrimaryPort: 0`) could be
+handed a port another Transport already held, silently splitting one node's
+inbound datagrams between two processes.**
+
+Every worker socket sets `SO_REUSEPORT`, and `SO_REUSEPORT` explicitly permits
+sharing — so when the requested port is 0 the kernel may satisfy it with a port
+an existing `SO_REUSEPORT` socket is already bound to. Two Transports then
+receive an interleaved half of each other's traffic. There is no error and no
+dropped-packet counter; it presents as a peer that will not complete a
+handshake.
+
+Observed in a full-suite run, where `TestFirewallLiveReload` failed with "A-B
+did not connect" and the log showed both nodes binding the same port:
+
+```
+transport: listening on udp port 42137 ... (node A)
+transport: listening on udp port 42137 ... (node B)
+```
+
+**What changed:** when the primary port is 0 and `SO_REUSEPORT` is in use, Open
+now resolves a concrete port first via `probeEphemeralPort`, which binds a plain
+socket *without* `SO_REUSEPORT` — so the kernel must pick a genuinely free port
+and concurrent probes cannot collide — reads the assigned port, releases it, and
+binds the worker sockets to that explicit number. On probe failure it falls
+through to the previous behaviour rather than failing startup.
+
+**Scope:** this is the test harness's path. Production names a port explicitly;
+`primary_port: 0` means "UDP disabled" and never reaches `transport.Open`. The
+value here is that 43 test call sites use ephemeral ports, and a harness that can
+randomly collide produces failures that read as real connectivity bugs — this
+one cost a full re-run to distinguish from a regression.
+
+**On the tests, honestly:** the first thing written here was a concurrency test
+asserting distinct ports across 24 simultaneous `Open` calls. It passed with the
+fix deliberately disabled, so it demonstrated nothing and was discarded. The
+selection race is timing-dependent and does not reproduce on demand. What ships
+instead pins the two things that *can* be established deterministically: that
+`SO_REUSEPORT` sharing is permitted at all (bind one socket, then a second to
+the same port — if a future kernel rejected this, the reason for the fix would
+be visibly gone), and that `probeEphemeralPort` hands a distinct port to each of
+64 concurrent callers while every previously-probed port is still held open. The
+fix itself is reasoned from the kernel's documented behaviour plus the log
+evidence above, not from a reproduction.
+
+**Verified:** `go build ./...`, `go vet ./...`, `gofmt -l` clean;
+`internal/transport` and `internal/config` suites pass. The v666 `internal/mesh`
+suite passed on re-run (607s) confirming the earlier failure was this flake and
+not a regression; v667's diff is confined to `internal/transport`.
+
+---
+
+## v666 — 2026-07-25
+
+**Added: a Socket buffer control on the Settings → Performance (advanced)
+card, denominated in megabytes, and `socket_buffer` in the config file now
+accepts megabytes too.** v664 added the setting but left it bytes-only and
+file-only, which meant tuning it required typing `33554432` into a text editor.
+
+**Both units, one meaning.** `socket_buffer` at or below
+`SocketBufferMBThreshold` (1024) is read as megabytes; larger values stay
+bytes. The two ranges cannot overlap in practice — the largest meaningful
+megabyte value is 256 (the ceiling) and the smallest meaningful byte value is
+262144 (the floor) — so `"socket_buffer": 32` unambiguously means 32 MiB, and
+so does typing 32 into the card. The point is that the file and the UI agree
+about the same setting instead of one wanting 33554432 where the other wants
+32; a config edited by hand and one edited through the web admin now read the
+same. Existing byte-denominated configs keep working untouched.
+
+**What changed:** `SocketBufferDefaultBytes`/`MinBytes`/`MaxBytes`/
+`MBThreshold` are exported so the handler and card validate against the same
+numbers `SocketBufferValue()` resolves with, rather than three copies of 256
+drifting apart. `SocketBufferMB()` returns the resolved value in whole MB for
+display. New `POST /api/socket-buffer` takes megabytes, rejects anything
+outside 0..256, and stores the figure as typed. The card's field sits under
+TUN queues, shares the existing debounced restart coordinator (so changing it
+alongside the other three still produces exactly one restart, three seconds
+after the last edit), and its description names `UdpRcvbufErrors` explicitly —
+that is the counter that tells an operator whether raising it is warranted,
+and it is not discoverable otherwise.
+
+The description also says the thing that is easy to get wrong: a buffer
+absorbs bursts, it cannot fix a receive path slower than the offered rate. 16
+MB is already ~1,900 jumbo datagrams, roughly 27 ms at 5 Gbps, and a burst
+does not last 27 ms — so if it is overflowing, something is stalling the drain
+for tens of milliseconds and a larger buffer hides that stall rather than
+removing it.
+
+**Verified:** `go build ./...`, `go vet ./...`, `gofmt -l` clean; full repo
+suite passes; web admin JS re-extracted and `node --check` clean. Socket-buffer
+tests rewritten for the dual unit: the full clamp table across both ranges
+(unset, 1 MB, 32 MB, exactly the ceiling in MB, over it, the threshold itself,
+one past the threshold, the byte floor, an explicit byte value, the byte
+ceiling, over it, absurd, negative), plus two properties that matter more than
+any single case — that a value expressed in MB and the same value expressed in
+bytes resolve identically across 1..256 MB, and that whatever `SocketBufferMB()`
+displays, typed back in, resolves to the same buffer it was displaying. A guard
+asserts the MB threshold stays below the byte floor, so the units cannot become
+ambiguous if either bound is ever changed.
+
+---
+
+## v665 — 2026-07-25
+
+**Changed defaults: `worker_threads` 4, `tun_queues` 4, and `udp_gso` on.**
+All three were previously opt-in, and the doc comments said exactly why — of
+`udp_gso`: *"nothing about exposing the switch changes how unproven the
+mechanism itself still is on real hardware under real load."* That was the
+right posture then. It is no longer accurate: v657–v664 verified all three on
+a live multi-Gbps jumbo link, and the mechanisms they depend on were repaired
+along the way. Single stream on that link now runs 5.12 Gbps with 65
+retransmits, against 2.66 Gbps with every lever off when this started.
+
+**Why these are now safe defaults rather than a guess.** `udp_gso` was
+previously untestable in any meaningful sense: greedy fragmentation produced
+alternating ~8952/338-byte datagrams, and `gsoRunLen` breaks a coalescing run
+at any segment larger than the first, so runs were 2-then-1 and GSO could not
+engage. Every A/B ever run on it compared two variants of "no coalescing"
+(fixed in v658/v659). `tun_queues` and `worker_threads` both spread work
+across goroutines, which used to scramble each connection's packet order badly
+enough to blow the 64-packet replay window — so turning them up made things
+worse, which is why they shipped off (v662 widened the window, v663 pinned each
+flow to one worker).
+
+**What changed:**
+
+- `WorkerThreadsValue()` — `DefaultWorkerThreads` (4) when unset, capped at
+  `NumCPU`. Fixed rather than `NumCPU()-1`: past a handful, each extra worker
+  mostly adds flow-hash buckets and contention, and since v663 pins a flow to
+  a worker what matters is having enough buckets for concurrent flows, not one
+  per core. The cap keeps a single-core host at 1, which routes to
+  `tunLoopSerial` — the pooled path measured ~70% slower there. An explicit
+  value is honoured as-is, cap included: the cap applies to the default, not
+  to a deliberate choice.
+- `TunQueuesValue()` — `DefaultTunQueues` (4) when unset, same cap. `0` now
+  means "use the default"; **`tun_queues: 1` is the way to force the old
+  single-queue path.** Still a silent no-op on platforms without multi-queue
+  TUN.
+- `EnableUDPGSO` becomes `*bool` (nil = enabled), matching `PMTUDiscovery`'s
+  existing shape. This is load-bearing: as a plain `bool`, flipping the default
+  would have silently re-enabled GSO for every operator who had deliberately
+  set `udp_gso: false`, because absent and false are indistinguishable. Enables
+  UDP_GRO on receive as well as UDP_SEGMENT on send — one flag covers both
+  directions.
+
+**Verified:** `go build ./...`, `go vet ./...`, `gofmt -l` clean; full repo
+suite passes. New `internal/config/perfdefaults_test.go` covers the default and
+its NumCPU cap for both counts, that an explicit value bypasses the cap, that
+`tun_queues: 1` still forces single-queue, and — the one that actually
+protects operators — that `udp_gso: false` survives both resolution and a
+JSON marshal/unmarshal round trip rather than being erased by the new default.
+
+---
+
 ## v664 — 2026-07-25
 
 **Added: `socket_buffer` config option, and the per-socket UDP buffer default

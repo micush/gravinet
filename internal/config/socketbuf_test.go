@@ -11,33 +11,71 @@ func TestSocketBufferDefaultHoldsEnoughJumboDatagrams(t *testing.T) {
 	var c Config
 	got := c.SocketBufferValue()
 	const jumboDatagram = 8900
+	if got != SocketBufferDefaultBytes {
+		t.Fatalf("default socket buffer = %d, want %d", got, SocketBufferDefaultBytes)
+	}
 	if n := got / jumboDatagram; n < 1500 {
 		t.Fatalf("default socket buffer %d holds only %d jumbo datagrams; want >=1500", got, n)
 	}
 }
 
 func TestSocketBufferClamps(t *testing.T) {
-	const (
-		min = 256 << 10
-		max = 256 << 20
-	)
 	cases := []struct {
 		in, want int
+		why      string
 	}{
-		{0, 16 << 20},      // unset -> default
-		{1, min},           // absurdly small -> floor
-		{min - 1, min},     // just under the floor
-		{min, min},         // exactly the floor
-		{8 << 20, 8 << 20}, // an ordinary explicit value passes through
-		{max, max},         // exactly the ceiling
-		{max + 1, max},     // over the ceiling
-		{1 << 40, max},     // absurdly large
-		{-5, min},          // negative is not treated as "unset"
+		{0, SocketBufferDefaultBytes, "unset uses the default"},
+		{1, 1 << 20, "1 is one megabyte, not one byte"},
+		{16, 16 << 20, "the default, written explicitly"},
+		{32, 32 << 20, "what an operator types into the Settings card"},
+		{256, SocketBufferMaxBytes, "the largest meaningful megabyte value"},
+		{512, SocketBufferMaxBytes, "megabytes over the ceiling clamp down"},
+		{SocketBufferMBThreshold, SocketBufferMaxBytes, "the threshold itself is megabytes"},
+		{SocketBufferMBThreshold + 1, SocketBufferMinBytes, "just past it is bytes, and below the floor"},
+		{SocketBufferMinBytes, SocketBufferMinBytes, "exactly the byte floor"},
+		{8 << 20, 8 << 20, "an explicit byte value passes through"},
+		{SocketBufferMaxBytes, SocketBufferMaxBytes, "exactly the byte ceiling"},
+		{SocketBufferMaxBytes + 1, SocketBufferMaxBytes, "over the byte ceiling"},
+		{1 << 40, SocketBufferMaxBytes, "absurdly large"},
+		{-5, SocketBufferMinBytes, "negative is not treated as unset"},
 	}
 	for _, c := range cases {
 		cfg := Config{SocketBuffer: c.in}
 		if got := cfg.SocketBufferValue(); got != c.want {
-			t.Fatalf("SocketBuffer=%d resolved to %d, want %d", c.in, got, c.want)
+			t.Fatalf("socket_buffer=%d resolved to %d, want %d (%s)", c.in, got, c.want, c.why)
+		}
+	}
+}
+
+// Both units have to mean the same thing, or the config file and the Settings
+// card would disagree about the same setting — the whole reason the dual
+// interpretation exists. The ranges cannot overlap: the largest meaningful MB
+// value (256) is far below the smallest meaningful byte value (262144).
+func TestSocketBufferMegabytesAndBytesAgree(t *testing.T) {
+	for _, mb := range []int{1, 4, 16, 32, 64, 128, 256} {
+		cMB := Config{SocketBuffer: mb}
+		cBytes := Config{SocketBuffer: mb << 20}
+		asMB, asBytes := cMB.SocketBufferValue(), cBytes.SocketBufferValue()
+		if asMB != asBytes {
+			t.Fatalf("%d MB resolved to %d but %d bytes resolved to %d", mb, asMB, mb<<20, asBytes)
+		}
+	}
+	if SocketBufferMBThreshold >= SocketBufferMinBytes {
+		t.Fatalf("the MB threshold (%d) overlaps the byte floor (%d) — the units are no longer distinguishable",
+			SocketBufferMBThreshold, SocketBufferMinBytes)
+	}
+}
+
+// SocketBufferMB is what the Settings card displays, so it has to round-trip:
+// whatever it shows, typed back in, must resolve to the same buffer.
+func TestSocketBufferMBRoundTrips(t *testing.T) {
+	for _, in := range []int{0, 1, 16, 32, 256, 512, 8 << 20, SocketBufferMaxBytes} {
+		cfg := Config{SocketBuffer: in}
+		shown := cfg.SocketBufferMB()
+		back := Config{SocketBuffer: shown}
+		if back.SocketBufferValue() != cfg.SocketBufferValue() {
+			t.Fatalf("socket_buffer=%d displays as %d MB, which resolves to %d instead of %d",
+				in, shown, back.SocketBufferValue(), cfg.SocketBufferValue())
 		}
 	}
 }

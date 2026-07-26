@@ -48,7 +48,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "664"
+	version = "667"
 	commit  = "none"
 )
 
@@ -396,13 +396,7 @@ func cmdRun(args []string) {
 		}
 		store := config.NewStore(cfg)
 
-		workers := cfg.WorkerThreads
-		if workers <= 0 {
-			workers = runtime.NumCPU() - 1
-			if workers < 1 {
-				workers = 1
-			}
-		}
+		workers := cfg.WorkerThreadsValue()
 
 		logx.Infof("gravinet %s starting", version)
 		logx.Infof("config: %s", store.Get().Path())
@@ -588,7 +582,7 @@ func cmdRun(args []string) {
 				Log:           logx.Default(),
 				Handler:       pktHandler,
 				OnSendMsgSize: engine.NoteSendTooLong,
-				EnableUDPGSO:  cfg.EnableUDPGSO,
+				EnableUDPGSO:  cfg.UDPGSOEnabled(),
 				SocketBuffer:  cfg.SocketBufferValue(),
 			})
 			if err != nil {
@@ -1233,7 +1227,7 @@ func cmdRun(args []string) {
 					Log:           logx.Default(),
 					Handler:       pktHandler,
 					OnSendMsgSize: engine.NoteSendTooLong,
-					EnableUDPGSO:  newCfg.EnableUDPGSO,
+					EnableUDPGSO:  newCfg.UDPGSOEnabled(),
 					SocketBuffer:  newCfg.SocketBufferValue(),
 				}); terr != nil {
 					logx.Errorf("underlay port change %d -> %d failed: %v — keeping port %d", prevPort, newCfg.PrimaryPort, terr, prevPort)
@@ -2246,9 +2240,9 @@ func newTunRetryingMQ(name string, mtu, queues int) (*tun.Device, []*tun.Queue, 
 	}
 }
 
-// tunQueuesOrDefault clamps a configured tun_queues to a sane value: <1
-// means off (the default — see config.Config.TunQueues's doc comment for why
-// this, unlike worker_threads, does not default to NumCPU()-1).
+// tunQueuesOrDefault floors a resolved tun_queues at 1. The default itself now
+// lives in config.TunQueuesValue (4, capped at NumCPU); this only guards
+// against a caller passing something nonsensical.
 func tunQueuesOrDefault(configured int) int {
 	if configured < 1 {
 		return 1
@@ -2323,7 +2317,7 @@ func buildOneNetSpec(n config.Network, cfg *config.Config, overlays []netip.Pref
 	if name == "" {
 		name = fmt.Sprintf("mesh%d", idx)
 	}
-	queues := tunQueuesOrDefault(cfg.TunQueues)
+	queues := tunQueuesOrDefault(cfg.TunQueuesValue())
 	dev, extraQueues, err := newTunRetryingMQ(name, n.MTU, queues)
 	if err != nil {
 		return mesh.NetSpec{}, nil, fmt.Errorf("tun: %w", err)
