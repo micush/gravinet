@@ -48,7 +48,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "663"
+	version = "664"
 	commit  = "none"
 )
 
@@ -589,6 +589,7 @@ func cmdRun(args []string) {
 				Handler:       pktHandler,
 				OnSendMsgSize: engine.NoteSendTooLong,
 				EnableUDPGSO:  cfg.EnableUDPGSO,
+				SocketBuffer:  cfg.SocketBufferValue(),
 			})
 			if err != nil {
 				for _, d := range devices {
@@ -1233,6 +1234,7 @@ func cmdRun(args []string) {
 					Handler:       pktHandler,
 					OnSendMsgSize: engine.NoteSendTooLong,
 					EnableUDPGSO:  newCfg.EnableUDPGSO,
+					SocketBuffer:  newCfg.SocketBufferValue(),
 				}); terr != nil {
 					logx.Errorf("underlay port change %d -> %d failed: %v — keeping port %d", prevPort, newCfg.PrimaryPort, terr, prevPort)
 				} else {

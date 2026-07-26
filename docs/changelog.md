@@ -2,6 +2,65 @@
 
 ---
 
+## v664 — 2026-07-25
+
+**Added: `socket_buffer` config option, and the per-socket UDP buffer default
+raised from 4 MiB to 16 MiB.** This addresses the last measured source of real
+loss on the link v657–v663 were chasing: `UdpRcvbufErrors`, ~0.14% of traffic.
+
+**Why the old default was too small.** `transport.Options.SocketBuffer`
+existed but nothing ever set it, so every node ran the hardcoded 4 MiB
+`defaultSocketBuffer` with no way to change it. At jumbo sizes a buffer holds
+`size/~8900` datagrams, so 4 MiB was roughly **470 datagrams — about 8 ms at
+4 Gbps**. The receive goroutine drains that socket while also decrypting,
+anti-spoofing, NAT'ing, filtering, and performing a *blocking* TUN write, so
+any stall in that pipeline longer than the buffer's depth overflows it. The
+kernel then drops the datagram and TCP sees ordinary loss. Measured on a live
+link: 685 `UdpRcvbufErrors` in a ~480k-datagram run, with `UdpInErrors` exactly
+equal to it (so every UDP receive error was buffer overflow, not corruption),
+while all eight cores sat 60% idle — this is not a CPU problem and more workers
+would not have helped.
+
+16 MiB is ~1,900 jumbo datagrams, ~34 ms of slack at these rates. It is a
+limit, not a reservation: the kernel allocates against it on demand, so the
+cost on an idle or low-rate node is nothing. The daemon runs as root and sets
+it via `SO_RCVBUFFORCE`, so `net.core.rmem_max` does not cap it and no sysctl
+change is required.
+
+**What changed:** `Config.SocketBuffer` (`socket_buffer`) with
+`SocketBufferValue()` resolving to 16 MiB when unset and clamping to
+[256 KiB, 256 MiB], plumbed into both `transport.Open` call sites — the initial
+one and the rebuild that runs when the underlay port changes at reload, which
+would otherwise have quietly reverted a tuned node to the transport default.
+
+**Deliberately a knob rather than a guess.** The right value depends on the
+link, and the one thing this whole sequence of changes has demonstrated is that
+picking a number by reasoning and shipping it is how the 9216/9000 MTU
+mismatch and the 64-packet replay window both happened. This makes the value
+measurable: set it, re-run, and read `UdpRcvbufErrors` from `nstat`.
+
+**Verified:** `go build ./...`, `go vet ./...`, `gofmt -l` clean; full repo
+suite passes. New `internal/config/socketbuf_test.go` asserts the default in
+terms of the property that actually matters — how many jumbo datagrams it holds
+(>=1500), not a byte count that could be changed without anyone noticing it had
+become too small again — plus the full clamp table (unset, below floor, exactly
+floor, ordinary value, exactly ceiling, above ceiling, absurd) and that a
+negative value floors rather than silently resolving to the default, which
+would make a typo look like it had worked.
+
+**Context — the measured arc of v657 through v664 on one 8-stream jumbo link:**
+
+| | throughput | retransmits |
+|---|---|---|
+| v656 baseline | 2.48 Gbps | 1,684 / 2.9 GB |
+| after MTU fix (v659) | 4.27 Gbps | 3,297 / 4.97 GB |
+| after per-flow affinity (v663) | 4.64 Gbps | **1,203 / 5.40 GB** |
+
+Retransmit *rate* went from ~0.55% to 0.18%, and the residual matched the
+`UdpRcvbufErrors` floor this version addresses.
+
+---
+
 ## v663 — 2026-07-25
 
 **Fixed: the outbound worker pool scrambled every connection's packets. Work is

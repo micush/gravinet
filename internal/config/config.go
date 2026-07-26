@@ -220,6 +220,19 @@ type Config struct {
 	// UnderlayMTU to pin a fixed size.
 	UnderlayMTUMax int `json:"underlay_mtu_max,omitempty"`
 
+	// SocketBuffer is the per-UDP-socket SO_RCVBUF/SO_SNDBUF target in bytes.
+	// Default 16 MiB; clamped to [256 KiB, 256 MiB]. The daemon runs as root
+	// and sets it with SO_RCVBUFFORCE, so net.core.rmem_max does not cap it.
+	//
+	// This is a real throughput knob at multi-Gbps, not a micro-optimisation.
+	// The receive goroutine drains the socket while also decrypting, filtering
+	// and writing to the TUN, so the buffer has to cover any stall in that
+	// pipeline; when it doesn't, the kernel drops datagrams and the counter is
+	// UdpRcvbufErrors, which TCP sees as ordinary loss. At jumbo sizes a
+	// buffer holds buffer/~8900 datagrams — 4 MiB was only ~470, about 8 ms at
+	// 4 Gbps, and measurably overflowed on a live link.
+	SocketBuffer int `json:"socket_buffer,omitempty"`
+
 	// PMTUDiscovery enables the probe-based path-MTU discovery described above.
 	// Nil/true means enabled; false pins the underlay size at UnderlayMTU.
 	PMTUDiscovery *bool `json:"pmtu_discovery,omitempty"`
@@ -1217,6 +1230,29 @@ func (c *Config) TCPFallbackPortValue() int {
 		return DefaultTCPFallbackPort
 	}
 	return c.TCPFallbackPort
+}
+
+// SocketBufferValue is the resolved per-socket buffer target in bytes.
+// Default 16 MiB; clamped to [256 KiB, 256 MiB] so a typo can neither
+// re-create the overflow this exists to avoid nor ask the kernel for something
+// absurd. Note this is a limit, not a reservation: the kernel allocates
+// against it on demand.
+func (c *Config) SocketBufferValue() int {
+	const (
+		def = 16 << 20
+		min = 256 << 10
+		max = 256 << 20
+	)
+	if c.SocketBuffer == 0 {
+		return def
+	}
+	if c.SocketBuffer < min {
+		return min
+	}
+	if c.SocketBuffer > max {
+		return max
+	}
+	return c.SocketBuffer
 }
 
 func (c *Config) UnderlayMTUValue() int {
