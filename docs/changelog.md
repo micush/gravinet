@@ -2,6 +2,39 @@
 
 ---
 
+## v669 — 2026-07-26
+
+**Removed: the `notify()` corner-toast mechanism added in v668, and the
+blocking alert shown when a peer stops being manageable mid-session.**
+
+Two separate changes, both about how failures get shown to the operator:
+
+1. `edit()` no longer routes settings-edit failures through `notify()`. That
+dismissible corner notice was new in v668, replacing a blocking `alert()`.
+It's gone again: `edit()` now reports failures via `alert()` directly, still
+using `friendlyErr()`/`targetName()` to translate the raw transport error into
+plain language rather than a stack-trace-flavored string. The `notify()`
+function and its `#notice-bar` container are removed outright, not just
+unused — nothing else in the UI called it.
+
+2. `load()`'s 401-while-managing-a-peer branch — reached when a peer that was
+briefly manageable (session expired on that end, a gossip window hadn't
+caught up, or it dropped out of Managed mode) rejects the management hop —
+no longer shows anything at all. It previously opened a blocking
+`alert('Could not manage that node: ' + reason + ...)`. That's removed
+outright rather than converted to a toast. The fallback behavior underneath
+is unchanged: silently drop back to managing this node locally, then retry.
+
+**Verified:** the embedded UI script re-extracted from `indexHTML` and checked
+with `node --check` — clean. Manually confirmed no remaining references to
+`notify(`, `notice-bar`, or the removed peer-management `alert()` string
+anywhere in `ui.go`. A Go toolchain wasn't available in this environment to
+run `go build`/`go vet`/`go test`; that should still be run before this is
+treated as fully verified on the Go side (only the embedded JS was
+syntax-checked here).
+
+---
+
 ## v668 — 2026-07-26
 
 **Changed: a settings edit that fails against a remote node no longer opens a

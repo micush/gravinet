@@ -965,13 +965,12 @@ async function load() {
       // Here the peer briefly *looked* manageable (it's why it was
       // selectable at all) and only failed once actually addressed, so
       // that earlier fix — not listing peers that can't work — doesn't
-      // catch this one. Fall back to local and surface the peer's actual
-      // reason instead of a content-free prompt to re-enter a password
-      // that was never the issue.
-      const reason = (r.body && r.body.error) || 'the peer rejected the management connection';
+      // catch this one. Fall back to local silently rather than prompting
+      // to re-enter a password that was never the issue, and rather than
+      // interrupting with a modal over what is, from here, just a peer
+      // that stopped being manageable.
       setTarget(null);
       document.body.classList.remove('remote');
-      alert('Could not manage that node: ' + reason + '\n\nSwitched back to this node.');
       return await load(); // retry against local; a real expired session still reaches showLogin below
     }
     showLogin();
@@ -1911,35 +1910,13 @@ function friendlyErr(raw){
   return body || 'the request failed';
 }
 
-// notify shows a dismissible, non-blocking message in the corner. Used for
-// things that are worth telling the operator about but do not need the page to
-// stop: a remote node that timed out, a save that did not land. An alert() for
-// those halts everything and has to be clicked before anything else can happen,
-// which is out of proportion to a slow peer.
-function notify(msg, kind){
-  let bar = document.getElementById('notice-bar');
-  if (!bar){
-    bar = $('<div id="notice-bar"></div>');
-    bar.style.cssText = 'position:fixed;right:16px;bottom:16px;max-width:420px;z-index:9999;display:flex;flex-direction:column;gap:8px';
-    document.body.appendChild(bar);
-  }
-  const item = $('<div></div>');
-  item.style.cssText = 'padding:10px 12px;border-radius:6px;border:1px solid var(--line);border-left:3px solid '+(kind==='err'?'#d1242f':'var(--acc)')+';background:var(--panel);color:var(--fg);box-shadow:0 2px 10px rgba(0,0,0,.18);cursor:pointer;font-size:13px;line-height:1.35';
-  item.textContent = msg;
-  item.title = 'click to dismiss';
-  const kill = () => { if (item.parentNode) item.parentNode.removeChild(item); };
-  item.onclick = kill;
-  setTimeout(kill, 9000);
-  bar.appendChild(item);
-}
-
 async function edit(path, payload, autoRestart){
   const r = await api(path, { method:'POST', body: JSON.stringify(payload) });
   if (!r.ok){
-    // Non-blocking: a settings edit failing against a slow or unreachable node
-    // is ordinary, and does not warrant a modal the operator must dismiss
-    // before touching anything else. The control restores its own value.
-    notify('Couldn\u2019t save that change on '+targetName()+' \u2014 '+friendlyErr(r.body && r.body.error)+'.', 'err');
+    // friendlyErr/targetName still translate the raw transport error into
+    // plain language; only the presentation reverts to a plain alert() here.
+    // The control restores its own value regardless of how the failure is shown.
+    alert('Couldn\u2019t save that change on '+targetName()+' \u2014 '+friendlyErr(r.body && r.body.error)+'.');
     return false;
   }
   // An advisory the server wants shown even though the edit succeeded (today:
