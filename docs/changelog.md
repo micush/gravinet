@@ -2,6 +2,37 @@
 
 ---
 
+## v681 — 2026-07-26
+
+**Added: `install-linux.sh` now detects and creates a missing
+`/dev/net/tun`**, instead of only surfacing the problem at daemon startup
+as `tun_linux.go`'s "need CAP_NET_ADMIN" error.
+
+The device node is present on virtually every real Linux boot (udev
+populates it), so this is a no-op almost everywhere — the one real case
+it helps is minimal container templates (LXC and similar) that don't
+populate a full `/dev`. On a privileged container this alone is usually
+enough; on an unprivileged one, `mknod` may still fail (no `CAP_MKNOD`),
+in which case the installer says so plainly rather than silently moving
+on — and either way it points out that the device node alone isn't
+sufficient inside a container, since the *outside* still has to allow the
+device through a cgroup rule (`lxc.cgroup2.devices.allow: c 10:200 rwm`
+for LXC) that nothing running inside the container can set for itself.
+
+Unconditional, no `--no-X` flag — unlike firewalld/systemd-resolved/FRR/
+snmpd/lldpd (each an opinionated change to system state with a real
+reason someone might skip it), creating one well-known, fixed-number
+(`c 10:200`) device node only when it's missing isn't something anyone
+would want to opt out of; it's closer to the config-write and PAM-service
+steps, which also have no skip flag.
+
+**Not changed:** the other platform installers. LXC is Linux-specific, and
+macOS/FreeBSD/OpenBSD's TUN device conventions (dynamic `utun` allocation,
+devfs cloning) don't have the same "minimal container template missing a
+static /dev entry" failure mode this addresses.
+
+---
+
 ## v680 — 2026-07-26
 
 **Fixed: continued the doc-correctness audit from v679 across every

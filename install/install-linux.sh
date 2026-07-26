@@ -918,6 +918,26 @@ else
   echo "    still let you author a config, but nothing runs until lldpd is installed yourself."
 fi
 
+echo "==> /dev/net/tun"
+if [ -e /dev/net/tun ]; then
+  echo "    present"
+else
+  echo "    missing — creating it. This is normal on minimal container"
+  echo "    templates (LXC, etc.) that don't populate a full /dev; gravinet"
+  echo "    needs the device node to bring up any overlay interface at all."
+  if mkdir -p /dev/net 2>/dev/null && mknod /dev/net/tun c 10 200 2>/dev/null && chmod 666 /dev/net/tun 2>/dev/null; then
+    echo "    created /dev/net/tun"
+  else
+    echo "    could not create /dev/net/tun (no CAP_MKNOD, or /dev is read-only"
+    echo "    here). If this is a container, the device node alone isn't"
+    echo "    enough either way — the *outside* also has to allow it via a"
+    echo "    device cgroup rule (LXC: lxc.cgroup2.devices.allow: c 10:200 rwm),"
+    echo "    which nothing running inside the container can set for itself."
+    echo "    gravinet will fail to bring up any network with a clear"
+    echo "    'need CAP_NET_ADMIN' error until both are in place."
+  fi
+fi
+
 echo "==> writing systemd unit"
 "$BIN" service install -config "$CONFIG" ${RUNUSER:+-user "$RUNUSER"} >/dev/null
 if systemctl daemon-reload 2>/dev/null; then
