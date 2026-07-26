@@ -2,6 +2,56 @@
 
 ---
 
+## v668 — 2026-07-26
+
+**Changed: a settings edit that fails against a remote node no longer opens a
+modal alert containing a raw Go error and an internal API path.** Reported from
+the field, verbatim:
+
+```
+reaching 5a70d11a46f1ab25: Post "https://192.168.203.236:8443/api/worker-threads":
+context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+```
+
+Two things wrong with that. It is written for someone reading a stack trace —
+HTTP verb, full internal endpoint URL, Go error type — none of which helps an
+operator who moved a slider. And it arrives as an `alert()`, which blocks the
+entire page until dismissed, for what is usually just a busy or briefly
+unreachable node.
+
+**What changed:** `edit()` — the shared helper every Settings control routes
+through, including the Performance card — now reports failures via a new
+`notify()`: a dismissible, non-blocking notice in the corner that fades after
+nine seconds and can be clicked away. The control still restores its previous
+value, so nothing is silently half-applied.
+
+`friendlyErr()` translates the transport-level error: it strips Go's
+`Post "https://host:8443/api/thing": ` prefix and maps the common causes to
+plain language — timeouts to "it did not respond in time", refusals to "it
+refused the connection \u2014 check gravinet is running there", unreachable
+hosts, and TLS rejections. Anything unrecognised passes through unchanged, so a
+real server-side validation message ("mtu 100 out of range") is not mangled into
+something vaguer. The failing node is named via `targetName()`, whose every
+field access is guarded — `state.target`'s shape has varied across versions, and
+a broken error message is a poor way to discover a schema change.
+
+Deliberately scoped to `edit()`. There are 146 `alert()` call sites in the UI;
+replacing them wholesale is a much larger change than the reported problem
+warrants, and this one helper covers every Settings control, which is where
+edits against remote nodes actually happen.
+
+**Verified:** `go build ./...` and `gofmt -l` clean (the first attempt was not:
+a backtick inside a JS comment terminated the Go raw string holding the whole
+UI, and because `gofmt` runs before `go build` in the same `&&` chain, the
+build never ran and its success was assumed rather than observed — worth
+recording as the reason the verification order was changed here to check
+`gofmt`'s exit status explicitly). Web admin JS re-extracted and `node --check`
+clean. `friendlyErr` tested in node against the exact field error above plus
+connection-refused, no-such-host, x509, a genuine server-side validation
+message, and empty input — including an assertion that no output leaks a URL.
+
+---
+
 ## v667 — 2026-07-26
 
 **Fixed: a Transport asking for an ephemeral port (`PrimaryPort: 0`) could be

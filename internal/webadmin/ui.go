@@ -1884,9 +1884,64 @@ async function refresh(){ await load(); syncRailGating(); renderSection(); }
 
 // edit POSTs a config change, surfaces errors, flags a needed restart, refreshes.
 // If autoRestart is true and the server signals a restart is needed, it restarts immediately.
+// targetName is the node an edit was aimed at, for error text. state.target's
+// shape has varied across versions, so every access is guarded rather than
+// assumed — a broken error message is a bad way to learn about a schema change.
+function targetName(){
+  const t = state.target;
+  if (!t) return 'this node';
+  if (typeof t === 'string') return t;
+  return t.hostname || t.name || t.id || 'the target node';
+}
+
+// friendlyErr turns a Go transport error into something an operator can act on.
+// The raw text is written for a developer reading a stack trace: it leads with
+// the HTTP verb and the full internal endpoint URL, then the Go error type.
+// None of that helps someone who just moved a slider, and putting it in a modal
+// makes an ordinary slow node feel like a fault.
+function friendlyErr(raw){
+  const s = String(raw == null ? '' : raw);
+  // Drop Go's own 'Post "https://host/api/thing": ' prefix \u2014 the endpoint
+  // is an implementation detail, and the host is already named by the caller.
+  const body = s.replace(/^(?:Get|Post|Put|Delete|Patch)\s+"[^"]*":\s*/i, '');
+  if (/context deadline exceeded|Client\.Timeout|i\/o timeout|timeout awaiting/i.test(body)) return 'it did not respond in time';
+  if (/connection refused/i.test(body)) return 'it refused the connection \u2014 check gravinet is running there';
+  if (/no such host|no route to host|network is unreachable|connection reset/i.test(body)) return 'it could not be reached';
+  if (/certificate|x509|tls/i.test(body)) return 'its TLS certificate was rejected';
+  return body || 'the request failed';
+}
+
+// notify shows a dismissible, non-blocking message in the corner. Used for
+// things that are worth telling the operator about but do not need the page to
+// stop: a remote node that timed out, a save that did not land. An alert() for
+// those halts everything and has to be clicked before anything else can happen,
+// which is out of proportion to a slow peer.
+function notify(msg, kind){
+  let bar = document.getElementById('notice-bar');
+  if (!bar){
+    bar = $('<div id="notice-bar"></div>');
+    bar.style.cssText = 'position:fixed;right:16px;bottom:16px;max-width:420px;z-index:9999;display:flex;flex-direction:column;gap:8px';
+    document.body.appendChild(bar);
+  }
+  const item = $('<div></div>');
+  item.style.cssText = 'padding:10px 12px;border-radius:6px;border:1px solid var(--line);border-left:3px solid '+(kind==='err'?'#d1242f':'var(--acc)')+';background:var(--panel);color:var(--fg);box-shadow:0 2px 10px rgba(0,0,0,.18);cursor:pointer;font-size:13px;line-height:1.35';
+  item.textContent = msg;
+  item.title = 'click to dismiss';
+  const kill = () => { if (item.parentNode) item.parentNode.removeChild(item); };
+  item.onclick = kill;
+  setTimeout(kill, 9000);
+  bar.appendChild(item);
+}
+
 async function edit(path, payload, autoRestart){
   const r = await api(path, { method:'POST', body: JSON.stringify(payload) });
-  if (!r.ok){ alert((r.body && r.body.error) || 'request failed'); return false; }
+  if (!r.ok){
+    // Non-blocking: a settings edit failing against a slow or unreachable node
+    // is ordinary, and does not warrant a modal the operator must dismiss
+    // before touching anything else. The control restores its own value.
+    notify('Couldn\u2019t save that change on '+targetName()+' \u2014 '+friendlyErr(r.body && r.body.error)+'.', 'err');
+    return false;
+  }
   // An advisory the server wants shown even though the edit succeeded (today:
   // setting an MTU larger than any path can carry whole). Shown before any
   // restart below, since a quiet restart would otherwise swallow it.
