@@ -161,13 +161,13 @@ func pickNetwork(cfg *config.Config, name string) *config.Network {
 
 func cmdNetwork(args []string) {
 	if len(args) == 0 {
-		fatal("usage: gravinet network <add|delete|enable|disable|rename|notes|subnet|join|join-token|token|list> ...")
+		fatal("usage: gravinet network <add|delete|enable|disable|rename|notes|subnet|mtu|join|join-token|token|list> ...")
 	}
 	sub := args[0]
 	cfg, path, rest := openCfg(args[1:])
 	noRestart, rest := hasFlag(rest, "no-restart")
 
-	sub = expandVerb(sub, v("list"), v("add"), v("delete", "del", "remove"), v("enable", "disable"), v("rename"), v("notes"), v("subnet", "set-subnet"), v("join"), v("join-token"), v("token", "invite"))
+	sub = expandVerb(sub, v("list"), v("add"), v("delete", "del", "remove"), v("enable", "disable"), v("rename"), v("notes"), v("subnet", "set-subnet"), v("mtu"), v("join"), v("join-token"), v("token", "invite"))
 	switch sub {
 	case "list":
 		if len(cfg.Networks) == 0 {
@@ -247,6 +247,27 @@ func cmdNetwork(args []string) {
 		}
 		fmt.Printf("set notes on network %q\n", name)
 		commitCfg(cfg, path) // local metadata only — no restart needed
+		return
+
+	case "mtu":
+		if len(rest) < 2 {
+			fatal("usage: gravinet network mtu NAME BYTES   (e.g. gravinet network mtu corp 8915)")
+		}
+		mtu, err := strconv.Atoi(rest[1])
+		if err != nil {
+			fatal("mtu must be a number, got %q", rest[1])
+		}
+		advice, err := cfg.NetworkSetMTU(rest[0], mtu)
+		if err != nil {
+			fatal("%v", err)
+		}
+		fmt.Printf("network %q mtu now %d\n  (restart required, and apply the same change on every node in this network)\n", rest[0], mtu)
+		if advice != "" {
+			fmt.Printf("  note: %s\n", advice)
+		}
+		// Same reasoning as "subnet" above: changing the MTU resizes the live
+		// overlay interface, which the hot-reload path does not do.
+		commitCfgStructural(cfg, path, noRestart)
 		return
 
 	case "subnet", "set-subnet":

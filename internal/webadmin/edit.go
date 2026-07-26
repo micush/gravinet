@@ -41,7 +41,7 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	return true
 }
 
-// handleNetwork: add / delete / enable / disable / rename / notes / subnet /
+// handleNetwork: add / delete / enable / disable / rename / notes / subnet / mtu /
 // join / redistribute-bgp. Most are structural (need a restart to bring
 // interfaces up/down or re-home addresses); rename, notes, and
 // redistribute-bgp are local changes and apply live.
@@ -50,6 +50,7 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 		Op, Net, Id, NewName, Subnet4, Subnet6, Address4, Address6, Key, Peer, Token, Notes string
 		Enabled                                                                             bool
 		Metric                                                                              int
+		MTU                                                                                 int
 		Routes                                                                              []string // redistribute-bgp: selected BGP-learned CIDRs (see NetworkSetRedistributeBGPRoutes)
 	}
 	if !decode(w, r, &req) {
@@ -65,6 +66,7 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 	// disabled networks entirely) just as surely as deleting the routes
 	// themselves would.
 	var prevMesh []string
+	var mtuAdvice string
 	err := s.mutateConfig(func(cfg *config.Config) error {
 		prevMesh = meshRouteCIDRs(cfg)
 		switch req.Op {
@@ -84,6 +86,16 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 		case "subnet":
 			restart = true // re-addressing an interface needs a restart
 			return cfg.NetworkSetSubnets(req.Net, req.Subnet4, req.Subnet6)
+		case "mtu":
+			// Resizing the overlay interface needs a restart, same as
+			// re-addressing it: the hot-reload path does not touch a live
+			// device's MTU. mtuAdvice carries NetworkSetMTU's "this will
+			// fragment every packet" note out to the response so the UI can
+			// show it inline instead of leaving it for a startup log line.
+			restart = true
+			a, e := cfg.NetworkSetMTU(req.Net, req.MTU)
+			mtuAdvice = a
+			return e
 		case "address":
 			restart = true // adopting a changed overlay address needs a restart
 			return cfg.NetworkSetAddress(req.Net, req.Address4, req.Address6)
@@ -115,6 +127,14 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 		if req.Op == "redistribute-bgp" && s.bgpRedis != nil {
 			go s.bgpRedis.sync()
 		}
+	}
+	// NetworkSetMTU's advisory (set an MTU that will fragment every packet and
+	// it says so) rides out on the success response so the UI can show it next
+	// to the field the operator just edited, rather than it only appearing in
+	// the log after the restart it triggers.
+	if err == nil && mtuAdvice != "" {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "restart": restart, "note": mtuAdvice})
+		return
 	}
 	s.editResult(w, err, restart)
 }

@@ -2,6 +2,74 @@
 
 ---
 
+## v661 — 2026-07-25
+
+**Added: `gravinet network mtu NAME BYTES`, and an editable mtu column in
+Settings → Networks.** v660's warning tells an operator to lower a network's
+MTU. Until now there was no supported way to do it — `gravinet network` had
+`add|delete|enable|disable|rename|notes|subnet|join|join-token|token|list` and
+nothing for MTU, the web admin had no field for it, and `config/ops.go` had no
+setter, so the only route was hand-editing `/etc/gravinet/config.json`. The
+CLI group has advertised itself as *"define overlay networks: subnets,
+addressing, MTU"* the whole time; the MTU part was never implemented.
+
+**Config:** `Config.NetworkSetMTU(ref, mtu)` validates against
+`protocol.MinTunnelMTU`..65535 and writes nothing on rejection. It returns an
+*advisory* alongside the error rather than refusing an oversized value: setting
+an MTU larger than any local path can carry whole is a legitimate thing to
+want (mid-migration, or deliberately trading fragmentation for a bigger overlay
+MSS), but it is also exactly the state that cost throughput invisibly here, so
+the caller gets something concrete to print instead of the operator finding out
+from a startup log line after the restart. The advisory is returned, not
+logged, so the CLI and web admin each render it in their own idiom from one
+implementation. `MaxUnfragmentedTunnelMTU(ceiling)` is exported alongside it —
+config cannot import mesh, so the arithmetic is duplicated there and pinned
+against `mesh.computeMaxInnerFrag` by the existing cross-package test.
+
+**CLI:**
+
+```
+$ gravinet network mtu lan 8915
+network "lan" mtu now 8915
+  (restart required, and apply the same change on every node in this network)
+
+$ gravinet network mtu lan 9216
+network "lan" mtu now 9216
+  (restart required, and apply the same change on every node in this network)
+  note: mtu 9216 is larger than any path on this node can carry whole (8915 at
+  an underlay_mtu_max of 9000), so every full-size packet will be split into 2
+  fragments and reassembled; 8915 avoids that
+```
+
+Routed through `commitCfgStructural` like `network subnet`, for the same
+reason: resizing a live overlay interface is not something the hot-reload path
+does. Honours `--no-restart`.
+
+**Web admin:** Settings → Networks gains an `mtu` column, double-click to edit,
+same inline-edit path as subnet/overlay address. It confirms first — naming the
+same footgun the subnet edit warns about, because it is the same one: the MTU
+is per-network but has to match on every node, and a node left on a larger
+value keeps silently fragmenting every full-size packet it sends, with no
+error, no drop counter, and nothing in the logs pointing at the mismatch. The
+advisory rides back on the API response as `note` (an existing convention in
+this codebase — two other handlers already use it) and `edit()` now surfaces
+any `note` before triggering a restart, since a quiet restart would otherwise
+swallow it. `MTU` was added to the `/api/config` network projection, which
+previously did not expose it at all.
+
+**Verified:** `go build ./...`, `go vet ./...`, `gofmt -l` clean; full repo
+suite passes; web admin JS re-extracted and `node --check` clean. New
+`internal/config/mtu_test.go` covers a fitting value (accepted, no advisory), an
+oversized one (accepted *with* an advisory that names both the problem and a
+value that fixes it — and that value, fed back in, is asserted to produce no
+advisory, the check v658's warning would have failed), out-of-range and
+unknown-network rejection, and that a rejected edit leaves the stored MTU
+untouched. The CLI was additionally exercised end to end against a scratch
+config: usage line, fitting set, oversized set with note, non-numeric input,
+and below-minimum input all behave as intended.
+
+---
+
 ## v660 — 2026-07-25
 
 **Fixed: the fragmentation warning added in v658 was wrong — it fired once per

@@ -1885,6 +1885,10 @@ async function refresh(){ await load(); syncRailGating(); renderSection(); }
 async function edit(path, payload, autoRestart){
   const r = await api(path, { method:'POST', body: JSON.stringify(payload) });
   if (!r.ok){ alert((r.body && r.body.error) || 'request failed'); return false; }
+  // An advisory the server wants shown even though the edit succeeded (today:
+  // setting an MTU larger than any path can carry whole). Shown before any
+  // restart below, since a quiet restart would otherwise swallow it.
+  if (r.body && r.body.note) alert(r.body.note);
   if (r.body && r.body.restart) {
     if (typeof autoRestart === 'function') { autoRestart(); return true; }
     if (autoRestart) { quietRestart(); return true; }
@@ -1935,7 +1939,8 @@ function startInlineEdit(td){
   const cur = (cfgOf(net)[field]) || '';
   const inp = $('<input class="cell-edit" type="text" spellcheck="false" autocapitalize="off">');
   inp.value = cur;
-  if (field !== 'name' && field !== 'notes') inp.placeholder = 'CIDR, or "none" to clear';
+  if (field === 'mtu') inp.placeholder = 'bytes, e.g. 8915';
+  else if (field !== 'name' && field !== 'notes') inp.placeholder = 'CIDR, or "none" to clear';
   td.classList.add('editing'); td.innerHTML = ''; td.appendChild(inp);
   inp.focus(); inp.select();
   let done = false;
@@ -1950,6 +1955,15 @@ function startInlineEdit(td){
       payload = { op:'rename', net, newName:v };
     } else if (field === 'notes'){
       payload = { op:'notes', net, notes:v };
+    } else if (field === 'mtu'){
+      const n = parseInt(v, 10);
+      if (!Number.isFinite(n)){ alert('mtu must be a number of bytes, e.g. 8915'); renderSection(); return; }
+      // Same class of footgun as subnet: the MTU is per-network but must match
+      // on every node. A node left on a larger MTU keeps fragmenting every
+      // full-size packet it sends, which costs throughput silently — no error,
+      // no drop counter, nothing in the logs pointing at the mismatch.
+      if (!confirm('Set the overlay MTU for "'+nameOf(net)+'" to '+n+'?\n\nThis node will restart immediately to apply it. Make the same change on every other node in this network — a node left on a different MTU still works, but silently fragments every full-size packet it sends.')){ renderSection(); return; }
+      payload = { op:'mtu', net, mtu:n };
     } else if (field === 'address4' || field === 'address6'){
       // Only warn about the restart if the banner isn't already up. Once a
       // restart is pending the user has seen the notice and it's still showing,
@@ -3201,8 +3215,8 @@ function secNetworks(c) {
   const cfgs = state.cfg;
   secHint(c, 'Add, remove, and manage networks. Double-click on an existing network to edit the name, subnet, overlay address, or notes for that network, or toggle the network state to enabled or disabled.<br><br><b>+</b> creates a network, <b>=</b> joins an existing one (paste a join token, or enter id/key/seed), <b>\u25cf</b> generates a join token for a ticked network to paste on another node, <b>\u2212</b> deletes the selected networks and all associated items, and <b>\u21bb reset</b> drops the selected networks\' peer connections and immediately reconnects to their peers and seeds.');
   const card = $('<div class="card"></div>');
-  let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>name</th><th>id</th><th>state</th><th>subnet4</th><th>overlay4</th><th>subnet6</th><th>overlay6</th><th>peers</th><th>seeds</th><th>notes</th></tr>';
-  if (!cfgs.length) h += '<tr><td colspan="11" class="empty">no networks — click + to create one, or = to join an existing one</td></tr>';
+  let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>name</th><th>id</th><th>state</th><th>subnet4</th><th>overlay4</th><th>subnet6</th><th>overlay6</th><th title="overlay interface MTU. Sized so a full packet fits one underlay datagram; larger than the path can carry means every packet is fragmented and reassembled.">mtu</th><th>peers</th><th>seeds</th><th>notes</th></tr>';
+  if (!cfgs.length) h += '<tr><td colspan="12" class="empty">no networks — click + to create one, or = to join an existing one</td></tr>';
   else for (const cf of cfgs) {
     const live = state.status.find(s=>s.id===cf.id) || {};
     const en = cf.enabled !== false;
@@ -3215,6 +3229,7 @@ function secNetworks(c) {
       + '<td class="editable" data-edit="address4" data-net="'+esc(cf.id)+'" title="double-click to edit this node\'s overlay address">'+esc(cf.address4||'auto')+'</td>'
       + '<td class="editable" data-edit="subnet6" data-net="'+esc(cf.id)+'" title="double-click to edit">'+esc(cf.subnet6||'—')+'</td>'
       + '<td class="editable" data-edit="address6" data-net="'+esc(cf.id)+'" title="double-click to edit this node\'s overlay address">'+esc(cf.address6||'auto')+'</td>'
+      + '<td class="editable" data-edit="mtu" data-net="'+esc(cf.id)+'" title="double-click to edit the overlay MTU">'+esc(cf.mtu||'')+'</td>'
       + '<td>'+((live.peers||[]).length)+'</td><td>'+((cf.seeds||[]).length)+'</td>'
       + '<td class="editable" data-edit="notes" data-net="'+esc(cf.id)+'" title="double-click to edit">'+esc(cf.notes||'')+'</td></tr>';
   }

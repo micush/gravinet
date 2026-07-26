@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"gravinet/internal/crypto"
+
+	"gravinet/internal/protocol"
 )
 
 // ---- network resolution ------------------------------------------------------
@@ -250,6 +252,51 @@ func (c *Config) NetworkSetSubnets(ref, v4, v6 string) error {
 	}
 	n.Subnet4, n.Subnet6 = nv4, nv6
 	return nil
+}
+
+// MaxUnfragmentedTunnelMTU returns the largest overlay MTU that still fits in
+// one underlay datagram at the given path-MTU-discovery ceiling — the same
+// arithmetic mesh.computeMaxInnerFrag performs, duplicated here (rather than
+// imported) because config must not depend on mesh. protocol.DefaultTunnelMTU
+// documents the derivation, and mesh's TestDefaultTunnelMTUFitsDefaultUnderlay
+// pins the two against each other so they cannot drift.
+//
+//	ceiling − 48 (IPv6 40 + UDP 8) − 31 (data header 14 + type 1 + tag 16) − 6 (frag header)
+func MaxUnfragmentedTunnelMTU(ceiling int) int {
+	m := ceiling - 48 - 31 - 6
+	if m < 1 {
+		return 1
+	}
+	return m
+}
+
+// NetworkSetMTU sets a network's overlay interface MTU.
+//
+// Returns an advisory alongside the error when the value is accepted but will
+// fragment every full-size packet — i.e. when it exceeds what the configured
+// path-MTU ceiling could ever carry whole. That is a legitimate thing to want
+// (an operator may be mid-migration, or deliberately trading fragmentation for
+// a larger overlay MSS), so it is not rejected; but it is precisely the state
+// that produced silent, invisible throughput loss in the field, so the caller
+// is given something concrete to print rather than leaving the operator to
+// discover it from a startup warning after the next restart.
+//
+// The advisory is returned rather than logged so the CLI and the web admin can
+// each present it in their own idiom from one implementation.
+func (c *Config) NetworkSetMTU(ref string, mtu int) (advice string, err error) {
+	n := c.FindNetwork(ref)
+	if n == nil {
+		return "", fmt.Errorf("no network named %q", ref)
+	}
+	if mtu < protocol.MinTunnelMTU || mtu > 65535 {
+		return "", fmt.Errorf("mtu %d out of range (%d-65535)", mtu, protocol.MinTunnelMTU)
+	}
+	n.MTU = mtu
+	if fits := MaxUnfragmentedTunnelMTU(c.UnderlayMTUMaxValue()); mtu > fits {
+		advice = fmt.Sprintf("mtu %d is larger than any path on this node can carry whole (%d at an underlay_mtu_max of %d), so every full-size packet will be split into %d fragments and reassembled; %d avoids that",
+			mtu, fits, c.UnderlayMTUMaxValue(), (mtu+fits-1)/fits, fits)
+	}
+	return advice, nil
 }
 
 // NetworkSetRedistributeBGPRoutes sets a network's BGP-into-mesh

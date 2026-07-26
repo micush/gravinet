@@ -876,14 +876,17 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		Notes       string `json:"notes"`
 	}
 	type cfgNet struct {
-		ID       string               `json:"id"`
-		Name     string               `json:"name"`
-		Enabled  bool                 `json:"enabled"`
-		Notes    string               `json:"notes"`
-		Subnet4  string               `json:"subnet4"`
-		Subnet6  string               `json:"subnet6"`
-		Address4 string               `json:"address4"`
-		Address6 string               `json:"address6"`
+		ID       string `json:"id"`
+		Name     string `json:"name"`
+		Enabled  bool   `json:"enabled"`
+		Notes    string `json:"notes"`
+		Subnet4  string `json:"subnet4"`
+		Subnet6  string `json:"subnet6"`
+		Address4 string `json:"address4"`
+		Address6 string `json:"address6"`
+		// MTU is the overlay interface MTU, surfaced so Settings > Networks can
+		// show and edit it — see handleNetwork's "mtu" op.
+		MTU      int                  `json:"mtu"`
 		Seeds    config.SeedList      `json:"seeds"`
 		Routes   []config.Route       `json:"routes"`
 		RouteRej []config.RejectRoute `json:"route_reject"`
@@ -918,7 +921,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, cfgNet{
 			ID: id, Name: n.Name, Enabled: n.Enabled, Notes: n.Notes,
-			Subnet4: n.Subnet4, Subnet6: n.Subnet6, Address4: n.Address4, Address6: n.Address6, Seeds: n.Seeds,
+			Subnet4: n.Subnet4, Subnet6: n.Subnet6, Address4: n.Address4, Address6: n.Address6, MTU: n.MTU, Seeds: n.Seeds,
 			Routes: n.Routes, RouteRej: n.RouteRej,
 			RedistributeBGPRoutes: n.RedistributeBGPRoutes, RedistributeBGPMetric: n.RedistributeBGPMetric,
 			NAT: n.NAT, QoS: n.QoS, Throttle: n.Throttle, Firewall: n.Firewall, Hosts: n.HostsAdvertise, HostsRej: n.HostsReject,
