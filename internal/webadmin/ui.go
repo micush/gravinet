@@ -4174,7 +4174,7 @@ function portLabel(min, max){ if(!min && !max) return 'any'; if(min===max) retur
 // effect on the next restart.
 function secSeeds(c, nets){
   const cfgs = state.cfg;
-  c.appendChild($('<div class="hint" style="margin:0 0 10px">Seed addresses (host, host:port, or host:port,port,... for more than one) this node dials to find each network; persist whether or not a peer is connected. <b>udp</b> bootstraps over UDP with automatic TCP/TLS fallback; <b>tcp</b> goes straight over TCP/TLS, for cold-starting when UDP\u2019s blocked entirely. Double-click <b>address</b>, <b>transport</b>, or <b>notes</b> to edit. + to add (live), tick rows and \u2212 to remove (next restart), or tick one and \ud83d\udec8 for DNS/WHOIS.</div>'));
+  c.appendChild($('<div class="hint" style="margin:0 0 10px">Seed addresses (host, host:port, or host:port,port,... for more than one) this node dials to find each network; persist whether or not a peer is connected. <b>udp</b> bootstraps over UDP with automatic TCP/TLS fallback; <b>tcp</b> goes straight over TCP/TLS, for cold-starting when UDP\u2019s blocked entirely. Double-click <b>address</b>, <b>transport</b>, or <b>notes</b> to edit. + to add, tick rows and \u2212 to remove, or tick one and \ud83d\udec8 for DNS/WHOIS.</div>'));
   if (!cfgs.length){ emptyCard(c, 'no networks — create one under Networks first'); return; }
   for (const cf of cfgs){
     const card = $('<div class="card"></div>');

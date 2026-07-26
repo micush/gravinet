@@ -62,7 +62,7 @@ keeps one flow's packets on one queue to avoid reordering them.
 Handshake (no session yet, so keyed by key identity, not slot):
 ```
 [ver:1][type=HS_INIT:1][network:8][keyID:8][nonce:12][ciphertext..][tag:16]
-[ver:1][type=HS_RESP:1][recv_session:4][nonce:12][ciphertext..][tag:16]
+[ver:1][type=HS_RESP:1][network:8][recv_session:4][nonce:12][ciphertext..][tag:16]
 ```
 `keyID = first 8 bytes of SHA-256(key)`. This is the mechanism that makes
 "slots don't need to match across hosts, only the key must match": keys are
@@ -195,9 +195,14 @@ v4 and/or v6 per the peer's assigned addressing, inside a fenced managed block.
 Entries expire on a TTL when a peer goes silent.
 
 ## MTU / fragmentation
-Default tunnel MTU 9216 (jumbo). Outer packets set DF; when an inner packet
-would exceed discovered path MTU, gravinet fragments at its own protocol layer
-(reassembled by recv_session + frag header) rather than relying on IP frag.
+Default tunnel MTU 8915 — sized so a full-size overlay packet fits in one
+underlay datagram at the default path-MTU-discovery ceiling (9000), after
+accounting for outer headers, the data header, and fragment overhead (see
+`protocol.DefaultTunnelMTU`'s doc comment for the exact arithmetic; this was
+9216 through v658, which could never actually fit in one datagram at that
+ceiling). Outer packets set DF; when an inner packet would exceed discovered
+path MTU, gravinet fragments at its own protocol layer (reassembled by
+recv_session + frag header) rather than relying on IP frag.
 
 ## Roadmap (priority order — each step compiles & is testable)
 1. ✅ Skeleton, config, logging, crypto core, protocol framing
@@ -238,8 +243,8 @@ matrix — linux (amd64/arm64/arm), windows (amd64/arm64), darwin (amd64/arm64),
 freebsd/amd64 — with SHA-256 checksums, CGO disabled throughout.
 
 ## Status — roadmap complete
-All 15 steps are done. The tree is ~62k lines of dependency-free Go (~98k
-including tests) as of v560, passes `go vet` and the full suite under
+All 15 steps are done. The tree is ~73k lines of dependency-free Go (~118k
+including tests) as of v679, passes `go vet` and the full suite under
 `-race`, is fuzzed at the network boundary, and cross-compiles to the whole
 release matrix.
 
@@ -337,7 +342,7 @@ At multi-Gbps the kernel-default UDP socket buffers (~208 KB) overflow on bursts
 and silently drop datagrams — visible as `RcvbufErrors` in `netstat -su` — which
 TCP over the overlay sees as loss and answers with retransmits and congestion
 backoff, capping throughput well below the link. Each bound socket is therefore
-sized to `Options.SocketBuffer` (default 4 MiB). On Linux the daemon runs as root,
+sized to `Options.SocketBuffer` (default 16 MiB). On Linux the daemon runs as root,
 so it sets `SO_RCVBUFFORCE`/`SO_SNDBUFFORCE`, which bypass `net.core.{r,w}mem_max`
 and spare the operator from raising sysctls (it falls back to the clamped option
 otherwise); other platforms use the portable `SetReadBuffer`/`SetWriteBuffer`.

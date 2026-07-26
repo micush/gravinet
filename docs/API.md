@@ -239,6 +239,11 @@ cookie, or a qualifying fleet-manager mesh session — see
 | POST | `/api/dns` | Advertise/reject conditional DNS forwards |
 | POST | `/api/nat` | Add/edit/remove NAT rules |
 | POST | `/api/natstate` | Global NAT state-table timeout |
+| POST | `/api/loginban` | Web admin login lockout policy (attempts, duration) |
+| POST | `/api/worker-threads` | Outbound TUN / inbound UDP worker-pool size |
+| POST | `/api/tun-queues` | Overlay TUN multi-queue count (Linux-only) |
+| POST | `/api/udp-gso` | UDP GSO/GRO toggle (Linux amd64/arm64 only) |
+| POST | `/api/socket-buffer` | Per-UDP-socket receive/send buffer size, in MB |
 | POST | `/api/qos` | Add/edit/remove QoS classification rules |
 | POST | `/api/bandwidth` | Set per-network bandwidth caps |
 | GET/POST | `/api/exempt` | Node-global always-allowed traffic list |
@@ -382,6 +387,15 @@ first to see current values before deciding what to send.
   "geoip_lookup": true,
   "enable_upnp": false,
   "allow_remote_shell": false,
+  "login_ban_max_failures": 3,
+  "login_ban_seconds": 900,
+  "worker_threads": 0,
+  "tun_queues": 0,
+  "tun_queues_supported": true,
+  "udp_gso": false,
+  "udp_gso_supported": true,
+  "socket_buffer_mb": 16,
+  "socket_buffer_max_mb": 256,
   "shell_supported": true,
   "bgp_supported": true,
   "snmp_supported": true,
@@ -862,6 +876,76 @@ manager is only ever started once, alongside the daemon's listen ports.
 
 ```json
 {"on": true}
+```
+
+### `POST /api/loginban`
+
+Sets the web admin login lockout policy: how many failed attempts from
+one source trigger a lockout, and how long the lockout lasts (seconds; 0
+restores the default of 900/15min). `max_failures` similarly 0 restores
+the default of 3. **POST-only** — the current values are reported by
+`/api/config`'s `login_ban_max_failures`/`login_ban_seconds` fields.
+**Needs a restart** — the throttle that tracks failures is built once,
+from these values, at `Server.New`.
+
+```
+POST /api/loginban
+{"maxFailures": 5, "banSeconds": 1800}
+→ {"ok": true, "restart": true}
+```
+
+### `POST /api/worker-threads`
+
+Sets `worker_threads`, the outbound TUN-processing and inbound UDP
+worker-pool size (0 restores the default: `runtime.NumCPU()-1`, minimum
+1; capped at 128). **Needs a restart** — the pools are sized once, at
+startup. Current value reported by `/api/config`'s `worker_threads`.
+
+```
+POST /api/worker-threads
+{"value": 4}
+→ {"ok": true, "restart": true}
+```
+
+### `POST /api/tun-queues`
+
+Sets `tun_queues`, how many `IFF_MULTI_QUEUE` queues to open on each
+overlay interface (0 or 1 is single-queue; capped at 64). Linux-only — a
+harmless no-op elsewhere, per `/api/config`'s `tun_queues_supported`.
+**Needs a restart** — the queue count is decided when the TUN device is
+opened.
+
+```
+POST /api/tun-queues
+{"value": 4}
+→ {"ok": true, "restart": true}
+```
+
+### `POST /api/udp-gso`
+
+Toggles `udp_gso` — UDP-side segmentation offload — the config-driven
+equivalent of the `GRAVINET_UDP_GSO=1` environment variable (either
+enables it). Experimental; off by default. Linux amd64/arm64 only — a
+harmless no-op elsewhere, per `/api/config`'s `udp_gso_supported`.
+**Needs a restart** — GSO is initialized once, when the transport opens.
+
+```
+POST /api/udp-gso
+{"on": true}
+→ {"ok": true, "restart": true}
+```
+
+### `POST /api/socket-buffer`
+
+Sets `socket_buffer_mb`, the per-UDP-socket receive/send buffer size in
+megabytes (0 restores the default; capped at `/api/config`'s
+`socket_buffer_max_mb`). **Needs a restart** — the buffer is set with
+`setsockopt` when each UDP socket is bound, at startup.
+
+```
+POST /api/socket-buffer
+{"value": 32}
+→ {"ok": true, "restart": true}
 ```
 
 ### `GET /api/interfaces`

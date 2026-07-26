@@ -2,6 +2,155 @@
 
 ---
 
+## v680 — 2026-07-26
+
+**Fixed: continued the doc-correctness audit from v679 across every
+remaining doc in the tree** (`docs/API.md`, `docs/ARCHITECTURE.md`,
+`docs/SECURITY-FIXES.md`, `docs/UPGRADES.md`, `features.md`,
+`getting-started.md`, `install/windows-service.txt`,
+`install/gravinet.service`, `install/com.gravinet.daemon.plist`,
+`third_party/wintun/README.md`). Same method as last time: check every
+concrete, checkable claim against the actual code rather than trusting the
+prose.
+
+**`docs/API.md`** — diffed every route actually registered in
+`webadmin.go` against every endpoint documented. Found five real gaps:
+`/api/loginban` (added in v671, never documented), and
+`/api/worker-threads`, `/api/tun-queues`, `/api/udp-gso`,
+`/api/socket-buffer` (the Performance card's settings, undocumented since
+before this session touched the file). Added full sections and
+`/api/config` fields for all five. Confirmed every remaining
+documented-but-unregistered path is intentional — illustrative
+placeholders, or the doc's own accurate "Known gaps" note about
+`cluster.go`'s phantom path references, re-verified against the code.
+
+**`docs/ARCHITECTURE.md`** — four real bugs:
+1. "~62k lines... as of v560" — stale; actual tree is ~73k/~118k lines.
+   Updated to v680.
+2. The documented HS_RESP wire layout omitted an 8-byte `network` field
+   that `EncodeHSResp` actually writes. Confirmed against the exact
+   encode function; fixed.
+3. "Default tunnel MTU 9216" — stale; `protocol.DefaultTunnelMTU`'s own
+   doc comment says this changed to 8915 (9216 could never fit in one
+   datagram at the default path-MTU ceiling). Fixed.
+4. "Socket buffer default 4 MiB" — wrong; `SocketBufferDefaultBytes =
+   16 << 20` = 16 MiB. Fixed.
+
+**`docs/SECURITY-FIXES.md`** and **`docs/UPGRADES.md`** — every specific
+claim checked (function names, flag names, constants: `MaxBoots = 3`,
+`DefaultConfirmWindow = 90s`, `pushConcurrency = 4`, the `state_dir`/
+`store_dir` fallback, `-trimpath`, `selftest -config`, and every cited
+identifier in the security doc) came back accurate. No changes.
+
+**`features.md`** — two fixes: "Reproducible release builds" was an
+overclaim contradicted by `build-release.sh`'s own header comment
+("reproducible-ish") and `docs/UPGRADES.md`'s explicit statement that
+reproducible builds "would be the thing that actually recovers it" (i.e.
+doesn't exist yet as an achieved property) — softened to "Checksummed
+release builds." Also added the IPv4-only note to the NAT bullet, mirroring
+the same fix already made in `README.md`.
+
+**`getting-started.md`** — two fixes: the Seeds section had the exact
+same stale "(takes effect on next restart)" claim about seed removal that
+v678 already corrected in the UI's own hint text (`handleSeed` applies
+every op live) — fixed here too. Also filled in a missing fourth
+Managed/Manager combination ("Manager on, Managed off") that was skipped
+in the enumeration despite being the exact bastion-box setup described in
+the very next paragraph.
+
+**`install/windows-service.txt`** — this static reference file (shipped
+via `build-release.sh`'s plain `cp`, never regenerated from code) was
+missing the `sc.exe failure`/`sc.exe failureflag` recovery commands that
+`WindowsInstallCommands` actually produces. `SystemdUnit` and
+`LaunchdPlist` both carry "kept in sync with install/X" reminder comments
+for their own static files; `WindowsInstallCommands` had none — which is
+almost certainly why this one drifted while the other two (verified
+against `install/gravinet.service` and `install/com.gravinet.daemon.plist`
+field-for-field) didn't. Added the missing commands to the static file and
+the same sync-reminder comment to the Go function, to stop this
+recurring.
+
+**`third_party/wintun/README.md`** — re-verified against the actual
+license file; still accurate, no changes.
+
+**Not touched:** `docs/changelog.md` itself. It's the historical record
+this entry is part of, not a spec to audit — each entry documents what
+was true when it was written, and rewriting old entries to match later
+reality would falsify that history rather than correct it.
+
+---
+
+## v679 — 2026-07-26
+
+**Fixed: three accuracy issues in README.md, found by checking every
+platform/feature claim against the actual code rather than trusting the
+existing text.**
+
+1. **"kernel NAT is Linux-only" was false.** Every one of the five targeted
+   platforms has a real kernel NAT backend: Linux (`netfilter_linux.go`,
+   nftables/iptables), Windows (`netfilter_windows.go`, WinNAT), and
+   macOS/FreeBSD/OpenBSD (`netfilter_pf.go`, pf \u2014 its own doc comment
+   says "Kernel NAT on the pf-based platforms (macOS, FreeBSD, OpenBSD)").
+   The Linux-only stub is `netfilter_other.go`, which only applies to
+   platforms *outside* all five. Removed the caveat and folded NAT into
+   the "works everywhere" list, alongside the overlay, routing, firewall,
+   QoS, bandwidth limiting, and DNS forwarding it was previously excluded
+   from.
+
+2. **Found while fixing #1: the NAT feature bullet didn't say NAT is
+   IPv4-only**, despite `ops.go` enforcing exactly that
+   ("NAT is IPv4-only") and despite the doc explicitly calling out
+   IPv4+IPv6 support for adjacent features (IP forwarding, routing,
+   overlay addressing). A reader would have reasonably assumed dual-stack
+   NAT given everything around it says "IPv4 and IPv6." Added "IPv4-only"
+   to the bullet.
+
+3. **The web UI sidebar description was missing entire sections** that
+   exist in the real `NAV_GROUPS`: BGP/BFD under Traffic, live BGP
+   sessions and LLDP/CDP neighbors under Monitor, and SNMP, L2 Disco, and
+   Syslog under System \u2014 none of them mentioned anywhere in the
+   README. Rewrote the sidebar paragraph to include all three, noting
+   their conditional visibility (FRR/lldpd/snmpd present) the same way the
+   code itself frames it.
+
+**Also verified accurate, no changes needed:** the PAM/BSD-auth/LogonUser
+platform mapping (build tags checked directly), systemd/launchd/sc.exe
+service generation, utun/Wintun TUN backends, the cross-compile target
+matrix against `build-release.sh`'s actual `TARGETS` array, the Windows
+installer's `-NoNpcap` flag and firewall rule, the 3-fails/minute
+\u2192 15-minute default login lockout, the 8 join-key slots
+(`KeySlots = 8`), the fallback UDP port list
+(443/4500/3478/1194/500/53), the "no CLI for DNS forwarding" claim, "all
+15 roadmap steps complete," "pure Go, no third-party dependencies" (bare
+`go.mod`, no require block), and the GPLv3/Wintun-prebuilt-license claims
+in the License section.
+
+**Not touched:** `docs/ARCHITECTURE.md` says "as of v560," which is stale
+relative to the current version \u2014 but that's a different file than
+what was asked to be re-evaluated here, so it was left alone rather than
+edited unprompted.
+
+---
+
+## v678 — 2026-07-26
+
+**Fixed: the Seeds hint claimed removing a seed needs a restart. It
+doesn\u2019t.**
+
+The hint text read "+ to add (live), tick rows and \u2212 to remove (next
+restart)" \u2014 implying add and remove behave differently. Checked
+`handleSeed` before touching it: every op (`add`, `remove`, `notes`,
+`update-addr`) calls `s.editResult(w, err, false)` alike, so removal is
+applied live, same as add. Removed the stale "(next restart)" and, since
+the two ops turned out to be equally live, dropped the now-redundant
+"(live)" qualifier from add too rather than leaving a distinction that no
+longer means anything: "+ to add, tick rows and \u2212 to remove."
+
+**Verified:** the embedded UI script re-extracted from `indexHTML` and
+checked with `node --check` \u2014 clean. UI-only change; no Go touched.
+
+---
+
 ## v677 — 2026-07-26
 
 **Changed: more breathing room in settings rows.** `.settings-row`'s gap

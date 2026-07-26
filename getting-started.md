@@ -166,6 +166,7 @@ These are genuinely independent, not two ends of one switch:
 
 - **Both off** — an ordinary node, log in locally only: a pure admin console that can drive the fleet, but can't itself be managed without a normal login.
 - **Managed on, Manager off** — can be managed, but can't manage anyone else.
+- **Manager on, Managed off** — can manage other Managed nodes, but can't itself be managed remotely (the bastion-box/laptop role in the typical setup just below).
 - **Manager on, Managed on** — full two-way (the old single-flag behavior).
 
 A typical setup: flip **Manager** on for your own laptop or a bastion box, and **Managed** on for every server you want to reach from it. Then, from your laptop's web admin, the peer dropdown lists every Managed node the mesh currently knows about — pick one and every page you visit (Networks, Routes, Firewall, NAT, QoS, DNS, Hosts...) shows and edits _that_ node's configuration instead of your own. Switch back to "This node" to return to your own.
@@ -233,7 +234,7 @@ Go to **Mesh → Seeds**. These are the host or host:port addresses this node di
 
 A seed's address can carry more than one port, comma-separated (e.g. `203.0.113.5:65432,443,53`) — each is tried as its own dial candidate against that host, on top of whatever a bare host with no port already gets (the primary port plus gravinet's own built-in fallback set). This is for a seed known to answer on a handful of specific, non-default ports — likely to make it through a restrictive firewall — rather than the built-in set.
 
-Each seed has a transport: **udp** seeds bootstrap over UDP, with automatic TCP/TLS fallback if UDP turns out to be blocked; **tcp** seeds are dialed straight over the TCP/TLS fallback, which is useful for cold-starting a node onto the mesh when UDP is blocked end to end and there's no point trying it first. Double-click an address to edit it, or the transport cell to flip udp/tcp. Click **+** to add a seed (applies live), tick rows and **−** to remove one (takes effect on the next restart).
+Each seed has a transport: **udp** seeds bootstrap over UDP, with automatic TCP/TLS fallback if UDP turns out to be blocked; **tcp** seeds are dialed straight over the TCP/TLS fallback, which is useful for cold-starting a node onto the mesh when UDP is blocked end to end and there's no point trying it first. Double-click an address to edit it, or the transport cell to flip udp/tcp. Click **+** to add a seed, tick rows and **−** to remove one — both apply live.
 
 ---
 

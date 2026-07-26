@@ -76,7 +76,8 @@ point of a mesh.
 
 - **Route whole subnets across the mesh** with longest-prefix matching, turning
   any node into a gateway to the network behind it.
-- **NAT and port-forwarding on the overlay** (masquerade plus destination NAT),
+- **NAT and port-forwarding on the overlay** (masquerade plus destination NAT,
+  IPv4),
   so you can reach non-gravinet hosts through a node.
 - **Per-domain DNS forwarding** — send specific domains to DNS servers inside the
   mesh.
@@ -131,7 +132,8 @@ Open an HTTPS page served by the node itself — no extra software to install.
 - **Heavily tested,** including race detection and fuzzing of every component
   that parses data off the wire, plus live end-to-end tests of relaying, the
   firewall, NAT, bandwidth shaping, and the admin login.
-- **Reproducible release builds** for every platform, published with SHA-256
+- **Checksummed release builds** for every platform, built the same way every
+  time and published with SHA-256
   checksums.
 - **Self-hosted end to end** — no account, no subscription, and no cloud control
   plane your network depends on.

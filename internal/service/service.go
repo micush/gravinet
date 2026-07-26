@@ -258,7 +258,10 @@ func OpenBSDRcScript(o Options) string {
 	return b.String()
 }
 
-// WindowsInstallCommands renders the sc.exe commands to register the service.
+// WindowsInstallCommands renders the sc.exe commands to register the
+// service. Kept in sync with install/windows-service.txt — that file is a
+// static reference copy (see build-release.sh), not generated from this
+// function, so a change here needs the same edit made there by hand.
 func WindowsInstallCommands(o Options) string {
 	o = o.withDefaults()
 	bin := fmt.Sprintf(`\"%s\" run -config \"%s\"`, o.ExecPath, o.ConfigPath)

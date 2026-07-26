@@ -3,11 +3,11 @@
 *Created by micush.*
 
 A single-binary, full-mesh, encrypted overlay VPN. Pure Go, stdlib-only core,
-`CGO_ENABLED=0` static build. Targets Linux, Windows, macOS, FreeBSD, OpenBSD
-(kernel NAT is Linux-only; everything else — the overlay, routing, firewall,
-QoS, bandwidth limiting, and per-network DNS forwarding — works across all of
-them; on OpenBSD, DNS forwarding needs unbound as the system resolver, which
-the installer sets up by default — pass --no-unbound to skip it).
+`CGO_ENABLED=0` static build. Targets Linux, Windows, macOS, FreeBSD, OpenBSD —
+the overlay, routing, firewall, NAT, QoS, bandwidth limiting, and per-network
+DNS forwarding all work across every one of them; on OpenBSD, DNS forwarding
+needs unbound as the system resolver, which the installer sets up by default —
+pass --no-unbound to skip it.
 
 See `docs/ARCHITECTURE.md` for the full design and the prioritized roadmap.
 
@@ -70,9 +70,9 @@ control plane, relay fallback, and broadcast/multicast:
   other interfaces. Best-effort per family — a missing IPv6 knob or
   insufficient privilege doesn't block the other — and restored to its
   prior value on clean shutdown.
-- **NAT** — stateful source NAT/masquerade (with port translation) and
-  destination NAT/port-forward on the overlay data path, with connection
-  tracking that reverse-translates replies; IPv4 + TCP/UDP checksums recomputed.
+- **NAT** — IPv4-only: stateful source NAT/masquerade (with port translation)
+  and destination NAT/port-forward on the overlay data path, with connection
+  tracking that reverse-translates replies; checksums recomputed.
 - **Web admin** — an HTTPS UI + JSON API over the running engine (peers, bans,
   routes, firewall) with session login and a 3-fails/minute → 15-minute lockout.
   **Enabled by default** on `127.0.0.1:8443` with self-signed TLS. Authenticates
@@ -242,15 +242,16 @@ Windows account on Windows. No separate admin password
 to create — it's your OS login.
 
 The UI has a left sidebar grouped into **Mesh** (Networks, Keys, Seeds, Peers,
-Bans), **Traffic** (Routes, Firewall, NAT, QoS, Bandwidth), **Naming** (DNS,
-Hosts), and **Monitor** (live metrics, mesh peer detail, packet capture,
-speedtest, latency, the live kernel route table, hosts file, DNS state, and
-logs), **System** (upgrade this node's binary, set its hostname and default
-DNS servers, set its clock, timezone and NTP servers, manage console
-accounts, restart or shut down the host),
-and **Info** (this README, the getting-started walkthrough, the license, and
-build/host details) — plus
-Settings and Sign out pinned at the bottom, and a light/dark
+Bans), **Traffic** (Routes, Firewall, NAT, QoS, Bandwidth, and BGP/BFD when
+FRR is installed), **Naming** (DNS, Hosts), **Monitor** (live metrics, mesh
+peer detail, packet capture, speedtest, latency, the live kernel route table,
+live BGP sessions and LLDP/CDP neighbors when applicable, hosts file, DNS
+state, and logs), **System** (upgrade this node's binary, set its hostname and
+default DNS servers, set its clock, timezone and NTP servers, SNMP, LLDP/CDP
+link-layer discovery, and syslog forwarding when the host supports them,
+manage console accounts, restart or shut down the host), and **Info** (this
+README, the getting-started walkthrough, the license, and build/host details)
+— plus Settings and Sign out pinned at the bottom, and a light/dark
 theme toggle in the top bar. A **global search box** next to the node picker
 searches everything — every route, host, rule, key, seed, peer, ban, and
 setting, across every network — and clicking a result jumps straight to it,
