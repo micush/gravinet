@@ -1061,11 +1061,6 @@ type peerSession struct {
 	effMTU  atomic.Int32 // discovered underlay MTU for this peer (outer datagram bytes)
 	maxFrag atomic.Int32 // largest overlay slice per datagram at effMTU (send hot path)
 
-	// fragWarned latches the "overlay MTU doesn't fit this path" warning so a
-	// periodic pmtuLoop re-probe that rediscovers the same ceiling doesn't
-	// reprint it every cycle — see noteFragmentationRisk.
-	fragWarned atomic.Bool
-
 	// Fragmentation/reassembly diagnostics (atomic; surfaced per-peer in the UI so
 	// an "it hangs" report can be localized: clean counters here mean the loss is
 	// upstream of the mesh, climbing reasmDrop/fragSendDrop point at the path).
@@ -1590,6 +1585,7 @@ func (e *Engine) startNetwork(ns *netState) {
 	}
 	extraQueues := len(ns.spec.ExtraQueues)
 	ns.wg.Add(4 + extraQueues)
+	e.checkOverlayMTUFits(ns)
 	go e.tunLoop(ns)
 	for i := 0; i < extraQueues; i++ {
 		go e.tunQueueLoop(ns, i)
@@ -1600,6 +1596,44 @@ func (e *Engine) startNetwork(ns *netState) {
 	// Self-assign an overlay address right away so a lone/first node in a
 	// network doesn't sit address-less until the first maintenance tick.
 	e.maybeAssignAddress(ns)
+}
+
+// checkOverlayMTUFits warns, once when a network starts, if its overlay MTU is
+// larger than the *best case any path could ever produce* — that is, larger
+// than what fits in one datagram at the path-MTU-discovery ceiling. In that
+// state every full-size packet on the network is fragmented no matter how good
+// the underlay is, because discovery is not permitted to climb high enough to
+// carry one whole. It is a contradiction between two config values, knowable
+// at startup, and it is always fixable by lowering the MTU named here.
+//
+// Deliberately NOT a per-peer check. v658 had this fire from the PMTU path
+// whenever an individual peer's discovered path came in under the overlay MTU,
+// which was wrong twice over: it re-armed on every reconnect (the latch lived
+// on peerSession, which a flapping peer replaces), and — much worse — the
+// condition it tested is the normal, intended state of a healthy mesh. A node
+// with a 9000-byte path to one peer and a 5140-byte path to another *should*
+// fragment to the second one; that is the entire reason application-layer
+// fragmentation exists. Worse still, the advice it printed ("set this
+// network's mtu to 5055") was actively harmful: the overlay MTU is per-network
+// but the constraint it named was per-peer, so following it for the smallest
+// path would have throttled every other peer to match the worst one.
+//
+// The condition here can't be satisfied by any peer, so lowering the MTU is
+// unambiguously right, and it fires once per network start rather than per
+// peer, per reconnect, or per probe.
+func (e *Engine) checkOverlayMTUFits(ns *netState) {
+	dev := ns.dev()
+	if dev == nil {
+		return
+	}
+	overlay := dev.MTU()
+	best := computeMaxInnerFrag(e.pmtuCeil)
+	if overlay <= 0 || best <= 0 || overlay <= best {
+		return
+	}
+	pieces := (overlay + best - 1) / best
+	e.log.Warnf("mesh: network %x overlay MTU is %d, but the largest datagram path-MTU discovery may use is %d, which carries at most %d bytes of overlay packet — so every full-size packet on this network is split into %d fragments and reassembled, on every peer, regardless of how good the underlay is. Lower this network's mtu to %d (or raise underlay_mtu_max above %d) to stop it.",
+		ns.spec.ID, overlay, e.pmtuCeil, best, pieces, best, overlay+fragOverheadV6+protocol.DataHeaderLen+1+protocol.GCMOverhead+fragHeaderLen)
 }
 
 // isOverlayAddr reports whether addr falls inside ANY of this node's overlay

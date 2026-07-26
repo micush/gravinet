@@ -2,6 +2,78 @@
 
 ---
 
+## v660 — 2026-07-25
+
+**Fixed: the fragmentation warning added in v658 was wrong — it fired once per
+second in a live mesh, and the advice it printed was actively harmful. It has
+been replaced with a network-level check that fires once at startup.**
+
+**What it did.** `noteFragmentationRisk` warned whenever an individual peer's
+discovered path MTU came in under the overlay MTU. In the field that produced:
+
+```
+[WARN] mesh: overlay MTU 9216 exceeds what the path to 5f87… can carry in one
+datagram (5055 bytes, at a discovered path MTU of 5140) … Set this network's
+mtu to 5055 or lower …
+```
+
+once a second, indefinitely.
+
+**Two separate defects, the second much worse than the first.**
+
+The *latch* failed because it lived on `peerSession.fragWarned`, and a
+peerSession is rebuilt on every reconnect. A flapping peer therefore got a
+fresh, unset latch each time it came back, and the warning re-armed with it.
+Path-MTU state also resets on EMSGSIZE (`resetPMTU`) and re-climbs, so the
+"effective MTU changed" guard the call sat behind kept firing too.
+
+But the real error was the *condition*. Fragmenting to a peer whose path is
+smaller than the overlay MTU is not a misconfiguration — it is the normal,
+intended behaviour of a healthy mesh, and the entire reason application-layer
+fragmentation exists. A node with a 9000-byte path to one peer and a 5140-byte
+path to another *should* fragment to the second. Worse, the remedy the message
+named was per-peer while the setting it named is per-network: an operator who
+followed it and set `mtu: 5055` to satisfy their worst peer would have
+throttled every other peer on the network down to match it. The warning would
+have caused the problem it was written to prevent.
+
+**What replaces it.** `checkOverlayMTUFits`, called once from `startNetwork`,
+tests the one condition that is genuinely a contradiction rather than a
+tradeoff: an overlay MTU larger than what fits in a datagram *at the path-MTU
+discovery ceiling*. That is the best case any path on the network could ever
+produce, so when the overlay exceeds it, every full-size packet fragments on
+every peer no matter how good the underlay is — and lowering the MTU is
+unambiguously correct because no peer can benefit from the extra bytes. This is
+exactly the v659 defect (9216 against a 9000 ceiling), and a correctly-sized
+network is silent regardless of how varied its peers' paths are:
+
+```
+[WARN] mesh: network 1 overlay MTU is 9216, but the largest datagram path-MTU
+discovery may use is 9000, which carries at most 8915 bytes of overlay packet —
+so every full-size packet on this network is split into 2 fragments and
+reassembled, on every peer, regardless of how good the underlay is. Lower this
+network's mtu to 8915 (or raise underlay_mtu_max above 9301) to stop it.
+```
+
+Both remedies it names are real and computed, not approximate: 8915 is
+`computeMaxInnerFrag(ceiling)`, and 9301 is the underlay that would carry a
+9216-byte overlay packet whole. `peerSession.fragWarned` is gone; nothing on
+the PMTU hot path logs about fragmentation any more.
+
+**Verified:** `go build ./...`, `go vet ./...`, `gofmt -l` clean; full repo
+suite passes. New `internal/mesh/mtucheck_test.go` redirects the engine logger
+into a buffer and asserts on what an operator would actually see: the
+unsatisfiable config warns exactly once and names 9216, 8915, and the fragment
+count; **the MTU the warning recommends, fed back in, produces no warning** —
+the advice is checked to actually resolve the condition, which is precisely
+what v658's did not do; a correctly-sized overlay stays silent (the pinned
+regression against re-introducing the per-peer condition); the check is
+stateless per call so it can't inherit another network's state; and the
+shipping defaults produce no warning at all, which is the end-to-end proof of
+v659.
+
+---
+
 ## v659 — 2026-07-25
 
 **Fixed: the default overlay MTU (9216) was larger than the default underlay
