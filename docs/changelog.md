@@ -2,6 +2,17 @@
 
 ---
 
+## v677 — 2026-07-26
+
+**Changed: more breathing room in settings rows.** `.settings-row`'s gap
+between description text and its control, added in v676 at 24px, bumped to
+40px per feedback that it still felt tight.
+
+**Verified:** the embedded UI script re-extracted from `indexHTML` and
+checked with `node --check` \u2014 clean. UI-only change; no Go touched.
+
+---
+
 ## v676 — 2026-07-26
 
 **Changed: removed the same debounce sentence from the Performance card

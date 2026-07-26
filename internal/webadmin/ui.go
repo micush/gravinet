@@ -109,7 +109,7 @@ const indexHTML = `<!doctype html>
   .rail-foot .rail-tab { text-transform:uppercase; letter-spacing:.04em; }
   .rail-divider { height:1px; background:var(--line); margin:0 0 8px; }
   .rail-logout:hover { color:var(--danger); background:var(--hover); }
-  .settings-row { display:flex; align-items:center; justify-content:space-between; gap:24px; padding:12px 0; border-bottom:1px solid var(--line); }
+  .settings-row { display:flex; align-items:center; justify-content:space-between; gap:40px; padding:12px 0; border-bottom:1px solid var(--line); }
   .settings-row:has(.route-picker) { flex-direction:column; align-items:stretch; justify-content:flex-start; gap:10px; }
   .settings-row:last-child { border-bottom:0; }
   .settings-row > input, .settings-row > .sw { flex-shrink:0; }
