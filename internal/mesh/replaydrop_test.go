@@ -10,11 +10,11 @@ import (
 )
 
 // The replay window is what these tests are actually about, so they assert
-// against crypto's own constant rather than a hardcoded 64: if the window is
-// ever widened (the obvious follow-up if replayDrop turns out to be non-zero
-// under real load), these should follow it automatically instead of silently
-// asserting the old boundary.
-const testReplayWindow = 64
+// against crypto's own constant rather than a literal: widening the window
+// (v662 took it from 64 to 8192, which is exactly the follow-up this counter
+// was built to justify) moves these with it instead of leaving them asserting
+// a boundary that no longer exists.
+const testReplayWindow = crypto.ReplayWindowSize
 
 // sealFor builds one complete on-the-wire DATA datagram for a receiver whose
 // inbound session index is idx, sealed with send — the same byte layout

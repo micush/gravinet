@@ -2,6 +2,141 @@
 
 ---
 
+## v663 — 2026-07-25
+
+**Fixed: the outbound worker pool scrambled every connection's packets. Work is
+now dispatched by flow, so a connection's packets stay in the order they were
+read.** Measured effect of the old behaviour on a live 4 Gbps link: ~315,000
+out-of-order segments queued per 10s run, and **3,210 of the sender's 4,186
+retransmits came back DSACK'd** — 77% of all retransmissions were for data the
+receiver already had.
+
+**What was wrong.** `tunLoopPooled` fed every packet into one shared channel
+that any of N workers could pull from. Two packets of the same TCP connection
+would routinely be sealed and sent by different goroutines, finishing in an
+order unrelated to the order they were read.
+
+Its doc comment argued this was harmless: *"UDP itself never promised ordering,
+the replay window (64 packets) comfortably absorbs reordering from goroutine
+scheduling alone, and any inner protocol that cares (TCP) already carries its
+own sequence numbers for exactly this reason."* All three clauses failed
+together under real load. Reordering routinely exceeded 64 packets, so the
+replay window discarded ~12,000 valid packets per run as replays (v657
+measured it, v662 widened the window). Once those packets were no longer being
+dropped, the receiver simply got them out of order instead — and what TCP
+*does* with reordering is emit duplicate ACKs and fast-retransmit. Sequence
+numbers preserve correctness; they don't make scrambling free.
+
+**What changed.** Each worker owns a queue, and a packet goes to
+`queues[flowIndex(pkt, n)]` — the same src/dst/proto/ports hash ECMP already
+uses to pin a connection to one sibling. Every packet of a connection passes
+through one worker in read order; distinct connections still spread across all
+of them, so the parallelism the pool exists for is untouched.
+
+**Tradeoff, stated plainly:** a stalled worker now backs up its own queue and
+eventually blocks the reader for every flow, where before any free worker could
+drain the backlog. That is the same bargain hardware RSS and the kernel's own
+multi-queue TUN make — `tunQueueLoop` already notes kernels pick a queue by
+flow hash *"precisely to avoid reordering a flow's own packets"*, and the send
+path simply never got the same treatment. `tunOutboundQueueDepth` (16 per
+worker, up from an effective 4) is the buffer against it.
+
+**How this was found.** Worth recording, because the counters this took were
+added over the preceding six versions and none of them individually pointed
+here. Fragmentation, replay, and auth counters all read zero; NIC, qdisc, and
+TUN drop counters all read zero on both hosts; CPU sat 60% idle on all 8 cores
+and GSO made no measurable difference. `UdpRcvbufErrors` on the receiver
+accounted for ~0.14% of a ~0.6% retransmit rate and no more. What finally
+identified it was `TcpExtTCPDSACKRecv` on the *sender* — the receiver
+explicitly reporting it had already received the retransmitted data — cross-
+checked against `TcpExtTCPOFOQueue` on the receiver. Neither host's gravinet
+counters could have shown this, because nothing was being lost.
+
+**Verified:** `go build ./...`, `go vet ./...`, `gofmt -l` clean; full repo
+suite passes, including the pre-existing multi-queue and pooled-outbound
+integration tests. New `internal/mesh/flowaffinity_test.go` pins the two
+properties the dispatch now depends on: one 5-tuple hashes to the same worker
+every time across worker counts of 2/3/4/7/8/16, and 64 distinct connections
+spread across all 7 of 7 workers with no worker taking a disproportionate
+share (the failure mode where ordering is bought by collapsing everything onto
+one queue). It also checks the index is always a valid slice subscript for
+inputs `flowIndex` cannot parse — empty, truncated IPv4, truncated IPv6, and a
+packet with no readable L4 header — since `tunLoopPooled` indexes the queue
+slice with it directly on the reader goroutine.
+
+**Still outstanding:** the ~0.14% of genuine loss from UDP receive-buffer
+overflow (`UdpRcvbufErrors`) is unaddressed. `transport.Options.SocketBuffer`
+exists but nothing ever sets it, so every node runs the hardcoded 4 MB
+`defaultSocketBuffer` — roughly 470 datagrams at jumbo size. That is a separate
+change.
+
+---
+
+## v662 — 2026-07-25
+
+**Fixed: the replay window was 64 packets, and it was silently discarding
+~0.5% of a live 4 Gbps link's traffic as "replayed" when the packets were
+perfectly valid and merely late. It is now 8192, matching WireGuard.**
+
+**This is the hypothesis from the very start of this investigation, finally
+measured instead of argued.** v657 added the `replay_drop` counter and
+deliberately did *not* widen the window, so the counter could establish
+whether reordering was actually costing anything. Read from the receiving
+node, on the bulk direction, it was:
+
+```
+gn-rocky … bytes-rx=20.0G  replay=11962
+```
+
+11,962 rejections against roughly 2.4M datagrams received — **0.50%**. The same
+run's iperf3 reported 3,297 retransmits over 4.97 GiB, **0.55%**. Those two
+numbers describe the same packets. Effectively all of the "loss" on that link
+was self-inflicted: valid packets the far side had spent a full encrypt and a
+full send on, thrown away here for arriving more than 64 counters out of order,
+then retransmitted. From both endpoints it was indistinguishable from underlay
+loss, which is exactly why it survived so long.
+
+**Why 64 was never enough for this data plane.** Nothing about the tunnel
+promises in-order arrival, and three separate mechanisms actively break it:
+`mesh.tunLoopPooled` hands packets to N worker goroutines that take their
+session counter under `Seal`'s atomic increment in one order and reach the wire
+in another; multi-queue TUN readers add a second source of spread; and
+sendmmsg/GSO batching adds a third. `tunLoopPooled`'s own doc comment asserted
+the 64-packet window "comfortably absorbs reordering from goroutine scheduling
+alone" — true of scheduling jitter in isolation, and not true of the system as
+built.
+
+**What changed:** `Cipher.window` goes from a single `uint64` to a
+`[128]uint64` ring indexed by `counter/64`, with `replayOK`/`replayAdvance`
+rewritten around it. Advancing past a word boundary now clears the words being
+reused, without which bits set a lap earlier would masquerade as recent and
+reject fresh packets. Cost is 1 KB per receive direction per session.
+
+**This does not weaken anti-replay.** The bitmap still records every counter
+individually, so no packet is ever accepted twice at any offset inside the
+window; the width governs only how much reordering is tolerated before a valid
+packet is discarded. 8192 is WireGuard's choice, for the same reason.
+
+`crypto.ReplayWindowSize` is now exported so mesh's counter tests track the
+real width rather than a literal — v657's tests claimed to do this and did not,
+which would have left them asserting a boundary that no longer exists.
+
+**Verified:** `go build ./...`, `go vet ./...`, `gofmt -l` clean; full repo
+suite passes. New `internal/crypto/replaywindow_test.go` covers the cases this
+class of code actually breaks on: a full window delivered in reverse order is
+absorbed (the direct regression — this failed at 64), the trailing edge is
+exact (`window-1` behind is accepted, `window` behind is not), four laps of
+in-order traffic never false-reject after ring wrap, a ten-lap forward jump
+invalidates the ring and still catches a replay landing after it, a
+block-shuffled run of three windows accepts every counter exactly once, and no
+counter is ever accepted twice. Two of those initially failed and both were
+bugs in the tests rather than the window: one fabricated a counter while
+reusing ciphertext sealed under a different nonce, the other clamped a
+permutation into duplicate indices and then flagged the resulting genuine
+double-delivery as a false rejection.
+
+---
+
 ## v661 — 2026-07-25
 
 **Added: `gravinet network mtu NAME BYTES`, and an editable mtu column in

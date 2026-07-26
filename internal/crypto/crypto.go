@@ -221,8 +221,9 @@ var ErrReplay = errors.New("crypto: replayed or stale packet")
 type Cipher struct {
 	aead    cipher.AEAD
 	counter uint64 // next send counter
-	// replay window state (open side):
-	window  uint64
+	// replay window state (open side): a sliding bitmap of the counters seen
+	// in the replayWindowSize packets behind highest. See replayAdvance.
+	window  [replayWords]uint64
 	highest uint64
 }
 
@@ -262,7 +263,38 @@ func (c *Cipher) Seal(dst, plaintext, aad []byte) (counter uint64, out []byte) {
 	return counter, out
 }
 
-const replayWindowSize = 64
+const (
+	// replayWindowSize is how many packet counters behind the highest one seen
+	// are still accepted. A counter further back than this is rejected as
+	// stale even if it was never actually seen.
+	//
+	// This was 64 (a single uint64 bitmap) until v662, and 64 turned out to be
+	// far too narrow for this data plane. Nothing about the tunnel guarantees
+	// in-order arrival: the outbound worker pool (mesh.tunLoopPooled) hands
+	// packets to N goroutines that take their session counter under one order
+	// — Seal's atomic increment — and reach the wire in another, multi-queue
+	// TUN readers add another source of spread, and sendmmsg/GSO batching adds
+	// a third. Measured on a live 4 Gbps jumbo link with the v657 counter:
+	// 11,962 packets rejected as "replayed" out of ~2.4M received, ~0.5%,
+	// which matched that run's TCP retransmit rate almost exactly. Every one
+	// of those was a legitimate packet the far side had spent a full encrypt
+	// and send on, discarded here for arriving more than 64 counters late, and
+	// then retransmitted — loss that looked exactly like underlay loss from
+	// both endpoints.
+	//
+	// 8192 is what WireGuard uses, for the same reason. Widening costs 1 KB
+	// per receive direction per session and does not weaken the anti-replay
+	// guarantee at all: the bitmap still records every counter individually,
+	// so no packet is ever accepted twice. The window governs only how much
+	// reordering is tolerated before a valid packet is thrown away.
+	replayWindowSize = 8192
+	replayWords      = replayWindowSize / 64
+)
+
+// ReplayWindowSize exposes the window width to other packages so their tests
+// track it instead of asserting a literal that silently goes stale when it
+// changes — mesh's replayDrop tests are written against this.
+const ReplayWindowSize = replayWindowSize
 
 // Open decrypts a packet given its header counter, enforcing the replay window.
 func (c *Cipher) Open(dst, ciphertext, aad []byte, counter uint64) ([]byte, error) {
@@ -280,32 +312,38 @@ func (c *Cipher) Open(dst, ciphertext, aad []byte, counter uint64) ([]byte, erro
 // replayOK reports whether a counter is acceptable without mutating state.
 func (c *Cipher) replayOK(counter uint64) bool {
 	if counter > c.highest {
-		return true
+		return true // ahead of everything seen: always fresh
 	}
-	diff := c.highest - counter
-	if diff >= replayWindowSize {
-		return false
+	if c.highest-counter >= replayWindowSize {
+		return false // older than the window can vouch for
 	}
-	return c.window&(1<<diff) == 0
+	return c.window[(counter/64)%replayWords]&(1<<(counter%64)) == 0
 }
 
 // replayAdvance records that a counter was successfully verified.
+//
+// The window is a ring of replayWords 64-bit words indexed by counter/64, so
+// advancing past a word boundary has to clear the words being reused before
+// they are read again a lap later — otherwise bits set by counters 8192 back
+// would masquerade as recent ones and reject fresh packets.
 func (c *Cipher) replayAdvance(counter uint64) {
 	if counter > c.highest {
-		shift := counter - c.highest
-		if shift >= replayWindowSize {
-			c.window = 0
-		} else {
-			c.window <<= shift
+		oldTop, newTop := c.highest/64, counter/64
+		if span := newTop - oldTop; span > 0 {
+			if span >= replayWords {
+				// Jumped a full lap or more: nothing in the ring is current.
+				for i := range c.window {
+					c.window[i] = 0
+				}
+			} else {
+				for i := oldTop + 1; i <= newTop; i++ {
+					c.window[i%replayWords] = 0
+				}
+			}
 		}
-		c.window |= 1
 		c.highest = counter
-		return
 	}
-	diff := c.highest - counter
-	if diff < replayWindowSize {
-		c.window |= 1 << diff
-	}
+	c.window[(counter/64)%replayWords] |= 1 << (counter % 64)
 }
 
 // Session bundles the send and receive ciphers for one peer link.

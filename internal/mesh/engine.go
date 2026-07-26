@@ -2356,6 +2356,14 @@ type tunJob struct {
 	n    int
 }
 
+// tunOutboundQueueDepth is how many packets may be queued per worker. Deeper
+// than the old shared channel's per-worker share, because a per-flow queue can
+// no longer be drained by whichever worker happens to be free: a burst on one
+// flow has to fit in that flow's own queue or the reader stalls. Slots hold a
+// pooled buffer pointer, so the real cost is outstanding pool buffers
+// (~MTU each), not the channel.
+const tunOutboundQueueDepth = 16
+
 // tunLoopPooled reads overlay packets and routes them to the right peer
 // session, using tunWorkerCount() worker goroutines for everything after
 // the read — see tunLoop, which only calls this when that count is > 1.
@@ -2363,15 +2371,43 @@ type tunJob struct {
 // The read itself stays on this one goroutine: dev is a single-queue fd
 // (no IFF_MULTI_QUEUE), and nothing here assumes concurrent Read calls on
 // it are safe. But everything after the read — firewall, NAT, classify,
-// route lookup, encrypt, send: processOutbound below — is handed off over a
-// channel to the worker pool, so packet N+1 can be read while N is still
-// being processed elsewhere. Before this, the whole pipeline ran inline on
-// the reader goroutine: one packet fully routed, NAT'd, encrypted, and sent
-// before the next Read even happened, capping every byte this node
-// *originates* (as opposed to relays or receives) to whatever one core
-// could push through that sequence, no matter how many cores were actually
-// available. Inbound already had this — readLoop in internal/transport
-// runs one goroutine per REUSEPORT socket — outbound just hadn't caught up.
+// route lookup, encrypt, send: processOutbound below — is handed off to the
+// worker pool, so packet N+1 can be read while N is still being processed
+// elsewhere. Before this, the whole pipeline ran inline on the reader
+// goroutine: one packet fully routed, NAT'd, encrypted, and sent before the
+// next Read even happened, capping every byte this node *originates* (as
+// opposed to relays or receives) to whatever one core could push through
+// that sequence, no matter how many cores were actually available.
+//
+// Work is dispatched by flow, not to whichever worker is free: each worker
+// owns a queue and a packet goes to queues[flowIndex(pkt, n)], the same hash
+// (src/dst/proto/ports) ECMP uses to pin a connection to one sibling. Every
+// packet of a given connection therefore passes through one worker, in the
+// order it was read, and different connections still spread across all of
+// them.
+//
+// This replaced a single shared channel that any worker could pull from, and
+// that arrangement actively broke things. Its own doc comment argued the
+// resulting reordering was harmless — "UDP itself never promised ordering,
+// the replay window (64 packets) comfortably absorbs reordering from
+// goroutine scheduling alone, and any inner protocol that cares (TCP)
+// already carries its own sequence numbers". Measured on a live 4 Gbps link,
+// all three claims failed together: reordering routinely exceeded 64 packets
+// and the replay window discarded ~12k valid packets per run as replays
+// (fixed by widening it in v662), and once they were no longer dropped the
+// receiver simply got them out of order instead — ~315k out-of-order
+// segments queued per run, and 3,210 of the sender's 4,186 retransmits came
+// back DSACK'd, i.e. the receiver already had the data. TCP does carry its
+// own sequence numbers; what it does with reordering is emit duplicate ACKs
+// and fast-retransmit, so scrambling a connection's packets does not cost
+// correctness but does cost throughput and a lot of wasted work.
+//
+// Tradeoff, stated plainly: a stalled worker now backs up its own queue and
+// eventually blocks the reader for every flow, where before any free worker
+// could drain the backlog. That is the same bargain hardware RSS and the
+// kernel's own multi-queue TUN make (see tunQueueLoop, which already notes
+// kernels pick a queue by flow hash "precisely to avoid reordering a flow's
+// own packets"), and tunOutboundQueueDepth is the buffer against it.
 //
 // Everything processOutbound touches (ns.fw, ns.nat, ns.routes4/6 via
 // routeTo, peerSession.sess) is already built for concurrent access: the
@@ -2379,41 +2415,38 @@ type tunJob struct {
 // from deliverInner, called from every UDP read-worker goroutine on the
 // inbound side, and peerSession.sess's send counter is allocated with a
 // plain atomic add (crypto.Cipher.Seal), so two workers sealing packets to
-// the same peer at once can't race or collide — they just get two distinct,
-// still-monotonic counters. The one behavioral change worth naming
-// explicitly: packets to the same destination are no longer guaranteed to
-// be sent in the order they were read, since two different workers can
-// finish out of order. That's not a new failure mode for anything running
-// over this tunnel — UDP itself never promised ordering, the replay window
-// (64 packets) comfortably absorbs reordering from goroutine scheduling
-// alone, and any inner protocol that cares (TCP) already carries its own
-// sequence numbers for exactly this reason.
+// different peers at once can't race or collide.
 func (e *Engine) tunLoopPooled(ns *netState) {
 	defer ns.wg.Done()
 	dev := ns.dev()
 
 	n := e.tunWorkerCount()
-	jobs := make(chan tunJob, n*4)
+	queues := make([]chan tunJob, n)
+	for i := range queues {
+		queues[i] = make(chan tunJob, tunOutboundQueueDepth)
+	}
 	pool := &sync.Pool{New: func() any { b := make([]byte, dev.MTU()+128); return &b }}
 
 	var workers sync.WaitGroup
 	workers.Add(n)
 	for i := 0; i < n; i++ {
-		go func() {
+		go func(jobs <-chan tunJob) {
 			defer workers.Done()
 			for job := range jobs {
 				e.processOutbound(ns, (*job.bufp)[:job.n])
 				pool.Put(job.bufp)
 			}
-		}()
+		}(queues[i])
 	}
-	// Closing jobs is what lets the workers above exit their range loop; wait
-	// for them here so nothing spawned by this tunLoop invocation is still
-	// running by the time it reports done via ns.wg — teardown callers that
-	// ns.wg.Wait() rely on that being a complete stop, not "the reader
-	// stopped, but N workers might still be mid-send."
+	// Closing the queues is what lets the workers above exit their range
+	// loops; wait for them here so nothing spawned by this tunLoop invocation
+	// is still running by the time it reports done via ns.wg — teardown
+	// callers that ns.wg.Wait() rely on that being a complete stop, not "the
+	// reader stopped, but N workers might still be mid-send."
 	defer func() {
-		close(jobs)
+		for _, q := range queues {
+			close(q)
+		}
 		workers.Wait()
 	}()
 
@@ -2457,6 +2490,11 @@ func (e *Engine) tunLoopPooled(ns *netState) {
 			dev = ns.dev()
 			continue
 		}
+		// Pin this packet's connection to one worker. flowIndex falls back to
+		// hashing whatever it can parse (addresses alone for a non-TCP/UDP
+		// packet), which still keeps any given flow on a single worker — the
+		// property that matters here — even when it can't see ports.
+		jobs := queues[flowIndex(buf[:nRead], n)]
 		select {
 		case jobs <- tunJob{bufp: bufp, n: nRead}:
 		case <-e.stop:
