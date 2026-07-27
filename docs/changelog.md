@@ -2,6 +2,54 @@
 
 ---
 
+## v693 — 2026-07-26
+
+**Fixed: config history was taking one snapshot per commit, not one per
+editing session** — the exact cost of "snapshot on every commit" that was
+flagged (and knowingly accepted) when this feature was built in v686, now
+seen in practice: editing several fields on a card like Performance
+(worker threads, TUN queues, UDP GSO, socket buffer) produced one
+snapshot per field, since each field saves independently.
+
+Added server-side debouncing in `mutateConfig` itself
+(`scheduleHistorySnapshot`/`flushPendingHistorySnapshot` in
+`webadmin.go`), the same idea as the client-side restart debounce
+(`schedulePerfRestart`/`scheduleLoginBanRestart`) but applied uniformly to
+every commit rather than only the cards that opted into a JS debounce:
+several commits within a 3-second window collapse into one snapshot
+comparing the state before the *first* commit of the burst against the
+state after the *last*, rather than diffing each commit against the one
+before it.
+
+**The one real correctness risk, caught before it shipped:** a process
+restart kills the debounce timer along with everything else in memory —
+if the window hadn't elapsed yet, the pending snapshot would simply never
+get taken. This isn't a corner case: GeoIP, UPnP, and Remote shell all
+restart *immediately* with no debounce of their own at all, so toggling
+one of those would race the 3-second window every time and usually lose.
+Fixed by flushing the pending snapshot synchronously at both places in
+the code that actually trigger a process restart from a live web-admin
+session (`handleRestart`, and the hostname-change handler's own direct
+restart) — audited every `service.Restart()` call site in the repo to
+confirm those are the only two reachable from a running `Server`'s
+in-memory state; the other three (the `gravinet upgrade` CLI, the upgrade
+guard's own internal restart orchestration, `cli_config.go`) are separate
+process invocations with no access to it, and — CLI-driven config edits
+not going through `mutateConfig`/history at all — a separate, pre-existing
+gap outside the scope of this fix.
+
+**Verified:** brace/paren balance checked on both touched files (the one
+pre-existing, unrelated imbalance in `edit.go` confirmed again). Grepped
+every new identifier across the whole `webadmin` package to confirm zero
+collisions and that both `flushPendingHistorySnapshot` call sites in
+`edit.go` land exactly where intended. No Go toolchain available in this
+environment to run `go build`/`go vet`/`go test` — this one touches
+concurrency (a shared timer and pending-state fields guarded by a new
+mutex), so a real build and a look at `go vet -race` would be worth
+doing before trusting this fully.
+
+---
+
 ## v692 — 2026-07-26
 
 **Changed: the Power page's service-restart button reads "Restart"

@@ -1091,6 +1091,7 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": hint})
 		return
 	}
+	s.flushPendingHistorySnapshot() // about to restart; don't lose a snapshot still mid-debounce
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "restarting": true})
 	go func() {
 		time.Sleep(700 * time.Millisecond) // let the reply flush first
@@ -1476,6 +1477,7 @@ func (s *Server) handleSystemResolver(w http.ResponseWriter, r *http.Request) {
 	// stands — only note that a manual restart is needed for peers to see it.
 	if req.Op == "hostname" {
 		if canRestart, hint := service.CanRestart(); canRestart {
+			s.flushPendingHistorySnapshot() // about to restart; don't lose a snapshot still mid-debounce
 			go func() {
 				time.Sleep(700 * time.Millisecond) // let the reply flush first
 				s.log.Infof("webadmin: restarting service to apply hostname change (requested from admin UI)")

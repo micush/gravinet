@@ -148,6 +148,17 @@ type Server struct {
 
 	tlsCert *x509.Certificate // the cert Start() actually loaded (custom or self-signed); for display only
 
+	// historyMu guards the fields below: config history debouncing. Several
+	// commits in a short window (e.g. every field on the Performance card
+	// being changed in one sitting) collapse into one snapshot comparing the
+	// state before the *first* commit of the burst against the state after
+	// the *last*, rather than one snapshot per field — see
+	// scheduleHistorySnapshot's doc comment.
+	historyMu            sync.Mutex
+	historyPendingBefore *config.Config
+	historyPendingUser   string
+	historyTimer         *time.Timer
+
 	bootID string // random per-process id; lets the admin UI detect a restart
 
 	version string // gravinet build version (for the About tab); set via SetVersion
@@ -248,7 +259,7 @@ func (s *Server) mutateConfig(r *http.Request, fn func(*config.Config) error) er
 		if r != nil {
 			user, _ = s.validSession(r)
 		}
-		config.OnCommit(s.configPath, before, cfg, user, cfg.EffectiveConfigHistoryLimit())
+		s.scheduleHistorySnapshot(before, user)
 		if s.reload != nil {
 			if err := s.reload(); err != nil {
 				s.log.Warnf("webadmin: reload after edit failed: %v", err)
@@ -269,6 +280,77 @@ func (s *Server) restoreConfig(r *http.Request, candidate *config.Config) error 
 		*cfg = *candidate
 		return nil
 	})
+}
+
+// historyDebounceWindow is how long a burst of commits can stay quiet
+// before it's treated as finished — matches PERF_RESTART_DEBOUNCE_MS /
+// LOGIN_BAN_RESTART_DEBOUNCE_MS on the JS side, the client-side debounce
+// this mirrors server-side for exactly the same reason (see
+// scheduleHistorySnapshot's doc comment).
+const historyDebounceWindow = 3 * time.Second
+
+// scheduleHistorySnapshot debounces config history the same way the UI
+// already debounces a restart for multi-field cards (Performance, Login):
+// several commits close together collapse into one snapshot rather than
+// one per commit. Unlike the client-side restart debounce, this one is
+// server-side and applies uniformly to every commit through mutateConfig,
+// not just the cards that opted into a JS debounce — gravinet's handlers
+// are far more granular than parapet's (SeedAdd/SeedRemove/SeedSetNotes are
+// three commits for what's conceptually "editing one seed"), so without
+// this, editing several fields in one sitting produced one snapshot per
+// field instead of one per editing session.
+//
+// The first commit of a new burst remembers its "before" state; each
+// subsequent commit within the window just resets the timer and updates
+// who gets credited (the most recent committer — in practice always the
+// same person mid-session). When the window elapses with no further
+// commits, flushPendingHistorySnapshot compares that remembered "before"
+// against whatever the config looks like *now*, so the one snapshot taken
+// reflects the whole burst, not just its last commit.
+func (s *Server) scheduleHistorySnapshot(before *config.Config, user string) {
+	s.historyMu.Lock()
+	defer s.historyMu.Unlock()
+	if s.historyPendingBefore == nil {
+		s.historyPendingBefore = before
+	}
+	s.historyPendingUser = user
+	if s.historyTimer != nil {
+		s.historyTimer.Stop()
+	}
+	s.historyTimer = time.AfterFunc(historyDebounceWindow, s.flushPendingHistorySnapshot)
+}
+
+// flushPendingHistorySnapshot takes the debounced snapshot immediately,
+// skipping the rest of the wait. Called from two places: the debounce timer
+// itself when the window elapses normally, and every path that's about to
+// restart this process (handleRestart, and the hostname-change handler's
+// own direct restart) — a process restart kills the timer along with
+// everything else in memory, so without an explicit flush first, a
+// snapshot still mid-debounce would simply never get taken. That matters
+// most for GeoIP/UPnP/Remote shell, which restart immediately with no
+// debounce of their own at all: without this, toggling one of those would
+// silently stop producing a snapshot, since the process would be gone
+// before the 3-second window ever elapsed on its own. Harmless no-op if
+// nothing is pending.
+func (s *Server) flushPendingHistorySnapshot() {
+	s.historyMu.Lock()
+	before := s.historyPendingBefore
+	user := s.historyPendingUser
+	if s.historyTimer != nil {
+		s.historyTimer.Stop()
+		s.historyTimer = nil
+	}
+	s.historyPendingBefore = nil
+	s.historyPendingUser = ""
+	s.historyMu.Unlock()
+	if before == nil {
+		return
+	}
+	after, err := config.Load(s.configPath)
+	if err != nil {
+		return
+	}
+	config.OnCommit(s.configPath, before, after, user, after.EffectiveConfigHistoryLimit())
 }
 
 // New builds a Server, choosing the authenticator from the config auth mode.

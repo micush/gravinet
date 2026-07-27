@@ -48,7 +48,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "692"
+	version = "693"
 	commit  = "none"
 )
 
