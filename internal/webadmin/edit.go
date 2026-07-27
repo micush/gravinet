@@ -1,7 +1,10 @@
 package webadmin
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net"
@@ -67,7 +70,7 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 	// themselves would.
 	var prevMesh []string
 	var mtuAdvice string
-	err := s.mutateConfig(func(cfg *config.Config) error {
+	err := s.mutateConfig(r, func(cfg *config.Config) error {
 		prevMesh = meshRouteCIDRs(cfg)
 		switch req.Op {
 		case "add":
@@ -192,7 +195,7 @@ func (s *Server) handleHost(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	err := s.mutateConfig(func(cfg *config.Config) error {
+	err := s.mutateConfig(r, func(cfg *config.Config) error {
 		switch req.Op {
 		case "add":
 			return cfg.HostAdd(req.Net, req.Name, req.IP)
@@ -237,7 +240,7 @@ func (s *Server) handleDNS(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	err := s.mutateConfig(func(cfg *config.Config) error {
+	err := s.mutateConfig(r, func(cfg *config.Config) error {
 		switch req.Op {
 		case "add":
 			return cfg.DNSForwardAdd(req.Net, req.Domain, req.Servers)
@@ -268,7 +271,7 @@ func (s *Server) handleSeed(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	err := s.mutateConfig(func(cfg *config.Config) error {
+	err := s.mutateConfig(r, func(cfg *config.Config) error {
 		switch req.Op {
 		case "add":
 			return cfg.SeedAdd(req.Net, req.Addr)
@@ -305,7 +308,7 @@ func (s *Server) handleRoute(w http.ResponseWriter, r *http.Request) {
 	// but capturing it unconditionally is one extra map build, not worth
 	// special-casing per op).
 	var prevMesh []string
-	err := s.mutateConfig(func(cfg *config.Config) error {
+	err := s.mutateConfig(r, func(cfg *config.Config) error {
 		prevMesh = meshRouteCIDRs(cfg)
 		switch req.Op {
 		case "add", "advertise", "redistribute":
@@ -360,7 +363,7 @@ func (s *Server) handleRouteAdv(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "interval must be between 0 and 86400 seconds"})
 		return
 	}
-	err := s.mutateConfig(func(cfg *config.Config) error {
+	err := s.mutateConfig(r, func(cfg *config.Config) error {
 		cfg.RouteAdvInterval = req.Interval
 		return nil
 	})
@@ -397,7 +400,7 @@ func (s *Server) handleKeepalive(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "interval must be between 0 and 86400 seconds"})
 		return
 	}
-	err := s.mutateConfig(func(cfg *config.Config) error {
+	err := s.mutateConfig(r, func(cfg *config.Config) error {
 		cfg.KeepaliveInterval = req.Interval
 		return nil
 	})
@@ -429,7 +432,7 @@ func (s *Server) handlePeerTimeout(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "interval must be between 0 and 86400 seconds"})
 		return
 	}
-	err := s.mutateConfig(func(cfg *config.Config) error {
+	err := s.mutateConfig(r, func(cfg *config.Config) error {
 		cfg.PeerTimeout = req.Interval
 		return nil
 	})
@@ -613,13 +616,13 @@ func (s *Server) handleExempt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Reset {
-		err := s.mutateConfig(func(cfg *config.Config) error { cfg.FirewallExemptReset(); return nil })
+		err := s.mutateConfig(r, func(cfg *config.Config) error { cfg.FirewallExemptReset(); return nil })
 		s.editResult(w, err, false)
 		return
 	}
 	// A per-entry toggle by index, mirroring the firewall per-rule enable/disable.
 	if req.Op == "enable" || req.Op == "disable" {
-		err := s.mutateConfig(func(cfg *config.Config) error {
+		err := s.mutateConfig(r, func(cfg *config.Config) error {
 			return cfg.FirewallExemptSetEnabled(req.Index, req.Op == "enable")
 		})
 		s.editResult(w, err, false)
@@ -633,7 +636,7 @@ func (s *Server) handleExempt(w http.ResponseWriter, r *http.Request) {
 		}
 		list = append(list, e)
 	}
-	err := s.mutateConfig(func(cfg *config.Config) error { return cfg.FirewallExemptSet(list) })
+	err := s.mutateConfig(r, func(cfg *config.Config) error { return cfg.FirewallExemptSet(list) })
 	s.editResult(w, err, false)
 }
 
@@ -650,7 +653,7 @@ func (s *Server) handleNATState(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	err := s.mutateConfig(func(cfg *config.Config) error {
+	err := s.mutateConfig(r, func(cfg *config.Config) error {
 		return cfg.NATStateTimeoutSet(req.Timeout)
 	})
 	s.editResult(w, err, false) // applied live; no restart
@@ -665,10 +668,86 @@ func (s *Server) handleLoginBan(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	err := s.mutateConfig(func(cfg *config.Config) error {
+	err := s.mutateConfig(r, func(cfg *config.Config) error {
 		return cfg.WebAdminLoginBanSet(req.MaxFailures, req.BanSeconds)
 	})
 	s.editResult(w, err, true) // needs a restart — see doc comment above
+}
+
+// handleTLSCert accepts a PEM certificate and private key pair uploaded from
+// the web admin's Settings > TLS certificate card, validates that they're
+// well-formed and actually pair together, writes them to disk (see
+// config.Config.WebAdminTLSPaths), and points web_admin.tls_cert/tls_key at
+// them. Deliberately validates and writes the files *before* touching config
+// at all: a bad pair fails here with a specific reason, rather than getting
+// saved and only discovered at the next restart, when the web admin itself
+// would fail to come back up.
+//
+// Needs a restart to actually take effect (same as GeoIP/AuthMode/etc.) but
+// deliberately does NOT auto-restart the way GeoIP/UPnP do: this is the
+// certificate the operator's own browser session is trusting right now, and
+// a mistake here deserves a conscious "yes, restart now" rather than an
+// immediate, unprompted disconnect.
+func (s *Server) handleTLSCert(w http.ResponseWriter, r *http.Request) {
+	var req struct{ Cert, Key string }
+	if !decode(w, r, &req) {
+		return
+	}
+	certPEM := strings.TrimSpace(req.Cert)
+	keyPEM := strings.TrimSpace(req.Key)
+	if certPEM == "" || keyPEM == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "both a certificate and a private key are required"})
+		return
+	}
+	if _, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM)); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "certificate and key don't form a valid pair: " + err.Error()})
+		return
+	}
+	// Surface (but don't block on) an expired or not-yet-valid certificate —
+	// someone uploading one that's already expired has almost certainly made
+	// a mistake, but it's their call whether to use it anyway.
+	var note string
+	if block, _ := pem.Decode([]byte(certPEM)); block != nil {
+		if c, err := x509.ParseCertificate(block.Bytes); err == nil {
+			now := time.Now()
+			switch {
+			case now.Before(c.NotBefore):
+				note = "Uploaded, but this certificate isn't valid until " + c.NotBefore.UTC().Format(time.RFC3339) + "."
+			case now.After(c.NotAfter):
+				note = "Uploaded, but this certificate expired on " + c.NotAfter.UTC().Format(time.RFC3339) + "."
+			}
+		}
+	}
+	err := s.mutateConfig(r, func(cfg *config.Config) error {
+		certPath, keyPath := cfg.WebAdminTLSPaths()
+		if werr := os.WriteFile(keyPath, []byte(keyPEM), 0o600); werr != nil {
+			return fmt.Errorf("writing key: %w", werr)
+		}
+		if werr := os.WriteFile(certPath, []byte(certPEM), 0o644); werr != nil {
+			return fmt.Errorf("writing cert: %w", werr)
+		}
+		return cfg.WebAdminTLSCertSet(certPath, keyPath)
+	})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	resp := map[string]any{"ok": true, "restart": true}
+	if note != "" {
+		resp["note"] = note
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleTLSCertReset clears any uploaded cert/key paths, reverting to the
+// auto-generated self-signed certificate on next restart. Does not delete
+// the uploaded files themselves (see config.Config.WebAdminTLSCertReset's
+// doc comment) — this is a config change, not a cleanup operation.
+func (s *Server) handleTLSCertReset(w http.ResponseWriter, r *http.Request) {
+	err := s.mutateConfig(r, func(cfg *config.Config) error {
+		return cfg.WebAdminTLSCertReset()
+	})
+	s.editResult(w, err, true)
 }
 
 // handleGeoIPSetting toggles the peer/seed info panel's Geo-IP lookup (on by
@@ -683,7 +762,7 @@ func (s *Server) handleGeoIPSetting(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	err := s.mutateConfig(func(cfg *config.Config) error {
+	err := s.mutateConfig(r, func(cfg *config.Config) error {
 		on := req.On
 		cfg.WebAdmin.GeoIPLookup = &on
 		return nil
@@ -705,7 +784,7 @@ func (s *Server) handleUPnPSetting(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	err := s.mutateConfig(func(cfg *config.Config) error {
+	err := s.mutateConfig(r, func(cfg *config.Config) error {
 		cfg.EnableUPnP = req.On
 		return nil
 	})
@@ -731,7 +810,7 @@ func (s *Server) handleWorkerThreads(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("worker_threads can't exceed %d", workerThreadsMax)})
 		return
 	}
-	err := s.mutateConfig(func(cfg *config.Config) error {
+	err := s.mutateConfig(r, func(cfg *config.Config) error {
 		cfg.WorkerThreads = req.Value
 		return nil
 	})
@@ -757,7 +836,7 @@ func (s *Server) handleTunQueues(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("tun_queues can't exceed %d", tunQueuesMax)})
 		return
 	}
-	err := s.mutateConfig(func(cfg *config.Config) error {
+	err := s.mutateConfig(r, func(cfg *config.Config) error {
 		cfg.TunQueues = req.Value
 		return nil
 	})
@@ -779,7 +858,7 @@ func (s *Server) handleSocketBuffer(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("socket buffer must be between 0 (default) and %d MB", maxMB)})
 		return
 	}
-	err := s.mutateConfig(func(cfg *config.Config) error {
+	err := s.mutateConfig(r, func(cfg *config.Config) error {
 		cfg.SocketBuffer = req.Value
 		return nil
 	})
@@ -797,7 +876,7 @@ func (s *Server) handleUDPGSOSetting(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	err := s.mutateConfig(func(cfg *config.Config) error {
+	err := s.mutateConfig(r, func(cfg *config.Config) error {
 		on := req.On
 		cfg.EnableUDPGSO = &on
 		return nil
@@ -829,7 +908,7 @@ func (s *Server) handlePort(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	err := s.mutateConfig(func(cfg *config.Config) error {
+	err := s.mutateConfig(r, func(cfg *config.Config) error {
 		if req.Disabled {
 			if !cfg.TCPFallbackEnabled() {
 				return fmt.Errorf("can't turn off the UDP port while the TCP fallback is also off — at least one must stay on")
@@ -872,7 +951,7 @@ func (s *Server) handleTCPPort(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	err := s.mutateConfig(func(cfg *config.Config) error {
+	err := s.mutateConfig(r, func(cfg *config.Config) error {
 		if req.Disabled {
 			if cfg.PrimaryPort == 0 {
 				return fmt.Errorf("can't turn off the TCP fallback while the UDP port is also off — at least one must stay on")
@@ -905,7 +984,7 @@ func (s *Server) handleNAT(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	err := s.mutateConfig(func(cfg *config.Config) error {
+	err := s.mutateConfig(r, func(cfg *config.Config) error {
 		switch req.Op {
 		case "add":
 			// Full rule when any rule field is set; otherwise the masquerade
@@ -952,7 +1031,7 @@ func (s *Server) handleQoS(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	err := s.mutateConfig(func(cfg *config.Config) error {
+	err := s.mutateConfig(r, func(cfg *config.Config) error {
 		switch req.Op {
 		case "add":
 			return cfg.QoSAdd(req.Net, strings.ToLower(req.Proto), req.Port, req.Services, req.Class)
@@ -986,7 +1065,7 @@ func (s *Server) handleBandwidth(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	err := s.mutateConfig(func(cfg *config.Config) error {
+	err := s.mutateConfig(r, func(cfg *config.Config) error {
 		switch req.Op {
 		case "enable":
 			return cfg.ThrottleSetEnabled(req.Net, true)
@@ -1637,7 +1716,7 @@ func (s *Server) handleSystemSNMP(w http.ResponseWriter, r *http.Request) {
 		action = "enabling"
 	}
 	s.log.Infof("webadmin: %s the SNMP agent (requested from admin UI)", action)
-	if err := s.mutateConfig(func(cfg *config.Config) error {
+	if err := s.mutateConfig(r, func(cfg *config.Config) error {
 		cfg.SNMP = snmp
 		return nil
 	}); err != nil {
@@ -1758,7 +1837,7 @@ func (s *Server) handleSystemL2Disco(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.log.Infof("webadmin: saving link-layer discovery configuration (requested from admin UI)")
-	if err := s.mutateConfig(func(cfg *config.Config) error {
+	if err := s.mutateConfig(r, func(cfg *config.Config) error {
 		cfg.Discovery = discovery
 		return nil
 	}); err != nil {
@@ -1989,7 +2068,7 @@ func (s *Server) handleKey(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
-		if err := s.mutateConfig(func(cfg *config.Config) error {
+		if err := s.mutateConfig(r, func(cfg *config.Config) error {
 			return cfg.KeySetDistributed(req.Net, req.Slot, true)
 		}); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -2009,7 +2088,7 @@ func (s *Server) handleKey(w http.ResponseWriter, r *http.Request) {
 	// and each node's copy can now drift independently (relabeled, given a
 	// different expiry, etc.) without any of that propagating anywhere.
 	if req.Op == "undistribute" {
-		if err := s.mutateConfig(func(cfg *config.Config) error {
+		if err := s.mutateConfig(r, func(cfg *config.Config) error {
 			return cfg.KeySetDistributed(req.Net, req.Slot, false)
 		}); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -2026,7 +2105,7 @@ func (s *Server) handleKey(w http.ResponseWriter, r *http.Request) {
 	var retractDistributed bool
 	var retractKeyB64 string
 	var retractNetID uint64
-	err := s.mutateConfig(func(cfg *config.Config) error {
+	err := s.mutateConfig(r, func(cfg *config.Config) error {
 		switch req.Op {
 		case "generate":
 			key, e := cfg.KeyGenerateInto(req.Net, req.Slot, req.Label)

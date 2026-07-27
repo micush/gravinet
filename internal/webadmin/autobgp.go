@@ -524,7 +524,7 @@ func (r *autoBGPReconciler) sync() {
 	var prev config.BGPConfig
 	var meshRoutes []string
 	var next config.BGPConfig
-	if err := r.s.mutateConfig(func(c *config.Config) error {
+	if err := r.s.mutateConfig(nil, func(c *config.Config) error {
 		prev = c.BGP
 		meshRoutes = meshRouteCIDRs(c)
 		c.BGP.Enabled = true

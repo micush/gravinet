@@ -357,7 +357,7 @@ const indexHTML = `<!doctype html>
 <script>
 const $ = (h) => { const d=document.createElement('div'); d.innerHTML=h.trim(); return d.firstChild; };
 const app = document.getElementById('app');
-const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, geoipLookup:false, enableUpnp:false, allowRemoteShell:false, loginBanMaxFailures:3, loginBanSeconds:900, shellSupported:true, bgpSupported:false, snmpSupported:false, l2discoSupported:false, syslogSupported:false, selfId:null, selfHostname:'', targetSeq:0, pendingBgpHighlight:null, workerThreads:0, tunQueues:0, tunQueuesSupported:true, udpGSO:false, udpGSOSupported:true, socketBufferMB:16, socketBufferMaxMB:256, perfRestartPending:false, loginBanRestartPending:false };
+const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, geoipLookup:false, enableUpnp:false, allowRemoteShell:false, loginBanMaxFailures:3, loginBanSeconds:900, tlsSource:'self-signed', tlsCommonName:'', tlsNotAfter:'', configHistoryLimit:250, configHistoryCount:0, shellSupported:true, bgpSupported:false, snmpSupported:false, l2discoSupported:false, syslogSupported:false, selfId:null, selfHostname:'', targetSeq:0, pendingBgpHighlight:null, workerThreads:0, tunQueues:0, tunQueuesSupported:true, udpGSO:false, udpGSOSupported:true, socketBufferMB:16, socketBufferMaxMB:256, perfRestartPending:false, loginBanRestartPending:false };
 // setTarget is the only place state.target is ever assigned — bumping
 // targetSeq alongside it, once, exactly when the *selection itself* actually
 // changes. load()/startPolling()/refreshCluster() each capture targetSeq
@@ -767,6 +767,7 @@ const NAV_GROUPS = [
     ['hosts-file', 'the live contents of this host\u2019s hosts file'],
     ['dns-state', 'what\u2019s actually registered with this host\u2019s OS resolver right now'],
     ['logs', 'the daemon\u2019s recent log output'],
+    ['config-history', 'automatic and manual snapshots of past configurations, with diff and restore'],
   ]},
   // System group — host-level operations on the machine gravinet runs on,
   // mirroring parapet's System menu. Sits just above Info, as there. Upgrade
@@ -817,6 +818,7 @@ function label(s){
   if (s==='mesh-peers') return 'Mesh Peers';
   if (s==='routes') return 'Mesh Routes';
   if (s==='bgp-peers') return 'BGP Peers';
+  if (s==='config-history') return 'Config History';
   if (s==='l2-peers') return 'L2 Peers';
   if (s==='getting-started') return 'Getting Started';
   if (s==='capture') return 'Packet Capture';
@@ -1014,6 +1016,11 @@ async function load() {
   state.allowRemoteShell = !!(c.body && c.body.allow_remote_shell);
   state.loginBanMaxFailures = (c.body && c.body.login_ban_max_failures) || 3;
   state.loginBanSeconds = (c.body && c.body.login_ban_seconds) || 900;
+  state.tlsSource = (c.body && c.body.tls_source) || 'self-signed';
+  state.tlsCommonName = (c.body && c.body.tls_common_name) || '';
+  state.tlsNotAfter = (c.body && c.body.tls_not_after) || '';
+  state.configHistoryLimit = (c.body && c.body.config_history_limit) || 250;
+  state.configHistoryCount = (c.body && c.body.config_history_count) || 0;
   state.shellSupported = c.body ? !!c.body.shell_supported : true;
   // Whether this host can serve dynamic-routing (BGP) status — true only when
   // FRR's vtysh is installed here (see the server's bgpSupported()). Gates the
@@ -1088,6 +1095,9 @@ function buildSearchIndex(){
     ['dark-mode-row', 'Dark mode', 'Switch between dark and light interface theme.'],
     ['loginban-attempts-row', 'Lockout attempts', 'How many failed logins from one source before it is locked out.'],
     ['loginban-duration-row', 'Lockout duration', 'How long a lockout lasts once triggered, in minutes.'],
+    ['tls-cert-upload-row', 'TLS certificate', 'Upload a certificate and private key to replace the self-signed one.'],
+    ['tls-cert-reset-row', 'Revert to self-signed', 'Stop using an uploaded certificate.'],
+    ['config-history-limit-row', 'Config history retention limit', 'How many configuration snapshots to keep before the oldest are pruned.'],
     ['cluster-managed-row', 'Managed mode', 'Let Manager-mode peers in the cluster remotely configure this node.'],
     ['cluster-manager-row', 'Manager mode', 'Let this node browse and remotely configure other Managed-mode peers in the cluster.'],
     ['shell-allow-row', 'Remote shell', 'Let a Manager peer open a real OS shell on this node through the web admin.'],
@@ -2485,7 +2495,7 @@ function renderSection() {
        metrics:infoMetrics, 'mesh-peers':infoMeshPeers, capture:infoCapture, speedtest:infoSpeedtest, latency:infoLatency,
        'route-table':infoRoutes, 'bgp-peers':secBgpPeers, 'l2-peers':secL2Peers, 'hosts-file':infoHosts, 'dns-state':infoDNS,
        resolver:secResolver, time:secTime, snmp:secSNMP, l2disco:secL2Disco, syslog:secSyslog, users:secUsers, power:secPower,
-       logs:secLogs, readme:secReadme, 'getting-started':secGettingStarted, api:secAPIDoc, license:secLicense, about:infoAbout }[state.section])(c, nets);
+       logs:secLogs, 'config-history':secConfigHistory, readme:secReadme, 'getting-started':secGettingStarted, api:secAPIDoc, license:secLicense, about:infoAbout }[state.section])(c, nets);
   }
   c.querySelectorAll('table').forEach(enhanceTable);
 }
@@ -2645,6 +2655,76 @@ function secSettings(c) {
   };
   lbd.appendChild(lbdLabel); lbd.appendChild(lbdInp);
   card.appendChild(lbd);
+
+  c.appendChild(card); card = $('<div class="card"></div>');
+  card.appendChild($('<h3>TLS certificate</h3>'));
+  card.appendChild($('<div class="settings-desc" style="margin-bottom:10px">Upload a certificate and its matching private key (PEM). Validated before anything is saved. Needs a restart to take effect.</div>'));
+
+  const tc = $('<div class="settings-row" id="tls-cert-upload-row" style="justify-content:flex-start;gap:10px"></div>');
+  const tcCertFile = $('<input type="file" accept=".pem,.crt,.cer,.cert" title="certificate (PEM)" style="width:340px">');
+  const tcKeyFile = $('<input type="file" accept=".pem,.key" title="private key (PEM)" style="width:340px">');
+  const tcBtn = $('<button class="sm">Upload</button>');
+  tc.appendChild(tcCertFile);
+  tc.appendChild(tcKeyFile);
+  tc.appendChild(tcBtn);
+  card.appendChild(tc);
+
+  tcBtn.onclick = async () => {
+    if (!tcCertFile.files[0] || !tcKeyFile.files[0]) { alert('Pick both a certificate file and a key file first.'); return; }
+    tcBtn.disabled = true;
+    tcBtn.textContent = 'Uploading\u2026';
+    try {
+      const certText = await tcCertFile.files[0].text();
+      const keyText = await tcKeyFile.files[0].text();
+      const ok = await edit('/api/tls-cert', { cert: certText, key: keyText });
+      if (ok) { tcCertFile.value = ''; tcKeyFile.value = ''; }
+    } finally {
+      tcBtn.disabled = false;
+      tcBtn.textContent = 'Upload';
+    }
+  };
+
+  if (state.tlsSource === 'custom') {
+    const tcr = $('<div class="settings-row" id="tls-cert-reset-row"></div>');
+    let tcrDesc = 'Stop using the uploaded certificate and go back to the auto-generated one. The uploaded files stay on disk \u2014 this only changes which one is used. Needs a restart.';
+    if (state.tlsCommonName || state.tlsNotAfter) {
+      let info = 'Currently using an uploaded certificate';
+      if (state.tlsCommonName) info += ', CN=' + state.tlsCommonName;
+      if (state.tlsNotAfter) {
+        const d = new Date(state.tlsNotAfter);
+        info += ', valid until ' + (isNaN(d) ? state.tlsNotAfter : d.toLocaleDateString());
+      }
+      tcrDesc = info + '. ' + tcrDesc;
+    }
+    const tcrLabel = $('<div><div class="settings-label">Revert to self-signed</div><div class="settings-desc">'+esc(tcrDesc)+'</div></div>');
+    const tcrBtn = $('<button class="sm danger">Revert</button>');
+    tcrBtn.onclick = async () => {
+      if (!confirm('Revert to the auto-generated self-signed certificate?')) return;
+      await edit('/api/tls-cert/reset', {});
+    };
+    tcr.appendChild(tcrLabel);
+    tcr.appendChild(tcrBtn);
+    card.appendChild(tcr);
+  }
+
+  c.appendChild(card); card = $('<div class="card"></div>');
+  card.appendChild($('<h3>Config history</h3>'));
+
+  const chRow = $('<div class="settings-row" id="config-history-limit-row"></div>');
+  const chLabel = $('<div><div class="settings-desc">How many automatic and manual configuration snapshots to keep (Monitor \u2192 Config History), FIFO \u2014 oldest pruned first once you go over this. 0 uses the default (250). Applied immediately; no restart.</div></div>');
+  const chInp = $('<input type="number" min="0" step="1" style="width:80px">');
+  chInp.value = state.configHistoryLimit;
+  chInp.onchange = async () => {
+    const v = parseInt(chInp.value, 10);
+    if (isNaN(v) || v < 0) { alert('Enter 0 or a positive whole number.'); chInp.value = state.configHistoryLimit; return; }
+    if (v === state.configHistoryLimit) return;
+    const ok = await edit('/api/history/limit', { limit: v });
+    if (ok) { state.configHistoryLimit = v; }
+    else { chInp.value = state.configHistoryLimit; }
+  };
+  chRow.appendChild(chLabel); chRow.appendChild(chInp);
+  card.appendChild(chRow);
+  card.appendChild($('<div class="settings-desc" style="margin-top:10px">Currently holding '+state.configHistoryCount+' of '+state.configHistoryLimit+' snapshot'+(state.configHistoryCount===1?'':'s')+'.</div>'));
 
   c.appendChild(card); card = $('<div class="card"></div>');
   card.appendChild($('<h3>Cluster</h3>'));
@@ -5906,6 +5986,24 @@ function secPower(c){
   const NUM = 'width:70px;margin:0 6px';
   const optRow = 'display:flex;align-items:center;gap:2px;margin:6px 0';
   const legend = 'font-size:12px;text-transform:uppercase;letter-spacing:1px;color:var(--mut);margin:0 0 6px';
+
+  // Every "needs a restart" setting in Settings already triggers exactly
+  // this (doRestart, defined above near the restart-pending banner) —
+  // this card is just the same action made available on its own, for
+  // whenever the operator wants to apply a pending change (or anything
+  // else) without waiting to trip across another setting first.
+  const svcCard = $('<div class="card"></div>');
+  svcCard.appendChild($('<div style="'+legend+'">gravinet service</div>'));
+  svcCard.appendChild($('<div class="hint" style="margin:0 0 10px">Restarts just the gravinet service on this node. The host itself, and everything else running on it, is untouched.</div>'));
+  const svcBtn = $('<button class="sm">Restart gravinet</button>');
+  svcCard.appendChild(svcBtn);
+  c.appendChild(svcCard);
+
+  svcBtn.onclick = async () => {
+    if (!confirm('Restart gravinet on ' + nodeLabel() + '?\n\nThis briefly drops the mesh session and this admin connection while it comes back.')) return;
+    svcBtn.disabled = true;
+    try { await doRestart(); } finally { svcBtn.disabled = false; }
+  };
 
   const card = $('<div class="card"></div>');
 
@@ -9211,6 +9309,226 @@ function linkifyLog(msg, toks){
 // first, in a filterable/sortable table — the filter box comes from enhanceTable
 // like every other list. Setting _rowButtons makes the toolbar (filter +
 // Refresh) render immediately, before the async tail load populates the rows.
+// secConfigHistory: automatic and manual configuration snapshots, with
+// diff and restore. Ported from parapet's status > config tab (its
+// backups::* backend, renderBackups/viewBackup/showDiffModal/renderLineDiff/
+// confirmRestore on the JS side) — see internal/config/history.go's own doc
+// comment for what's a faithful port versus an adaptation to gravinet's
+// shape. Every commit through mutateConfig snapshots automatically; this
+// page is purely a viewer/actions surface over what's already being kept.
+let CH_SEL = new Set(); // ticked snapshot ids, this render only
+
+function secConfigHistory(c){
+  secHint(c, 'Automatic and manual snapshots of past configurations. A snapshot is taken every time a change is committed (no action needed), or on demand with the button below. Tick one to download or restore it, or two to compare them.');
+  const card = $('<div class="card"></div>');
+  const t = $('<div></div>');
+  t.innerHTML = '<table><tr><th class="selcol"></th><th>saved</th><th>by</th><th>changes</th></tr></table>';
+  const table = t.querySelector('table');
+  table._noFilter = false;
+  table._rowButtons = [
+    { label:'Snapshot now', cls:'', title:'save a snapshot of the current configuration', onclick: chSnapshotNow },
+    { label:'Diff selected', cls:'ghost', title:'compare two ticked snapshots', onclick: chDiffSelected },
+    { label:'Download', cls:'ghost', title:'download the ticked snapshot as JSON', onclick: chDownloadSelected },
+    { label:'Restore', cls:'danger', title:'roll the live configuration back to the ticked snapshot', onclick: chRestoreSelected },
+  ];
+  card.appendChild(t);
+  c.appendChild(card);
+
+  (async () => {
+    const tb = table.tBodies[0] || table;
+    const r = await api('/api/history');
+    if (!r.ok || !r.body) { tb.innerHTML = '<tr><td colspan="4" class="empty">Could not load configuration history.</td></tr>'; return; }
+    const items = r.body.history || [];
+    const ids = new Set(items.map(b => String(b.id)));
+    for (const id of Array.from(CH_SEL)) if (!ids.has(id)) CH_SEL.delete(id);
+    if (!items.length) {
+      tb.innerHTML = '<tr><td colspan="4" class="empty">No configuration snapshots yet. Use \u201cSnapshot now\u201d above to capture the current configuration \u2014 one is also saved automatically the next time you change it.</td></tr>';
+      return;
+    }
+    for (const b of items) {
+      const id = String(b.id);
+      const tr = document.createElement('tr');
+      tr.dataset.id = id;
+      const cb = $('<input type="checkbox">');
+      cb.checked = CH_SEL.has(id);
+      cb.onchange = () => { if (cb.checked) CH_SEL.add(id); else CH_SEL.delete(id); chUpdateButtons(table); };
+      const pickTd = document.createElement('td'); pickTd.className = 'selcol'; pickTd.appendChild(cb);
+      const stampTd = document.createElement('td'); stampTd.className = 'cell-name'; stampTd.title = 'view this snapshot';
+      stampTd.textContent = b.stamp || id; stampTd.style.cursor = 'pointer';
+      stampTd.onclick = () => chViewSnapshot(id);
+      const byTd = document.createElement('td');
+      if (b.user) { byTd.textContent = b.user; } else { const sp = document.createElement('span'); sp.style.color = 'var(--mut)'; sp.textContent = 'system'; byTd.appendChild(sp); }
+      const sumTd = document.createElement('td');
+      if (b.summary) { sumTd.textContent = b.summary; } else { sumTd.textContent = '\u2014'; sumTd.style.color = 'var(--mut)'; }
+      tr.appendChild(pickTd); tr.appendChild(stampTd); tr.appendChild(byTd); tr.appendChild(sumTd);
+      tb.appendChild(tr);
+    }
+    chUpdateButtons(table);
+  })();
+}
+
+// chUpdateButtons enables/disables the toolbar buttons enhanceTable already
+// rendered from table._rowButtons, based on how many rows are ticked —
+// parapet's updateBackupSelInfo, minus the info text (the button titles
+// already say what each one needs).
+function chUpdateButtons(table){
+  const bar = table.parentNode && table.parentNode.querySelector('.tbar');
+  if (!bar) return;
+  const btns = [].slice.call(bar.querySelectorAll('button')).filter(b => b.textContent !== 'Snapshot now');
+  const n = CH_SEL.size;
+  btns.forEach(b => {
+    if (b.textContent === 'Diff selected') b.disabled = n !== 2;
+    else b.disabled = n !== 1;
+  });
+}
+
+function chSingleSelectedId(){ return CH_SEL.size === 1 ? Array.from(CH_SEL)[0] : null; }
+
+async function chSnapshotNow(){
+  const r = await api('/api/history/snapshot', { method:'POST' });
+  if (!r.ok) { alert((r.body && r.body.error) || 'could not save snapshot'); return; }
+  renderSection();
+}
+
+function chDownloadSelected(){ const id = chSingleSelectedId(); if (id) chDownloadSnapshot(id); }
+function chRestoreSelected(){ const id = chSingleSelectedId(); if (id) chConfirmRestore(id); }
+
+async function chDiffSelected(){
+  if (CH_SEL.size !== 2) return;
+  const [a, b] = Array.from(CH_SEL);
+  const [older, newer] = (Number(a) <= Number(b)) ? [a, b] : [b, a];
+  const r = await api('/api/history/diff?a='+encodeURIComponent(older)+'&b='+encodeURIComponent(newer));
+  if (!r.ok || !r.body) { alert((r.body && r.body.error) || 'could not diff snapshots'); return; }
+  chShowDiffModal(r.body);
+}
+
+async function chViewSnapshot(id){
+  const r = await api('/api/history/get?id='+encodeURIComponent(id));
+  if (!r.ok || !r.body) { alert((r.body && r.body.error) || 'could not load snapshot'); return; }
+  const pretty = JSON.stringify(r.body.config, null, 2);
+  const body = $('<div></div>');
+  body.innerHTML = '<pre class="ch-json" style="max-height:60vh;overflow:auto;font-size:12px">'+esc(pretty)+'</pre>'
+    + '<div class="row" style="justify-content:flex-end;gap:8px;margin-top:10px">'
+    + '<button class="sm ghost" id="ch-view-dl">Download</button>'
+    + '<button class="sm danger" id="ch-view-restore">Restore this</button>'
+    + '</div>';
+  const m = showModal('snapshot \u00b7 '+(r.body.stamp || id), body);
+  body.querySelector('#ch-view-dl').onclick = () => chSaveConfigFile(r.body.config, r.body.stamp || id);
+  body.querySelector('#ch-view-restore').onclick = () => { m.close(); chConfirmRestore(id); };
+}
+
+// chStampToken turns a stamp like "2026-06-24 15:30:12 UTC" into a
+// filename-safe token.
+function chStampToken(stamp){ return String(stamp).replace(/[: ]+/g, '-').replace(/-+/g, '-').replace(/-+$/, ''); }
+
+function chSaveConfigFile(config, stamp){
+  try {
+    const text = JSON.stringify(config, null, 2);
+    const blob = new Blob([text], { type:'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = 'gravinet-config-'+chStampToken(stamp)+'.json';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (e) { alert('Could not prepare the download.'); }
+}
+
+async function chDownloadSnapshot(id){
+  const r = await api('/api/history/get?id='+encodeURIComponent(id));
+  if (!r.ok || !r.body) { alert((r.body && r.body.error) || 'could not download snapshot'); return; }
+  chSaveConfigFile(r.body.config, r.body.stamp || id);
+}
+
+// chDiffSummaryHtml builds the semantic per-section summary block from a
+// diff response \u2014 parapet's diffSummaryHtml.
+function chDiffSummaryHtml(data, heading){
+  const secs = data.sections || [];
+  let h = '<div class="ch-diff-summary">';
+  if (heading) h += '<div style="font-weight:600;margin-bottom:6px">'+esc(heading)+'</div>';
+  if (!secs.length) {
+    h += '<div class="empty" style="padding:14px">No differences \u2014 these configurations are identical.</div>';
+  } else {
+    h += '<ul style="margin:0;padding-left:18px">';
+    secs.forEach(s => { h += '<li><b>'+esc(s.section)+'</b>: '+esc(s.detail)+'</li>'; });
+    h += '</ul>';
+  }
+  return h + '</div>';
+}
+
+function chShowDiffModal(data){
+  const aLabel = (data.a && (data.a.stamp || data.a.id)) || 'A';
+  const bLabel = (data.b && (data.b.stamp || data.b.id)) || 'B';
+  const body = $('<div></div>');
+  body.innerHTML = '<div class="row" style="gap:10px;margin-bottom:8px">'
+    + '<span style="color:var(--danger)">\u2212 '+esc(aLabel)+'</span>'
+    + '<span style="color:var(--acc)">+ '+esc(bLabel)+'</span></div>'
+    + chDiffSummaryHtml(data, null)
+    + '<div style="font-weight:600;margin:12px 0 6px">Line-by-line</div>'
+    + '<div class="ch-linediff" style="max-height:50vh;overflow:auto;font-family:monospace;font-size:12px">'
+    + chRenderLineDiff(data.a_json || '', data.b_json || '') + '</div>';
+  showModal('compare snapshots', body);
+}
+
+// chRenderLineDiff: an LCS line diff collapsed into a unified +/\u2212 view
+// with 3 lines of context \u2014 parapet's renderLineDiff, unchanged
+// (the algorithm is plain JS, nothing parapet-specific about it).
+function chRenderLineDiff(aText, bText){
+  const a = aText.split('\n'), b = bText.split('\n');
+  const n = a.length, m = b.length;
+  const dp = Array.from({length:n+1}, () => new Int32Array(m+1));
+  for (let i = n-1; i >= 0; i--)
+    for (let j = m-1; j >= 0; j--)
+      dp[i][j] = a[i] === b[j] ? dp[i+1][j+1]+1 : Math.max(dp[i+1][j], dp[i][j+1]);
+  const ops = [];
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { ops.push(['ctx', a[i]]); i++; j++; }
+    else if (dp[i+1][j] >= dp[i][j+1]) { ops.push(['del', a[i]]); i++; }
+    else { ops.push(['add', b[j]]); j++; }
+  }
+  while (i < n) { ops.push(['del', a[i]]); i++; }
+  while (j < m) { ops.push(['add', b[j]]); j++; }
+  if (ops.every(o => o[0] === 'ctx')) return '<div>(no line differences)</div>';
+  const CTX = 3;
+  const keep = new Array(ops.length).fill(false);
+  for (let k = 0; k < ops.length; k++)
+    if (ops[k][0] !== 'ctx')
+      for (let d = -CTX; d <= CTX; d++) { const x = k+d; if (x >= 0 && x < ops.length) keep[x] = true; }
+  let html = '', skipped = 0;
+  const flushGap = () => { if (skipped > 0) { html += '<div style="color:var(--mut)">\u22ef '+skipped+' unchanged line'+(skipped===1?'':'s')+'</div>'; skipped = 0; } };
+  for (let k = 0; k < ops.length; k++) {
+    if (!keep[k]) { skipped++; continue; }
+    flushGap();
+    const [ty, s] = ops[k];
+    const sign = ty === 'add' ? '+' : ty === 'del' ? '\u2212' : ' ';
+    const col = ty === 'add' ? 'var(--acc)' : ty === 'del' ? 'var(--danger)' : 'var(--fg)';
+    html += '<div style="color:'+col+';white-space:pre-wrap"><span style="display:inline-block;width:1.2em">'+sign+'</span>'+esc(s || ' ')+'</div>';
+  }
+  flushGap();
+  return html;
+}
+
+async function chConfirmRestore(id){
+  const body = $('<div></div>');
+  body.innerHTML = '<div class="hint" style="margin:0 0 10px">Restoring rolls the live configuration back to this snapshot, then validates and applies it like any other change. The restore is itself snapshotted, so it can be undone.</div>';
+  try {
+    const r = await api('/api/history/diff?a=current&b='+encodeURIComponent(id));
+    if (r.ok && r.body) {
+      const extra = document.createElement('div');
+      extra.innerHTML = chDiffSummaryHtml(r.body, 'Changes that restoring will apply (current \u2192 snapshot):');
+      body.appendChild(extra);
+    }
+  } catch (e) { /* preview is best-effort */ }
+  body.innerHTML += '<div class="row" style="justify-content:flex-end;gap:8px;margin-top:12px">'
+    + '<button class="sm ghost" id="ch-restore-cancel">Cancel</button>'
+    + '<button class="sm danger" id="ch-restore-go">Restore</button></div>';
+  const m = showModal('restore snapshot', body);
+  body.querySelector('#ch-restore-cancel').onclick = m.close;
+  body.querySelector('#ch-restore-go').onclick = async () => {
+    const ok = await edit('/api/history/restore', { id: id });
+    if (ok) { m.close(); CH_SEL.clear(); renderSection(); }
+  };
+}
+
 function secLogs(c){
   secHint(c, 'Everything the daemon logs, newest first. Filter narrows by text across all columns (try a network id, <b>ERROR</b>, or <b>mesh</b>). Refresh reloads the tail of the log file.');
   const card = $('<div class="card"></div>');

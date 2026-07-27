@@ -78,6 +78,19 @@ if (-not $admin) { throw "Run this script from an elevated (Administrator) Power
 # from its "gravinet NNN (commit) os/arch" output (see cmd/gravinet/main.go's
 # version subcommand) — the same parse install-linux.sh/install-macos.sh/
 # install-freebsd.sh already use for the equivalent check on those platforms.
+# Get-WebPort reads the port actually in effect out of config.json rather
+# than assuming the default (8443) - someone who moved the web admin off it
+# needs to see *their* port in the summary and the Desktop shortcut, not the
+# one the docs mention. Falls back to the default when the config has no
+# explicit value, doesn't parse, or can't be read.
+function Get-WebPort {
+  try {
+    $cfg = Get-Content $Config -Raw -ErrorAction Stop | ConvertFrom-Json
+    if ($cfg.web_admin.listen -match ':(\d+)$') { return $Matches[1] }
+  } catch {}
+  return 8443
+}
+
 function Get-BinVersion($path) {
   if (-not $path -or -not (Test-Path $path)) { return "" }
   try {
@@ -649,13 +662,32 @@ if (-not $NoStart) {
   if ($wasRunning) { Write-Host "==> restarted $ServiceName" } else { Write-Host "==> started $ServiceName" }
 }
 
+Write-Host "==> Desktop shortcut"
+$Desktop = [Environment]::GetFolderPath("Desktop")
+if ($Desktop -and (Test-Path $Desktop)) {
+  $ShortcutPath = Join-Path $Desktop "gravinet.url"
+  if (Test-Path $ShortcutPath) {
+    Write-Host "    already present, leaving it alone"
+  } else {
+    try {
+      "[InternetShortcut]`r`nURL=https://localhost:$(Get-WebPort)`r`n" |
+        Set-Content -Path $ShortcutPath -Encoding ASCII -NoNewline
+      Write-Host "    created $ShortcutPath"
+    } catch {
+      Write-Host "    could not create $ShortcutPath - skipping"
+    }
+  }
+} else {
+  Write-Host "    no Desktop folder found here - skipping"
+}
+
 @"
 
 gravinet installed and running ($ServiceName).
 
-Web admin:  https://127.0.0.1:8443   (self-signed TLS - accept the warning)
+Web admin:  https://127.0.0.1:$(Get-WebPort)   (self-signed TLS - accept the warning)
             log in with your Windows account
-            Remote box? tunnel it:  ssh -L 8443:127.0.0.1:8443 <user>@<host>
+            Remote box? tunnel it:  ssh -L $(Get-WebPort):127.0.0.1:$(Get-WebPort) <user>@<host>
 
 Note: Windows needs the Wintun driver at runtime. A release build embeds it; a
 plain build looks for wintun.dll beside the .exe (pass -Wintun to stage one).

@@ -495,7 +495,7 @@ func (s *Server) handleBGPConfig(w http.ResponseWriter, r *http.Request) {
 	// that from prev/next BGPConfig alone.
 	var prev config.BGPConfig
 	var meshRoutes []string
-	if err := s.mutateConfig(func(cfg *config.Config) error {
+	if err := s.mutateConfig(r, func(cfg *config.Config) error {
 		prev = cfg.BGP
 		meshRoutes = meshRouteCIDRs(cfg)
 		cfg.BGP = req

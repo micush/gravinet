@@ -2,6 +2,330 @@
 
 ---
 
+## v690 — 2026-07-26
+
+**Fixed: the TLS cert/key picker boxes were still showing truncated
+"No fil…ected." text at 220px.** That width wasn't a no-op — the layout
+fix in v689 was real — but 220px still wasn't enough room for the
+browser's own internal truncation of the "No file selected" status text
+to stop kicking in once the Browse button's own width is accounted for.
+Widened both to 340px.
+
+**Verified:** the embedded UI script re-extracted from `indexHTML` and
+checked with `node --check` — clean. UI-only change; no Go touched.
+
+---
+
+## v689 — 2026-07-26
+
+**Fixed: the TLS certificate upload row was scattered across the whole
+card width.** `.settings-row`'s `justify-content:space-between` is built
+for its normal shape — a label on the left, one control on the right —
+and does that well. This row has neither: no label (folded into the
+card's own description in v687) and three loose controls (cert picker,
+key picker, Upload), so space-between spread all three apart with large
+gaps and a lot of dead space in between, which is exactly what the
+screenshot showed. Overridden via inline style on just this row
+(`justify-content:flex-start; gap:10px`) rather than touching the shared
+`.settings-row` rule, which is still correct for every one of its normal
+2-item uses elsewhere. The three controls now sit together, left-aligned,
+the way the original request's mockup showed them.
+
+**Verified:** the embedded UI script re-extracted from `indexHTML` and
+checked with `node --check` — clean. UI-only change; no Go touched.
+
+---
+
+## v688 — 2026-07-26
+
+**Changed: two small Settings tweaks.**
+
+- TLS certificate card: widened the certificate/key file picker inputs
+  (220px) so a picked filename isn't immediately truncated.
+- Config history card: removed the "Retention limit" label from the
+  retention-limit row, leaving just its description. (The settings-search
+  index entry keeps the fuller wording — that's just how the setting
+  surfaces in search results, unrelated to what's shown on the card
+  itself.)
+
+**Verified:** the embedded UI script re-extracted from `indexHTML` and
+checked with `node --check` — clean. UI-only change; no Go touched.
+
+---
+
+## v687 — 2026-07-26
+
+**Added: a Settings control for the config history retention limit.** New
+"Config history" card, right after TLS certificate: a "Retention limit"
+field (default 250, 0 restores it) plus a live "currently holding N of
+limit snapshots" line. Backed by `Config.ConfigHistoryLimitSet` and a new
+`/api/history/limit` endpoint.
+
+Unlike TLS cert or login lockout, this one applies immediately — nothing
+caches it at startup. Every place that reads it
+(`EffectiveConfigHistoryLimit`, called from `mutateConfig` and the manual
+snapshot handler) reads it fresh off the config that was just loaded for
+that exact commit, so a change here takes effect on the very next commit,
+not after a restart. `/api/config` now also reports the current snapshot
+count (`config.Count`), which is what the "N of limit" line displays.
+
+**Changed: restructured the TLS certificate Settings card.** Was: a
+card-level "current cert in use" line, then a separate "Replace
+certificate" row with its own label, description, and the two file
+inputs stacked vertically above the Upload button. Now: the description
+moves up to be the card's own description (directly under "TLS
+certificate," no separate row label), and the certificate file, key
+file, and Upload button sit in one row. The "current cert in use" info
+(source, CN, expiry) didn't just disappear — it's not always relevant
+(nobody needs reminding a self-signed cert is self-signed), so it now
+only appears folded into the "Revert to self-signed" row's own
+description, which only shows when a custom cert is actually active —
+exactly the situation where knowing its CN and expiry actually matters.
+
+**Verified:** the embedded UI script re-extracted from `indexHTML` and
+checked with `node --check` — clean. Brace/paren balance re-checked on
+all three touched Go files. No Go toolchain available in this
+environment to run `go build`/`go vet`/`go test`.
+
+---
+
+## v686 — 2026-07-26
+
+**Added: Config history — automatic and manual configuration snapshots,
+with semantic diff, a line-level diff, and restore.** Ported from
+parapet's `status > config` tab (`backups.rs`/`diff.rs`/`server.rs`'s
+backups handlers), at the user's explicit request for feature parity, not
+a scoped-down approximation. New "Config History" page under Monitor.
+
+**What it does:** every config change committed through `mutateConfig`
+now automatically snapshots the resulting configuration — no action
+needed. A "Snapshot now" button captures the current state on demand.
+Retention is FIFO (`config_history_limit`, default 250, matching
+parapet's own `config_backups` default). Tick one snapshot to download or
+restore it; tick two to compare them — both a semantic per-section
+summary ("networks: changed 'corp' (seeds: added '1.2.3.4:65432'; NAT:
+changed 'rules')") and a full line-by-line diff of the pretty-printed
+JSON. Restoring runs the old snapshot through the exact same
+validate/save/apply pipeline as any live edit, so the restore itself is
+committed and snapshotted — a bad restore can be rolled back the same way
+a bad edit can.
+
+**`internal/config/history.go`** (storage) and **`historydiff.go`** (the
+semantic diff engine) — ports of `backups.rs`/`diff.rs`: atomic
+tmp-then-rename writes, `.meta` sidecars so listing never parses full
+config bodies, FIFO pruning, baseline-seeding on the first tracked
+change, path-traversal guards on snapshot ids.
+
+**Real adaptation, not just translation — gravinet's config isn't
+parapet's:** parapet is flat, a dozen independent top-level sections
+(policies, zones, NAT...) each replaced wholesale by its own PUT handler.
+gravinet is two-level — global settings plus one `Networks` list, with
+the actual policy-like content (keys, seeds, routes, NAT, QoS, firewall,
+hosts, DNS) nested *inside* each network. So gravinet gets two top-level
+sections instead of a dozen: `networks` (each network diffed as a
+composite of its own sub-areas, the same way parapet's own "routing"
+section composites static+policy routes+BGP+OSPF one level deep) and
+`settings` (everything else, field-level). Also: gravinet's NAT/QoS/
+firewall rule lists have no stable id field to match on (unlike
+parapet's policies/NAT), so those three are diffed as whole objects
+rather than item-by-item — an honest reflection of the data model, not a
+corner cut for scope.
+
+**Also, at the user's explicit direction, ported as literally as
+practical rather than adapted for gravinet's much more granular edit
+model:** a snapshot is taken on every commit, matching parapet's
+behavior exactly, even though gravinet's handlers (`SeedAdd`,
+`SeedRemove`, `SeedSetNotes` are three separate commits for what's
+conceptually "editing one seed") are far more granular than parapet's
+own whole-section PUTs — a real editing session here will produce more
+commits, and therefore more snapshots for the same FIFO limit, than the
+same session would in parapet. Flagged, not silently debounced, per the
+explicit "I want what's in parapet" direction.
+
+**The one genuinely hard integration problem:** attributing a snapshot
+to a user requires knowing who made the request, but `mutateConfig` (the
+single choke point every config edit already goes through — deliberately
+chosen as the hook point, exactly analogous to parapet's own `commit()`)
+never received the request at all. Fixed by threading `*http.Request`
+through `mutateConfig` and all 44 of its call sites (mechanical — `r` was
+already in scope in every one, since `mutateConfig` is only ever called
+from inside an `http.HandlerFunc`) — except one: the auto-BGP
+reconciler's background commit (`autobgp.go`), which isn't triggered by
+any request at all. That one passes `nil`, attributed as "system"
+(unattributed), matching how parapet itself displays an unattributed
+snapshot. Added a nil-guard in `mutateConfig` before that shipped, since
+`validSession(nil)` would otherwise panic.
+
+**`Config.Clone()`** (JSON round-trip deep copy) — needed since
+`mutateConfig`'s mutator function changes the loaded config in place;
+capturing the "before" state for a diff requires copying it first, before
+`fn(cfg)` runs.
+
+**Caught and fixed three real bugs before any of this shipped**, the same
+way this whole session has gone: (1) initially wrote `diffObject` as
+variadic then tried to assign it directly into a non-variadic
+function-typed struct field — wrapped it. (2) initially unmarshaled a
+stored snapshot straight into a bare `*Config`, which would silently
+turn any `omitempty` field with a non-zero default (`web_admin.listen`
+defaults to `"127.0.0.1:8443"`, not `""`) into the wrong value on
+restore — confirmed `Load()` itself guards against exactly this by
+seeding from `Default()` first, and restructured the read path to match.
+(3) a `str_replace` meant to insert the new page ahead of `secLogs`
+accidentally deleted `secLogs`'s own function signature line, orphaning
+its body and breaking the whole file's brace balance — caught by
+`node --check` failing, traced, fixed, re-verified clean.
+
+**Verified:** the embedded UI script re-extracted from `indexHTML` and
+checked with `node --check` — clean, after the `secLogs` fix. Every
+exported function name referenced across the `config`/`webadmin`
+package boundary confirmed to match its actual signature (arg count,
+types, return count) by direct source inspection. Brace/paren balance
+re-checked on all 12 touched Go files (the one non-zero count, in
+`edit.go`, is the same pre-existing, unrelated imbalance confirmed
+several times earlier this session). No Go toolchain available in this
+environment to run `go build`/`go vet`/`go test` — given the size of this
+change (touching `mutateConfig`'s signature and 44 call sites across 7
+files), running the real build before trusting this fully matters more
+here than it has for anything else this session.
+
+---
+
+## v685 — 2026-07-26
+
+**Added: a standalone "Restart gravinet" button, under System > Power.**
+
+Every "needs a restart" setting across this session (Login lockout,
+Performance, TLS certificate, and everything from before) already
+triggers exactly this action — `doRestart()`, hitting the existing
+`/api/restart` endpoint — but only implicitly, via the restart-pending
+banner's own "Restart now" button, which only appears after some other
+setting change flags it. There was no way to just... restart gravinet,
+on its own, without first tripping across a setting that needed it.
+
+Added a small card above the existing host-restart/shutdown card on the
+Power page: one button, restarts just the gravinet service (the host and
+everything else on it untouched), with a confirm dialog phrased using the
+same `nodeLabel()` helper the host-power card already uses — so it reads
+consistently whether you're managing this node or a remote peer. No new
+backend needed; this calls the same `doRestart()` function (boot-id
+tracking, reconnect polling, all of it) every other "restart now" path
+in this UI already relies on, rather than duplicating any of that logic.
+
+**Verified:** the embedded UI script re-extracted from `indexHTML` and
+checked with `node --check` — clean. UI-only change; no Go touched.
+
+---
+
+## v684 — 2026-07-26
+
+**Added: a GUI way to replace the web admin's TLS certificate**, in a new
+"TLS certificate" Settings card right after Login. Previously this was
+config-file-and-restart only (`web_admin.tls_cert`/`tls_key`), with no CLI
+or GUI path at all.
+
+**Backend** (`internal/config/ops.go`): `WebAdminTLSPaths()` (path
+resolution for an uploaded pair, named distinctly from
+`selfSignedPaths()`'s own `webadmin-cert.pem`/`webadmin-key.pem` so the two
+never collide), `WebAdminTLSCertSet()`, `WebAdminTLSCertReset()` (clears the
+config fields but doesn't delete the uploaded files — reverting isn't the
+same as discarding).
+
+**Handler** (`internal/webadmin/edit.go`): `handleTLSCert` validates that
+the uploaded cert and key are well-formed PEM and actually pair together
+(`tls.X509KeyPair`) *before* writing anything to disk — a bad pair fails
+here with a specific reason, not at the next restart when the web admin
+itself would fail to come back up. Surfaces (but doesn't block on) an
+expired or not-yet-valid certificate as an advisory note rather than a
+hard failure — someone uploading one that's already expired has almost
+certainly made a mistake, but it's their call. `handleTLSCertReset` reverts
+to self-signed. Both need a restart, like every other startup-captured
+setting this session — but deliberately do **not** auto-restart the way
+GeoIP/UPnP do: this is the certificate the operator's own browser session
+is trusting right now, and a mistake here deserves a conscious "yes,
+restart now," not an immediate, unprompted disconnect.
+
+`Server` now stashes whichever certificate `Start()` actually loaded
+(`s.tlsCert`, parsed for display only) so `/api/config` can report the real
+source/CN/expiry (`tls_source`, `tls_common_name`, `tls_not_after`) instead
+of just echoing whether `tls_cert` is set in config.
+
+**UI**: current cert info at the top of the card (source, CN, expiry), two
+file inputs + Upload (reads via `file.text()`, since PEM is plain text —
+no multipart plumbing needed), and a "Revert to self-signed" button shown
+only when a custom cert is actually active.
+
+**Caught while building, not after:** I left an unclosed `(` in one of my
+own doc comments in `webadmin.go` — caught by the same brace/paren balance
+check this session has been running on every Go edit (the file was
+balanced before this change, wasn't after). Fixed and re-verified before
+this shipped, not after.
+
+**Verified:** the embedded UI script re-extracted from `indexHTML` and
+checked with `node --check` — clean. All three touched Go files re-checked
+for brace/paren balance (`edit.go`'s one pre-existing imbalance predates
+this session entirely, confirmed earlier). Confirmed the new
+conditionally-rendered search-index row (`tls-cert-reset-row`, only in the
+DOM when a custom cert is active) resolves safely when absent —
+`flashAndScroll`'s existing `if (!target) return` guard, the same one every
+other conditional settings row already relies on. No Go toolchain
+available in this environment to run `go build`/`go vet`/`go test`; that
+should still be run before this is treated as fully verified on the Go
+side.
+
+---
+
+## v683 — 2026-07-26
+
+**Added: every installer now creates a Desktop shortcut to the web admin,
+if one doesn't already exist** (best-effort — skips quietly wherever
+there's no desktop to hang one on, e.g. a headless server).
+
+- **Linux** (`install-linux.sh`): a freedesktop `.desktop` file
+  (`Type=Link`), `chmod +x`, owned by the invoking user, and marked
+  trusted via `gio` if present (GNOME/Nautilus otherwise refuses to run a
+  `.desktop` file dropped on the Desktop until it's explicitly trusted).
+- **macOS** (`install-macos.sh`): a `.webloc` file — the same format
+  Safari produces when you drag a URL to the Desktop.
+- **FreeBSD / OpenBSD** (`install-freebsd.sh` / `install-openbsd.sh`):
+  the same `.desktop` format as Linux, for the desktop environments that
+  do exist on BSD following the same XDG convention. Rarely fires on a
+  typical server install of either — that's expected, not an error.
+- **Windows** (`install-windows.ps1`): a `.url` (Internet Shortcut) file
+  via `[Environment]::GetFolderPath("Desktop")`, which resolves correctly
+  to the invoking user even when the installer is running elevated — UAC
+  elevation keeps the same user identity, unlike `sudo`/`doas` on Unix.
+
+**Who's "the user"?** All four Unix installers run as root, so `$HOME`
+there is root's. Added `desktop_user`/`desktop_user_home` helpers to each:
+Linux/macOS/FreeBSD use `$SUDO_USER` (sudo's own record of who invoked
+it), falling back to `logname`. OpenBSD uses `doas`, which — unlike sudo —
+doesn't set an equivalent env var by default, so `logname` is the primary
+mechanism there, with `$SUDO_USER`/`$DOAS_USER` only as a fallback for
+anyone who configured one explicitly.
+
+**Found and fixed while building this — the shortcut needs the right URL,
+which means the actual configured web admin port, not always 8443:** every
+one of the five installers' final "what to do next" summary hardcoded
+`https://127.0.0.1:8443`, even on install-linux.sh, which already had a
+`cfg_web_port()` helper — used for the firewalld message, just never for
+its own summary. The other four installers had no port-detection logic at
+all. Added `cfg_web_port()` (shell, sed-based, matching install-linux.sh's
+existing pattern) to `install-macos.sh`/`install-freebsd.sh`/
+`install-openbsd.sh`, and `Get-WebPort` (PowerShell, parsing config.json
+properly via `ConvertFrom-Json` rather than regex) to
+`install-windows.ps1`. Fixed all five summaries to use it, and the new
+Desktop shortcut in each uses the same helper for its URL.
+
+**Idempotent:** every installer checks for the shortcut file's existence
+first and leaves it alone if already present, so re-running an installer
+to upgrade in place doesn't touch a shortcut you may have since moved,
+renamed, or deleted.
+
+**Not touched:** `install-windows.bat` — it only relaunches
+`install-windows.ps1`, no logic of its own to change.
+
+---
+
 ## v682 — 2026-07-26
 
 **Added: documented container deployment (LXC etc.) and the v681

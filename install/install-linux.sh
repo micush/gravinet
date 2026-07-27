@@ -195,6 +195,33 @@ cfg_web_port() {
   echo "${p:-$WEB_PORT_DEFAULT}"
 }
 
+# desktop_user is a best-effort guess at the invoking (non-root) user, so a
+# Desktop shortcut can be created for, and handed ownership to, an actual
+# human rather than root. Installers run as root (via sudo), so $SUDO_USER is
+# sudo's own record of who invoked it; logname (reads the controlling tty's
+# session) covers anything invoking this as root directly without sudo
+# setting it. Prints nothing if neither resolves to a real, existing user.
+desktop_user() {
+  local u
+  for u in "$SUDO_USER" "$(logname 2>/dev/null)"; do
+    [ -n "$u" ] && [ "$u" != "root" ] || continue
+    id "$u" >/dev/null 2>&1 && { echo "$u"; return 0; }
+  done
+  return 1
+}
+
+# desktop_user_home resolves desktop_user's home directory. Empty output —
+# treated by callers as "skip, no desktop context to hang a shortcut on" —
+# if desktop_user found nobody, or that user turns out to have no real home.
+desktop_user_home() {
+  local u home
+  u="$(desktop_user)" || return 1
+  home="$(eval echo "~$u" 2>/dev/null)"
+  case "$home" in "~"*) return 1 ;; esac
+  [ -n "$home" ] && [ -d "$home" ] && { echo "$home"; return 0; }
+  return 1
+}
+
 firewalld_running() {
   command -v firewall-cmd >/dev/null || return 1
   systemctl is-active --quiet firewalld 2>/dev/null || return 1
@@ -958,6 +985,33 @@ else
   echo "    once systemd is available: systemctl enable --now $SERVICE"
 fi
 
+echo "==> Desktop shortcut"
+if DU="$(desktop_user)" && DHOME="$(desktop_user_home)" && [ -d "$DHOME/Desktop" ]; then
+  LINK="$DHOME/Desktop/gravinet.desktop"
+  if [ -e "$LINK" ]; then
+    echo "    already present, leaving it alone"
+  else
+    cat > "$LINK" <<SHORTCUT
+[Desktop Entry]
+Version=1.0
+Type=Link
+Name=gravinet Web Admin
+Comment=Open the gravinet web admin
+URL=https://localhost:$(cfg_web_port)
+Icon=network-vpn
+SHORTCUT
+    chmod +x "$LINK" 2>/dev/null || true
+    chown "$DU":"$(id -gn "$DU" 2>/dev/null)" "$LINK" 2>/dev/null || true
+    # GNOME/Nautilus won't run a .desktop file dropped on the Desktop until
+    # it's explicitly marked trusted; harmless no-op on anything else.
+    command -v gio >/dev/null 2>&1 && sudo -u "$DU" gio set "$LINK" metadata::trusted true 2>/dev/null
+    echo "    created $LINK"
+  fi
+else
+  echo "    no desktop found for a shortcut (headless install, or couldn't"
+  echo "    tell which user's Desktop to use) — skipping"
+fi
+
 if [ "$PAM_BUILT" = 1 ]; then
   web_auth="log in with a system account (PAM)"
 else
@@ -984,9 +1038,9 @@ fi
 
 cat <<EOF
 
-Web admin:  https://127.0.0.1:8443   (self-signed TLS — accept the warning)
+Web admin:  https://127.0.0.1:$(cfg_web_port)   (self-signed TLS — accept the warning)
             $web_auth
-            Remote box? tunnel it:  ssh -L 8443:127.0.0.1:8443 <user>@<host>
+            Remote box? tunnel it:  ssh -L $(cfg_web_port):127.0.0.1:$(cfg_web_port) <user>@<host>
 
 To join a mesh:
   1. Generate keys:    $BIN genkey -n 3

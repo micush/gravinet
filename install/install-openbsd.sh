@@ -50,6 +50,42 @@ ACTION=install
 RCSCRIPT=/etc/rc.d/gravinet
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 GO_MIN_MINOR=22   # go.mod requires go 1.22
+WEB_PORT_DEFAULT=8443   # config.Default()'s web_admin.listen
+
+# cfg_web_port reads the port actually in effect out of the config rather
+# than assuming the default — see install-linux.sh's own copy for the full
+# rationale (someone who moved the web admin off 8443 needs *their* port).
+cfg_web_port() {
+  local p=""
+  [ -f "$CONFIG" ] && p="$(sed -n 's/.*"listen"[[:space:]]*:[[:space:]]*"[^"]*:\([0-9]\{1,\}\)".*/\1/p' "$CONFIG" | head -1)"
+  echo "${p:-$WEB_PORT_DEFAULT}"
+}
+
+# desktop_user / desktop_user_home: a best-effort guess at the invoking
+# (non-root) user, for a Desktop shortcut. This installer runs under doas,
+# not sudo, and doas does not set an equivalent of sudo's $SUDO_USER unless
+# doas.conf explicitly keeps/sets it — which isn't the default — so logname
+# (reads the controlling tty's login session, unaffected by doas either way)
+# is the primary mechanism here, with $SUDO_USER/$DOAS_USER only as a
+# fallback for anyone who did configure one. Rarely resolves to anything on
+# an OpenBSD server install; that's expected, not an error, and the
+# shortcut step below just skips quietly when it doesn't.
+desktop_user() {
+  local u
+  for u in "$(logname 2>/dev/null)" "$SUDO_USER" "$DOAS_USER"; do
+    [ -n "$u" ] && [ "$u" != "root" ] || continue
+    id "$u" >/dev/null 2>&1 && { echo "$u"; return 0; }
+  done
+  return 1
+}
+desktop_user_home() {
+  local u home
+  u="$(desktop_user)" || return 1
+  home="$(eval echo "~$u" 2>/dev/null)"
+  case "$home" in "~"*) return 1 ;; esac
+  [ -n "$home" ] && [ -d "$home" ] && { echo "$home"; return 0; }
+  return 1
+}
 UNDERLAY_PORT=65432   # default gravinet underlay port (tcp+udp); the pf rule below opens it
 SETUP_UNBOUND=1       # default on: makes unbound the system resolver; --no-unbound opts out (see help)
 INSTALL_SNMP=1         # default on: installs net-snmp for System > SNMP; --no-snmp opts out (see help)
@@ -406,6 +442,30 @@ if [ "$START" = 1 ]; then
   [ "$WAS_RUNNING" = 1 ] && echo "==> restarted gravinet" || echo "==> started gravinet"
 fi
 
+echo "==> Desktop shortcut"
+if DU="$(desktop_user)" && DHOME="$(desktop_user_home)" && [ -d "$DHOME/Desktop" ]; then
+  LINK="$DHOME/Desktop/gravinet.desktop"
+  if [ -e "$LINK" ]; then
+    echo "    already present, leaving it alone"
+  else
+    cat > "$LINK" <<SHORTCUT
+[Desktop Entry]
+Version=1.0
+Type=Link
+Name=gravinet Web Admin
+Comment=Open the gravinet web admin
+URL=https://localhost:$(cfg_web_port)
+Icon=network-vpn
+SHORTCUT
+    chmod +x "$LINK" 2>/dev/null || true
+    chown "$DU":"$(id -gn "$DU" 2>/dev/null)" "$LINK" 2>/dev/null || true
+    echo "    created $LINK"
+  fi
+else
+  echo "    no desktop found for a shortcut (headless install, or couldn't"
+  echo "    tell which user's Desktop to use) — skipping"
+fi
+
 # --- firewall (pf): open the underlay port inbound ----------------------------
 # pf is enabled by default on OpenBSD, so add an explicit pass rule for the
 # gravinet underlay (tcp+udp) rather than relying on the stock ruleset staying
@@ -543,11 +603,11 @@ fi
 
 cat <<EOF
 
-Web admin:  https://127.0.0.1:8443   (self-signed TLS — accept the warning)
+Web admin:  https://127.0.0.1:$(cfg_web_port)   (self-signed TLS — accept the warning)
             Log in with a system account — its password is checked via
             login_passwd(8) (BSD auth). The daemon runs as root so it can.
             Restrict who may log in with web_admin.allow_users.
-            Remote box? tunnel it:  ssh -L 8443:127.0.0.1:8443 <user>@<host>
+            Remote box? tunnel it:  ssh -L $(cfg_web_port):127.0.0.1:$(cfg_web_port) <user>@<host>
 
 Firewall (pf): inbound ${UNDERLAY_PORT}/tcp+udp was opened in /etc/pf.conf
 (marked '# gravinet'); see the 'firewall (pf)' step above for the actual result.

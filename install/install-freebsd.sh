@@ -88,6 +88,38 @@ ENABLE_IFQMAXLEN=1
 RCSCRIPT=/usr/local/etc/rc.d/gravinet
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 GO_MIN_MINOR=21
+WEB_PORT_DEFAULT=8443       # config.Default()'s web_admin.listen
+
+# cfg_web_port reads the port actually in effect out of the config rather
+# than assuming the default — see install-linux.sh's own copy for the full
+# rationale (someone who moved the web admin off 8443 needs *their* port).
+cfg_web_port() {
+  local p=""
+  [ -f "$CONFIG" ] && p="$(sed -n 's/.*"listen"[[:space:]]*:[[:space:]]*"[^"]*:\([0-9]\{1,\}\)".*/\1/p' "$CONFIG" | head -1)"
+  echo "${p:-$WEB_PORT_DEFAULT}"
+}
+
+# desktop_user / desktop_user_home: see install-linux.sh's own copy of these
+# for the full rationale. Same approach here — $SUDO_USER, falling back to
+# logname — since this installer is also always run as root via sudo.
+# Rarely resolves to anything on FreeBSD server installs; that's expected,
+# not an error, and the shortcut step below just skips quietly when it doesn't.
+desktop_user() {
+  local u
+  for u in "$SUDO_USER" "$(logname 2>/dev/null)"; do
+    [ -n "$u" ] && [ "$u" != "root" ] || continue
+    id "$u" >/dev/null 2>&1 && { echo "$u"; return 0; }
+  done
+  return 1
+}
+desktop_user_home() {
+  local u home
+  u="$(desktop_user)" || return 1
+  home="$(eval echo "~$u" 2>/dev/null)"
+  case "$home" in "~"*) return 1 ;; esac
+  [ -n "$home" ] && [ -d "$home" ] && { echo "$home"; return 0; }
+  return 1
+}
 
 # build_from_source() stages the freshly-built binary under a mktemp -d
 # directory (BUILD_TMP, set there) so it can be installed from a known path
@@ -730,6 +762,30 @@ if [ "$START" = 1 ]; then
   [ "$WAS_RUNNING" = 1 ] && echo "==> restarted gravinet" || echo "==> started gravinet"
 fi
 
+echo "==> Desktop shortcut"
+if DU="$(desktop_user)" && DHOME="$(desktop_user_home)" && [ -d "$DHOME/Desktop" ]; then
+  LINK="$DHOME/Desktop/gravinet.desktop"
+  if [ -e "$LINK" ]; then
+    echo "    already present, leaving it alone"
+  else
+    cat > "$LINK" <<SHORTCUT
+[Desktop Entry]
+Version=1.0
+Type=Link
+Name=gravinet Web Admin
+Comment=Open the gravinet web admin
+URL=https://localhost:$(cfg_web_port)
+Icon=network-vpn
+SHORTCUT
+    chmod +x "$LINK" 2>/dev/null || true
+    chown "$DU":"$(id -gn "$DU" 2>/dev/null)" "$LINK" 2>/dev/null || true
+    echo "    created $LINK"
+  fi
+else
+  echo "    no desktop found for a shortcut (headless install, or couldn't"
+  echo "    tell which user's Desktop to use) — skipping"
+fi
+
 if [ "$PAM_BUILT" = 1 ]; then
   web_auth="log in with a system account (PAM)"
 else
@@ -780,9 +836,9 @@ fi
 
 cat <<EOF
 
-Web admin:  https://127.0.0.1:8443   (self-signed TLS — accept the warning)
+Web admin:  https://127.0.0.1:$(cfg_web_port)   (self-signed TLS — accept the warning)
             $web_auth
-            Remote box? tunnel it:  ssh -L 8443:127.0.0.1:8443 <user>@<host>
+            Remote box? tunnel it:  ssh -L $(cfg_web_port):127.0.0.1:$(cfg_web_port) <user>@<host>
 
 Note: FreeBSD has no firewall enabled by default, so — unlike the Windows and
 macOS installers — there's no "allow this app through the firewall" step

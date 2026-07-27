@@ -48,7 +48,7 @@ func (s *Server) handleLogLevel(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	err := s.mutateConfig(func(cfg *config.Config) error {
+	err := s.mutateConfig(r, func(cfg *config.Config) error {
 		cfg.LogLevel = req.Level
 		return nil
 	})
@@ -94,7 +94,7 @@ func (s *Server) handleLogSize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	canonical := config.FormatSize(b)
-	err = s.mutateConfig(func(cfg *config.Config) error {
+	err = s.mutateConfig(r, func(cfg *config.Config) error {
 		cfg.LogMaxSize = canonical
 		// Clear the legacy fields so the new single-file FIFO cap is
 		// unambiguously in charge (LogMaxBytes/LogFIFO both key off LogMaxSize).

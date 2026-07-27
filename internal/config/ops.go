@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -1206,6 +1207,55 @@ func (c *Config) WebAdminLoginBanSet(maxFailures, banSeconds int) error {
 	}
 	c.WebAdmin.LoginBan.MaxFailures = maxFailures
 	c.WebAdmin.LoginBan.BanSeconds = banSeconds
+	return nil
+}
+
+// WebAdminTLSPaths returns where an uploaded (not self-signed) cert/key pair
+// is written, next to the config — same directory as selfSignedPaths' own
+// webadmin-cert.pem/webadmin-key.pem, but named distinctly so the two never
+// collide and switching back to self-signed (WebAdminTLSCertReset) never
+// risks deleting or overwriting the uploaded pair still sitting on disk.
+func (c *Config) WebAdminTLSPaths() (certPath, keyPath string) {
+	return filepath.Join(c.dir(), "webadmin-cert-custom.pem"), filepath.Join(c.dir(), "webadmin-key-custom.pem")
+}
+
+// WebAdminTLSCertSet points the config at an uploaded cert/key pair already
+// written to disk (see WebAdminTLSPaths) — validating that they actually
+// parse and pair together is the caller's job (internal/webadmin's handler
+// does it with crypto/tls, before anything is written to disk at all), this
+// just records the paths. Needs a restart: like the self-signed path it
+// replaces, the certificate is loaded once when the HTTPS listener starts.
+func (c *Config) WebAdminTLSCertSet(certPath, keyPath string) error {
+	if certPath == "" || keyPath == "" {
+		return fmt.Errorf("both a certificate path and a key path are required")
+	}
+	c.WebAdmin.TLSCert = certPath
+	c.WebAdmin.TLSKey = keyPath
+	return nil
+}
+
+// WebAdminTLSCertReset clears any uploaded cert/key paths, reverting to the
+// auto-generated self-signed certificate (selfSignedCert) on next restart.
+// Does not delete the uploaded files themselves — reverting is not the same
+// as discarding, and someone who reset by mistake can point tls_cert/tls_key
+// back at them without re-uploading.
+func (c *Config) WebAdminTLSCertReset() error {
+	c.WebAdmin.TLSCert = ""
+	c.WebAdmin.TLSKey = ""
+	return nil
+}
+
+// ConfigHistoryLimitSet sets how many config history snapshots (see
+// history.go) are kept, FIFO. 0 restores the default (250). Applied live —
+// unlike TLS cert/login lockout, nothing captures this at startup; every
+// snapshot call reads it fresh off the just-loaded config (see
+// EffectiveConfigHistoryLimit's call sites), so a change here takes effect
+// on the very next commit.
+func (c *Config) ConfigHistoryLimitSet(limit int) error {
+	if limit < 0 || limit > 10000 {
+		return fmt.Errorf("config history limit must be 0..10000 (0 restores the default of 250)")
+	}
+	c.ConfigHistoryLimit = limit
 	return nil
 }
 

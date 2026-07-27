@@ -287,7 +287,7 @@ func (s *Server) handleUpgradeOSUpdates(w http.ResponseWriter, r *http.Request) 
 			DayOfMonth: req.DayOfMonth, Hour: req.Hour, Minute: req.Minute,
 		}
 		s.log.Infof("webadmin: saving OS update schedule (enabled=%v cadence=%q) (requested from admin UI)", req.Enabled, req.Cadence)
-		if err := s.mutateConfig(func(cfg *config.Config) error {
+		if err := s.mutateConfig(r, func(cfg *config.Config) error {
 			cfg.OSUpdates = osu
 			return nil
 		}); err != nil {

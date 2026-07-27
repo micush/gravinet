@@ -34,7 +34,7 @@ func (s *Server) handleManaged(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	err := s.mutateConfig(func(cfg *config.Config) error {
+	err := s.mutateConfig(r, func(cfg *config.Config) error {
 		cfg.Managed = req.On
 		return nil
 	})
@@ -60,7 +60,7 @@ func (s *Server) handleManager(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	err := s.mutateConfig(func(cfg *config.Config) error {
+	err := s.mutateConfig(r, func(cfg *config.Config) error {
 		cfg.Manager = req.On
 		return nil
 	})
@@ -100,7 +100,7 @@ func (s *Server) handleAcceptManagerUpgrades(w http.ResponseWriter, r *http.Requ
 	if !decode(w, r, &req) {
 		return
 	}
-	err := s.mutateConfig(func(cfg *config.Config) error {
+	err := s.mutateConfig(r, func(cfg *config.Config) error {
 		cfg.Upgrade.AcceptManagerUpgrades = req.On
 		return nil
 	})

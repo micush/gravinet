@@ -146,6 +146,8 @@ type Server struct {
 	ln      net.Listener
 	extraLn map[string]net.Listener // additional listeners (e.g. overlay addresses), by address
 
+	tlsCert *x509.Certificate // the cert Start() actually loaded (custom or self-signed); for display only
+
 	bootID string // random per-process id; lets the admin UI detect a restart
 
 	version string // gravinet build version (for the About tab); set via SetVersion
@@ -211,7 +213,14 @@ func (s *Server) SetReload(fn func() error) { s.reload = fn }
 // writer can't silently revert a change made here by saving a copy it loaded
 // before this one committed. See WithLock's doc for why that combination once
 // mattered in practice, not just in theory.
-func (s *Server) mutateConfig(fn func(*config.Config) error) error {
+// mutateConfig loads the config, applies fn, validates, saves, reloads, and
+// (on success) snapshots the before/after into config history — see
+// internal/config/history.go. r identifies who made the change (via
+// validSession; "" if it can't be determined, e.g. a Managed-mode proxy
+// request with no session cookie of its own — shown as "system" in the
+// config history table, matching how an unattributed snapshot already
+// displays there).
+func (s *Server) mutateConfig(r *http.Request, fn func(*config.Config) error) error {
 	if s.configPath == "" {
 		return fmt.Errorf("config path not set")
 	}
@@ -219,6 +228,10 @@ func (s *Server) mutateConfig(fn func(*config.Config) error) error {
 	defer s.cfgMu.Unlock()
 	return config.WithLock(s.configPath, func() error {
 		cfg, err := config.Load(s.configPath)
+		if err != nil {
+			return err
+		}
+		before, err := cfg.Clone()
 		if err != nil {
 			return err
 		}
@@ -231,11 +244,29 @@ func (s *Server) mutateConfig(fn func(*config.Config) error) error {
 		if err := cfg.SaveTo(s.configPath); err != nil {
 			return err
 		}
+		user := ""
+		if r != nil {
+			user, _ = s.validSession(r)
+		}
+		config.OnCommit(s.configPath, before, cfg, user, cfg.EffectiveConfigHistoryLimit())
 		if s.reload != nil {
 			if err := s.reload(); err != nil {
 				s.log.Warnf("webadmin: reload after edit failed: %v", err)
 			}
 		}
+		return nil
+	})
+}
+
+// restoreConfig replaces the live config outright with candidate, running it
+// through the same validate/save/reload/snapshot pipeline as any other
+// change (see mutateConfig) rather than a bespoke path of its own — so a
+// restore is validated exactly as strictly as a normal edit, and is itself
+// snapshotted, which is what makes "restore the restore" (undoing a bad
+// restore) possible without anything special.
+func (s *Server) restoreConfig(r *http.Request, candidate *config.Config) error {
+	return s.mutateConfig(r, func(cfg *config.Config) error {
+		*cfg = *candidate
 		return nil
 	})
 }
@@ -412,6 +443,14 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/tcpport", s.authed(s.handleTCPPort))
 	mux.HandleFunc("/api/natstate", s.authed(s.handleNATState))
 	mux.HandleFunc("/api/loginban", s.authed(s.handleLoginBan))
+	mux.HandleFunc("/api/tls-cert", s.authed(s.handleTLSCert))
+	mux.HandleFunc("/api/tls-cert/reset", s.authed(s.handleTLSCertReset))
+	mux.HandleFunc("/api/history", s.authed(s.handleHistoryList))
+	mux.HandleFunc("/api/history/get", s.authed(s.handleHistoryGet))
+	mux.HandleFunc("/api/history/diff", s.authed(s.handleHistoryDiff))
+	mux.HandleFunc("/api/history/restore", s.authed(s.handleHistoryRestore))
+	mux.HandleFunc("/api/history/snapshot", s.authed(s.handleHistorySnapshot))
+	mux.HandleFunc("/api/history/limit", s.authed(s.handleConfigHistoryLimit))
 	mux.HandleFunc("/api/geoip", s.authed(s.handleGeoIPSetting))
 	mux.HandleFunc("/api/upnp", s.authed(s.handleUPnPSetting))
 	mux.HandleFunc("/api/worker-threads", s.authed(s.handleWorkerThreads))
@@ -475,6 +514,18 @@ func (s *Server) Start() error {
 	if err != nil {
 		ln.Close()
 		return err
+	}
+	// Parsed for display only: the Settings > TLS certificate card shows
+	// what's actually loaded — custom or self-signed, its CN, its expiry —
+	// rather than just echoing whether tls_cert is set in config, which
+	// wouldn't catch a config pointing at files that failed to load and fell
+	// through to self-signed. (In practice that distinction doesn't arise:
+	// the LoadX509KeyPair branch above returns an error and aborts Start
+	// entirely on that failure, so this always reflects whichever branch
+	// actually ran.) Best-effort: cert.Certificate[0] is the leaf by TLS
+	// convention; a parse failure here isn't fatal to serving TLS itself.
+	if len(cert.Certificate) > 0 {
+		s.tlsCert, _ = x509.ParseCertificate(cert.Certificate[0])
 	}
 	s.httpSrv = &http.Server{
 		Handler:   s.handler(),
@@ -927,8 +978,23 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	snmpSupported, _ := service.SNMPSupported()
 	l2discoSupported, _ := service.LLDPSupported()
 	syslogSupported, _ := service.SyslogSupported()
+	// tlsSource/tlsCN/tlsNotAfter describe whichever certificate Start()
+	// actually loaded (s.tlsCert), not just whether tls_cert is set in
+	// config — see that field's own comment for why those always agree in
+	// practice. Cert info is best-effort: nil if Start() hasn't run yet
+	// (shouldn't happen once the API is serving requests at all) or if
+	// parsing it failed, in which case these just come back blank.
+	tlsSource := "self-signed"
+	if s.cfg.TLSCert != "" {
+		tlsSource = "custom"
+	}
+	var tlsCN, tlsNotAfter string
+	if s.tlsCert != nil {
+		tlsCN = s.tlsCert.Subject.CommonName
+		tlsNotAfter = s.tlsCert.NotAfter.UTC().Format(time.RFC3339)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"nets": out, "primary_port": cfg.PrimaryPort, "tcp_fallback_port": cfg.TCPFallbackPortValue(), "tcp_fallback_disabled": !cfg.TCPFallbackEnabled(), "extra_listen_ports": cfg.ExtraListenPorts, "extra_tcp_listen_ports": cfg.ExtraTCPListenPorts, "nat_state_timeout": cfg.NATStateTimeout, "geoip_lookup": s.cfg.GeoIPEnabled(), "enable_upnp": cfg.EnableUPnP, "allow_remote_shell": s.cfg.AllowRemoteShell, "login_ban_max_failures": s.cfg.LoginBan.EffectiveMaxFailures(), "login_ban_seconds": s.cfg.LoginBan.EffectiveBanSeconds(), "shell_supported": ptySupported, "bgp_supported": bgpSupported(), "snmp_supported": snmpSupported, "l2disco_supported": l2discoSupported, "syslog_supported": syslogSupported, "log_level": s.be.LogLevel(), "log_max_size": cfg.LogMaxSizeString(),
+		"nets": out, "primary_port": cfg.PrimaryPort, "tcp_fallback_port": cfg.TCPFallbackPortValue(), "tcp_fallback_disabled": !cfg.TCPFallbackEnabled(), "extra_listen_ports": cfg.ExtraListenPorts, "extra_tcp_listen_ports": cfg.ExtraTCPListenPorts, "nat_state_timeout": cfg.NATStateTimeout, "geoip_lookup": s.cfg.GeoIPEnabled(), "enable_upnp": cfg.EnableUPnP, "allow_remote_shell": s.cfg.AllowRemoteShell, "login_ban_max_failures": s.cfg.LoginBan.EffectiveMaxFailures(), "login_ban_seconds": s.cfg.LoginBan.EffectiveBanSeconds(), "tls_source": tlsSource, "tls_common_name": tlsCN, "tls_not_after": tlsNotAfter, "config_history_limit": cfg.EffectiveConfigHistoryLimit(), "config_history_count": config.Count(s.configPath), "shell_supported": ptySupported, "bgp_supported": bgpSupported(), "snmp_supported": snmpSupported, "l2disco_supported": l2discoSupported, "syslog_supported": syslogSupported, "log_level": s.be.LogLevel(), "log_max_size": cfg.LogMaxSizeString(),
 		"worker_threads": cfg.WorkerThreads, "tun_queues": cfg.TunQueues, "tun_queues_supported": tunMultiQueueSupported, "udp_gso": cfg.UDPGSOEnabled(), "udp_gso_supported": udpGSOSupported, "socket_buffer_mb": cfg.SocketBufferMB(), "socket_buffer_max_mb": config.SocketBufferMaxBytes >> 20,
 		// Node-global firewall object/service catalog (see Config.FirewallObjects'
 		// doc comment) — shared by every network above, not nested under any one
@@ -1025,12 +1091,12 @@ func (s *Server) handlePeer(w http.ResponseWriter, r *http.Request) {
 	}
 	var err error
 	if req.Op == "notes" {
-		err = s.mutateConfig(func(cfg *config.Config) error {
+		err = s.mutateConfig(r, func(cfg *config.Config) error {
 			return cfg.PeerSetNotes(req.Net, req.Node, req.Notes)
 		})
 	} else {
 		on := req.Op == "enable"
-		err = s.mutateConfig(func(cfg *config.Config) error {
+		err = s.mutateConfig(r, func(cfg *config.Config) error {
 			return cfg.PeerSetEnabled(req.Net, req.Node, on)
 		})
 	}
@@ -1098,7 +1164,7 @@ func (s *Server) handleFirewall(w http.ResponseWriter, r *http.Request) {
 	// enable/disable operate on the config by name (no engine rule id needed).
 	if req.Op == "enable" || req.Op == "disable" {
 		on := req.Op == "enable"
-		err := s.mutateConfig(func(cfg *config.Config) error { return cfg.FirewallSetEnabled(req.Net, on) })
+		err := s.mutateConfig(r, func(cfg *config.Config) error { return cfg.FirewallSetEnabled(req.Net, on) })
 		// The reload applies the toggle to the running engine live (the firewall
 		// object always exists), so no restart is needed.
 		s.editResult(w, err, false)
@@ -1138,7 +1204,7 @@ func (s *Server) handleFirewall(w http.ResponseWriter, r *http.Request) {
 	// per-config-path lock; see mutateConfig's comment).
 	if req.Op == "mark-objects-seeded" || req.Op == "mark-services-seeded" {
 		objects := req.Op == "mark-objects-seeded"
-		err := s.mutateConfig(func(cfg *config.Config) error {
+		err := s.mutateConfig(r, func(cfg *config.Config) error {
 			if objects {
 				return cfg.FirewallMarkObjectsCatalogSeeded()
 			}
@@ -1177,7 +1243,7 @@ func (s *Server) handleFirewall(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "rule not found"})
 			return
 		}
-		err = s.mutateConfig(func(cfg *config.Config) error {
+		err = s.mutateConfig(r, func(cfg *config.Config) error {
 			return cfg.FirewallRuleSetEnabled(req.Net, idx, on)
 		})
 		s.editResult(w, err, false)

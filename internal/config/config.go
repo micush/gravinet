@@ -319,6 +319,11 @@ type Config struct {
 	// Networks are independent overlays multiplexed on this node.
 	Networks []Network `json:"networks"`
 
+	// ConfigHistoryLimit caps how many automatic + manual config snapshots
+	// (see internal/config/history.go) are kept, FIFO — oldest pruned first
+	// once the count exceeds this. 0 uses the default (250).
+	ConfigHistoryLimit int `json:"config_history_limit,omitempty"`
+
 	// WebAdmin is the hot-config administration interface.
 	WebAdmin WebAdmin `json:"web_admin"`
 
@@ -2098,6 +2103,36 @@ func (c *Config) SaveTo(path string) error {
 
 // Path returns the on-disk location.
 func (c *Config) Path() string { return c.path }
+
+// EffectiveConfigHistoryLimit returns ConfigHistoryLimit, or the default
+// (250, matching parapet's own config_backups default) if it's 0 or unset.
+func (c *Config) EffectiveConfigHistoryLimit() int {
+	if c.ConfigHistoryLimit <= 0 {
+		return 250
+	}
+	return c.ConfigHistoryLimit
+}
+
+// Clone returns a deep copy via a JSON round-trip — simpler and less
+// error-prone than a hand-written field-by-field copy that has to be kept in
+// sync as fields are added, at the cost of needing every field to already be
+// (un)marshalable, which is already true of the whole Config (it's saved and
+// loaded this same way). Used by history.go to capture the "before" state
+// right after Load, since the caller's mutator function changes the same
+// struct in place — after it runs, the pre-change state only survives if
+// something copied it first.
+func (c *Config) Clone() (*Config, error) {
+	data, err := json.Marshal(c)
+	if err != nil {
+		return nil, err
+	}
+	clone := &Config{}
+	if err := json.Unmarshal(data, clone); err != nil {
+		return nil, err
+	}
+	clone.path = c.path
+	return clone, nil
+}
 
 // ForwardingEnabled reports whether the daemon should enable host IP forwarding
 // at startup. Defaults to true when unset (nil); an explicit false opts out.
