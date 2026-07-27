@@ -767,7 +767,6 @@ const NAV_GROUPS = [
     ['hosts-file', 'the live contents of this host\u2019s hosts file'],
     ['dns-state', 'what\u2019s actually registered with this host\u2019s OS resolver right now'],
     ['logs', 'the daemon\u2019s recent log output'],
-    ['config-history', 'automatic and manual snapshots of past configurations, with diff and restore'],
   ]},
   // System group — host-level operations on the machine gravinet runs on,
   // mirroring parapet's System menu. Sits just above Info, as there. Upgrade
@@ -798,6 +797,7 @@ const NAV_GROUPS = [
     ['l2disco', 'link-layer discovery (LLDP/CDP) and neighbor status (shown only when lldpd is present on this host)'],
     ['syslog', 'forward this host\u2019s syslog to a remote collector (shown only when a supported syslog daemon is present)'],
     ['users', 'local OS accounts permitted to sign in to this console'],
+    ['config-history', 'automatic and manual snapshots of past configurations, with diff and restore'],
     ['power', 'restart or shut down this host'],
   ]},
   { name:'info', items: [
@@ -2711,7 +2711,7 @@ function secSettings(c) {
   card.appendChild($('<h3>Config history</h3>'));
 
   const chRow = $('<div class="settings-row" id="config-history-limit-row"></div>');
-  const chLabel = $('<div><div class="settings-desc">How many automatic and manual configuration snapshots to keep (Monitor \u2192 Config History), FIFO \u2014 oldest pruned first once you go over this. 0 uses the default (250). Applied immediately; no restart.</div></div>');
+  const chLabel = $('<div><div class="settings-desc">How many automatic and manual configuration snapshots to keep (System \u2192 Config History), FIFO \u2014 oldest pruned first once you go over this. 0 uses the default (250). Applied immediately; no restart.</div></div>');
   const chInp = $('<input type="number" min="0" step="1" style="width:80px">');
   chInp.value = state.configHistoryLimit;
   chInp.onchange = async () => {
@@ -5995,7 +5995,7 @@ function secPower(c){
   const svcCard = $('<div class="card"></div>');
   svcCard.appendChild($('<div style="'+legend+'">gravinet service</div>'));
   svcCard.appendChild($('<div class="hint" style="margin:0 0 10px">Restarts just the gravinet service on this node. The host itself, and everything else running on it, is untouched.</div>'));
-  const svcBtn = $('<button class="sm">Restart gravinet</button>');
+  const svcBtn = $('<button class="sm">Restart</button>');
   svcCard.appendChild(svcBtn);
   c.appendChild(svcCard);
 

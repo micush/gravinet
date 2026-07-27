@@ -2,6 +2,37 @@
 
 ---
 
+## v692 — 2026-07-26
+
+**Changed: the Power page's service-restart button reads "Restart"
+instead of "Restart gravinet."** The card it's on is already titled
+"gravinet service," so the button repeating the product name added
+nothing. The confirm dialog it triggers ("Restart gravinet on
+<node>?") is untouched — that's a full sentence, not a label, and still
+reads correctly.
+
+**Verified:** the embedded UI script re-extracted from `indexHTML` and
+checked with `node --check` — clean. UI-only change; no Go touched.
+
+---
+
+## v691 — 2026-07-26
+
+**Moved: Config History from Monitor to System**, right before Power —
+matching the existing "everything new lands above Power" convention that
+group's own comment already documents. Only the `NAV_GROUPS` entry moved;
+the page's render function, its dispatch-table entry, and its section
+label are all keyed by the section id, not by which group lists it, so
+nothing else needed to change. Also fixed a reference to the old location
+("Monitor \u2192 Config History") in the retention-limit setting's own
+description, which would otherwise have quietly pointed at the wrong
+place.
+
+**Verified:** the embedded UI script re-extracted from `indexHTML` and
+checked with `node --check` — clean. UI-only change; no Go touched.
+
+---
+
 ## v690 — 2026-07-26
 
 **Fixed: the TLS cert/key picker boxes were still showing truncated
