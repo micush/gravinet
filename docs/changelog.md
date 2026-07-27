@@ -2,6 +2,21 @@
 
 ---
 
+## v694 — 2026-07-26
+
+**Changed: Power page's Execute/Cancel buttons.** "Cancel scheduled
+power" shortened to just "Cancel," with the detail moved to a tooltip
+("cancel the scheduled power event") instead of the button label. Both
+buttons also picked up the `sm` class, matching the "Restart" button on
+the gravinet-service card above — they'd been full-size buttons next to
+that card's compact one, which is the size mismatch the screenshot
+showed.
+
+**Verified:** the embedded UI script re-extracted from `indexHTML` and
+checked with `node --check` — clean. UI-only change; no Go touched.
+
+---
+
 ## v693 — 2026-07-26
 
 **Fixed: config history was taking one snapshot per commit, not one per

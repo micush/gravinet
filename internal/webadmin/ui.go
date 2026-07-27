@@ -6025,8 +6025,8 @@ function secPower(c){
   const tm = card.querySelector('#pwr-time'); if (tm) tm.addEventListener('focus', () => pick('pwr-when','at'));
 
   const btns = $('<div style="display:flex;gap:8px;margin-top:16px"></div>');
-  const execBtn = $('<button class="danger">Execute</button>');
-  const cancelBtn = $('<button class="ghost">Cancel scheduled power</button>');
+  const execBtn = $('<button class="sm danger">Execute</button>');
+  const cancelBtn = $('<button class="sm ghost" title="cancel the scheduled power event">Cancel</button>');
   btns.appendChild(execBtn); btns.appendChild(cancelBtn);
   card.appendChild(btns);
   c.appendChild(card);
