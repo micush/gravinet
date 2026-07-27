@@ -2,6 +2,21 @@
 
 ---
 
+## v682 — 2026-07-26
+
+**Added: documented container deployment (LXC etc.) and the v681
+`/dev/net/tun` installer check in README.md's Install section**, right
+after the Linux/macOS/FreeBSD/OpenBSD install block. Covers the two
+things the container runtime has to provide (`CAP_NET_ADMIN`,
+`/dev/net/tun`), the privileged-vs-unprivileged capability distinction,
+what `install-linux.sh` now does automatically, and the one thing it
+can't do for itself — the device cgroup rule has to come from outside the
+container. This was previously only discussed in conversation, never
+written down anywhere; now it's in the one doc a new reader actually
+opens first.
+
+---
+
 ## v681 — 2026-07-26
 
 **Added: `install-linux.sh` now detects and creates a missing

@@ -186,6 +186,19 @@ sudo ./install-freebsd.sh
 doas ./install-openbsd.sh
 ```
 
+**Containers.** gravinet runs fine inside a Linux container (LXC, etc.),
+given the same two things any TUN-based tool needs from the container
+runtime: `CAP_NET_ADMIN`, and access to `/dev/net/tun`. A privileged
+container already has the capabilities; an unprivileged one needs
+`CAP_NET_ADMIN` added explicitly (and `CAP_NET_RAW` too, for the web admin's
+packet-capture feature). `install-linux.sh` detects a missing
+`/dev/net/tun` — common on minimal container templates that don't populate
+a full `/dev` — and creates it (`mknod ... c 10 200`) when it can. That's
+necessary but not sufficient by itself: the device also has to be allowed
+through from *outside* the container via a device cgroup rule (LXC:
+`lxc.cgroup2.devices.allow: c 10:200 rwm`), which nothing running inside the
+container can grant itself.
+
 On Windows, the easiest path is `install-windows.bat`: just double-click it. No
 PowerShell prompt to open yourself, no execution-policy fiddling — it
 relaunches itself elevated if needed, sets the execution policy to Bypass for
