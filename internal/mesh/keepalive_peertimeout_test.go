@@ -66,7 +66,7 @@ func TestPeerTimeoutClampsToLiveKeepalive(t *testing.T) {
 
 // TestLoweredPeerTimeoutPrunesFaster proves the live setting actually
 // changes pruneDead's real behavior, not just that the getter returns the
-// right number in isolation: with the default (20s) a session idle for 10s
+// right number in isolation: with the default (30s) a session idle for 10s
 // must survive; with an explicit 5s timeout, that same 10s-idle session must
 // be reaped.
 func TestLoweredPeerTimeoutPrunesFaster(t *testing.T) {
@@ -87,14 +87,14 @@ func TestLoweredPeerTimeoutPrunesFaster(t *testing.T) {
 		return ps
 	}
 
-	// Default (20s) peer timeout: a session idle for 10s must survive pruning.
+	// Default (30s) peer timeout: a session idle for 10s must survive pruning.
 	mkIdleSession("survivor", 1)
 	e.pruneDead(ns, time.Now())
 	ns.mu.RLock()
 	_, alive := ns.byNode["survivor"]
 	ns.mu.RUnlock()
 	if !alive {
-		t.Fatal("session idle for 10s was pruned under the default 20s peer timeout — should have survived")
+		t.Fatal("session idle for 10s was pruned under the default 30s peer timeout — should have survived")
 	}
 
 	// Lower the timeout below the idle duration: the same-shaped session

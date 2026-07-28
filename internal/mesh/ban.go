@@ -656,7 +656,7 @@ func (e *Engine) peerTimeoutDuration() time.Duration {
 }
 
 // SetPeerTimeout updates the dead-session timeout live. Non-positive values
-// restore the default (20s). An explicit value below the current keepalive
+// restore the default (30s). An explicit value below the current keepalive
 // interval is clamped up to it: a session timing out before a single
 // keepalive round trip could even complete would just cause constant
 // unnecessary reconnection thrashing, not faster failure detection.

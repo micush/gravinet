@@ -256,7 +256,7 @@ type Options struct {
 	// PeerTimeout is how long a session may go without any received traffic
 	// before it's considered dead and torn down — this is what governs how
 	// long a gone-silent peer keeps showing as connected in the peers
-	// table. Zero means the built-in default (20s); an explicit value below
+	// table. Zero means the built-in default (30s); an explicit value below
 	// the current keepalive interval is clamped up to it, since timing a
 	// session out before a single keepalive round trip could complete would
 	// cause constant unnecessary reconnection thrashing rather than faster
@@ -1220,7 +1220,7 @@ const (
 	suspendSkew = 30 * time.Second
 
 	defaultKeepaliveInterval = 10 * time.Second // NAT keepalive cadence
-	defaultPeerTimeout       = 20 * time.Second // drop a session after this much silence
+	defaultPeerTimeout       = 30 * time.Second // drop a session after this much silence
 
 	defaultRouteAdvInterval = 10 * time.Second // route re-advertisement cadence
 

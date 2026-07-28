@@ -172,7 +172,7 @@ type Config struct {
 	// PeerTimeout is how long (seconds) a session may go without any
 	// received traffic before it's considered dead and torn down — this is
 	// what governs how long a peer that's gone silent keeps showing as
-	// connected in the peers table. 0 or unset means the default (20s). An
+	// connected in the peers table. 0 or unset means the default (30s). An
 	// explicit value below the (possibly also-configured) keepalive
 	// interval is clamped up to it: a session timing out before a single
 	// keepalive round trip could even complete would just cause constant
@@ -2174,11 +2174,11 @@ func (c *Config) KeepaliveDuration() time.Duration {
 }
 
 // PeerTimeoutDuration is the resolved dead-session timeout: the configured
-// value in seconds, defaulting to 20s when unset, floored at 1s, and — like
+// value in seconds, defaulting to 30s when unset, floored at 1s, and — like
 // mesh.Engine.SetPeerTimeout — clamped up to KeepaliveDuration if an
 // explicit value would otherwise be shorter than a single keepalive cadence.
 func (c *Config) PeerTimeoutDuration() time.Duration {
-	d := 20 * time.Second
+	d := 30 * time.Second
 	if c.PeerTimeout > 0 {
 		d = time.Duration(c.PeerTimeout) * time.Second
 		if d < time.Second {

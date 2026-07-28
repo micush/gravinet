@@ -149,12 +149,12 @@ func TestRouteFailoverBetweenTwoOrigins(t *testing.T) {
 	}
 
 	// A must no longer appear connected — this needs real time past
-	// defaultPeerTimeout (20s as of this writing — see engine.go, now
+	// defaultPeerTimeout (30s as of this writing — see engine.go, now
 	// independently configurable via mesh.Options.PeerTimeout/config's
 	// peer_timeout), not just routeTTL (already elapsed above by the time
 	// the route failover was confirmed); give it a comfortable margin past
 	// that plus a couple of maintInterval ticks.
-	if !waitUntil(45*time.Second, func() bool {
+	if !waitUntil(55*time.Second, func() bool {
 		for _, pi := range C.eng.ListPeers(netID) {
 			if pi.NodeID == "A" {
 				return false

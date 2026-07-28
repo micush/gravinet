@@ -2,6 +2,70 @@
 
 ---
 
+## v702 — 2026-07-28
+
+**Changed: the default dead-session timeout is now 30s, up from 20s.**
+Only the default moves; an explicit `peer_timeout` in config is
+unaffected, as is the clamp that raises it to the keepalive interval
+when someone configures a timeout shorter than a single keepalive
+cadence.
+
+**Why.** At the default 10s keepalive, a 20s timeout is two keepalive
+cycles of margin — one lost keepalive pair plus ordinary jitter reaches
+teardown. That margin is thinner than it looks in the common case and
+wider than it looks in the rare one: `touch()` fires on any decrypted
+inbound packet rather than on keepalives specifically, so a session
+carrying real traffic rides on the data alone and never approaches the
+timeout regardless of what it is set to. The sessions actually governed
+by this number are the idle ones, and an idle session on a lossy path is
+exactly where two cycles of margin produces spurious reconnects that
+look like peer instability but are the timeout being tight. 30s is three
+cycles, which is the usual ratio elsewhere for the same reason.
+
+**Both defaults moved, because there are two.** `mesh.defaultPeerTimeout`
+(the engine's own fallback, used when nothing sets a value — including
+by tests constructing an Engine directly) and the literal in
+`config.PeerTimeoutDuration()` (what the daemon actually resolves and
+hands to `SetPeerTimeout` at startup and on reload) are independent.
+Changing only one would leave the effective default dependent on which
+path a caller came through, which is worse than either value.
+
+**What this costs.** A peer that goes genuinely silent now stays in the
+peers table for 30s plus up to one `maintInterval` (5s) before
+`pruneDead` reaps it, rather than 20s plus the same — a slower "this
+peer is gone" signal in the UI, in exchange for not tearing down idle
+sessions that were merely quiet. `stuckKeepaliveThreshold` is not
+affected: it derives from the keepalive interval alone
+(`max(6 × keepalive, 30s)`), so at the default keepalive it remains 60s.
+The two are separate knobs governing separate failure modes, and raising
+one does not relax the other.
+
+**Test adjustments, noted because two of them were degraded by this
+change rather than broken by it** — they kept passing while quietly
+testing less, which is the failure mode worth recording:
+
+- `TestPeerTimeoutDurationClampsToKeepalive` built its clamp case as
+  `Config{KeepaliveInterval: 25}`, relying on 25s exceeding the
+  then-20s default so the timeout would be clamped up to it. Against a
+  30s default, 25 no longer exceeds it, no clamp occurs, and the
+  assertion would have been satisfied by the plain default — proving
+  nothing about clamping at all. Raised to 35.
+- The same file's explicit-value case set `PeerTimeout = 30` and
+  asserted 30s, which after this change is indistinguishable from the
+  default and would pass even if the explicit path were ignored
+  entirely. Changed to 25.
+- `TestRouteFailoverBetweenTwoOrigins` waits real time for a silent peer
+  to leave `ListPeers`, so its headroom above the timeout shrank from
+  25s to 5s. Budget raised 45s → 55s; it completes in about 35s, which
+  was uncomfortably near the old ceiling on a loaded single-core
+  machine.
+
+Verified with go1.22.2: `go build ./...` and `go vet ./...` clean, the
+`internal/config` suite passes, and the full `internal/mesh` suite
+passes with the widened failover budget.
+
+---
+
 ## v701 — 2026-07-28
 
 **Fixed: a statically configured seed was never attributed to the node it

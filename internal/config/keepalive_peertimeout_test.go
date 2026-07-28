@@ -24,12 +24,12 @@ func TestKeepaliveDurationDefaultsAndFloors(t *testing.T) {
 
 func TestPeerTimeoutDurationDefaultsAndFloors(t *testing.T) {
 	var c Config
-	if got := c.PeerTimeoutDuration(); got != 20*time.Second {
-		t.Fatalf("unset PeerTimeout = %v, want 20s default", got)
-	}
-	c.PeerTimeout = 30
 	if got := c.PeerTimeoutDuration(); got != 30*time.Second {
-		t.Fatalf("PeerTimeout=30 -> %v, want 30s", got)
+		t.Fatalf("unset PeerTimeout = %v, want 30s default", got)
+	}
+	c.PeerTimeout = 25
+	if got := c.PeerTimeoutDuration(); got != 25*time.Second {
+		t.Fatalf("PeerTimeout=25 -> %v, want 25s", got)
 	}
 }
 
@@ -48,18 +48,18 @@ func TestPeerTimeoutDurationClampsToKeepalive(t *testing.T) {
 	if got := c2.PeerTimeoutDuration(); got != 45*time.Second {
 		t.Fatalf("PeerTimeout=45 with KeepaliveInterval=15 -> %v, want 45s (no clamp needed)", got)
 	}
-	// Both defaulted: 20s default peer timeout already exceeds the 10s
+	// Both defaulted: 30s default peer timeout already exceeds the 10s
 	// default keepalive, so no clamp kicks in — this is the ordinary case.
 	c3 := Config{}
-	if got := c3.PeerTimeoutDuration(); got != 20*time.Second {
-		t.Fatalf("both unset -> %v, want 20s (default already above default keepalive)", got)
+	if got := c3.PeerTimeoutDuration(); got != 30*time.Second {
+		t.Fatalf("both unset -> %v, want 30s (default already above default keepalive)", got)
 	}
 	// But raising the *keepalive* default via an explicit value past the
-	// still-defaulted 20s peer timeout must still clamp the (defaulted)
+	// still-defaulted 30s peer timeout must still clamp the (defaulted)
 	// peer timeout up — the relationship holds regardless of which side is
 	// the one left at its default.
-	c4 := Config{KeepaliveInterval: 25}
-	if got := c4.PeerTimeoutDuration(); got != 25*time.Second {
-		t.Fatalf("KeepaliveInterval=25, PeerTimeout unset -> %v, want clamped to 25s", got)
+	c4 := Config{KeepaliveInterval: 35}
+	if got := c4.PeerTimeoutDuration(); got != 35*time.Second {
+		t.Fatalf("KeepaliveInterval=35, PeerTimeout unset -> %v, want clamped to 35s", got)
 	}
 }
