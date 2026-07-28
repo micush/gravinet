@@ -1145,6 +1145,19 @@ type peerSession struct {
 	// see bestRelay — and surfaced per-peer via PeerInfo.RTTMs.
 	pingSentNanos atomic.Int64
 	rttNanos      atomic.Int64
+
+	// lastPongNanos is when a ctrlPong last actually completed a round trip
+	// for this session, 0 meaning never. Deliberately separate from
+	// rttNanos (which holds a *duration*, not a timestamp — useless for
+	// asking "how long has it been") and from lastRx (touch()'s general
+	// liveness timestamp, updated by *any* successfully decrypted inbound
+	// packet, data included). That distinction is exactly the gap
+	// sweepStuckKeepalive exists to close: a session can keep looking
+	// alive by lastRx — real data still flowing both ways — while its
+	// control-plane keepalive specifically has stopped completing, and
+	// nothing before this closed that gap. See sweepStuckKeepalive's own
+	// doc comment.
+	lastPongNanos atomic.Int64
 }
 
 type pendingHS struct {

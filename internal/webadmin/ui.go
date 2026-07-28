@@ -88,6 +88,8 @@ const indexHTML = `<!doctype html>
   @keyframes search-hit-flash { 0% { background:var(--acc); } 100% { background:transparent; } }
   .peer-link { cursor:pointer; }
   .peer-link:hover { text-decoration:underline; }
+  .lat-trend { cursor:pointer; display:inline-block; }
+  .lat-trend:hover { opacity:.75; }
   .toggle:hover { background:var(--hover); }
   .layout { display:flex; flex:1 1 auto; min-height:0; }
   .rail { width:188px; flex:0 0 188px; background:var(--sidebar); border-right:1px solid var(--line); display:flex; flex-direction:column; overflow:hidden; }
@@ -214,6 +216,7 @@ const indexHTML = `<!doctype html>
   table.peers-table col.c-overlay { width:13%; }
   table.peers-table col.c-endpoint { width:21%; }
   table.peers-table col.c-reach { width:7%; }
+  table.peers-table col.c-rtt { width:7%; }
   table.peers-table col.c-time { width:7%; }
   table.peers-table col.c-transport { width:auto; }
   table.peers-table col.c-fill { width:auto; }
@@ -2506,7 +2509,7 @@ function emptyCard(c, msg){ c.appendChild($('<div class="card"><div class="empty
 // caller fills in (directly, or later via bodyEl.innerHTML once results come
 // back). Closes on the × button, clicking the backdrop, or Escape. Returns
 // {close} so a caller can dismiss it programmatically too.
-function showModal(title, bodyEl){
+function showModal(title, bodyEl, onClose){
   const bg = $('<div class="modal-backdrop"></div>');
   const panel = $('<div class="modal-panel"></div>');
   const head = $('<div class="modal-head"><h3></h3></div>');
@@ -2518,7 +2521,7 @@ function showModal(title, bodyEl){
   panel.appendChild(head); panel.appendChild(body);
   bg.appendChild(panel);
   document.body.appendChild(bg);
-  const close = () => bg.remove();
+  const close = () => { bg.remove(); if (onClose) onClose(); };
   closeBtn.onclick = close;
   bg.onclick = (e) => { if (e.target === bg) close(); };
   const onKey = (e) => { if (e.key === 'Escape'){ close(); document.removeEventListener('keydown', onKey); } };
@@ -3665,7 +3668,8 @@ function peerRowsForNet(n) {
       notes:p.Notes||p.notes||'',
       fsent:p.FragsSent||p.frags_sent||0, fsdrop:p.FragSendDrop||p.frag_send_drop||0,
       frcvd:p.FragsRcvd||p.frags_rcvd||0, rdrop:p.ReasmDrop||p.reasm_drop||0,
-      repdrop:p.ReplayDrop||p.replay_drop||0, authdrop:p.AuthDrop||p.auth_drop||0 });
+      repdrop:p.ReplayDrop||p.replay_drop||0, authdrop:p.AuthDrop||p.auth_drop||0,
+      rtt:p.RTTMs||p.rtt_ms||0 });
   }
   const seen = new Set(rows.map(r => r.id));
   const disabledSet = new Set();
@@ -3924,8 +3928,8 @@ function infoMeshPeers(c) {
   perNet(c, (card, n) => {
     const rows = peerRowsForNet(n);
 
-    let h = '<table class="peers-table"><colgroup><col class="c-sel"><col class="c-target"><col class="c-version"><col class="c-key"><col class="c-overlay"><col class="c-endpoint"><col class="c-reach"><col class="c-time"><col class="c-transport"></colgroup><tr><th class="selcol"><input type="checkbox" class="rall"></th><th>target</th><th title="the gravinet build this peer is running, as it advertises in its own handshake. A dash means the peer predates this field \u2014 not that it has no version.">version</th><th title="the label (from this node\'s own Keys table) of the key currently authenticating this peer\'s session">key</th><th>overlay</th><th>endpoint</th><th>reach</th><th title="how long the current session with this peer has been established; resets on every reconnect">time</th><th title="discovered path MTU to the peer, fragment counts (tx/rx), and fragment loss (send/reassembly), plus session decrypt drops (replay/auth) when there are any. Clean counters here, with no replay or auth drops alongside them, mean a connectivity problem is not inside the mesh.">transport</th></tr>';
-    if (!rows.length) h += '<tr><td colspan="9" class="empty">no peers</td></tr>';
+    let h = '<table class="peers-table"><colgroup><col class="c-sel"><col class="c-target"><col class="c-version"><col class="c-key"><col class="c-overlay"><col class="c-endpoint"><col class="c-reach"><col class="c-rtt"><col class="c-time"><col class="c-transport"></colgroup><tr><th class="selcol"><input type="checkbox" class="rall"></th><th>target</th><th title="the gravinet build this peer is running, as it advertises in its own handshake. A dash means the peer predates this field \u2014 not that it has no version.">version</th><th title="the label (from this node\'s own Keys table) of the key currently authenticating this peer\'s session">key</th><th>overlay</th><th>endpoint</th><th>reach</th><th title="round-trip time from this node\'s own keepalive traffic to this peer \u2014 passive, already happening regardless of this column, distinct from Monitor \u2192 Latency\'s active on-demand ping. Blank until the first keepalive round trip completes.">rtt</th><th title="how long the current session with this peer has been established; resets on every reconnect">time</th><th title="discovered path MTU to the peer, fragment counts (tx/rx), and fragment loss (send/reassembly), plus session decrypt drops (replay/auth) when there are any. Clean counters here, with no replay or auth drops alongside them, mean a connectivity problem is not inside the mesh.">transport</th></tr>';
+    if (!rows.length) h += '<tr><td colspan="10" class="empty">no peers</td></tr>';
     for (const p of rows) {
       // None of reach/key/time/transport describe a connection to yourself,
       // so the self row leaves them blank rather than showing something
@@ -3958,6 +3962,7 @@ function infoMeshPeers(c) {
           + '<span class="hint" title="fragment datagrams sent / received">tx '+(p.fsent||0)+' rx '+(p.frcvd||0)+'</span> '+health+sessDrops;
       }
       const timeCell = (p.disabled || p.pending || p.self) ? '' : '<span class="hint" title="established '+esc(new Date(p.est/1e6).toLocaleString())+'">'+esc(fmtElapsed(p.est))+'</span>';
+      const rttCell = (p.disabled || p.pending || p.self) ? '' : (p.rtt > 0 ? (Math.round(p.rtt*10)/10)+' ms' : '<span class="hint" title="no keepalive round trip completed yet">\u2014</span>');
       const keyCell = (p.disabled || p.pending || p.self) ? '' : '<span class="hint">'+esc(p.keyLabel||'')+'</span>';
       // Shown for every row that has one, including self and a
       // disabled/pending peer: a version is a property of the node, not of
@@ -3974,7 +3979,7 @@ function infoMeshPeers(c) {
       // way a peer's endpoint is rather than overridden to a dash.
       h += '<tr class="selectable'+(p.self?' peer-self':'')+'" title="'+stTitle+'" data-peer="'+esc(p.id)+'"><td class="selcol"><input type="checkbox" class="rsel" data-k="'+esc(selKey(n.id,p.id))+'"'+(p.self?' title="this is the current node"':'')+'></td><td>'+nodeNameCell(p.host,p.id,n.id,p.endpoint)+'</td><td>'+verCell+'</td><td>'+keyCell+'</td>'
         + '<td class="ov-cell"'+(p.overlay?' title="'+(p.self?'this node\'s own overlay address':'overlay address is set by the peer itself')+'">':'>')+overlayCellHTML(p)+'</td>'
-        + '<td class="ep-cell"'+(p.self?' title="this node\'s own observed public address">':'>')+esc(dispAddr(p.endpointText))+'</td><td>'+reach+'</td><td>'+timeCell+'</td><td class="c-transport-cell">'+xport+'</td></tr>';
+        + '<td class="ep-cell"'+(p.self?' title="this node\'s own observed public address">':'>')+esc(dispAddr(p.endpointText))+'</td><td>'+reach+'</td><td>'+rttCell+'</td><td>'+timeCell+'</td><td class="c-transport-cell">'+xport+'</td></tr>';
     }
     const t = $('<div></div>'); t.innerHTML = h+'</table>'; card.appendChild(t);
     wireSelectable(t, 'mpeers');
@@ -9105,9 +9110,72 @@ function latencySparkline(hist){
   return '<svg width="'+w+'" height="'+h+'" viewBox="0 0 '+w+' '+h+'" style="display:block">'+bars+'</svg>';
 }
 
+// latencyMsFmt formats a Y-axis tick for the expanded latency chart.
+function latencyMsFmt(v){ return (v||0).toFixed(0)+' ms'; }
+
+// showLatencyHistoryModal is the "bigger, longer trend" view a trend
+// sparkline click opens: same graphCard renderer the Metrics tab's own
+// CPU/memory/disk/bandwidth graphs use, over the passive RTT history
+// history.go's latencyCollector keeps server-side (see that file's own doc
+// comment for why this reads from a different, free-to-sample source than
+// this page's own live ping poll). A one-shot fetch per range selection,
+// not a self-refreshing chart — the underlying history keeps accumulating
+// regardless of whether this modal is open, so closing and reopening it
+// (or just picking a range again) always shows the current state; not
+// worth the added complexity of wiring a cleanup-on-close for a timer here.
+async function showLatencyHistoryModal(netName, nodeId, label, overlay){
+  const body = $('<div></div>');
+  if (overlay) body.appendChild($('<div class="hint" style="margin:-4px 0 10px">'+esc(overlay)+'</div>'));
+  const durBar = $('<div class="seg" style="margin-bottom:14px"></div>');
+  const chartBox = $('<div></div>');
+  chartBox.innerHTML = '<div class="hint">loading\u2026</div>';
+  body.appendChild(durBar);
+  body.appendChild(chartBox);
+
+  let minutes = 60;
+  let card = null; // the live graphCard element, once built; redrawn in place on refresh so the chart doesn't flash blank every tick
+  const load = async () => {
+    const r = await api('/api/latency/history?minutes='+minutes);
+    if (!r.ok || !r.body){ card = null; chartBox.innerHTML = '<div class="hint">could not load latency history.</div>'; return; }
+    const net = (r.body.networks||{})[netName];
+    const peer = net && net[nodeId];
+    const points = (peer && peer.hist) || [];
+    if (!points.length){
+      card = null;
+      chartBox.innerHTML = '<div class="hint">no history yet for this peer \u2014 give it a little time; it fills in as the mesh\u2019s own keepalive traffic to it completes. If this node was recently restarted, history resets to empty and needs a few sample intervals to refill \u2014 it isn\u2019t saved across restarts.</div>';
+      return;
+    }
+    const nowRef = points[points.length-1].t;
+    const yMax = Math.max(1, maxOf(points) * 1.15);
+    if (card){
+      card._redraw([{name:'rtt', color:'var(--acc)', points:points}], yMax, minutes*60, latencyMsFmt, nowRef);
+    } else {
+      chartBox.innerHTML = '';
+      card = graphCard('round-trip time', [{name:'rtt', color:'var(--acc)', points:points}], yMax, latencyMsFmt, minutes*60, true, nowRef);
+      chartBox.appendChild(card);
+    }
+  };
+  for (const [m,lbl] of [[5,'5 min'],[15,'15 min'],[30,'30 min'],[60,'60 min'],[240,'4 hr']]){
+    const b = $('<button class="seg-btn'+(minutes===m?' active':'')+'">'+lbl+'</button>');
+    b.onclick = () => {
+      minutes = m;
+      durBar.querySelectorAll('.seg-btn').forEach(x => x.className = 'seg-btn');
+      b.className = 'seg-btn active';
+      card = null; // force a full rebuild on a range change, same as renderMetricGraphs does for a different set of graphs
+      chartBox.innerHTML = '<div class="hint">loading\u2026</div>';
+      load();
+    };
+    durBar.appendChild(b);
+  }
+  let timer;
+  showModal('latency \u00b7 ' + esc(label), body, () => clearInterval(timer));
+  timer = setInterval(load, LATENCY_POLL_MS);
+  load();
+}
+
 function infoLatency(c){
   if (latencyTimer){ clearInterval(latencyTimer); latencyTimer = null; }
-  secHint(c, 'Round-trip time from this host to every other peer on each up network, pinged over the overlay (so it reflects the mesh path, not just the underlay). A couple of probes per peer, run concurrently; this can take a few seconds. Refreshes automatically every '+(LATENCY_POLL_MS/1000)+'s; <b>trend</b> covers the last '+(LATENCY_WINDOW_MS/1000)+'s; blue bars scale to that peer\u2019s own range, red is a miss; hover a bar for the exact reading, or the chart for how long it\u2019s held its current state.');
+  secHint(c, 'Round-trip time from this host to every other peer on each up network, pinged over the overlay (so it reflects the mesh path, not just the underlay). A couple of probes per peer, run concurrently; this can take a few seconds. Refreshes automatically every '+(LATENCY_POLL_MS/1000)+'s; <b>trend</b> covers the last '+(LATENCY_WINDOW_MS/1000)+'s; blue bars scale to that peer\u2019s own range, red is a miss; hover a bar for the exact reading, or the chart for how long it\u2019s held its current state. Click a trend for a bigger chart over a longer window \u2014 that one comes from the mesh\u2019s own passive keepalive RTT, sampled continuously in the background, rather than this page\u2019s live ping.');
   const card = $('<div class="card"></div>');
   const body = $('<div></div>'); body.innerHTML = '<div class="hint">pinging\u2026</div>'; card.appendChild(body); c.appendChild(card);
 
@@ -9150,7 +9218,7 @@ function infoLatency(c){
 
         const rtt = p.ok ? (Math.round(p.rtt_ms*10)/10)+' ms' : '<span class="hint">'+esc(p.error||'unreachable')+'</span>';
         const streak = fmtElapsed(e.since*1e6);
-        const trend = '<div title="'+(p.ok?'up ':'down ')+streak+'">'+latencySparkline(e.hist)+'</div>';
+        const trend = '<div class="lat-trend" data-node="'+esc(p.node_id)+'" title="'+(p.ok?'up ':'down ')+streak+' \u2014 click for a longer trend">'+latencySparkline(e.hist)+'</div>';
         const rowClass = changed ? (' class="'+(p.ok?'lat-flash-up':'lat-flash-down')+'"') : '';
         const nameLabel = esc(p.hostname||p.node_id.slice(0,8));
         const nameTitle = notesTitleForNetName(n.name, p.node_id);
@@ -9169,6 +9237,20 @@ function infoLatency(c){
       // table wholesale each refresh.
       tbl.querySelectorAll('.peer-link').forEach(el => {
         el.onclick = (e) => { e.stopPropagation(); gotoMeshPeer(netId, el.dataset.node); };
+      });
+      // Clicking a trend sparkline opens a bigger, longer-window chart of the
+      // same peer's RTT — backed by history.go's passive collector (mesh
+      // keepalive RTT, sampled continuously regardless of this page being
+      // open), not this page's own live ping poll. Looked up from 'sorted'
+      // rather than stashed in another data-* attribute since it's already
+      // in scope here and only needed at click time.
+      tbl.querySelectorAll('.lat-trend').forEach(el => {
+        el.onclick = () => {
+          const clicked = sorted.find(x => x.node_id === el.dataset.node);
+          const label = (clicked && clicked.hostname) || el.dataset.node.slice(0,8);
+          const overlay = (clicked && clicked.overlay) || '';
+          showLatencyHistoryModal(n.name, el.dataset.node, label, overlay);
+        };
       });
     }
   };

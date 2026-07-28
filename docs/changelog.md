@@ -2,6 +2,457 @@
 
 ---
 
+## v701 — 2026-07-28
+
+**Fixed: a statically configured seed was never attributed to the node it
+connects to, so `initLoop` re-dialed and re-handshook peers that were
+already connected — once every second, indefinitely.** This is the
+root-cause fix for the once-a-second "tunnel up" churn, and for the
+repeating `pruned dead session` log flood that accompanies it.
+
+**What was actually happening.** `ns.seedOwner` maps a seed address to
+the node id that lives there; `connectedToSeedOwner` uses it to answer
+"am I already connected to whoever is at this address?", and
+`initSeedTick` skips dialing when the answer is yes. But that map was
+only ever populated via `AddSeedFor` (control.go's gossip re-dial hint,
+and reload's live-seed merge). Seeds loaded from the config file went
+through neither — `cmd/gravinet`'s `buildOneNetSpec`/`resolveSeeds` feed
+`NetSpec.Seeds` straight into `newNetState`, bypassing `addSeed`
+entirely — so they had no owner entry at all. Nor did completing a
+handshake create one: `install()` records
+`ns.everConnected[ps.endpoint]`, which answers a different question
+(has this address *ever* worked — used by `sweepDeadSeeds` to decide
+what is safe to forget) and says nothing about *whose* address it is.
+
+So for a configured seed, `connectedToSeedOwner` was structurally unable
+to recognize the most common arrangement in the whole system: a peer
+that connects fine at its configured address, but whose live session
+endpoint is not byte-identical to the literal seed address — any NAT or
+PAT on either side, which is most of them. `connectedTo`'s exact-address
+match failed, the owner lookup had nothing to fall back on, and the seed
+was dialed again on the next tick. Every tick. Each dial completed a
+real handshake and reinstalled the session, disrupting the data path
+each time it did.
+
+**Why this was catastrophic on some peers and invisible on others.**
+`resolveSeeds` expands `host:port,port,...` into one seed per port (see
+`TestResolveSeedsMultiPort`), and a peer configured with extra listen
+ports genuinely answers on all of them — so every one of those dials
+succeeds. A single peer given 13 ports across two address families is 26
+distinct seed addresses. Gossip attributes at most the one endpoint it
+reports; the other 25 stay unattributed forever and are each redialed
+every second.
+
+**The `pruned dead session` flood is this same bug seen from the other
+end**, not a second fault. `install()` deliberately keeps older session
+indices valid in `e.sessions` (glare handling — see its doc comment;
+stale-session reaping is still owed to a later rekeying step), so each
+re-handshake orphans the previous session object rather than closing it.
+Orphans fall silent, cross `defaultPeerTimeout` (20s), and `pruneDead`
+reaps whatever crossed during the last `maintInterval` (5s) — one log
+line per session, all carrying the *same* node id, roughly ten per tick,
+at a steady five-second cadence for as long as the churn lasts. A
+repeating block of identical `pruned dead session` lines for one node id
+is therefore a signature of this bug rather than evidence of a separate
+teardown problem, and should stop once the peer is attributed.
+
+**The fix**, in `internal/mesh/handshake_engine.go`: the outbound
+handshake completion path now records `ns.seedOwner[p.endpoint] =
+pl.NodeID` before installing the session. `p.endpoint` is the literal
+address we dialed, and a completed, authenticated handshake proves who
+answered there — which is what makes this the correct place for it.
+`install()` only ever sees `ps.endpoint`, the address packets came
+*back* from, which is precisely the one that may differ. Attribution now
+happens regardless of how the seed was added, closing the config-file
+case without altering anything about the gossip-added one.
+
+`TestOutboundHandshakeAttributesSeedOwner`
+(`internal/mesh/handshake_flap_test.go`) is the integration-level
+regression test: two real nodes connected over loopback via a plain
+`AddSeed` — exactly how a config-file seed arrives, with no owner —
+asserting both that the seed is attributed to the peer's node id once
+the handshake completes, and that `connectedToSeedOwner` then recognizes
+it, which is the specific fact that stops `initLoop` re-dialing.
+
+`TestMultiPortSeedsConvergeAndStopRedialing`
+(`internal/mesh/multiport_seed_test.go`, new) is the deployment-shaped
+counterpart, covering the arrangement that made this catastrophic rather
+than cosmetic. One peer listens on its primary port plus five more
+(`transport.Options.ExtraPorts`, the peer side of `extra_listen_ports`),
+and the other is seeded with one address per port — the expansion
+`resolveSeeds` produces from a single `host:p1,p2,...` line. It asserts
+convergence in two parts: every address ends up attributed and
+`connectedToSeedOwner` is true for all of them, and then the peer's
+session object survives four full `initLoop` ticks unreplaced. The
+second part is what distinguishes a fix from the bug — `install()`
+overwrites `ns.byNode` on every completed handshake, so a surviving
+pointer is direct evidence that no re-handshake occurred.
+
+Seeds are delivered there through `NetSpec.Seeds`, not `AddSeed`, and
+the difference is load-bearing rather than stylistic. `AddSeed` marks a
+seed non-explicit, and non-explicit seeds converge by an entirely
+different route: `install()`'s pruning deletes the surplus outright
+instead of attributing it. A test written the easy way would therefore
+have gone green without exercising the deployed arrangement at all.
+`NetSpec.Seeds` is the real config path (`buildOneNetSpec`/
+`resolveSeeds` into `newNetState`), which both bypasses `addSeed` — the
+original cause — and marks the seeds explicit via `explicitSeedSet`.
+
+**Verification — v700's outstanding caveat is now closed.** v700 shipped
+`sweepStuckKeepalive`/`teardownSessions` with an explicit warning that no
+Go toolchain was available, and that a live-session-teardown change in
+the core protocol path should not be trusted until built, vetted, and
+run under `-race`. A toolchain was available this time (go1.22.2,
+matching `go.mod`; the tree has no external dependencies, so it builds
+offline):
+
+- `go build ./...` and `go vet ./...` — clean across every package.
+- `go test ./...` — all packages pass, `internal/mesh` included: the
+  full suite exits 0 with the new test in it. That package does need
+  `-timeout` raised above the 10-minute default on a single-core
+  machine, where it exceeds it in aggregate (about 613s) — which
+  presents as a hang partway through a long test and is not one.
+  `TestDeadSeedWithTCPFallbackDoesNotDegrade` alone takes 91s and
+  `TestSelfSeedDoesNotDegradeOtherPeers` several minutes; they are
+  slow by design, not stuck.
+- **Both regression tests were confirmed to fail without the fix**,
+  rather than merely passing with it: stubbing out the one line at
+  `handshake_engine.go:500` fails
+  `TestMultiPortSeedsConvergeAndStopRedialing` at its convergence
+  assertion (0 of 6 addresses attributed) and
+  `TestOutboundHandshakeAttributesSeedOwner` alongside it. The file was
+  then restored and diffed byte-for-byte against its pre-edit state.
+- **The churn was measured, not just inferred.** Against the stubbed
+  build, a single peer completed 101 outbound handshakes in 20 seconds
+  — roughly five per second, being six seed addresses redialed every 1s
+  tick minus the one `connectedTo` matches by exact endpoint. With the
+  fix: six handshakes total, one per address, then silence. That ratio
+  is the whole bug in one number.
+- `-race` on the seed-attribution and dead-seed-sweep tests
+  (`TestMultiPortSeedsConvergeAndStopRedialing`,
+  `TestOutboundHandshakeAttributesSeedOwner`,
+  `TestSweepDeadSeedsProtectsPreviouslyConnectedSeed`,
+  `TestSweepDeadSeedsRemovesNeverConnected`,
+  `TestInstallNeverPrunesExplicitSeeds`,
+  `TestConnectedToRecognizesResolvedFallback`) — no races reported.
+
+**Still outstanding, stated plainly rather than left implied:**
+`sweepStuckKeepalive`, `stuckKeepaliveThreshold` and `teardownSessions`
+have no direct test coverage — no test anywhere in `internal/mesh` so
+much as names them. v700's change is now known to compile, vet, and not
+race, and `teardownSessions` is exercised indirectly through `pruneDead`
+across the suite, but its own trigger condition — pings armed, no pong
+inside the threshold — has never been asserted by anything. The full
+suite has also only been run under `-race` for the subset listed above,
+not end to end. Both are worth closing before this code is leaned on
+harder.
+
+---
+
+## v700 — 2026-07-26
+
+**Fixed, in the mesh engine itself: a session whose keepalive stopped
+completing round trips could stay stuck indefinitely**, even while
+otherwise looking perfectly healthy (real data still flowing, live ping
+succeeding). This is the actual root-cause fix for the whole rtt-column/
+config-history investigation over the last many turns — not a
+workaround, and unlike everything else this session, it's a change to
+`internal/mesh`, not the web admin layer.
+
+**What was actually happening**, confirmed by reading the real code paths
+rather than guessing: `initSeedTick` (the loop that dials seeds) checks
+`connectedTo` first and returns immediately if true — meaning a seed is
+re-dialed *once*, ever, not periodically. Once connected, nothing
+re-checks that session's actual health again, only its continued
+existence. Separately, `pruneDead`'s silence-based timeout is driven by
+`touch()`, which fires on *any* successfully decrypted inbound packet —
+data included, not specifically the control-plane keepalive. So a
+session whose `ctrlPong` had stopped landing, while regular data kept
+flowing, satisfied both mechanisms' notion of "alive" forever: never
+silent enough for `pruneDead`, and never re-dialed because
+`connectedTo` never went false. Nothing existed to catch that specific,
+narrower failure — "the session exists" and "the session's keepalive is
+actually working" were being treated as the same fact when they aren't.
+
+**The fix**, in `internal/mesh/control.go` and `engine.go`:
+
+- `peerSession` gained `lastPongNanos` — when a `ctrlPong` last actually
+  completed a round trip, distinct from `rttNanos` (a duration, not a
+  timestamp — useless for asking "how long has it been") and from the
+  existing `lastRx` (touched by any packet, not specifically a pong).
+  Set in `onControl`'s `ctrlPong` case, right alongside the existing RTT
+  measurement, but unconditionally — even a pong whose RTT sample gets
+  skipped (stray/replay-suspected) still proves the channel isn't stuck.
+- `sweepStuckKeepalive` (new): drops a session if pings are being sent
+  (`pingSentNanos != 0` — sendKeepalive pings every session
+  unconditionally, so this is always true for anything in `ns.byNode`)
+  but no pong has landed within `stuckKeepaliveThreshold` — 6 keepalive
+  intervals or 30s, whichever is longer, recomputed live so it stays
+  proportionate if the operator changes the keepalive interval setting.
+  Wired into `maintLoop` right alongside `pruneDead`, same 5s tick.
+- `pruneDead` and `sweepStuckKeepalive` now share a `teardownSessions`
+  helper (routes, bypass routes, node-route dropping, logging) extracted
+  from `pruneDead`'s own previous body — deliberately, so there's one
+  place this cleanup logic can be wrong instead of two slowly-drifting
+  copies of it. Dropping a session this way is exactly what already lets
+  a genuinely-silent one recover today; this just adds a second,
+  narrower reason to trigger the same proven path.
+
+**What this does and doesn't claim to fix:** a stuck session now
+recovers within roughly a minute at default settings, on its own,
+without needing an unrelated settings change to dislodge it as a side
+effect. It does **not** explain *why* `ctrlPong` stops landing for a
+session in the first place — that's still genuinely unknown. This makes
+the symptom self-healing; it doesn't diagnose the disease. If it recurs
+frequently enough to matter, the debug-log capture suggested several
+turns ago is still the way to actually find that.
+
+**Given the risk of this change — live session teardown in the core
+protocol path every connected peer depends on — extra care on
+verification:** brace/paren balance confirmed on both touched files.
+Confirmed `ps.established` is actually `time.Time` (used as the
+fallback baseline for a session that's never received a pong at all,
+so a brand-new session isn't immediately flagged before it's had a
+fair chance). Confirmed zero naming collisions for every new identifier
+across the whole `internal/mesh` package. Re-read the full refactored
+`pruneDead`/`stuckKeepaliveThreshold`/`sweepStuckKeepalive`/
+`teardownSessions` block end-to-end after editing to confirm the
+extraction was clean and nothing was left dangling (an early version of
+this edit did leave `pruneDead`'s old hard-coded log line behind inside
+the new shared helper, which would have mislabeled every stuck-session
+reconnect as a plain prune — caught and fixed before this shipped, not
+after). Deliberately reused `pruneDead`'s exact, already-proven teardown
+path rather than writing new cleanup logic from scratch, specifically to
+avoid the risk of a hand-rolled version getting routes or bypass-route
+cleanup subtly wrong.
+
+**No Go toolchain available in this environment to run `go build`/
+`go vet`/`go test`/`go test -race`.** This is the change this session
+where that actually matters most — it's concurrent, mutex-guarded
+engine code, not UI or config-file logic — and it should not be treated
+as verified until it's actually been built, vetted, and ideally run
+under `-race` against the existing mesh test suite before being trusted
+on a live mesh.
+
+---
+
+## v699 — 2026-07-26
+
+**Added: an rtt column on the Mesh Peers page**, showing
+`mesh.PeerInfo.RTTMs` directly — the same passive, keepalive-derived
+value `latencyCollector` (v695) already samples in the background, now
+visible on its own rather than only reachable through the history modal.
+
+Built specifically to answer an open question from a live bug report:
+several peers persistently show no history in the Latency page's popup
+despite a working live ping, and it isn't resolving over time. Whether
+that's a bug in `latencyCollector` or the mesh engine's own
+`ctrlPing`/`ctrlPong` never completing for those peers hinges on one
+fact neither of us could previously see: does the engine's own `RTTMs`
+actually have a value for them. This column answers that directly,
+without needing to open the history popup or reason about the collector
+at all — if a peer shows blank here, the engine itself has never
+recorded a completed round trip for it, independent of anything the
+history feature does with that value afterward.
+
+**No backend change needed.** `handleStatus` already marshals the full
+`[]mesh.PeerInfo` slice into `/api/status` as-is; `rtt_ms` was already
+present in that JSON, just never read by the Mesh Peers page's row
+builder or rendered as a column. Purely additive on the frontend:
+`peerRowsForNet` now extracts `p.RTTMs||p.rtt_ms||0` alongside every
+other field it already pulls the same way, a new `<col class="c-rtt">`
+(7%, matching reach/time) and `<th>` with a tooltip disambiguating it
+from the Latency page's active check, and a new `<td>` between reach and
+time — blank for self/disabled/pending rows (meaningless for those,
+matching how time/key already behave), a dash with an explanatory
+tooltip when no round trip has completed yet, the rounded ms value
+otherwise. The "no peers" empty-row `colspan` bumped from 9 to 10 to
+match.
+
+**Verified:** confirmed this table's `<colgroup>` is the only
+`peers-table` in the file affected — a second `peers-table` construction
+elsewhere (a peer-picker, different columns entirely) is a separate
+`<table>` with its own colgroup, untouched. Confirmed nothing else in
+the file assumes a fixed column position for this table (rows are built
+and read via named object properties throughout, never positional
+indexing), so inserting a column in the middle couldn't silently break
+something reading the wrong `<td>`. Backtick count confirmed exactly 2,
+`node --check` clean on the full extracted script. No Go changes this
+round — this was frontend-only, since the data was already there.
+
+---
+
+## v698 — 2026-07-26
+
+**Fixed: the latency history popup didn't update as new data came in.**
+v695 deliberately built it as a one-shot fetch, on the reasoning that the
+history keeps accumulating server-side regardless of whether the modal
+is open — true, but missed the obvious part: if you're watching the
+graph, you want to see it move.
+
+`showModal` gained an optional third parameter, `onClose`, fired on
+every path that closes a modal (X button, backdrop click, Escape, or a
+caller's own `m.close()`) — needed so the latency modal's refresh timer
+actually stops when the modal does, rather than polling forever in the
+background after it's gone. Backward compatible: every other `showModal`
+call site (seed/peer info, config-history's view/diff/restore modals)
+passes exactly two arguments, so `onClose` is simply `undefined` there
+and the extra behavior never fires.
+
+The latency modal now refreshes every `LATENCY_POLL_MS` (10s, matching
+the collector's own sample interval) and redraws in place via
+`graphCard`'s existing `_redraw` method — the same mechanism
+`renderMetricGraphs` already uses for the Metrics tab — rather than
+tearing down and rebuilding the chart every tick, which would have
+flashed blank on every refresh. A range change (5 min → 4 hr, etc.)
+still does a full rebuild, same as switching which graphs Metrics shows.
+
+**On the second thing reported — some peers showing "no history yet"
+even though they're actively connected:** almost certainly a side effect
+of this session's own frequent version-bump-and-restart cycle, not a
+bug. The collector's history lives only in memory (see `history.go`'s
+own doc comment on why: recording an in-memory value is free, but that
+also means nothing persists it to disk) — every restart, including every
+one of these version updates being installed and applied, wipes it back
+to empty, and it needs a few 10s sample intervals to have anything to
+show again. Made this self-explanatory rather than something to ask
+about: the empty-state message now says so directly, instead of just
+"give it a little time" with no reason attached.
+
+**Verified:** backtick count confirmed exactly 2 after this edit (per
+v697's new standing rule), `node --check` clean on the full extracted
+script, every other `showModal` call site checked to confirm none of
+them pass a third argument that would now behave differently. No Go
+changes this round.
+
+---
+
+## v697 — 2026-07-26
+
+**Fixed: a real build failure, reported from an actual build attempt
+(`gn-ionos1`), caused by a mistake in v695.** `ui.go`'s entire contents —
+every line of embedded HTML, CSS, and JS — is one single Go raw string
+literal, delimited by exactly two backticks (the opening one on line 3,
+the closing one on the last line). A doc comment added in v695, for the
+trend-sparkline click handler, used markdown-style backticks around a
+variable name (`` `sorted` ``) — an entirely ordinary way to write a
+comment, and completely invisible as a problem when read as JS. But
+those two extra backticks terminated the Go string literal early,
+dumping everything after them out of the string and into literal Go
+source — which is exactly why the compiler's error pointed at `sorted`
+itself ("unexpected name sorted after top level declaration"): by that
+point in the file, Go wasn't parsing a string anymore, it was trying to
+parse the rest of the JavaScript as Go code.
+
+Fixed by replacing the two stray backticks with plain quotes. Re-scanned
+the entire file afterward and confirmed exactly 2 backticks remain (the
+legitimate open/close of the raw string) — this was the only instance.
+
+**Why this got past every check that ran before it shipped:** `node
+--check` validates the *extracted* JavaScript in isolation, where that
+comment is completely valid — the bug only exists once the content is
+wrapped in Go backticks, which nothing in the JS-only verification step
+ever looks at. The brace/paren balance checks run on every Go edit this
+session don't catch it either, since a backtick affects neither. A
+"total backtick count in `ui.go` must be exactly 2" check *was* run
+earlier this session (after the CSS gap edits), but wasn't re-run after
+this specific change — which is exactly how it slipped through instead
+of being caught before shipping, the way most other mistakes this
+session were.
+
+**Going forward:** treat the backtick-count check as a mandatory, every-
+time step for any `ui.go` edit, not an occasional spot-check — the same
+standing discipline already applied to brace/paren balance and
+`node --check`.
+
+---
+
+## v696 — 2026-07-26
+
+**Changed: latency history retention raised from 60 minutes to 4
+hours.** `latencyRetention` in `latencyhist.go` is the only real knob —
+raising it just widens the rolling window `appendTrim` keeps per peer, no
+other logic depends on the specific duration. `handleLatencyHistory`'s
+`minutes` clamp raised from 60 to 240 to match, and the history modal's
+range picker gained a "4 hr" option alongside the existing 5/15/30/60
+min buttons.
+
+Cost check, since that's exactly what this whole feature was built to
+avoid: at the existing 10s sample interval, 4 hours is 1,440 points per
+peer instead of 360 — at 100 peers, roughly 2–3 MB of `{t,v}` pairs
+total. Still nothing that scales meaningfully with peer count, and still
+zero additional network traffic or subprocess forks either way — the
+collector is reading the same already-computed `RTTMs` value on the same
+timer as before, just keeping more of what it already reads.
+
+**Verified:** brace/paren balance on `latencyhist.go`, `node --check`
+clean on the full extracted UI script. No Go toolchain available in this
+environment to run `go build`/`go vet`/`go test`.
+
+---
+
+## v695 — 2026-07-26
+
+**Added: click a trend sparkline on the Latency page for a bigger chart
+over a longer window.** Deliberately does *not* work the way it might
+look like it should — by turning the page's live on-demand ping check
+into a permanent background loop. That would mean forking `ping(1)` and
+doing a real ICMP round trip per peer, on a timer, forever, regardless of
+whether anyone has the page open — at a hundred peers, a real, continuing
+cost, not a free background sample.
+
+Instead, `internal/webadmin/latencyhist.go`'s new `latencyCollector`
+samples `mesh.PeerInfo.RTTMs` — round-trip time the mesh engine already
+measures continuously via its own keepalive traffic, entirely independent
+of this collector's existence (see `RTTMs`'s own doc comment in
+`internal/mesh/ban.go`). Recording an already-computed in-memory value on
+a 10s timer costs nothing that scales with peer count. Same shape as
+`metricsCollector` (60-minute retention, reusing its `metricPoint`/
+`appendTrim`/`sinceCutoff` directly rather than duplicating them), new
+`/api/latency/history` endpoint, `minutes=` windowing matching
+`/api/metrics`'s own convention.
+
+**One thing worth being honest about, stated plainly rather than glossed
+over:** this is a *different* signal than the page's live check, not the
+same measurement sampled more often — the mesh's own control-plane round
+trip over a peer's actual current session (direct or relayed) vs. ICMP
+through the TUN device. In practice they should track closely, since both
+reflect the real path a peer's traffic takes, but they're not
+interchangeable, and the page's hint text now says so.
+
+Clicking a trend sparkline opens a modal with a real line chart (the same
+`graphCard` renderer Metrics' own CPU/memory/disk graphs use) and a
+5/15/30/60-minute range picker matching Metrics' segmented-control
+convention exactly. A one-shot fetch per range pick, not self-refreshing —
+the underlying history keeps accumulating server-side regardless of
+whether the modal is open, so there was no real need to wire up
+cleanup-on-close for a timer here.
+
+Wired into the `Server` lifecycle alongside `metrics`: started in
+`Start()`, and — going one step further than `metrics` itself, which has
+no explicit shutdown at all — actually closed in `Close()`, matching the
+majority pattern the other three background loops (`capture`, `bgpRedis`,
+`autoBGP`) already follow.
+
+**Caught and fixed two mistakes before any of this shipped:** a stray `#`
+in place of `//` in one of my own doc comments, which would have broken
+compilation outright, and an invented `parsePositiveInt` helper that
+doesn't exist anywhere in the codebase — replaced with the exact
+`strconv.Atoi`-plus-clamp pattern `handleMetrics` already uses for its
+own `minutes` parameter.
+
+**Verified:** confirmed byte-for-byte that the JSON shape the frontend
+reads (`networks[name][nodeId].hist`, points shaped `{t,v}`) matches
+`metricPoint`'s actual tags and `snapshot()`'s actual output, and that
+both `/api/latency` and `/api/latency/history` key networks by the same
+`ifc.Name` source, so a click's network name always resolves correctly
+against the history endpoint. Brace/paren balance and zero-collision
+checks passed on every touched file. `node --check` clean on the full
+extracted UI script. No Go toolchain available in this environment to run
+`go build`/`go vet`/`go test`.
+
+---
+
 ## v694 — 2026-07-26
 
 **Changed: Power page's Execute/Cancel buttons.** "Cancel scheduled

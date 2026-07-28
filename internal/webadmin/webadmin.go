@@ -165,6 +165,7 @@ type Server struct {
 	commit  string // gravinet build commit
 
 	metrics  *metricsCollector     // CPU/mem/interface time series for the Metrics tab
+	latencyHist *latencyCollector  // passive per-peer RTT history for the Latency tab's expanded chart
 	capture  *captureState         // live packet capture for the Capture tab
 	bgpRedis *bgpMeshRedistributor // polls FRR's RIB, pushes BGP routes into the mesh (config.Network.RedistributeBGPRoutes)
 	autoBGP  *autoBGPReconciler    // derives ASN/router-id and maintains one Neighbor per online mesh peer (config.BGPConfig.AutoBGP)
@@ -564,6 +565,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/localhosts", s.authed(s.handleLocalHosts))
 	mux.HandleFunc("/api/localdns", s.authed(s.handleLocalDNS))
 	mux.HandleFunc("/api/latency", s.authed(s.handleLocalLatency))
+	mux.HandleFunc("/api/latency/history", s.authed(s.handleLatencyHistory))
 	// /debug/pprof/* — Go's standard runtime profiler, under the same auth as
 	// every other route here rather than the usual DefaultServeMux/:6060
 	// convention (which would mean an unauthenticated port). Not surfaced in
@@ -621,6 +623,8 @@ func (s *Server) Start() error {
 	}
 	s.metrics = newMetricsCollector(s.be, s.log)
 	go s.metrics.run()
+	s.latencyHist = newLatencyCollector(s.be, s.log)
+	go s.latencyHist.run()
 	s.bgpRedis = newBGPMeshRedistributor(s)
 	go s.bgpRedis.run()
 	s.autoBGP = newAutoBGPReconciler(s)
@@ -684,6 +688,9 @@ func (s *Server) Close() error {
 	}
 	if s.autoBGP != nil {
 		s.autoBGP.close()
+	}
+	if s.latencyHist != nil {
+		s.latencyHist.close()
 	}
 	if s.httpSrv != nil {
 		return s.httpSrv.Close()

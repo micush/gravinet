@@ -85,6 +85,12 @@ func (e *Engine) onControl(ps *peerSession, body []byte) {
 				ps.rttNanos.Store(rtt)
 			}
 		}
+		// lastPongNanos records that a round trip actually completed, full
+		// stop — unlike rttNanos above, this isn't skipped for a stray/
+		// replay-suspected pong: even a pong we can't attribute a clean RTT
+		// sample to is still real evidence the control channel is not stuck,
+		// which is the only thing sweepStuckKeepalive needs from it.
+		ps.lastPongNanos.Store(time.Now().UnixNano())
 	case ctrlPeerList:
 		entries, err := decodePeerList(body[1:])
 		if err != nil {
@@ -513,6 +519,7 @@ func (e *Engine) maintLoop(ns *netState) {
 		e.maybeAssignAddress(ns)
 		e.reconcileDataplane(ns, now)
 		e.pruneDead(ns, now)
+		e.sweepStuckKeepalive(ns, now)
 		e.sweepStaleRoutes(ns, now)
 		e.sweepStaleHosts(ns, now)
 		e.sweepStaleDNS(ns, now)
@@ -804,6 +811,78 @@ func (e *Engine) pruneDead(ns *netState, now time.Time) {
 		}
 	}
 	e.mu.Unlock()
+	e.teardownSessions(ns, dead, "pruned dead session")
+}
+
+// stuckKeepaliveThreshold is how long a session may go with pings sent but no
+// completed pong before sweepStuckKeepalive treats it as stuck rather than
+// merely slow: at least 30s, or 6 keepalive intervals, whichever is longer.
+// Long enough that one missed cycle (a transient blip) never triggers this;
+// short enough that a genuinely stuck session recovers within about a minute
+// at the default 10s interval, rather than sitting broken indefinitely.
+// Recomputed from the live keepalive interval each call rather than fixed,
+// so raising or lowering that setting keeps this in proportion to it.
+func (e *Engine) stuckKeepaliveThreshold() time.Duration {
+	if t := 6 * e.keepaliveInterval(); t > 30*time.Second {
+		return t
+	}
+	return 30 * time.Second
+}
+
+// sweepStuckKeepalive drops a session whose control-plane keepalive has
+// stopped completing round trips, even though the session looks perfectly
+// alive by every other measure. sendKeepalive pings every session in
+// ns.byNode unconditionally, every keepaliveInterval, regardless of whether
+// pongs are coming back — so a session with pings armed
+// (pingSentNanos != 0) but no completed pong (lastPongNanos) within
+// stuckKeepaliveThreshold has a control channel that has genuinely stopped
+// working, not one that just hasn't been asked yet.
+//
+// This matters because nothing else catches it. pruneDead's lastRxTime is
+// touched by *any* successfully decrypted inbound packet — data included —
+// so a session that's still exchanging real traffic never goes "silent" by
+// that definition, no matter how long its keepalive specifically has been
+// stuck. And initSeedTick (see its own doc comment) never re-dials a seed
+// once connectedTo it is true — once, not periodically — so an established
+// session that degrades this way was found to sit broken indefinitely, with
+// no path back except an unrelated config change that happened to touch
+// enough live state to dislodge it as a side effect. Dropping the session
+// here is what lets the normal reconnect path — initSeedTick for a seed,
+// gossip-driven re-learning for anything else — pick it back up fresh, the
+// same way any other lost connection already recovers.
+func (e *Engine) sweepStuckKeepalive(ns *netState, now time.Time) {
+	threshold := e.stuckKeepaliveThreshold()
+	var dead []*peerSession
+	e.mu.Lock()
+	for idx, ps := range e.sessions {
+		if ps.net != ns {
+			continue
+		}
+		if ps.pingSentNanos.Load() == 0 {
+			continue // never armed a ping yet on this session; nothing to judge
+		}
+		baseline := ps.established
+		if lastPong := ps.lastPongNanos.Load(); lastPong != 0 {
+			baseline = time.Unix(0, lastPong)
+		}
+		if now.Sub(baseline) > threshold {
+			delete(e.sessions, idx)
+			dead = append(dead, ps)
+		}
+	}
+	e.mu.Unlock()
+	e.teardownSessions(ns, dead, "reconnecting stuck session (keepalive stopped completing)")
+}
+
+// teardownSessions removes each of dead from ns's routing/session state and
+// frees it for reconnection — the same cleanup regardless of *why* a session
+// is being dropped. pruneDead (gone silent) and sweepStuckKeepalive (looks
+// alive but its keepalive specifically stopped completing) both feed into
+// this rather than each repeating it, so there is one place this logic can
+// be wrong instead of two copies of it slowly drifting apart. reason is
+// logged verbatim, e.g. "pruned dead session" or "reconnecting stuck
+// session (keepalive stopped completing)".
+func (e *Engine) teardownSessions(ns *netState, dead []*peerSession, reason string) {
 	if len(dead) == 0 {
 		return
 	}
@@ -832,7 +911,7 @@ func (e *Engine) pruneDead(ns *netState, now time.Time) {
 		e.dropNodeRoutes(ns, id)
 	}
 	for _, ps := range dead {
-		e.log.Infof("mesh: pruned dead session to %q on net %x", ps.nodeID, ns.spec.ID)
+		e.log.Infof("mesh: %s: %q on net %x", reason, ps.nodeID, ns.spec.ID)
 	}
 }
 
