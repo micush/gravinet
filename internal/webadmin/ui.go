@@ -1087,36 +1087,49 @@ function buildSearchIndex(){
   }
   add('Settings', 'Section', 'settings', null, {kind:'section', section:'settings'}, 'console, security, and node-wide settings');
 
-  // Settings' own content (Appearance/Cluster/Routing/Underlay/NAT/Privacy)
-  // is node-global, same shape as the exempt list above — no per-network
-  // scoping, so navigation is a plain getElementById rather than the
-  // card-scoped searchRowSelector pattern every per-network section uses.
-  // Managed/Manager's descriptions are dynamic (syncClusterModeRows swaps
-  // them based on whether a remote peer is selected); indexed here using
-  // their local-node text, the one most people would actually search for.
+  // Settings' own content is node-global, same shape as the exempt list
+  // above — no per-network scoping, so navigation is a plain getElementById
+  // rather than the card-scoped searchRowSelector pattern every per-network
+  // section uses. Managed/Manager's descriptions are dynamic
+  // (syncClusterModeRows swaps them based on whether a remote peer is
+  // selected); indexed here using their local-node text, the one most
+  // people would actually search for.
+  //
+  // Settings grew tabs (General/Security/Network/Performance) the same way
+  // Firewall did in v330 — each row here now also carries which tab it
+  // lives on, so a hit lands on a rendered element instead of one hidden
+  // behind whichever tab happens to already be showing. See the generic
+  // state[r.section+'Tab'] assignment in navigateToSearchResult below.
   const settingsRows = [
-    ['dark-mode-row', 'Dark mode', 'Switch between dark and light interface theme.'],
-    ['loginban-attempts-row', 'Lockout attempts', 'How many failed logins from one source before it is locked out.'],
-    ['loginban-duration-row', 'Lockout duration', 'How long a lockout lasts once triggered, in minutes.'],
-    ['tls-cert-upload-row', 'TLS certificate', 'Upload a certificate and private key to replace the self-signed one.'],
-    ['tls-cert-reset-row', 'Revert to self-signed', 'Stop using an uploaded certificate.'],
-    ['config-history-limit-row', 'Config history retention limit', 'How many configuration snapshots to keep before the oldest are pruned.'],
-    ['cluster-managed-row', 'Managed mode', 'Let Manager-mode peers in the cluster remotely configure this node.'],
-    ['cluster-manager-row', 'Manager mode', 'Let this node browse and remotely configure other Managed-mode peers in the cluster.'],
-    ['shell-allow-row', 'Remote shell', 'Let a Manager peer open a real OS shell on this node through the web admin.'],
-    ['accept-manager-upg-row', 'Accept Manager-pushed upgrades', 'Let a directly-connected Manager peer push and apply a new gravinet binary to this node. Off by default; local-only.'],
-    ['loglevel-row', 'Log level', 'How much this node logs (error, warn, info, debug). Applied immediately, no restart.'],
-    ['logsize-row', 'Log size', 'Maximum size of the log file; once full the oldest lines are dropped (FIFO). e.g. 200M, 1G, 99K.'],
-    ['routeadv-row', 'Route advertisement interval', 'How often this node re-advertises the routes it originates.'],
-    ['udpport-row', 'UDP port', 'The UDP port(s) this node listens on; comma-separated for more than one, so a peer behind a restrictive firewall can reach it on a well-known port too.'],
-    ['tcpport-row', 'TCP port', 'The TCP port(s) this node listens on for the TLS fallback; comma-separated for more than one.'],
-    ['natstate-row', 'NAT state timeout', 'How long an idle translated NAT connection is remembered before its mapping is reclaimed.'],
-    ['upnp-row', 'UPnP', 'Ask the LAN router to forward every port this node listens on \u2014 UDP, TCP fallback, and any extra ports \u2014 from its WAN side to this host automatically, so peers can reach it without a manual port forward. Off by default. upnp port forwarding nat traversal'],
-    ['geoip-row', 'Geo-IP lookups', 'Show an approximate location on a peer or seed\u2019s info panel, looked up from a third-party service (ipapi.co). geoip'],
+    ['dark-mode-row', 'Dark mode', 'Switch between dark and light interface theme.', 'general'],
+    ['loginban-attempts-row', 'Lockout attempts', 'How many failed logins from one source before it is locked out.', 'security'],
+    ['loginban-duration-row', 'Lockout duration', 'How long a lockout lasts once triggered, in minutes.', 'security'],
+    ['tls-cert-upload-row', 'TLS certificate', 'Upload a certificate and private key to replace the self-signed one.', 'security'],
+    ['tls-cert-reset-row', 'Revert to self-signed', 'Stop using an uploaded certificate.', 'security'],
+    ['config-history-limit-row', 'Config history retention limit', 'How many configuration snapshots to keep before the oldest are pruned.', 'general'],
+    ['cluster-managed-row', 'Managed mode', 'Let Manager-mode peers in the cluster remotely configure this node.', 'security'],
+    ['cluster-manager-row', 'Manager mode', 'Let this node browse and remotely configure other Managed-mode peers in the cluster.', 'security'],
+    ['shell-allow-row', 'Remote shell', 'Let a Manager peer open a real OS shell on this node through the web admin.', 'security'],
+    ['accept-manager-upg-row', 'Accept Manager-pushed upgrades', 'Let a directly-connected Manager peer push and apply a new gravinet binary to this node. Off by default; local-only.', 'security'],
+    ['geoip-row', 'Geo-IP lookups', 'Show an approximate location on a peer or seed\u2019s info panel, looked up from a third-party service (ipapi.co). geoip', 'security'],
+    ['loglevel-row', 'Log level', 'How much this node logs (error, warn, info, debug). Applied immediately, no restart.', 'general'],
+    ['logsize-row', 'Log size', 'Maximum size of the log file; once full the oldest lines are dropped (FIFO). e.g. 200M, 1G, 99K.', 'general'],
+    ['routeadv-row', 'Route advertisement interval', 'How often this node re-advertises the routes it originates.', 'network'],
+    ['keepalive-row', 'Keepalive interval', 'How often this node pings each connected peer, keeping NAT mappings open and measuring round-trip time.', 'network'],
+    ['peertimeout-row', 'Peer timeout', 'How long a peer may go silent before its session is dropped.', 'network'],
+    ['udpport-row', 'UDP port', 'The UDP port(s) this node listens on; comma-separated for more than one, so a peer behind a restrictive firewall can reach it on a well-known port too.', 'network'],
+    ['tcpport-row', 'TCP port', 'The TCP port(s) this node listens on for the TLS fallback; comma-separated for more than one.', 'network'],
+    ['natstate-row', 'NAT state timeout', 'How long an idle translated NAT connection is remembered before its mapping is reclaimed.', 'network'],
+    ['upnp-row', 'UPnP', 'Ask the LAN router to forward every port this node listens on \u2014 UDP, TCP fallback, and any extra ports \u2014 from its WAN side to this host automatically, so peers can reach it without a manual port forward. Off by default. upnp port forwarding nat traversal', 'network'],
+    ['worker-threads-row', 'Worker threads', 'How many goroutines process outbound TUN traffic and inbound UDP traffic.', 'performance'],
+    ['tun-queues-row', 'TUN queues', 'How many independent read queues to open on each overlay interface.', 'performance'],
+    ['socket-buffer-row', 'Socket buffer', 'Per-UDP-socket receive/send buffer, in megabytes.', 'performance'],
+    ['udp-gso-row', 'UDP GSO/GRO', 'Batch multiple packets per send/receive syscall on the underlay UDP socket. Experimental.', 'performance'],
   ];
-  for (const [id, lbl, desc] of settingsRows) {
-    add(lbl, 'Settings', 'settings', null, {kind:'setting', id}, desc);
+  for (const [id, lbl, desc, tab] of settingsRows) {
+    add(lbl, 'Settings', 'settings', null, {kind:'setting', id, tab}, desc);
   }
+
 
   // Firewall grew sub-tabs in v330 (Rules / Allow List); a section hit alone
   // no longer says which one to land on, so section/group entries generally
@@ -1241,11 +1254,14 @@ async function navigateToSearchResult(r){
   const targetSection = (r.match && r.match.kind === 'group') ? r.match.firstSection : r.section;
   state.section = targetSection;
   setActiveRailTab(targetSection);
-  // Only Firewall has sub-tabs as of v330; a match that came from a
-  // specific tab (see buildSearchIndex's 'fw'/exempt-list entries) sets it
-  // before rendering, same as ordinary section/netId targeting above —
-  // generalizable to state.<section>Tab if another section grows tabs later.
-  if (r.match && r.match.tab) state.firewallTab = r.match.tab;
+  // Firewall (v330) and Settings (this reorg) both have sub-tabs now; a
+  // match that came from a specific tab (see buildSearchIndex's
+  // 'fw'/exempt-list entries and the settingsRows tab field) sets
+  // state.<section>Tab before rendering, same as ordinary section/netId
+  // targeting above — so a hit lands on the tab that actually renders the
+  // row it's about to scroll to, not whichever tab happened to already be
+  // showing.
+  if (r.match && r.match.tab) state[targetSection + 'Tab'] = r.match.tab;
   // renderSection() alone (no reload) is what the existing Settings rail
   // link itself does — state.cfg/state.status aren't what that section
   // reads, so there's nothing for refresh()'s round trip to buy here.
@@ -2602,8 +2618,38 @@ function buildPortListRow(id, label, desc, initialPorts, apiPath, onSaved, initi
   return row;
 }
 
+// secSettings renders System \u2192 Settings as four grouped tabs — General,
+// Security, Network, Performance — rather than one long flat stack of
+// cards in whatever order they were added over time. Each tab is its own
+// function below, using the same state.<section>Tab + buildTabBar pattern
+// Firewall (v330) already established for exactly this: unrelated
+// concerns living under one section header, switchable without a page
+// navigation (see secFirewall). Splitting only changes which tab a card
+// appears under and the order cards render in within that tab — every
+// card's id, description, and behavior is unchanged from before this
+// split, so anything that already linked or searched its way to a
+// specific row (buildSearchIndex, the "Settings \u2192 X" hints elsewhere in
+// this file) still lands on the same element, just behind the tab that
+// now owns it.
 function secSettings(c) {
+  state.settingsTab = state.settingsTab || 'general';
+  secHint(c, 'Console, security, and node-wide settings. <b>General</b> covers the interface and local housekeeping; <b>Security</b> covers access control, certificates, and what a Manager peer may do here; <b>Network</b> covers mesh timing, ports, and NAT; <b>Performance</b> is advanced tuning most setups never need to touch.');
+  c.appendChild(buildTabBar([['general','General'],['security','Security'],['network','Network'],['performance','Performance']], state.settingsTab,
+    (tab) => { state.settingsTab = tab; renderSection(); }));
+
+  if (state.settingsTab === 'security') return secSettingsSecurity(c);
+  if (state.settingsTab === 'network') return secSettingsNetwork(c);
+  if (state.settingsTab === 'performance') return secSettingsPerformance(c);
+  return secSettingsGeneral(c);
+}
+
+// secSettingsGeneral: interface preference and local housekeeping that
+// doesn't change mesh behavior or who can do what — Appearance, Logging,
+// Config history. The tab most people land on without a specific task in
+// mind, which is also why it's the default.
+function secSettingsGeneral(c) {
   let card = $('<div class="card"></div>');
+
   card.appendChild($('<h3>Appearance</h3>'));
 
   // Dark mode toggle
@@ -2617,14 +2663,103 @@ function secSettings(c) {
   card.appendChild(dm);
 
   c.appendChild(card); card = $('<div class="card"></div>');
+
+  // Logging card. Holds Log level (moved here from Cluster in an earlier
+  // version) and Log size — grouped under General rather than Security or
+  // Network since it's local console/diagnostic housekeeping, not
+  // something that changes mesh behavior or what a peer may do. Both apply
+  // live on save: the daemon's reload path updates the running logger's
+  // level and the rotating log file's size cap without a restart (a
+  // restart would reset every session, backoff timer and learned endpoint
+  // — the very state you raise the level to observe). Both are proxied
+  // like any other setting, so a Manager can change a peer's.
+  card.appendChild($('<h3>Logging</h3>'));
+
+  // Log level.
+  const lg = $('<div class="settings-row" id="loglevel-row"></div>');
+  const lgLabel = $('<div><div class="settings-label">Log level</div><div class="settings-desc">How much this node logs (error, warn, info, debug). Switch to <b>debug</b> to see rejected handshakes and connection failures that don\u2019t show at info. Applied immediately, no restart. Leave on info normally; debug is chatty.</div></div>');
+  const lgSel = $('<select class="sel" id="loglevel-sel"><option value="error">error</option><option value="warn">warn</option><option value="info">info</option><option value="debug">debug</option></select>');
+  lgSel.value = state.logLevel || 'info';
+  lgSel.onchange = async () => {
+    const want = lgSel.value;
+    const prev = state.logLevel || 'info';
+    const ok = await edit('/api/loglevel', { level: want });
+    if (ok) { state.logLevel = want; }
+    else { lgSel.value = prev; }
+  };
+  lg.appendChild(lgLabel); lg.appendChild(lgSel);
+  card.appendChild(lg);
+
+  // Log size. The log file is a single rolling file capped at this size; once
+  // full, the oldest lines are dropped from the front (FIFO) to make room for
+  // new ones, so it never grows without bound and always holds the most recent
+  // output. Accepts a human size with a unit suffix — 200M, 1G, 99K — or a bare
+  // byte count. Committed on Enter or blur (not per keystroke); the box snaps to
+  // the canonical form the server echoes back, and reverts on a rejected value.
+  const lz = $('<div class="settings-row" id="logsize-row"></div>');
+  const lzLabel = $('<div><div class="settings-label">Log size</div><div class="settings-desc">Maximum size of the log file; oldest lines are dropped once it\u2019s full. e.g. <b>200M</b>, <b>1G</b>, <b>99K</b>. Default 200M.</div></div>');
+  const lzInput = $('<input type="text" class="sel" id="logsize-input" style="width:90px" placeholder="200M">');
+  lzInput.value = state.logMaxSize || '200M';
+  let lzLast = lzInput.value;
+  const saveLZ = async () => {
+    const want = (lzInput.value || '').trim();
+    if (!want || want === lzLast) { lzInput.value = lzLast; return; }
+    const r = await api('/api/logsize', { method:'POST', body: JSON.stringify({ size: want }) });
+    if (r.ok && r.body && r.body.size) {
+      state.logMaxSize = r.body.size;
+      lzLast = r.body.size;
+      lzInput.value = r.body.size; // canonical form from the server
+    } else {
+      alert((r.body && r.body.error) || 'could not set log size');
+      lzInput.value = lzLast; // revert
+    }
+  };
+  lzInput.onkeydown = (e) => { if (e.key === 'Enter'){ e.preventDefault(); lzInput.blur(); } };
+  lzInput.onblur = saveLZ;
+  lz.appendChild(lzLabel); lz.appendChild(lzInput);
+  card.appendChild(lz);
+
+  c.appendChild(card); card = $('<div class="card"></div>');
+
+  card.appendChild($('<h3>Config history</h3>'));
+
+  const chRow = $('<div class="settings-row" id="config-history-limit-row"></div>');
+  const chLabel = $('<div><div class="settings-desc">How many automatic and manual configuration snapshots to keep (System \u2192 Config History), FIFO \u2014 oldest pruned first once you go over this. 0 uses the default (250). Applied immediately; no restart.</div></div>');
+  const chInp = $('<input type="number" min="0" step="1" style="width:80px">');
+  chInp.value = state.configHistoryLimit;
+  chInp.onchange = async () => {
+    const v = parseInt(chInp.value, 10);
+    if (isNaN(v) || v < 0) { alert('Enter 0 or a positive whole number.'); chInp.value = state.configHistoryLimit; return; }
+    if (v === state.configHistoryLimit) return;
+    const ok = await edit('/api/history/limit', { limit: v });
+    if (ok) { state.configHistoryLimit = v; }
+    else { chInp.value = state.configHistoryLimit; }
+  };
+  chRow.appendChild(chLabel); chRow.appendChild(chInp);
+  card.appendChild(chRow);
+  card.appendChild($('<div class="settings-desc" style="margin-top:10px">Currently holding '+state.configHistoryCount+' of '+state.configHistoryLimit+' snapshot'+(state.configHistoryCount===1?'':'s')+'.</div>'));
+
+  c.appendChild(card);
+}
+
+// secSettingsSecurity: everything that gates access — logging in, this
+// node's TLS identity, what a Manager peer is allowed to do (Managed/
+// Manager mode, remote shell, Manager-pushed upgrades), and whether an
+// address lookup leaves this node for a third party. Login, TLS
+// certificate, Cluster, and Privacy all lived scattered across the old
+// flat list; they belong together because they're all, in one way or
+// another, "who can do what, and what leaves this box."
+function secSettingsSecurity(c) {
+  let card = $('<div class="card"></div>');
+
   card.appendChild($('<h3>Login</h3>'));
   const loginBanPending = $('<div class="settings-desc" id="loginban-restart-pending" style="color:var(--acc);min-height:1.2em"></div>');
   if (state.loginBanRestartPending) loginBanPending.textContent = 'Changes saved \u2014 restarting in a moment to apply them.';
   card.appendChild(loginBanPending);
 
-  // Lockout attempts/duration — same shape as Worker threads/TUN queues in
-  // the Performance card below (commits on change, restart debounced rather
-  // than immediate — see scheduleLoginBanRestart's doc comment), but each
+  // Lockout attempts/duration — same shape as Worker threads/TUN queues on
+  // the Performance tab (commits on change, restart debounced rather than
+  // immediate — see scheduleLoginBanRestart's doc comment), but each
   // field posts both values together since the backend takes the whole
   // policy in one call (config.Config.WebAdminLoginBanSet) rather than two
   // independent setters.
@@ -2660,6 +2795,7 @@ function secSettings(c) {
   card.appendChild(lbd);
 
   c.appendChild(card); card = $('<div class="card"></div>');
+
   card.appendChild($('<h3>TLS certificate</h3>'));
   card.appendChild($('<div class="settings-desc" style="margin-bottom:10px">Upload a certificate and its matching private key (PEM). Validated before anything is saved. Needs a restart to take effect.</div>'));
 
@@ -2711,25 +2847,7 @@ function secSettings(c) {
   }
 
   c.appendChild(card); card = $('<div class="card"></div>');
-  card.appendChild($('<h3>Config history</h3>'));
 
-  const chRow = $('<div class="settings-row" id="config-history-limit-row"></div>');
-  const chLabel = $('<div><div class="settings-desc">How many automatic and manual configuration snapshots to keep (System \u2192 Config History), FIFO \u2014 oldest pruned first once you go over this. 0 uses the default (250). Applied immediately; no restart.</div></div>');
-  const chInp = $('<input type="number" min="0" step="1" style="width:80px">');
-  chInp.value = state.configHistoryLimit;
-  chInp.onchange = async () => {
-    const v = parseInt(chInp.value, 10);
-    if (isNaN(v) || v < 0) { alert('Enter 0 or a positive whole number.'); chInp.value = state.configHistoryLimit; return; }
-    if (v === state.configHistoryLimit) return;
-    const ok = await edit('/api/history/limit', { limit: v });
-    if (ok) { state.configHistoryLimit = v; }
-    else { chInp.value = state.configHistoryLimit; }
-  };
-  chRow.appendChild(chLabel); chRow.appendChild(chInp);
-  card.appendChild(chRow);
-  card.appendChild($('<div class="settings-desc" style="margin-top:10px">Currently holding '+state.configHistoryCount+' of '+state.configHistoryLimit+' snapshot'+(state.configHistoryCount===1?'':'s')+'.</div>'));
-
-  c.appendChild(card); card = $('<div class="card"></div>');
   card.appendChild($('<h3>Cluster</h3>'));
 
   // Managed toggle. Editable only for *this* node — the one you're actually
@@ -2843,64 +2961,39 @@ function secSettings(c) {
   // some later unrelated syncClusterModeRows call happens to fix it up — the
   // real bug behind being able to flip these for a "remote" node right after
   // navigating here.)
+
   c.appendChild(card);
   syncClusterModeRows();
 
-  // Logging card — sits directly beneath Cluster. Holds Log level (moved here
-  // from Cluster) and Log size. Both apply live on save: the daemon's reload
-  // path updates the running logger's level and the rotating log file's size
-  // cap without a restart (a restart would reset every session, backoff timer
-  // and learned endpoint — the very state you raise the level to observe).
-  // Both are proxied like any other setting, so a Manager can change a peer's.
   card = $('<div class="card"></div>');
-  card.appendChild($('<h3>Logging</h3>'));
 
-  // Log level.
-  const lg = $('<div class="settings-row" id="loglevel-row"></div>');
-  const lgLabel = $('<div><div class="settings-label">Log level</div><div class="settings-desc">How much this node logs (error, warn, info, debug). Switch to <b>debug</b> to see rejected handshakes and connection failures that don\u2019t show at info. Applied immediately, no restart. Leave on info normally; debug is chatty.</div></div>');
-  const lgSel = $('<select class="sel" id="loglevel-sel"><option value="error">error</option><option value="warn">warn</option><option value="info">info</option><option value="debug">debug</option></select>');
-  lgSel.value = state.logLevel || 'info';
-  lgSel.onchange = async () => {
-    const want = lgSel.value;
-    const prev = state.logLevel || 'info';
-    const ok = await edit('/api/loglevel', { level: want });
-    if (ok) { state.logLevel = want; }
-    else { lgSel.value = prev; }
+  card.appendChild($('<h3>Privacy</h3>'));
+  const gi = $('<div class="settings-row" id="geoip-row"></div>');
+  const giLabel = $('<div><div class="settings-label">Geo-IP lookups</div><div class="settings-desc">Show an approximate location and map on a peer or seed\u2019s info panel, looked up from its public address. On by default. Sends the address to a third-party service (ipapi.co) over HTTPS \u2014 turn off to avoid that. Restarts to apply.</div></div>');
+  const giSw = $('<label class="sw"><input type="checkbox" id="geoip-toggle-cb"><span class="sw-slider"></span></label>');
+  const giCb = giSw.querySelector('input');
+  giCb.checked = state.geoipLookup;
+  giCb.onchange = async () => {
+    const want = giCb.checked;
+    const ok = await edit('/api/geoip', { on: want }, true); // restarts automatically once saved
+    if (ok) { state.geoipLookup = want; }
+    else { giCb.checked = !want; }
   };
-  lg.appendChild(lgLabel); lg.appendChild(lgSel);
-  card.appendChild(lg);
+  gi.appendChild(giLabel); gi.appendChild(giSw);
+  card.appendChild(gi);
 
-  // Log size. The log file is a single rolling file capped at this size; once
-  // full, the oldest lines are dropped from the front (FIFO) to make room for
-  // new ones, so it never grows without bound and always holds the most recent
-  // output. Accepts a human size with a unit suffix — 200M, 1G, 99K — or a bare
-  // byte count. Committed on Enter or blur (not per keystroke); the box snaps to
-  // the canonical form the server echoes back, and reverts on a rejected value.
-  const lz = $('<div class="settings-row" id="logsize-row"></div>');
-  const lzLabel = $('<div><div class="settings-label">Log size</div><div class="settings-desc">Maximum size of the log file; oldest lines are dropped once it\u2019s full. e.g. <b>200M</b>, <b>1G</b>, <b>99K</b>. Default 200M.</div></div>');
-  const lzInput = $('<input type="text" class="sel" id="logsize-input" style="width:90px" placeholder="200M">');
-  lzInput.value = state.logMaxSize || '200M';
-  let lzLast = lzInput.value;
-  const saveLZ = async () => {
-    const want = (lzInput.value || '').trim();
-    if (!want || want === lzLast) { lzInput.value = lzLast; return; }
-    const r = await api('/api/logsize', { method:'POST', body: JSON.stringify({ size: want }) });
-    if (r.ok && r.body && r.body.size) {
-      state.logMaxSize = r.body.size;
-      lzLast = r.body.size;
-      lzInput.value = r.body.size; // canonical form from the server
-    } else {
-      alert((r.body && r.body.error) || 'could not set log size');
-      lzInput.value = lzLast; // revert
-    }
-  };
-  lzInput.onkeydown = (e) => { if (e.key === 'Enter'){ e.preventDefault(); lzInput.blur(); } };
-  lzInput.onblur = saveLZ;
-  lz.appendChild(lzLabel); lz.appendChild(lzInput);
-  card.appendChild(lz);
   c.appendChild(card);
+}
 
-  card = $('<div class="card"></div>');
+// secSettingsNetwork: how this node times and reaches the mesh itself —
+// route advertisement, keepalive/peer-timeout liveness, the underlay's
+// listening ports, and NAT/UPnP. Routing, Liveness, Underlay, and NAT all
+// tune the same thing from different angles (when to speak, how long to
+// wait, and where to listen), which is exactly what made them hard to
+// place confidently in the old undifferentiated list.
+function secSettingsNetwork(c) {
+  let card = $('<div class="card"></div>');
+
   card.appendChild($('<h3>Routing</h3>'));
   const ra = $('<div class="settings-row" id="routeadv-row"></div>');
   const raLabel = $('<div><div class="settings-label">Route advertisement interval</div><div class="settings-desc">How often (seconds) this node re-advertises the routes it originates. 0 uses the default (10s).</div></div>');
@@ -2923,6 +3016,7 @@ function secSettings(c) {
   raInput.onkeydown = (e) => { if (e.key === 'Enter') { raInput.blur(); } };
 
   c.appendChild(card); card = $('<div class="card"></div>');
+
   card.appendChild($('<h3>Liveness</h3>'));
   const ka = $('<div class="settings-row" id="keepalive-row"></div>');
   const kaLabel = $('<div><div class="settings-label">Keepalive interval</div><div class="settings-desc">How often (seconds) this node pings each connected peer, keeping NAT mappings open and measuring round-trip time. Lower detects a dead link faster at the cost of more background traffic. 0 uses the default (10s).</div></div>');
@@ -2965,6 +3059,7 @@ function secSettings(c) {
   ptInput.onkeydown = (e) => { if (e.key === 'Enter') { ptInput.blur(); } };
 
   c.appendChild(card); card = $('<div class="card"></div>');
+
   card.appendChild($('<h3>Underlay</h3>'));
   card.appendChild(buildPortListRow('udpport', 'UDP port',
     'The UDP port(s) this node listens on; comma-separated for more than one. The first is the primary: used for outbound and advertised to peers. Changing it applies immediately: the node rebinds and connected peers migrate automatically; the old port keeps serving inbound for a couple of minutes so nothing drops. Peers that only know this node by a fixed seed address will need that seed updated if the primary changes. Any further ports are extra, inbound-only listeners (e.g. 65432, 443, 80), so a peer behind a restrictive firewall can still reach this node; best-effort, a port that\u2019s privileged or already in use is skipped, not rejected. Enter <b>-</b> to turn UDP off entirely and rely on the TCP fallback below; refused while that\u2019s also off, since the node needs at least one way to be reached.',
@@ -2979,6 +3074,7 @@ function secSettings(c) {
     state.tcpFallbackDisabled));
 
   c.appendChild(card); card = $('<div class="card"></div>');
+
   card.appendChild($('<h3>NAT</h3>'));
   const nt = $('<div class="settings-row" id="natstate-row"></div>');
   const ntLabel = $('<div><div class="settings-label">NAT state timeout</div><div class="settings-desc">How long an idle translated NAT connection is remembered before its mapping is reclaimed, in seconds. Applies to every network. 0 uses the default (120s).</div></div>');
@@ -3014,23 +3110,17 @@ function secSettings(c) {
   up.appendChild(upLabel); up.appendChild(upSw);
   card.appendChild(up);
 
-  c.appendChild(card); card = $('<div class="card"></div>');
-  card.appendChild($('<h3>Privacy</h3>'));
-  const gi = $('<div class="settings-row" id="geoip-row"></div>');
-  const giLabel = $('<div><div class="settings-label">Geo-IP lookups</div><div class="settings-desc">Show an approximate location and map on a peer or seed\u2019s info panel, looked up from its public address. On by default. Sends the address to a third-party service (ipapi.co) over HTTPS \u2014 turn off to avoid that. Restarts to apply.</div></div>');
-  const giSw = $('<label class="sw"><input type="checkbox" id="geoip-toggle-cb"><span class="sw-slider"></span></label>');
-  const giCb = giSw.querySelector('input');
-  giCb.checked = state.geoipLookup;
-  giCb.onchange = async () => {
-    const want = giCb.checked;
-    const ok = await edit('/api/geoip', { on: want }, true); // restarts automatically once saved
-    if (ok) { state.geoipLookup = want; }
-    else { giCb.checked = !want; }
-  };
-  gi.appendChild(giLabel); gi.appendChild(giSw);
-  card.appendChild(gi);
+  c.appendChild(card);
+}
 
-  c.appendChild(card); card = $('<div class="card"></div>');
+// secSettingsPerformance: advanced data-plane tuning (worker pools, TUN
+// queues, socket buffers, UDP GSO/GRO) that most setups never touch. Kept
+// on its own tab rather than folded into Network so the knobs someone
+// reaches for after profiling a real throughput ceiling aren't mixed in
+// with the handful of settings every node operator eventually adjusts.
+function secSettingsPerformance(c) {
+  let card = $('<div class="card"></div>');
+
   card.appendChild($('<h3>Performance (advanced)</h3>'));
   card.appendChild($('<div class="settings-desc" style="margin-bottom:10px">These size the outbound/inbound worker pools and the underlay\u2019s packet-batching path. Sane defaults for most setups; only worth touching if you\u2019ve profiled a real throughput ceiling.</div>'));
   const perfPending = $('<div class="settings-desc" id="perf-restart-pending" style="color:var(--acc);min-height:1.2em"></div>');
@@ -3041,7 +3131,7 @@ function secSettings(c) {
   // every other control on this page, but the restart itself is debounced
   // (schedulePerfRestart) rather than firing immediately — see that
   // function's doc comment for why this card specifically needs that and
-  // GeoIP/UPnP below it deliberately don't.
+  // GeoIP (Security tab) and UPnP (Network tab) deliberately don't.
   const wt = $('<div class="settings-row" id="worker-threads-row"></div>');
   const wtLabel = $('<div><div class="settings-label">Worker threads</div><div class="settings-desc">How many goroutines process outbound TUN traffic and inbound UDP traffic. 0 uses the default (CPU cores minus one, minimum one).</div></div>');
   const wtInp = $('<input type="number" min="0" step="1" style="width:80px">');
@@ -3738,7 +3828,7 @@ function openPeerShellFromSel(n, sec) {
   // that node: it still needs Manager mode and a live connection.
   const trulyLocalSelf = p.self && !state.target;
   if (!trulyLocalSelf) {
-    if (!state.manager){ alert('enable Manager mode (Settings \u2192 Cluster) to open a shell on a peer'); return; }
+    if (!state.manager){ alert('enable Manager mode (Settings \u2192 Security \u2192 Cluster) to open a shell on a peer'); return; }
     if (p.disabled || p.pending){ alert('that peer is not currently connected'); return; }
   }
   openShellModal(p.id, p.host || p.id);
@@ -4430,7 +4520,7 @@ function renderInfoLookup(body, d){
 // succeeded.
 function geoIPSectionHTML(d){
   if (!d.geoEnabled){
-    return '<div class="hint">Geo-IP lookups are turned off. Enable them under Settings \u2192 Privacy to see an approximate location here.</div>';
+    return '<div class="hint">Geo-IP lookups are turned off. Enable them under Settings \u2192 Security \u2192 Privacy to see an approximate location here.</div>';
   }
   if (d.geoErr){
     return '<div class="hint">'+esc(d.geoErr)+'</div>';
@@ -7236,6 +7326,17 @@ async function drawUpgrade(host){
         resBox.appendChild($('<div class="hint" style="color:var(--danger,#b33)">'+esc(body.error || 'push failed')+'</div>'));
         return;
       }
+      // resultLabel is peerLabel without the id/version suffix: useful in the
+      // picker above, where "which builds are behind" is the point, but
+      // actively misleading here — the version it would show is this peer's
+      // *pre-push* version (state.cluster hasn't refreshed yet), so right
+      // next to "applied, restarting" it reads as the version just applied
+      // when it's actually the one being replaced. The hostname alone is
+      // enough once a peer's identity was already settled by picking it.
+      const resultLabel = (id) => {
+        const p = (state.cluster || []).find(x => x.node_id === id);
+        return (p && p.hostname) || id.slice(0,8);
+      };
       // addResult renders one peer's line the moment it's known, rather than
       // a loop over a fully-collected array once every peer is done — that's
       // the whole point of reading the response as a stream below.
@@ -7250,7 +7351,7 @@ async function drawUpgrade(host){
         mark.textContent = res.ok ? '\u2713 ' : '\u2717 ';
         mark.style.color = res.ok ? 'var(--ok,#2a2)' : 'var(--danger,#b33)';
         line.appendChild(mark);
-        line.appendChild(document.createTextNode(peerLabel(res.node) + (res.ok ? (res.skipped ? ' \u2014 already up to date' : ' \u2014 applied, restarting') : '')));
+        line.appendChild(document.createTextNode(resultLabel(res.node) + (res.ok ? (res.skipped ? ' \u2014 already up to date' : ' \u2014 applied, restarting') : '')));
         if (!res.ok && res.error){
           const why = $('<div class="hint" style="margin:2px 0 6px 16px;white-space:pre-wrap"></div>');
           why.textContent = res.error;
@@ -9687,7 +9788,17 @@ function secLogs(c){
         setTimeout(() => URL.revokeObjectURL(url), 1000);
       } },
     { label:'tshoot', cls:'ghost', title:'download one file with everything needed to troubleshoot this node: every peer on every network with reach, relay, session age, path MTU, fragment and drop counters; routes; bans; disabled peers; firewall rules and exemptions; NAT status; interfaces; the config with secrets redacted; and the tail of the log. Collect it from both ends of any peer problem \u2014 the two nodes can legitimately disagree, and the disagreement is often the diagnosis.', onclick: async () => {
-        const r = await fetch('/api/tshoot', { credentials:'same-origin' });
+        // Built by hand rather than via api(): the response is a raw text/plain
+        // attachment, not JSON, so api()'s fetch-then-json() wrapper can't carry
+        // it. That means /api/tshoot needs the same manual proxy-URL treatment
+        // as the pcap download in infoCapture — otherwise this always lands on
+        // the node you're logged into, silently ignoring whichever peer is
+        // selected in the header (see LOCAL_API's comment for the general rule
+        // this is an instance of).
+        const tshootUrl = state.target
+          ? '/api/proxy?node='+encodeURIComponent(state.target)+'&path='+encodeURIComponent('/api/tshoot')
+          : '/api/tshoot';
+        const r = await fetch(tshootUrl, { credentials:'same-origin' });
         if (!r.ok) { alert('could not build the bundle (HTTP '+r.status+')'); return; }
         const text = await r.text();
         const blob = new Blob([text], { type:'text/plain' });

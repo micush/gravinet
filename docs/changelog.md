@@ -2,6 +2,147 @@
 
 ---
 
+## v719 — 2026-07-29
+
+**Fixed: the tshoot download (Monitor → Logs → tshoot) always bundled the
+node you're logged into, even with a different peer selected in the
+header dropdown — e.g. selecting `gn-ionos2` and clicking tshoot still
+downloaded the local node's own diagnostics.**
+
+Every other per-peer action in the UI goes through one of two paths that
+both respect the header selection: the `api()` wrapper (which routes
+through `/api/proxy?node=...` whenever `state.target` is set), or, for
+downloads that need the raw response body rather than JSON, a hand-built
+proxy URL — that's the pattern the pcap capture download already uses,
+with its own comment explaining why `api()` doesn't fit a binary/text
+attachment. The tshoot button was added later and called
+`fetch('/api/tshoot', ...)` directly, skipping both paths entirely, so
+it was structurally incapable of ever reaching a peer — it always landed
+on the node serving the page, regardless of the dropdown.
+
+**Fix:** tshoot's download handler now builds the same
+`/api/proxy?node=<target>&path=/api/tshoot` URL as the capture download
+when a peer is selected, falling back to the direct `/api/tshoot` path
+only when the dropdown is on the local node (`state.target` unset). No
+server-side change was needed — `/api/tshoot` was already a normal
+proxyable `/api/` route; `handleProxy` forwards method, body, and
+Content-Type generically, and none of its local-only exceptions (managed
+mode, upgrade orchestration, shell settings) apply to it.
+
+This is client-side JS embedded in the Go binary with no separate
+frontend build/test step. Verified: the full embedded `<script>` block
+still passes `node --check`.
+
+Verified with go1.22.2: `go build ./...` and the full `internal/webadmin`
+suite pass (unaffected — no Go-visible behavior changed; the fix is
+entirely in the embedded JS).
+
+---
+
+## v718 — 2026-07-29
+
+**Fixed: the fleet upgrade push results feed (System → Upgrade) showed
+each peer's node id and version next to its outcome — e.g. "gn-manjaro ·
+a32c3b46 · v716 — applied, restarting" — and the version shown there was
+actively misleading, not just cluttered.**
+
+That id/version suffix comes from `peerLabel`, shared with the peer
+picker above it, where it earns its keep: "which builds are behind" is
+the whole reason an operator reads that list before deciding who to
+push to. But `state.cluster`'s version field isn't refreshed mid-push,
+so the version rendered next to a *result* line is each peer's version
+from **before** this push — sitting directly next to "applied,
+restarting" it reads as the version just applied, when it's actually the
+one being replaced. Dropping the id added nothing either: once a peer's
+been picked by name, repeating its id back doesn't help confirm anything
+the hostname didn't already.
+
+**Fix:** the results feed now uses a separate `resultLabel` — hostname
+only, no id, no version — while the picker keeps `peerLabel` (id +
+version) unchanged, since that's the one place the version is genuinely
+useful.
+
+This is client-side JS embedded in the Go binary with no separate
+frontend build/test step. Verified: the full embedded `<script>` block
+still passes `node --check`; grepped to confirm `peerLabel` is still the
+picker's label function and `resultLabel` is now the only thing feeding
+the results line.
+
+Verified with go1.22.2: `go build ./...` and `go vet ./...` clean, and
+the full `internal/webadmin` suite passes (unaffected — no Go-visible
+behavior changed).
+
+---
+
+## v717 — 2026-07-29
+
+**Changed: Settings is now four grouped tabs (General, Security, Network,
+Performance) instead of one long flat stack of twelve cards in whatever
+order they'd accumulated over time.**
+
+**What was wrong.** Appearance, Login, TLS certificate, Config history,
+Cluster, Logging, Routing, Liveness, Underlay, NAT, Privacy, and
+Performance (advanced) all rendered top to bottom on one page, in an order
+that reflected the sequence they were added in rather than what they have
+to do with each other — a cosmetic dark-mode toggle sat directly above
+account lockout policy, which sat above a TLS certificate upload, above
+config-snapshot retention, above four different cluster-trust toggles,
+above log level and log size, above route/keepalive/port/NAT tuning,
+above a third-party privacy toggle, above advanced worker-pool sizing.
+Finding anything meant scanning the whole page.
+
+**The fix regroups by what the setting actually governs**, using the same
+`state.<section>Tab` + `buildTabBar` pattern Firewall (v330) already
+established for exactly this — unrelated concerns under one section
+header, switchable without a page navigation:
+
+- **General** — Appearance, Logging, Config history: interface
+  preference and local housekeeping that doesn't change mesh behavior or
+  who can do what. The default tab.
+- **Security** — Login, TLS certificate, Cluster, Privacy: everything
+  that gates access — logging in, this node's TLS identity, what a
+  Manager peer may do (Managed/Manager mode, remote shell,
+  Manager-pushed upgrades), and whether an address lookup leaves this
+  node for a third party.
+- **Network** — Routing, Liveness, Underlay, NAT: how this node times
+  and reaches the mesh itself.
+- **Performance** — the advanced worker-pool/TUN-queue/socket-buffer/UDP
+  GSO card, split out on its own so profiling-grade knobs aren't mixed in
+  with settings every operator eventually touches.
+
+Every card keeps its existing id, description, and behavior — this only
+changes which tab a card renders under and the order cards appear in
+within that tab. `buildSearchIndex`'s settings entries now each carry
+which tab they live on, and `navigateToSearchResult`'s tab-setting logic
+(previously hardcoded to `state.firewallTab`, with a comment noting it was
+"generalizable... if another section grows tabs later") is now generic
+across any section with tabs, so a search hit switches to the right tab
+before scrolling to the row — a settings result can no longer land on a
+row that isn't actually rendered because a different tab is showing.
+Also filled in six settings (Keepalive interval, Peer timeout, Worker
+threads, TUN queues, Socket buffer, UDP GSO/GRO) that were never in the
+search index at all, an unrelated pre-existing gap noticed while touching
+this table.
+
+Two hint strings that pointed at "Settings → Cluster" and "Settings →
+Privacy" now say "Settings → Security → Cluster" / "→ Privacy" so they
+name a path that's actually one click away rather than skipping the tab.
+
+This is client-side JS embedded in the Go binary with no separate
+frontend build/test step, so it isn't covered by a Go test. Verified: the
+entire embedded `<script>` block (`internal/webadmin/ui.go`) still passes
+`node --check`; every row id referenced by the search index was
+cross-checked against the ids actually defined in the new tab functions
+(all 24 present, no duplicates); all twelve original card headers were
+confirmed present exactly once across the four new tab functions with
+nothing dropped or duplicated in the split.
+
+Verified with go1.22.2: `go build ./...` and `go vet ./...` clean, and
+the full `internal/webadmin` suite passes (unaffected — no Go-visible
+behavior changed).
+
+---
+
 ## v716 — 2026-07-29
 
 **Fixed: the latency history modal (Monitor → Latency → click a trend
