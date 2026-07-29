@@ -1105,6 +1105,26 @@ type peerSession struct {
 	// should be flat at zero on a healthy link — a non-zero, climbing value
 	// means corruption on the path or traffic forged at this session index.
 	authDrop atomic.Uint64
+	// The remaining silent drops in the data path. Every one of these was
+	// previously a bare `return` (or, for tunWriteDrop, a lone Debugf), which
+	// meant a peer could be losing every data packet while its session looked
+	// perfectly healthy by RTT, uptime and fragment counters — control traffic
+	// never touches any of these checks, so ping/pong keeps completing right
+	// through it. Diagnosing that state cost an entire investigation of
+	// inference from ping matrices; these four make it a glance.
+	//
+	// fwInDrop:      dropped by the ingress firewall (fwIn).
+	// policeDrop:    dropped by ingress rate policing (over the down-rate).
+	// tunWriteDrop:  the write to the overlay device failed. Distinct from the
+	//                three policy drops above: those are decisions, this is a
+	//                failure, and it is invisible to the receiving host's
+	//                kernel counters because the packet never reached IP input.
+	// egressQDrop:   the egress shaper's queue was full when this packet was
+	//                enqueued for this peer.
+	fwInDrop     atomic.Uint64
+	policeDrop   atomic.Uint64
+	tunWriteDrop atomic.Uint64
+	egressQDrop  atomic.Uint64
 
 	// txBytes/rxBytes count outer-datagram bytes exchanged with this peer —
 	// encrypted wire bytes at the mesh layer, counted where the session is
@@ -2051,12 +2071,20 @@ func (e *Engine) deliverInner(ps *peerSession, ip []byte, outerLen int) {
 		nat.translateIn(ip) // reverse-SNAT / DNAT
 	}
 	if !ps.net.fw.allow(fwIn, ip) {
+		ps.fwInDrop.Add(1)
 		return // dropped by firewall (ingress)
 	}
 	if ig := ps.net.ingress.Load(); ig != nil && !ig.allowN(float64(outerLen)) {
+		ps.policeDrop.Add(1)
 		return // ingress policing: over the down-rate, drop
 	}
 	if _, err := ps.net.dev().Write(ip); err != nil {
+		// Counted, not just logged: this drop is invisible from the receiving
+		// host as well as from here. The packet was decrypted, cleared every
+		// check above, and then never reached IP input — so none of the
+		// kernel's own counters move either, and a debug line nobody has
+		// enabled is the only trace it ever left.
+		ps.tunWriteDrop.Add(1)
 		e.log.Debugf("mesh: tun write: %v", err)
 	}
 }
@@ -2591,6 +2619,7 @@ func (e *Engine) processOutbound(ns *netState, buf []byte) {
 	}
 	if eg := ns.egress.Load(); eg != nil {
 		if !eg.enqueue(ps, append([]byte(nil), pkt...)) {
+			ps.egressQDrop.Add(1)
 			e.log.Debugf("mesh: egress queue full on net %x, dropping packet", ns.spec.ID)
 		}
 	} else {

@@ -3669,6 +3669,8 @@ function peerRowsForNet(n) {
       fsent:p.FragsSent||p.frags_sent||0, fsdrop:p.FragSendDrop||p.frag_send_drop||0,
       frcvd:p.FragsRcvd||p.frags_rcvd||0, rdrop:p.ReasmDrop||p.reasm_drop||0,
       repdrop:p.ReplayDrop||p.replay_drop||0, authdrop:p.AuthDrop||p.auth_drop||0,
+      fwindrop:p.FwInDrop||p.fw_in_drop||0, policedrop:p.PoliceDrop||p.police_drop||0,
+      tunwdrop:p.TunWriteDrop||p.tun_write_drop||0, eqdrop:p.EgressQDrop||p.egress_q_drop||0,
       rtt:p.RTTMs||p.rtt_ms||0 });
   }
   const seen = new Set(rows.map(r => r.id));
@@ -3958,6 +3960,15 @@ function infoMeshPeers(c) {
         let sessDrops = '';
         if (repd > 0) sessDrops += ' <span class="off" title="inbound packets this peer\'s session rejected as replayed or stale: they arrived more than 64 packets out of order and the receive window threw them away. On a link with no attacker these are legitimate packets, and each one cost a full encrypt and send on the far side plus a retransmit. A count that climbs in step with throughput means the replay window itself is limiting this path.">replay '+repd+'</span>';
         if (autd > 0) sessDrops += ' <span class="off" title="inbound packets whose AEAD tag did not verify: corruption on the path, or traffic forged at this session index. Unlike replay drops this should stay flat at zero on a healthy link.">auth '+autd+'</span>';
+        // Data-path drops. None of these are reachable by control traffic, so
+        // each one is a case where the peer holds a healthy RTT and uptime
+        // while losing data — the state that is otherwise indistinguishable
+        // from a working peer at this zoom level. Shown only when non-zero.
+        const fwd = p.fwindrop||0, pold = p.policedrop||0, twd = p.tunwdrop||0, eqd = p.eqdrop||0;
+        if (twd > 0) sessDrops += ' <span class="off" title="packets decrypted, passed every policy check, and then failed on the write to the overlay device. They never reached this host\'s IP layer, so no kernel counter here records them either — a packet visible in tcpdump on the overlay interface and absent from every nstat counter is this. Usually a device queue that is full or a reader falling behind.">tun-write '+twd+'</span>';
+        if (fwd > 0) sessDrops += ' <span class="off" title="inbound data packets dropped by the ingress firewall for this network. Control traffic never reaches the firewall, so a peer can hold a perfect RTT while every data packet from it is discarded here.">fw-in '+fwd+'</span>';
+        if (pold > 0) sessDrops += ' <span class="off" title="inbound data packets dropped by ingress rate policing: the peer is sending faster than this network\'s configured down-rate. Not a fault in the path — a limit being enforced.">policed '+pold+'</span>';
+        if (eqd > 0) sessDrops += ' <span class="off" title="outbound packets dropped because the egress shaper queue for this peer was full. The send rate exceeded what the configured up-rate could drain.">egress-q '+eqd+'</span>';
         xport = proto + ' <span class="hint" title="discovered underlay datagram size to this peer">'+esc(mtu)+'</span> '
           + '<span class="hint" title="fragment datagrams sent / received">tx '+(p.fsent||0)+' rx '+(p.frcvd||0)+'</span> '+health+sessDrops;
       }

@@ -119,6 +119,22 @@ type PeerInfo struct {
 	// grow two always-zero fields.
 	ReplayDrop uint64 `json:"replay_drop,omitempty"`
 	AuthDrop   uint64 `json:"auth_drop,omitempty"`
+
+	// The rest of the data path's drops, split by cause. All four are
+	// data-plane only: control traffic (ctrlPing/ctrlPong, gossip) reaches
+	// neither the firewall, the policer, the overlay device, nor the egress
+	// queue, which is why a peer can hold a healthy RTT while losing every
+	// data packet. Omitted from JSON when zero.
+	//
+	// TunWriteDrop is the one to read first when a peer is unreachable but
+	// looks fine: it means the packet was decrypted, passed every policy
+	// check, and then failed on the write to the overlay device — so it never
+	// reached the receiving host's IP layer and none of that host's own
+	// counters will show it either.
+	FwInDrop     uint64 `json:"fw_in_drop,omitempty"`
+	PoliceDrop   uint64 `json:"police_drop,omitempty"`
+	TunWriteDrop uint64 `json:"tun_write_drop,omitempty"`
+	EgressQDrop  uint64 `json:"egress_q_drop,omitempty"`
 }
 
 func banKey(origin, target string) string { return origin + "\x00" + target }
@@ -877,6 +893,10 @@ func (e *Engine) ListPeers(networkID uint64) []PeerInfo {
 			SpoofDrop:     ps.spoofDrop.Load(),
 			ReplayDrop:    ps.replayDrop.Load(),
 			AuthDrop:      ps.authDrop.Load(),
+			FwInDrop:      ps.fwInDrop.Load(),
+			PoliceDrop:    ps.policeDrop.Load(),
+			TunWriteDrop:  ps.tunWriteDrop.Load(),
+			EgressQDrop:   ps.egressQDrop.Load(),
 			TxBytes:       ps.txBytes.Load(),
 			RxBytes:       ps.rxBytes.Load(),
 			TxPackets:     ps.txPkts.Load(),

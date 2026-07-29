@@ -2,6 +2,237 @@
 
 ---
 
+## v705 — 2026-07-28
+
+**Fixed: a peer could become permanently unreachable after a session
+teardown, because the relay fallback was waiting for evidence that nothing
+would ever produce.** The node stayed in the peer registry with a valid
+advertised endpoint, held no session, and neither dialed nor relayed —
+indefinitely, with nothing logged.
+
+**The deadlock.** `tryRelays` relays only once a direct path has
+demonstrably failed, which it tested by looking for a `seedBackoff` entry
+for the node's endpoint. That reads a missing entry as "direct hasn't been
+tried yet, keep waiting" — but a missing entry is ambiguous, and the other
+meaning is the dangerous one. `install()` deliberately deletes the backoff
+entry for an endpoint on a successful connect, and prunes the seed that
+produced it (attributable via `seedOwner`, not operator-configured). So
+after a later teardown the node is left known, endpointed, sessionless,
+with no backoff entry *and* no seed that would ever dial it again. No dial
+means no backoff entry; no backoff entry meant no relay. Nothing breaks
+the cycle from either side.
+
+A peer behind symmetric NAT never escapes at all, since its advertised
+endpoint cannot work even if something did dial it.
+
+**Why it presents as a one-sided session.** `teardownSessions` is purely
+local — it removes the session, its routes and its bypass reference, and
+never tells the peer. So the two ends disagree: the side that reaped has
+to re-establish and is the side that gets stuck, while the other keeps a
+session in `byNode`, keeps routing overlay traffic into it, and keeps
+sending into an index the far end has discarded. In the field this showed
+as one node listing twelve peers and the other listing thirteen, each
+holding a different view of the same pair, with pings that got no reply
+because the replying side had no session to reply on.
+
+**The fix.** The gate now asks whether a direct attempt is actually going
+to happen, rather than whether one has already failed. `shouldRelay`
+returns true when the endpoint is invalid (unchanged), when it is in
+backoff (unchanged), or when no seed exists that would dial it — the case
+that previously wedged. The original intent is preserved exactly where it
+applies: while a seed is queued and not cooling down, a direct attempt is
+genuinely pending and relaying early would stack a hop for nothing.
+
+**Tests** (`internal/mesh/relaygate_test.go`):
+
+- `TestTryRelaysWhenNoBackoffEntryExists` builds the wedged state directly
+  — known node, valid endpoint, no session, no seed, no backoff, a willing
+  relay connected and reporting it — and asserts a relayed handshake is
+  started. Confirmed to fail against the old gate.
+- `TestTryRelaysWaitsWhileADirectDialIsStillPending` is the other half:
+  with a seed queued and no backoff, no relay may be started. Without it
+  the fix could degenerate into "always relay", which would stack hops on
+  every peer that is merely slow to connect.
+
+Both tests read `ns.pending` without taking `ns.mu`, deliberately.
+`startRelayHandshake` registers the pending entry before building the
+packet, and building it on a fixture with no session crypto panics while
+`ns.mu` is held; the recover in the test leaves that lock orphaned, so
+taking it in the assertion would deadlock. The decision under test is
+complete at the point the pending entry exists, and the test is
+single-goroutine.
+
+**Not fixed here, and worth stating.** Teardown remains unsignalled: a
+node still learns its peer has gone only by its own timeout expiring.
+Making teardown notify the far end — or answering a datagram for an
+unknown session index with a hint that provokes an immediate re-handshake
+— would shorten these windows from a timeout to a round trip, and would
+have made this bug visible far sooner than it was. Neither is in this
+release.
+
+Verified with go1.22.2: `go build ./...` and `go vet ./...` clean, and the
+full `internal/mesh` suite passes.
+
+---
+
+## v704 — 2026-07-28
+
+**Added: per-cause counters for the four silent drops in the data path,
+surfaced per peer in the admin UI.** No behaviour change — nothing is
+dropped that wasn't dropped before, and nothing is kept that wasn't kept.
+What changes is that a lost packet now says why.
+
+**Why this earned a release of its own.** The data path had four places a
+packet could disappear without a trace: the ingress firewall, ingress rate
+policing, the write to the overlay device, and the egress shaper's queue.
+Three were a bare `return`; the fourth logged a `Debugf` nobody has
+enabled. None of them are reachable by control traffic — `ctrlPing` and
+`ctrlPong` touch neither the firewall, the policer, the device, nor the
+queue — so a peer losing *every* data packet to any of them still reports
+a healthy RTT, a climbing uptime, and clean fragment counters. At the zoom
+level of the peer table, that is indistinguishable from a working peer.
+
+That is not hypothetical. Diagnosing exactly this state consumed an
+afternoon of inference: ping matrices, RTT arithmetic, correlating relay
+assignments against uptimes, and several confident theories that the next
+screenshot falsified. The decisive observation, when it finally arrived,
+was that packets appeared in `tcpdump` on the receiving node's overlay
+interface and then failed to appear in *any* of that host's kernel
+counters — `IpInDiscards`, `IcmpInErrors`, `InCsumErrors` all flat.
+`tcpdump` taps the device before IP input, so a packet visible there and
+absent from every counter after it was written to the device and lost, and
+the only record it left anywhere was a debug line that was not enabled.
+
+**The counters.** Four new `atomic.Uint64` on `peerSession`, mirrored into
+`PeerInfo` and omitted from JSON when zero:
+
+- `tun_write_drop` — the write to the overlay device failed. The one to
+  read first when a peer is unreachable but looks fine. Distinct from the
+  other three in kind: those are decisions, this is a failure, and it is
+  invisible from *both* ends because the packet never reached the
+  receiving host's IP layer.
+- `fw_in_drop` — dropped by the ingress firewall.
+- `police_drop` — dropped by ingress rate policing (over the down-rate).
+  A limit being enforced rather than a fault.
+- `egress_q_drop` — the egress shaper's queue for this peer was full.
+
+Each appears in the peer row beside the existing fragment and session-drop
+badges, only when non-zero, so a healthy peer's row reads exactly as it
+did before. The tooltips are deliberately worded to point at different
+places, in the same spirit as the existing replay/auth split: a count that
+names its cause is worth several rounds of guessing.
+
+**Tests** (`internal/mesh/dropcounters_test.go`). The assertion in each is
+not merely that a drop is counted, but that it increments its *own*
+counter and no other — a counter that fires for several causes reports
+that something was lost, which is what the code already did by dropping
+the packet:
+
+- `TestTunWriteFailureIsCountedAndAttributed` — a device whose `Write`
+  always fails; asserts `tunWriteDrop` is 1 and the three policy counters
+  are all 0. Confirmed to fail with the increment removed.
+- `TestSuccessfulDeliveryCountsNoDrops` — every counter stays 0 on a
+  delivery that succeeds, without which a non-zero value would mean
+  nothing.
+- `TestSpoofedSourceIsCountedSeparately` — a rejected source increments
+  `spoofDrop` and specifically not `tunWriteDrop`.
+
+Worth recording from writing those: `sourceAllowedFrom` fails open in two
+ways that are easy to misread as bugs and are not. With no forwarding
+snapshot published it allows everything, and a source address it has never
+heard of is allowed — only an address that demonstrably belongs to a
+*different* node is rejected. The test has to publish a snapshot
+attributing the foreign address elsewhere before the check has anything to
+reject at all.
+
+Verified with go1.22.2: `go build ./...` and `go vet ./...` clean, and the
+full `internal/mesh` suite passes.
+
+---
+
+## v703 — 2026-07-28
+
+**Fixed: path-MTU discovery on a relayed session searched up to the same
+ceiling a direct session uses, making no allowance for the relay envelope
+its packets get wrapped in.** The result was a relayed peer settling on an
+MTU a full hop too large, all of its traffic riding fragmented from then
+on, and the session being reaped and rebuilt on a loop.
+
+**The field signature.** A relayed peer would come up and walk its search
+`5140 → 7070 → 8035 → 8518 → 8759 → 8880 → 8940 → 8970 → 8985 → 8993 →
+8997 → 8999 → 9000` in thirteen seconds, converging on exactly the figure
+the *direct* sessions on the same node carried. Then, a minute or two
+later, `pruned dead session`, a fresh `inbound tunnel up ... via relay`,
+and the identical climb again from 5140. Compare the same peer while it
+was reached directly: the kernel returned EMSGSIZE at 5207, 3334, 2398,
+1930, 1696, 1579, 1520 and 1491 bytes, walking the estimate down to a
+true 1510. Relayed, nothing pushed back at all.
+
+**Why nothing pushed back.** The probes ack. `deliver()` does not put a
+relayed peer's sealed datagram on the wire — it wraps it in `encodeRelay`
+and seals *that* on the relay's session, and the relay hop fragments
+whatever it is handed. An acked probe proves the bytes arrived intact,
+which is what the AEAD tag is for, but not that they crossed in a single
+datagram. So the search read reassembled fragments as proof the path
+carried the size, and climbed to the ceiling every time.
+
+The consequence was visible in the peer table before the cause was: the
+relayed peers held the only non-zero fragment counters in the mesh, and
+they were the only sessions that ever tore down. Every direct peer sat at
+process uptime, untouched.
+
+**The fix.** `relayMTUCap` computes what a relayed session may actually
+use — the relay's own effective MTU, less one sealed-datagram overhead
+and `encodeRelay`'s two length-prefixed node IDs — and `applyRelayMTUCap`
+holds the search ceiling there. Chains need no special handling: a relay
+that is itself relayed has already had this applied to its own `effMTU`,
+so capping against that value composes down the chain, which matters here
+because three-hop paths do occur (`bestRelay` prefers a directly-reached
+candidate but does not exclude a relayed one, and nothing caps depth).
+
+Applied on every `pmtuTick` rather than once at install, because neither
+input holds still: relay assignments move on their own as candidates come
+and go, and the relay's own path MTU is being discovered concurrently. A
+cap computed at install would be stale within seconds.
+
+`pmtuState.setCeil` clamps `eff`, `low` and `high` into the new range and
+abandons any in-flight probe above it — an ack for a size no longer
+admissible would only re-confirm something unusable — reopening the search
+so the correct size is re-established under the new bound.
+
+**The ceiling is also restored when a session goes the other way.** This
+was very nearly a regression in the fix: sessions are upgraded from
+relayed to direct whenever a direct path appears
+(`TestRelayedConnectionUpgradesToDirect`), and a cap that only ever
+lowered would leave such a session pinned at its old relayed limit
+indefinitely — the same defect inverted, and harder to notice because it
+only costs throughput. `applyRelayMTUCap` restores the engine-wide ceiling
+when a session has no relay.
+
+**Tests** (`internal/mesh/pmtu_relay_test.go`), all four confirmed to fail
+against the unfixed code:
+
+- `TestRelayedPMTUCeilingAccountsForRelayEnvelope` — the cap is computed
+  correctly, and a direct session is left completely alone. The expected
+  overhead is restated independently in the test rather than borrowed from
+  the production helper; a test that asks the code under test to define the
+  number it is checking proves only that the code agrees with itself.
+- `TestPMTUTickAppliesRelayCap` — exists because the other tests call
+  `applyRelayMTUCap` directly and would all still pass if the cap were
+  computed perfectly and never wired into the discovery loop. Verified by
+  removing the call from `pmtuTick`: the others stay green, this one fails.
+- `TestRelayedPMTUCapClampsAnAlreadyInflatedSession` — a session that
+  converged at the full ceiling while direct is pulled back down when it
+  becomes relayed, search state included, so it cannot re-inflate on the
+  next tick.
+- `TestPMTUCeilingRestoredOnUpgradeToDirect` — the relayed → direct
+  restore above.
+
+Verified with go1.22.2: `go build ./...` and `go vet ./...` clean, and the
+full `internal/mesh` suite passes.
+
+---
+
 ## v702 — 2026-07-28
 
 **Changed: the default dead-session timeout is now 30s, up from 20s.**

@@ -242,6 +242,40 @@ func (p *pmtuState) reset(now time.Time) {
 	p.cand = 0
 }
 
+// setCeil lowers (or restores) the search ceiling, clamping the current search
+// state into the new range. Used when a session's reachability changes: a peer
+// reached through a relay can only use what fits inside its relay's datagram,
+// and that budget moves when the relay changes or the relay's own path MTU does.
+// Any in-flight probe above the new ceiling is abandoned rather than waited out,
+// since its ack could only re-confirm a size we may no longer use.
+func (p *pmtuState) setCeil(c int) bool {
+	if c < p.floor {
+		c = p.floor
+	}
+	if c == p.ceil {
+		return false
+	}
+	p.ceil = c
+	if p.high > c {
+		p.high = c
+	}
+	if p.low > c {
+		p.low = c
+	}
+	if p.eff > c {
+		p.eff = c
+	}
+	if p.cand > c {
+		p.cand = 0
+		p.awaiting = false
+		p.tries = 0
+		// Re-open the search: the settled/validating size is no longer
+		// admissible, so it has to be re-established under the new ceiling.
+		p.phase = phaseSearch
+	}
+	return true
+}
+
 // ---- engine glue ----
 
 // initPMTU sets up a peer's discovery state when its session is installed.
@@ -273,8 +307,78 @@ func (ps *peerSession) setEff(mtu int) {
 	ps.maxFrag.Store(int32(computeMaxInnerFrag(mtu)))
 }
 
+// relayMTUCap returns the largest outer datagram this session may use given
+// that it is reached through a relay, or 0 if it is reached directly (no cap).
+//
+// deliver() does not send a relayed peer's sealed datagram to the wire: it
+// wraps it in encodeRelay's two length-prefixed node IDs and seals *that* on
+// the relay's own session. So our outer must fit inside the relay's outer with
+// room for both. Without this the search climbs to the unrelayed ceiling, the
+// probes ack anyway because the relay hop fragments them, and every full-size
+// packet afterwards rides fragmented — which is how a relayed peer ends up
+// carrying the only non-zero fragment counters in the mesh and getting reaped
+// and rebuilt on a loop.
+//
+// Chains need no special handling: a relay that is itself relayed has already
+// had this applied to its own effMTU, so capping against that value composes
+// down the chain.
+func (e *Engine) relayMTUCap(ps *peerSession) int {
+	r := ps.getRelay()
+	if r == nil {
+		return 0
+	}
+	rEff := int(r.effMTU.Load())
+	if rEff <= 0 {
+		return 0 // relay hasn't published one yet; nothing to bound against
+	}
+	sealed := protocol.DataHeaderLen + 1 + protocol.GCMOverhead
+	return rEff - (sealed + 2 + len(e.nodeID) + len(ps.nodeID))
+}
+
+// applyRelayMTUCap reconciles a session's search ceiling with its current
+// relay. Driven every tick rather than only at install: relay assignments move
+// on their own (a peer can go direct → relayed → direct as candidates come and
+// go), and the relay's own path MTU is itself being discovered concurrently, so
+// a cap computed once at install would be stale almost immediately.
+func (e *Engine) applyRelayMTUCap(ps *peerSession) {
+	// Computed before taking pmtuMu: getRelay takes ps.mu, and taking it under
+	// pmtuMu would invert the order used elsewhere on this session.
+	cap := e.relayMTUCap(ps)
+	if cap <= 0 {
+		// Direct, or the relay hasn't published an MTU yet. Restore the
+		// engine-wide ceiling: sessions are upgraded from relayed to direct
+		// when a direct path appears (see TestRelayedConnectionUpgradesToDirect),
+		// and a session left pinned at its old relayed ceiling would never
+		// climb back to what the direct path can actually carry.
+		if e.pmtuCeil <= 0 {
+			return
+		}
+		cap = e.pmtuCeil
+	}
+	ps.pmtuMu.Lock()
+	if ps.pmtu == nil {
+		ps.pmtuMu.Unlock()
+		return
+	}
+	changed := ps.pmtu.setCeil(cap)
+	eff := ps.pmtu.eff
+	ps.pmtuMu.Unlock()
+	if changed && int32(eff) != ps.effMTU.Load() {
+		ps.setEff(eff)
+		e.log.Debugf("mesh: path mtu to %s capped to %d bytes (reached via relay %q)", ps.nodeID, eff, relayNodeID(ps))
+	}
+}
+
+func relayNodeID(ps *peerSession) string {
+	if r := ps.getRelay(); r != nil {
+		return r.nodeID
+	}
+	return ""
+}
+
 // pmtuTick drives one peer's discovery: issue/resend/expire probes as due.
 func (e *Engine) pmtuTick(ps *peerSession) {
+	e.applyRelayMTUCap(ps)
 	ps.pmtuMu.Lock()
 	if ps.pmtu == nil {
 		ps.pmtuMu.Unlock()

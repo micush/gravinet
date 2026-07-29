@@ -152,12 +152,32 @@ func (e *Engine) tryRelays(ns *netState) {
 		peers = append(peers, ps)
 	}
 	backoff := ns.seedBackoff
-	hasBackoff := func(ep netip.AddrPort) bool {
+	// Seeds that initSeedTick will actually dial. Needed because a missing
+	// backoff entry is ambiguous on its own: it means either "direct hasn't
+	// been tried yet" or "direct was tried, succeeded, and install() cleared
+	// the entry" — and after a later teardown the second case leaves a node
+	// with a valid endpoint, no backoff, and nothing that will ever dial it
+	// again (install() also prunes the seed on connect). Treating that as
+	// "still waiting on direct" wedges the node permanently: no dial means no
+	// backoff entry, and no backoff entry means no relay. Peers behind
+	// symmetric NAT, whose advertised endpoint can never work, never escape
+	// it. See TestTryRelaysWhenNoBackoffEntryExists.
+	dialable := make(map[netip.AddrPort]bool, len(ns.seeds))
+	for _, s := range ns.seeds {
+		dialable[s] = true
+	}
+	// shouldRelay reports whether to go via a relay now rather than keep
+	// waiting for a direct path: no endpoint at all, a direct attempt that has
+	// demonstrably failed (in backoff), or no seed that would produce an
+	// attempt in the first place.
+	shouldRelay := func(ep netip.AddrPort) bool {
 		if !ep.IsValid() {
 			return true // no direct endpoint at all
 		}
-		_, ok := backoff[ep]
-		return ok
+		if _, cooling := backoff[ep]; cooling {
+			return true // direct has demonstrably failed
+		}
+		return !dialable[ep] // nothing will dial it; waiting is indefinite
 	}
 	ns.mu.Unlock()
 
@@ -168,8 +188,9 @@ func (e *Engine) tryRelays(ns *netState) {
 		if ns.isBanned(w.nodeID) || ns.isPeerDisabled(w.nodeID) {
 			continue
 		}
-		// Only relay once direct has demonstrably failed (in backoff or no endpoint).
-		if !hasBackoff(w.endpoint) {
+		// Only relay once direct has demonstrably failed, or once it is clear
+		// nothing is going to attempt it.
+		if !shouldRelay(w.endpoint) {
 			continue
 		}
 		// Best connected peer that reports knowing the target — see bestRelay.
