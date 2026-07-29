@@ -55,6 +55,10 @@ func (e *Engine) install(ns *netState, ps *peerSession) {
 		ps.established = prev.established
 	}
 	ns.byNode[ps.nodeID] = ps
+	// Anything relaying through the session we just replaced must follow it
+	// onto the new one; see repointRelayUsers for what holding the orphan
+	// costs. Deferred until ns.mu is released, below.
+	relayReplaced := prev
 	if ps.overlay4.IsValid() {
 		ns.routes4[ps.overlay4] = ps
 	}
@@ -173,6 +177,11 @@ func (e *Engine) install(ns *netState, ps *peerSession) {
 	}
 	ns.publishFwd()
 	ns.mu.Unlock()
+
+	// Move every peer relaying through the object we just replaced onto the
+	// new one. Done after ns.mu is released: repointRelayUsers takes session
+	// mutexes, and the lock order in this package is never ns.mu -> ps.mu.
+	e.repointRelayUsers(ns, relayReplaced, ps)
 
 	e.addLocalCandidates(ns.spec.ID, ps.nodeID, localCands)
 

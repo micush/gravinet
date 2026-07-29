@@ -2,6 +2,87 @@
 
 ---
 
+## v707 — 2026-07-28
+
+**Fixed: a peer reached through a relay kept a pointer to the relay's old
+session after the relay re-handshaked, and went dark until its own
+timeout reaped it.** This is the defect behind "only relayed hosts are
+affected, direct hosts are always fine" — a symptom reported repeatedly
+and, for several releases, explained wrongly.
+
+**The mechanism.** `peerSession.relay` is a pointer to the relay's own
+`*peerSession`. It was set at session creation and refreshed by `touch()`
+on inbound relayed traffic, and that was all: nothing anywhere cleared or
+repointed it. A relay re-handshakes far more often than it disconnects —
+`install()` services that by putting a *fresh object* in `byNode` and
+orphaning the previous one, deliberately, so establishment time carries
+forward — and every peer reached through that relay went on holding the
+orphan.
+
+`deliver()` then sealed with the orphan's keys and sent to its
+`remoteIdx`, an index the relay node had already discarded. The relay
+dropped it: no error returned, no counter incremented, nothing logged.
+The affected peer was dark outbound while still appearing connected, with
+a healthy RTT, until its own `peerTimeout` reaped the session and a fresh
+handshake installed a current pointer. From outside that reads as a peer
+that works, stops for a minute, and comes back — which is exactly what
+was observed, at exactly that period.
+
+**Why only relayed peers.** A direct session holds no relay pointer at
+all, so there is nothing to dangle. That asymmetry is the entire
+signature, and it is why every direct peer in the field mesh sat at
+process uptime while the relayed ones cycled.
+
+**Why it appeared to be a recent regression.** The bug is latent until
+relay sessions are replaced often. Anything that raises re-handshake
+frequency exposes it — and v701 fixed a defect that was re-handshaking
+peers *once per second*, each one orphaning the relay pointer of every
+peer behind it. A mesh that once worked can therefore start failing here
+without this code changing at all.
+
+**The fix.** `repointRelayUsers` moves every session relaying through a
+replaced object onto its replacement, called from `install()` after
+`ns.mu` is released. `teardownSessions` calls it with a nil replacement
+when a relay goes away entirely, clearing the pointer rather than leaving
+peers sealing traffic to a discarded index, and logs how many peers now
+need a new path — previously that situation was entirely silent.
+
+Sessions are snapshotted under `ns.mu` and their own mutexes taken only
+after it is released, matching `resyncAllBypassRoutes`, so no
+`ns.mu`→`ps.mu` ordering is introduced.
+
+**Tests.** `internal/mesh/relayptr_test.go` covers replacement (dependents
+follow the relay onto its new session), teardown (pointers cleared, not
+left dangling), and isolation (a peer relaying through a *different*
+relay is untouched).
+
+`TestRelayRehandshakeDoesNotBreakRelayedPeers` in
+`relaymtu_repro_test.go` is the end-to-end form, and **it currently skips
+rather than passing**: re-adding a seed will not provoke a re-handshake,
+because `initSeedTick` correctly declines to re-dial a peer it is already
+connected to, and there is no other outside handle for forcing one. A test
+that cannot reach the state it names is worth less than an honest skip,
+and the unit tests exercise the mechanism directly. Providing a test-only
+way to force a re-handshake would close this properly.
+
+**On the releases that preceded this one.** v701 through v706 were all
+real defects with real tests, and none of them were this. They were
+diagnosed by reading symptoms off status tables and reasoning toward a
+plausible cause. What found this one was asking the code a structural
+question — what does a relayed session depend on that a direct one does
+not — which is the question the reported symptom had been pointing at
+from the beginning. Two theories from that same period were killed by
+reproductions in `relaymtu_repro_test.go` (relayed path-MTU is discovered
+correctly end-to-end through a relay; a relayed session survives 25% loss
+on the relay leg for 75 seconds without a teardown), and those
+reproductions are kept because a negative result that closes off a wrong
+avenue is worth as much as the fix.
+
+Verified with go1.22.2: `go build ./...` and `go vet ./...` clean, and the
+full `internal/mesh` suite passes.
+
+---
+
 ## v706 — 2026-07-28
 
 **Added: gravinet now tells the sending host when a packet is too big for

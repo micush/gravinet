@@ -341,3 +341,56 @@ func (e *Engine) startRelayHandshake(ns *netState, target string, relay *peerSes
 	e.log.Infof("mesh: attempting relayed handshake to %q via %q on net %x", target, relay.nodeID, ns.spec.ID)
 	e.sealAndSend(relay, innerRelay, encodeRelay(e.nodeID, target, pkt))
 }
+
+// repointRelayUsers moves every session that was relaying through old onto
+// replacement (or onto nothing, when replacement is nil).
+//
+// peerSession.relay is a pointer to the relay's own session, and until this
+// existed nothing ever updated it. A relay re-handshakes far more often than
+// it disconnects — install() puts a fresh session in byNode and orphans the
+// previous object — and every peer reached through that relay went on holding
+// the orphan. deliver() then sealed with the dead session's keys and sent to
+// its remoteIdx, an index the relay node had already discarded, so the packet
+// was dropped there with no error, no counter and no log. The affected peer
+// went dark outbound until its own peerTimeout reaped it and a fresh handshake
+// installed a current pointer, which reads from outside as a peer that works,
+// stops, and comes back a minute later.
+//
+// Direct sessions hold no such pointer, which is exactly why only relayed
+// peers were affected.
+//
+// Locking: sessions are snapshotted under ns.mu and their own mutexes taken
+// only after it is released, matching resyncAllBypassRoutes — no ns.mu→ps.mu
+// ordering is introduced.
+func (e *Engine) repointRelayUsers(ns *netState, old, replacement *peerSession) {
+	if old == nil || old == replacement {
+		return
+	}
+	ns.mu.RLock()
+	sessions := make([]*peerSession, 0, len(ns.byNode))
+	for _, ps := range ns.byNode {
+		sessions = append(sessions, ps)
+	}
+	ns.mu.RUnlock()
+
+	moved := 0
+	for _, ps := range sessions {
+		if ps == old || ps == replacement {
+			continue
+		}
+		ps.mu.Lock()
+		if ps.relay == old {
+			ps.relay = replacement
+			moved++
+		}
+		ps.mu.Unlock()
+	}
+	if moved > 0 && replacement == nil {
+		// The relay is gone rather than replaced: these peers have no path
+		// until tryRelays picks another, which it will once their own
+		// sessions are reaped. Leaving the dangling pointer instead would
+		// keep them sending into a discarded session for just as long, but
+		// silently and with no diagnosis available.
+		e.log.Infof("mesh: relay %q on net %x went away; %d relayed peer(s) need a new path", old.nodeID, ns.spec.ID, moved)
+	}
+}
