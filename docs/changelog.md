@@ -2,6 +2,81 @@
 
 ---
 
+## v706 — 2026-07-28
+
+**Added: gravinet now tells the sending host when a packet is too big for
+a peer's path, instead of silently absorbing the cost forever.** An ICMP
+"fragmentation needed" (IPv4, DF set) or ICMPv6 "packet too big" is
+written back to the overlay device alongside the fragmentation that
+already happens. Forwarding is unchanged: the packet is still split and
+still delivered, so a sender that ignores the advisory is exactly as well
+off as it was before this existed.
+
+**Why it was needed.** Overlay fragmentation makes an oversized packet
+work; it does not make it stop happening. A host on a jumbo segment
+sending to a peer whose underlay path is ~1500 keeps emitting 8900-byte
+packets indefinitely, and every one becomes roughly seven datagrams that
+must all arrive. Losing any single one discards the whole packet, so
+ordinary path loss is amplified by the fragment count.
+
+The field case: one node was relaying for most of the mesh and gatewaying
+a redistributed jumbo subnet, holding 9000 B toward the LAN and 1473 B
+toward the far peer. Its session to that peer had sent 35,163 fragments
+and the receiving end had lost 61 reassemblies, while every other session
+on both nodes read `clean`. The relayed sessions sharing that leg lost
+keepalives to the same amplification, starved, hit the peer timeout and
+were reaped — producing session churn that looked, from every other angle,
+like a relay fault. A TCP sender that receives this advisory lowers its
+MSS once and stops generating oversized packets, which removes the
+amplification at its source rather than absorbing it downstream.
+
+**Deliberately conservative in three ways**, each of which has a test:
+
+- **IPv4 only when DF is set.** Without DF the sender has explicitly
+  permitted fragmentation, and RFC 1191 signalling would be unsolicited
+  and misleading. Stacks performing PMTUD set DF, which is the case that
+  matters. IPv6 has no DF concept and is always eligible.
+- **Never in reply to an ICMP error.** That is how ICMP storms start.
+- **Rate-limited per session** (one per second). The trigger is
+  per-packet, so a bulk transfer would otherwise emit one advisory per
+  datagram — which would be its own amplification bug.
+
+Advertised MTU is the same figure `sendData` fragments to, so a sender
+that honours it lands exactly at the threshold rather than one byte over.
+An ICMPv6 PTB is never advertised below 1280 (RFC 8200): a smaller value
+is not actionable, since the sender would fragment at 1280 regardless.
+`peerSession.tooBigSent` counts what was emitted.
+
+**Tests** (`internal/mesh/pmtud_signal_test.go`), the first and last of
+which fail with the advisory call removed:
+
+- `TestOversizedPacketStillFragmentedAndAdvised` — checks type/code,
+  destination, and above all the advertised MTU, since a wrong number
+  there is worse than no advisory at all: the sender acts on it.
+- `TestNoAdvisoryWithoutDontFragment`, `TestNoAdvisoryInReplyToICMPError`,
+  `TestNoAdvisoryForPacketThatFits` — the three cases that must stay
+  silent.
+- `TestAdvisoryIsRateLimitedPerSession` — 25 oversized packets, exactly
+  one advisory.
+
+The tests call `sendData` through a recovering helper: the advisory is
+written before the packet is split, and the split then panics inside
+`Seal` on a fixture with no session crypto. The write under test has
+already happened by that point, so recovering leaves precisely what is
+being asserted on, and building real session crypto would test the cipher
+rather than the advisory.
+
+**What this does not do.** It does not lower any MTU by itself, and it
+cannot help a sender that ignores ICMP or has it filtered. Where a jumbo
+segment fronts a much smaller path, setting the overlay MTU on those hosts
+to something the path can carry remains the direct fix; this makes the
+common case self-correcting rather than requiring one.
+
+Verified with go1.22.2: `go build ./...` and `go vet ./...` clean, and the
+full `internal/mesh` suite passes.
+
+---
+
 ## v705 — 2026-07-28
 
 **Fixed: a peer could become permanently unreachable after a session

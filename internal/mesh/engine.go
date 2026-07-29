@@ -1121,6 +1121,12 @@ type peerSession struct {
 	//                kernel counters because the packet never reached IP input.
 	// egressQDrop:   the egress shaper's queue was full when this packet was
 	//                enqueued for this peer.
+	// lastTooBig/tooBigSent drive and record path-MTU advisories back to the
+	// local sender (see pmtud_signal.go). Rate-limited per session because the
+	// trigger is per-packet.
+	lastTooBig atomic.Int64
+	tooBigSent atomic.Uint64
+
 	fwInDrop     atomic.Uint64
 	policeDrop   atomic.Uint64
 	tunWriteDrop atomic.Uint64
@@ -2239,6 +2245,10 @@ func (e *Engine) sendData(ps *peerSession, packet []byte) {
 		per = e.maxInnerFrag // session not yet PMTU-initialised: use the floor
 	}
 	if per > 0 && len(packet) > per {
+		// Advise the sender before splitting: fragmentation makes this packet
+		// work, but only the advisory stops the next one being oversized too.
+		// Forwarding is unchanged either way — see pmtud_signal.go.
+		e.signalPacketTooBig(ps, packet, per)
 		e.sendFragmented(ps, packet, per)
 		return
 	}
