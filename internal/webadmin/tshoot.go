@@ -1,10 +1,12 @@
 package webadmin
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"regexp"
 	"runtime"
 	"strings"
@@ -100,6 +102,26 @@ func (s *Server) handleTshoot(w http.ResponseWriter, r *http.Request) {
 			dump("firewall rules", rules)
 		}
 		dump("firewall exemptions", s.be.FirewallExemptsFor(id))
+	}
+
+	// The host's own routing table. Included because gravinet's view of what
+	// it installed (its overlay route list, above) and the kernel's actual
+	// table can disagree, and when they do, every routing-related symptom
+	// becomes undiagnosable from gravinet's side alone. An investigation
+	// stalled on exactly this: peer underlay traffic was demonstrably being
+	// steered into the tunnel, and nothing in the bundle could show which
+	// route was doing it.
+	sec("HOST ROUTING TABLE")
+	for _, c := range [][]string{
+		{"ip", "-4", "route", "show"},
+		{"ip", "-6", "route", "show"},
+		{"netstat", "-rn"}, // BSD/macOS fallback
+	} {
+		out, err := runDiag(c[0], c[1:]...)
+		if err != nil {
+			continue // not this platform's tool
+		}
+		fmt.Fprintf(&b, "\n--- %s ---\n%s\n", strings.Join(c, " "), out)
 	}
 
 	sec("CONFIG (secrets redacted)")
@@ -225,4 +247,16 @@ func tailFile(path string, max int64) ([]byte, error) {
 		}
 	}
 	return buf, nil
+}
+
+// runDiag executes a short read-only diagnostic command, bounded so a missing
+// or wedged tool cannot hold up the bundle.
+func runDiag(name string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+	if err != nil && len(out) == 0 {
+		return "", err
+	}
+	return string(out), nil
 }

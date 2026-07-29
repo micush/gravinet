@@ -2,6 +2,100 @@
 
 ---
 
+## v712 — 2026-07-29
+
+**Changed: the "rejecting advertised route" debug line is now rate-limited
+to once per five minutes per (origin, prefix).**
+
+Peers re-advertise their routes on every gossip round, so a rejected route
+is a standing condition rather than an event — but it was logged every time
+one arrived. Two peers each advertising a v4 and a v6 default produced four
+lines every five seconds, indefinitely, which is enough to bury everything
+else in the log and in any diagnostic bundle taken from it.
+
+Tracked per (origin, prefix) rather than globally, so suppressing one
+peer's rejected default cannot hide a different peer or a different prefix
+being rejected — and the line reappears after the interval, so a condition
+persisting for hours stays visible rather than vanishing after its first
+mention. The message now states that repeats are suppressed, so the gap
+isn't read as the rejection having stopped.
+
+Tests in `internal/mesh/rejectlog_test.go` cover suppression, per-key
+independence, and resumption after the interval.
+
+---
+
+## v711 — 2026-07-29
+
+**Fixed: a peer whose underlay address falls inside a redistributed prefix
+could be permanently unreachable, because the bypass route that exists to
+prevent exactly that was never acquired and nothing said why.**
+
+**The field case, finally captured.** A node reachable from its own LAN
+worked perfectly; moved off-LAN, the same five peers were unreachable
+every time while eight others were fine. The discriminating evidence came
+from a diagnostic bundle taken in the failing configuration: every
+loop-guard drop and every `tcp fallback ... connected but no mesh session
+formed` on a LAN address belonged to exactly those five peers, and to no
+others. Two peers on the *same subnet behind the same NAT* appeared in
+neither list and worked throughout — the difference being that those two
+had been reached at their public address and never dialled at their LAN
+one.
+
+The mechanism: `192.168.5.0/24` and `fdf5:168:5::/64` were redistributed
+into the mesh, and those five peers' underlay addresses sit inside them.
+When the node was remote and tried to reach them there, the kernel steered
+gravinet's own underlay packets into the tunnel — the loop guard dropping
+some, and the TCP fallback "succeeding" through the overlay for others,
+where the handshake then never completed.
+
+**Why the existing bypass never fired.** `acquireBypassRoute` handles this
+case by design; its own doc comment describes a redistributed prefix
+containing a peer endpoint. But it is gated on `meshRouteCovers`, which
+consults `ns.osMetric` — gravinet's record of the prefixes it believes it
+installed. Where that record and the kernel's actual table disagree, the
+gate returns **silently**, no bypass is acquired, and the loop repeats
+indefinitely with nothing logged. The bundle bore that out: repeated
+loop-guard drops for those addresses and not one bypass line of any kind,
+at debug level, in twenty-five minutes.
+
+**The fix.** The loop guard already detects the precise condition a bypass
+undoes, and a looped datagram is *proof* rather than inference — it is the
+kernel's own answer to the question `meshRouteCovers` is guessing at, and
+it cannot be stale. `noteUnderlayLoop` now calls
+`acquireProvenBypassRoute`, which installs the host route without the
+`meshRouteCovers` precondition, rate-limited per address (the trigger is
+per-packet), and which **warns loudly** if no gateway can be found —
+previously the most consequential failure on this path was a debug line.
+
+**Also: the troubleshooting bundle now includes the host routing table.**
+This investigation stalled precisely because it could not: gravinet's
+overlay route list was in the bundle, the kernel's table was not, and the
+disagreement between them was the whole diagnosis. `ip -4 route show`,
+`ip -6 route show` and `netstat -rn` are captured, each bounded by a short
+timeout so a missing or wedged tool cannot hold up the bundle.
+
+**Tests** (`internal/mesh/provenbypass_test.go`), both confirmed to fail
+without the fix:
+
+- `TestLoopGuardInstallsBypassOnProof` — a looped datagram for a peer
+  address installs a host route for exactly that address.
+- `TestProvenBypassIsRateLimited` — 50 looped datagrams produce one
+  install, not fifty.
+
+**What this does and does not claim.** The mechanism is confirmed by
+data — the drop targets are exactly the failing set, and the two working
+peers on the same subnet appear nowhere in it. Whether installing the
+bypass makes those five reachable is the next measurement, not a
+prediction: the bypass gets the dial out of the tunnel, but if those
+addresses are unreachable from off-LAN for ordinary reasons, reaching them
+will still fail — correctly, and via the public address instead.
+
+Verified with go1.22.2: `go build ./...` and `go vet ./...` clean, and the
+full `internal/mesh` suite passes.
+
+---
+
 ## v710 — 2026-07-29
 
 **Fixed: TCP seed priming re-dialled every unconnected port of a host on

@@ -49,6 +49,7 @@ import (
 	"syscall"
 
 	"gravinet/internal/tun"
+	"time"
 )
 
 var (
@@ -541,4 +542,55 @@ func (e *Engine) restorePhysicalDefaultRoute(ns *netState, p netip.Prefix) {
 		return
 	}
 	e.log.Infof("mesh: existing default route on net %x restored to metric %d after full-tunnel withdrawal", ns.spec.ID, old)
+}
+
+// acquireProvenBypassRoute installs a bypass route for an address the dataplane
+// has *demonstrated* is being steered into the tunnel, skipping the
+// meshRouteCovers precondition the ordinary acquire path applies.
+//
+// The distinction matters. meshRouteCovers asks gravinet's own record of what
+// it installed (ns.osMetric); a looped datagram asks the kernel, and the kernel
+// is authoritative. Where the two disagree the ordinary path returns silently
+// and the loop persists indefinitely — which is precisely what was observed:
+// repeated loop-guard drops for a set of peer endpoints with no bypass ever
+// acquired and nothing logged to say why.
+//
+// Rate-limited per address: the trigger is per-packet, and a failed install
+// would otherwise be retried on every looped datagram.
+func (e *Engine) acquireProvenBypassRoute(ns *netState, addr netip.Addr) {
+	if !addr.IsValid() || !gatewaySupported {
+		return
+	}
+	addr = addr.Unmap()
+
+	e.bypassMu.Lock()
+	if _, held := e.bypassRefs[addr]; held {
+		e.bypassMu.Unlock()
+		return // already bypassed; the loop is from something else
+	}
+	if e.provenBypassTried == nil {
+		e.provenBypassTried = map[netip.Addr]time.Time{}
+	}
+	now := time.Now()
+	if last, ok := e.provenBypassTried[addr]; ok && now.Sub(last) < 30*time.Second {
+		e.bypassMu.Unlock()
+		return
+	}
+	e.provenBypassTried[addr] = now
+	e.bypassMu.Unlock()
+
+	gw, ifIndex, err := e.physicalGateway(ns, addr)
+	if err != nil {
+		e.log.Warnf("mesh: underlay traffic to %s is looping into the tunnel and no bypass could be installed: %v — this peer is unreachable until a route for it exists outside the tunnel", addr, err)
+		return
+	}
+	p := netip.PrefixFrom(addr, addr.BitLen())
+	if err := addGatewayRouteFn(p, gw, ifIndex, bypassMetric); err != nil {
+		e.log.Warnf("mesh: install proven bypass route %s via %s on net %x: %v", p, gw, ns.spec.ID, err)
+		return
+	}
+	e.bypassMu.Lock()
+	e.bypassRefs[addr] = bypassRef{count: 1, gateway: gw, ifIndex: ifIndex}
+	e.bypassMu.Unlock()
+	e.log.Infof("mesh: installed bypass route %s via %s on net %x after underlay traffic to it looped back through the tunnel", p, gw, ns.spec.ID)
 }

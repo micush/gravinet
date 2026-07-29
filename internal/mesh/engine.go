@@ -326,6 +326,9 @@ type Engine struct {
 	// delete a route another network's peer still depends on.
 	bypassMu   sync.Mutex
 	bypassRefs map[netip.Addr]bypassRef
+	// provenBypassTried rate-limits the loop-guard-driven bypass path
+	// (acquireProvenBypassRoute); its trigger is per-packet.
+	provenBypassTried map[netip.Addr]time.Time
 
 	managed atomic.Bool // advertised "managed" mode; toggled live
 	manager atomic.Bool // advertised "manager" mode (can manage other managed peers); toggled live
@@ -442,6 +445,12 @@ type Engine struct {
 	// per ~10s instead of one per packet.
 	loopDrops    atomic.Uint64
 	loopWarnUnix atomic.Int64
+
+	// rejectLogAt rate-limits the per-(origin,prefix) "rejecting advertised
+	// route" line; peers re-advertise on every gossip round, so the condition
+	// is standing rather than eventful. See shouldLogRejectedRoute.
+	rejectLogMu sync.Mutex
+	rejectLogAt map[string]time.Time
 	// localCands is the published host-candidate set (see localcand.go).
 	// Refreshed off the handshake path by refreshLocalCandidates and read
 	// atomically by localEndpoints, which buildHSInit calls under ns.mu — the
@@ -2863,6 +2872,24 @@ func (e *Engine) isUnderlayLoop(ns *netState, pkt []byte, dst netip.Addr) bool {
 // bypass install that failed and was logged at the time).
 func (e *Engine) noteUnderlayLoop(ns *netState, dst netip.Addr) {
 	n := e.loopDrops.Add(1)
+
+	// A looped datagram is proof — not inference — that a route on this host
+	// steers underlay traffic for dst into the tunnel, which is exactly the
+	// condition a bypass route exists to undo. Install one now.
+	//
+	// This is deliberately not gated on meshRouteCovers the way the other
+	// acquire paths are. That predicate consults ns.osMetric, gravinet's
+	// record of the prefixes it believes it installed, and if that record and
+	// the kernel's actual table ever disagree the bypass is silently never
+	// acquired while the loop keeps happening. The packet coming back is the
+	// kernel's own answer to the same question, and it cannot be stale.
+	//
+	// Observed in the field: five peers permanently unreachable while the node
+	// was remote, every one of them with an underlay address inside a
+	// redistributed prefix, each producing these drops, and no bypass route
+	// ever acquired for any of them.
+	e.acquireProvenBypassRoute(ns, dst)
+
 	now := time.Now().Unix()
 	last := e.loopWarnUnix.Load()
 	if now-last < 10 || !e.loopWarnUnix.CompareAndSwap(last, now) {

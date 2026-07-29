@@ -415,7 +415,15 @@ func (e *Engine) onRouteAdd(ps *peerSession, body []byte) {
 	}
 	ns := ps.net
 	if ns.rejected(prefix) {
-		e.log.Debugf("mesh: rejecting advertised route %s from %q", prefix, origin)
+		// Rate-limited per (origin, prefix): a peer re-advertises its routes on
+		// every gossip round, so an unconditional line here is one entry every
+		// few seconds per rejected route, forever — two peers each advertising
+		// a v4 and a v6 default is four lines every five seconds, which buries
+		// everything else in the log. The rejection is a standing condition,
+		// not an event, so it only needs restating occasionally.
+		if e.shouldLogRejectedRoute(origin, prefix) {
+			e.log.Debugf("mesh: rejecting advertised route %s from %q (repeats suppressed for %s)", prefix, origin, rejectedRouteLogEvery)
+		}
 		return
 	}
 	key := origin + "|" + prefix.String()
@@ -1055,5 +1063,28 @@ func (ns *netState) shouldReadvertise(now time.Time, interval time.Duration) boo
 		return false
 	}
 	ns.lastRouteAdv = now
+	return true
+}
+
+// rejectedRouteLogEvery bounds how often a given (origin, prefix) rejection is
+// logged. Long enough that a steady-state rejection is a footnote rather than
+// the bulk of the log, short enough that it still shows up in a bundle covering
+// a few minutes.
+const rejectedRouteLogEvery = 5 * time.Minute
+
+// shouldLogRejectedRoute reports whether this rejection is due to be logged,
+// and records the decision.
+func (e *Engine) shouldLogRejectedRoute(origin string, prefix netip.Prefix) bool {
+	key := origin + "|" + prefix.String()
+	now := time.Now()
+	e.rejectLogMu.Lock()
+	defer e.rejectLogMu.Unlock()
+	if e.rejectLogAt == nil {
+		e.rejectLogAt = map[string]time.Time{}
+	}
+	if last, ok := e.rejectLogAt[key]; ok && now.Sub(last) < rejectedRouteLogEvery {
+		return false
+	}
+	e.rejectLogAt[key] = now
 	return true
 }
