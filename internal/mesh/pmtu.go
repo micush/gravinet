@@ -46,7 +46,11 @@ const (
 // discovered working outer MTU (mirrored to peerSession atomics for the hot path).
 type pmtuState struct {
 	floor, ceil int
-	eff         int
+	// linkCap is the largest datagram the local link has been observed to
+	// accept, learned from EMSGSIZE (see tooBig). Zero until something is
+	// refused. Survives reset() and outranks any ceiling set from elsewhere.
+	linkCap int
+	eff     int
 
 	phase    pmtuPhase
 	low      int // largest confirmed-working size in this search
@@ -184,10 +188,40 @@ func (p *pmtuState) tooBig(size int, now time.Time) bool {
 		}
 		changed = true
 	}
+	// EMSGSIZE is the local link refusing the datagram outright. That is a
+	// standing property of this path, not a transient loss, and it has to
+	// survive reset() and revalidation — otherwise reset() restores
+	// high = ceil and the search re-walks the identical rejections forever.
+	// Observed in the field as a permanent oscillation on every peer at once:
+	// climb to the ceiling, get refused at the same ladder of sizes, collapse
+	// to the floor, climb again, hundreds of times an hour.
+	//
+	// Recorded separately from ceil because ceil is also driven by the relay
+	// cap (see applyRelayMTUCap), which restores the engine-wide ceiling when
+	// a session is direct and would otherwise wipe this every tick.
+	if lc := size - 1; lc >= p.floor && (p.linkCap == 0 || lc < p.linkCap) {
+		p.linkCap = lc
+		if p.ceil > lc {
+			p.ceil = lc
+		}
+		if p.high > lc {
+			p.high = lc
+		}
+		changed = true
+	}
 	if p.eff >= size {
 		// Whatever we're currently sending at is too big for this path. Drop to
 		// the floor immediately and re-search upward — do not keep emitting
 		// packets the kernel will keep refusing.
+		//
+		// Specifically NOT a fallback to low: a refusal at or below eff is
+		// evidence the path itself changed (a roam onto a smaller link), which
+		// makes low stale — it was confirmed against the path as it was, and
+		// on a jumbo LAN it can equal the very size just refused. See
+		// TestPMTUTooBigOnNonProbeDropsEffToFloor, which is the case that
+		// makes the floor the only safe fallback. The re-climb this causes is
+		// bounded now that linkCap caps the ceiling above, so it happens once
+		// rather than on a loop.
 		p.eff = p.floor
 		p.low = p.floor
 		p.phase = phaseSearch
@@ -249,6 +283,11 @@ func (p *pmtuState) reset(now time.Time) {
 // Any in-flight probe above the new ceiling is abandoned rather than waited out,
 // since its ack could only re-confirm a size we may no longer use.
 func (p *pmtuState) setCeil(c int) bool {
+	// A limit the local link has already refused outright can never be raised
+	// away by a relay cap or by restoring the engine-wide ceiling.
+	if p.linkCap > 0 && c > p.linkCap {
+		c = p.linkCap
+	}
 	if c < p.floor {
 		c = p.floor
 	}

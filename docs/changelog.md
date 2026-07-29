@@ -2,6 +2,139 @@
 
 ---
 
+## v710 — 2026-07-29
+
+**Fixed: TCP seed priming re-dialled every unconnected port of a host on
+every tick, forever, including hosts that were already connected peers.**
+Measured on a live node: **29,228 failed connects in twenty minutes — a
+steady 24 per second** — against one peer that was up and healthy the
+whole time.
+
+**How.** `primeTCPSeeds` skipped a seed only when a fallback already
+existed for that *exact address*. A peer configured with thirteen ports
+across two address families is twenty-six seed addresses; one of them
+carries the connection and the other twenty-five refuse. Because none of
+those twenty-five ever acquires a fallback of its own, none is ever
+skipped, and the loop re-dials all of them every tick indefinitely. Twelve
+`connection refused` per host per second, plus the same again on the v6
+address.
+
+A multi-port seed list exists to *find* a port that works, not to hold
+connections on all of them, so once any port on a host is carrying us the
+rest have no purpose.
+
+**The fix.** `primeTCPSeeds` now builds the set of hosts already reached —
+by a live session's endpoint, or by an existing fallback on any port — and
+skips dialling other ports of those hosts. Suppression is per host, not
+global: a host with no connection is still dialled on every port, so
+discovery is unchanged. When the connection to a host drops it leaves the
+reached set and full dialling resumes, so this self-corrects rather than
+latching.
+
+Session endpoints are read after `ns.mu` is released, since `ps.ep()`
+takes `ps.mu` and the lock order in this package is never `ns.mu` →
+`ps.mu`.
+
+**This is the same defect as v701, on the other path.** There, the UDP
+`initSeedTick` re-dialled seeds for peers it was already connected to,
+because its skip test was an exact-endpoint match with no notion of which
+node owned the address. Here the TCP path had the identical blind spot.
+Worth noting for whoever finds the next one: a skip test that compares
+addresses rather than asking "have we already reached this peer" has now
+been wrong twice.
+
+**Tests** (`internal/mesh/tcpseedstorm_test.go`):
+
+- `TestPrimeTCPSeedsStopsAtTheFirstWorkingPortOnAHost` — thirteen ports on
+  one host, exactly one answering, and no re-dialling once it is up.
+  Verified to fail without the fix: 60 redundant dials across five ticks.
+- `TestPrimeTCPSeedsStillDialsUnreachedHosts` — a host with no connection
+  is still dialled while another is up, so the fix cannot degenerate into
+  never dialling anything.
+
+The first test needs its own fallback fake. The shared one succeeds on
+every dial, and with every port connected the *old* code also stops
+dialling — so a test built on it passes either way and proves nothing.
+`refuseAllBut` answers on one port and refuses the rest, which is the
+condition that actually occurs and the only one that exposes the bug.
+
+Verified with go1.22.2: `go build ./...` and `go vet ./...` clean, and the
+full `internal/mesh` suite passes.
+
+---
+
+## v709 — 2026-07-29
+
+**Fixed: path-MTU discovery oscillated permanently on every peer at once,
+never converging.** A refusal from the local link lowered the search's
+upper bound but not its ceiling, and `reset()` restores `high = ceil` — so
+every reset discarded what the kernel had just established and re-walked
+the identical range, forever.
+
+**The observed behaviour**, from a live node's own log: 648 refusals and
+80 full resets to the floor in an 18-minute window, spread evenly across
+twelve peers — 66 apiece for most of the mesh. Each cycle identical:
+climb 1400 → 1460 → 1490 → 1505 → 1513 → 1517 → 1519 → 1520, probe above
+it, and get refused at the same ladder of sizes every time (5212, 3342,
+2407, 1939, 1705, 1588, 1530, 1501, 1473), collapse, climb again. The
+log line for each was *"link MTU shrank, e.g. a roam onto a smaller-MTU
+network"* — which is what it looks like from inside `tooBig`, and is not
+what was happening. Nothing roamed. The ceiling was 9000 on a ~1500-byte
+link, and the search had a six-fold range to re-cross on every pass.
+
+**Why the bound was lost.** `tooBig` pulls `high` down to just under the
+refused size, which is correct for the search in progress. But EMSGSIZE is
+the local link refusing a datagram outright — a standing property of the
+path, not a transient loss — and nothing recorded it as such. `reset()`,
+which `tooBig` itself calls whenever the current estimate is at or above
+the refused size, restores `high` from `ceil` and throws it away.
+
+**The fix.** `pmtuState.linkCap` records the largest datagram the link has
+been observed to accept, learned from EMSGSIZE, ratcheting downward only.
+It lowers `ceil` with it, survives `reset()`, and is honoured by
+`setCeil`.
+
+That last part matters because of v703: `applyRelayMTUCap` restores the
+engine-wide ceiling on any session with no relay, which would have wiped a
+learned limit every single tick and reintroduced the oscillation by a
+different route. `linkCap` is tracked separately from `ceil` precisely so
+it outranks anything set from elsewhere.
+
+**A refusal still collapses the estimate to the floor, deliberately.** An
+earlier draft of this fix also changed that, reasoning that `low` is
+confirmed-good and collapsing past it wastes a working estimate. The
+existing `TestPMTUTooBigOnNonProbeDropsEffToFloor` caught it, and it was
+right: a refusal at or below `eff` is evidence the *path changed* — a roam
+onto a smaller link — which makes `low` stale, since it was confirmed
+against the path as it was and on a jumbo LAN can equal the very size just
+refused. The floor is the only safe fallback. What v709 changes is that
+the re-climb afterwards is bounded by `linkCap`, so it happens once rather
+than on a loop.
+
+**Tests** (`internal/mesh/pmtu_oscillation_test.go`), the first three
+confirmed to fail against the old code with the exact symptom
+(`ceiling = 9000 after the link refused 1473`):
+
+- `TestEMSGSIZELimitSurvivesReset` — the single cycle that made the loop.
+- `TestEMSGSIZELimitRatchets` — replays the observed ladder of nine
+  refusals and requires the ceiling to settle at 1472, and a later refusal
+  at a *larger* size not to raise it back.
+- `TestRelayCapRestoreCannotRaiseTheLinkLimit` — v703's restore path must
+  not undo it.
+- `TestRefusalStillFallsToFloorButCeilingIsNowBounded` — the floor
+  fallback stays; only the re-climb after it is now bounded.
+
+**What this does not claim.** It does not explain why a specific set of
+peers is unreachable when this node is remote; that remains open. It fixes
+a defect visible in the node's own logs, in the subsystem everything
+relayed depends on, and it removes a continuous source of MTU churn that
+was making every other measurement harder to read.
+
+Verified with go1.22.2: `go build ./...` and `go vet ./...` clean, and the
+full `internal/mesh` suite passes.
+
+---
+
 ## v708 — 2026-07-28
 
 **Added: a `tshoot` button in Monitor → Logs that downloads one text file

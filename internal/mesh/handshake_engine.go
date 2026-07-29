@@ -991,6 +991,10 @@ func (ns *netState) extraTCPPortsForEndpoint(ep netip.AddrPort) []uint16 {
 func (e *Engine) primeTCPSeeds(ns *netState) {
 	ns.mu.RLock()
 	seeds := append([]netip.AddrPort(nil), ns.tcpSeeds...)
+	sessions := make([]*peerSession, 0, len(ns.byNode))
+	for _, ps := range ns.byNode {
+		sessions = append(sessions, ps)
+	}
 	ns.mu.RUnlock()
 	if len(seeds) == 0 {
 		return
@@ -1002,13 +1006,45 @@ func (e *Engine) primeTCPSeeds(ns *netState) {
 	if !ok {
 		return // UDP-only transport: can't dial a TCP seed
 	}
+
+	// Hosts we have already reached. A multi-port seed list exists to *find* a
+	// port that works, not to hold a connection on all of them, so once any
+	// port on a host is up — or the peer is reachable at that address by any
+	// transport — dialing its remaining ports is pure waste.
+	//
+	// Without this the loop re-dials every unconnected port of every seed
+	// address on every tick, forever: a peer configured with thirteen ports on
+	// two address families produced 24 failed connects per second,
+	// indefinitely, against a host that was already a connected peer. Same
+	// shape as the seed churn fixed in v701, on the TCP path rather than UDP —
+	// there too the skip test was an exact-address match with no notion of
+	// "this host is already reached".
+	//
+	// Endpoints are read after ns.mu is released: ps.ep() takes ps.mu, and the
+	// lock order in this package is never ns.mu -> ps.mu.
+	reached := make(map[netip.Addr]bool, len(sessions))
+	for _, ps := range sessions {
+		if ep := ps.ep(); ep.IsValid() {
+			reached[ep.Addr()] = true
+		}
+	}
+	for _, seed := range seeds {
+		if seed.Addr().IsValid() && fd.HasFallback(seed) {
+			reached[seed.Addr()] = true
+		}
+	}
+
 	netID := ns.spec.ID
 	for _, seed := range seeds {
-		if !seed.Addr().IsValid() || fd.HasFallback(seed) {
-			if fd.HasFallback(seed) {
-				e.AddSeed(netID, seed) // connected; make sure the handshake loop dials it
-			}
+		if !seed.Addr().IsValid() {
 			continue
+		}
+		if fd.HasFallback(seed) {
+			e.AddSeed(netID, seed) // connected; make sure the handshake loop dials it
+			continue
+		}
+		if reached[seed.Addr()] {
+			continue // another port on this host is already carrying us
 		}
 		s := seed
 		go func() {
