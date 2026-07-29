@@ -84,7 +84,29 @@ func (e *Engine) NATStatus() (class string, public netip.AddrPort) {
 		distinct[a] = struct{}{}
 	}
 	if len(distinct) > 1 {
-		// Different vantage points see different mappings → symmetric NAT.
+		// Different vantage points seeing different mappings is the
+		// signature of symmetric NAT — but it's also exactly what a
+		// directly-addressed, multi-homed host looks like: several real
+		// public IPs (extra routed blocks, multiple interfaces) with
+		// outbound traffic legitimately leaving from different ones
+		// depending on route selection, no translation involved at all.
+		// The single-observation path below already tells "open" (no
+		// NAT) from "nat" by checking whether the reported address is
+		// one of our own interface addresses; the same check applied to
+		// *every* distinct report here tells a genuinely multi-homed
+		// host from real per-destination NAT remapping. Only fall
+		// through to "symmetric" once at least one reported address is
+		// something this host doesn't itself own.
+		allLocal := true
+		for a := range distinct {
+			if !e.isLocalUnderlayAddr(a.Addr()) {
+				allLocal = false
+				break
+			}
+		}
+		if allLocal {
+			return "open", netip.AddrPort{}
+		}
 		return "symmetric", netip.AddrPort{}
 	}
 	public = obs[0]

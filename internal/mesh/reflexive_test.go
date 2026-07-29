@@ -36,6 +36,24 @@ func TestNATStatusClassification(t *testing.T) {
 	if c, _ := set(map[string]netip.AddrPort{"a": pub1, "b": pub2}, 0).NATStatus(); c != "symmetric" {
 		t.Errorf("two disagreeing: class=%s, want symmetric", c)
 	}
+	// Two peers reporting two different addresses is also exactly what a
+	// directly-addressed, multi-homed host looks like — e.g. traffic to
+	// different peers legitimately leaving from different real public IPs,
+	// no NAT involved. The classification only cares whether the reported
+	// IP is one this host owns (isLocalUnderlayAddr ignores port), so a
+	// second observation on the same local IP but a different port
+	// exercises that path without depending on which other real addresses
+	// happen to exist wherever this test runs.
+	loOtherPort := netip.MustParseAddrPort("127.0.0.1:40000")
+	if c, _ := set(map[string]netip.AddrPort{"a": lo, "b": loOtherPort}, 0).NATStatus(); c != "open" {
+		t.Errorf("two disagreeing but both local (multi-homed): class=%s, want open", c)
+	}
+	// One real local address and one genuinely foreign one must still read
+	// as symmetric — a single self-report mixed in must not mask real
+	// per-destination NAT remapping seen from elsewhere.
+	if c, _ := set(map[string]netip.AddrPort{"a": lo, "b": pub2}, 0).NATStatus(); c != "symmetric" {
+		t.Errorf("one local, one foreign: class=%s, want symmetric", c)
+	}
 	if c, p := set(map[string]netip.AddrPort{"a": lo}, 0).NATStatus(); c != "open" || p != lo {
 		t.Errorf("local addr: class=%s public=%v, want open %v", c, p, lo)
 	}

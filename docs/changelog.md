@@ -2,6 +2,63 @@
 
 ---
 
+## v720 — 2026-07-29
+
+**Fixed: a directly multi-homed host — real public IPs, no NAT device at
+all — was classified as being behind symmetric NAT.** Surfaced on
+`gn-ionos2`, an IONOS box with a primary public IP plus additional
+routed public IPs (visible in its own tshoot bundle's host routing
+table: `212.227.123.16`/`.17` routed via the same gateway as the
+primary `66.179.240.44`). No NAT device is in the path anywhere.
+
+**Root cause:** `internal/mesh/reflexive.go`'s `NATStatus()` learns this
+node's reachability from what directly-connected peers report seeing it
+at (a STUN-style reflexive report). Its rule was: if two peers report
+two *different* addresses, that's the signature of symmetric NAT
+(per-destination port/address remapping) — call it "symmetric". But
+that's also exactly what a multi-homed host with several real public
+IPs looks like from the outside: different peers legitimately see
+different, but equally real and directly reachable, addresses depending
+on which local IP outbound traffic happened to leave from. The single-
+report path already had the right idea — it checks whether the
+reported address is one of this host's own interface addresses to tell
+"open" from "nat" — but that check was never applied once there was
+more than one distinct report; multiple reports skipped straight to
+"symmetric" with no such check at all.
+
+**Fix:** when peers report multiple distinct addresses, only classify
+as symmetric once at least one of those addresses is something this
+host doesn't itself own. If every distinct reported address matches
+one of our own interface addresses, it's `open` (direct, multi-homed),
+not `symmetric`. A single foreign address mixed in with local ones
+still correctly reads as symmetric — a lone self-report can't mask real
+per-destination NAT remapping seen from elsewhere.
+
+Added `TestNATStatusClassification` coverage for both directions: two
+disagreeing reports that are both this host's own addresses (→ open),
+and one local + one genuinely foreign address (→ still symmetric).
+
+Verified with go1.22.2: `go build ./...` and `go vet ./...` clean
+(CGO disabled — this sandbox has no PAM dev headers). The new/changed
+`internal/mesh` reflexive tests pass directly (`-run TestNATStatus`).
+`NATStatus`/`NATStatusStrings` are only ever called from webadmin, not
+from anywhere else in `internal/mesh`, so this change has no reachable
+path into mesh-internal logic like dynamic addressing.
+
+**Not fully verified:** the complete `internal/mesh` test suite could
+not be run to completion in this sandbox (single CPU core) — it either
+times out or appears to stall partway through, on `TestDynamicAddressing`
+in one run. That same test passes cleanly and quickly (1.8s) in
+isolation, both with this change and against the original unmodified
+source, so this looks like pre-existing resource contention in a large
+real-socket/real-timing integration suite on a 1-core sandbox rather
+than a regression from this change — but a clean full-suite run was not
+obtained to confirm that conclusively. Recommend running
+`go test ./internal/mesh/...` on real hardware before relying on this
+build broadly.
+
+---
+
 ## v719 — 2026-07-29
 
 **Fixed: the tshoot download (Monitor → Logs → tshoot) always bundled the
