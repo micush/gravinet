@@ -7206,11 +7206,17 @@ async function drawUpgrade(host){
     try {
       if (!nodes.length){ await applyLocal(); return; }
 
-      // Push phase: one archive to every target peer. The server fans out with a
-      // bounded concurrency and returns once they have all finished, so "all
-      // peers first" is already guaranteed before the local phase can start.
+      // Push phase: one archive to every target peer. The server fans out with
+      // a bounded concurrency and streams each peer's result back the instant
+      // that peer finishes (see handleUpgradePush), so "all peers first" is
+      // still guaranteed before the local phase can start, but the operator
+      // watches results land one by one instead of staring at "Pushing…" until
+      // the slowest peer in the batch is done.
       resBox.innerHTML = '';
-      resBox.appendChild($('<div class="hint">Building on '+nodes.length+' peer(s)\u2026 this can take several minutes each.</div>'));
+      const progress = $('<div class="hint"></div>');
+      const setProgress = (n) => { progress.textContent = 'Building on ' + nodes.length + ' peer(s)\u2026 ' + n + ' of ' + nodes.length + ' finished so far.'; };
+      setProgress(0);
+      resBox.appendChild(progress);
       let pushDots = 0;
       upgradeBtn.textContent = 'Pushing';
       pushDotsTimer = setInterval(() => {
@@ -7223,16 +7229,21 @@ async function drawUpgrade(host){
       fd.append('nodes', JSON.stringify(nodes));
       fd.append('source', fileIn.files[0]);
       const resp = await fetch('/api/upgrade/push', { method:'POST', body: fd });
-      clearInterval(pushDotsTimer); pushDotsTimer = null;
-      const body = await resp.json().catch(()=>({}));
-      const results = body.results || [];
-      resBox.innerHTML = '';
-      if (!results.length){
+      if (!resp.ok || !resp.body){
+        clearInterval(pushDotsTimer); pushDotsTimer = null;
+        const body = await resp.json().catch(()=>({}));
+        resBox.innerHTML = '';
         resBox.appendChild($('<div class="hint" style="color:var(--danger,#b33)">'+esc(body.error || 'push failed')+'</div>'));
         return;
       }
+      // addResult renders one peer's line the moment it's known, rather than
+      // a loop over a fully-collected array once every peer is done — that's
+      // the whole point of reading the response as a stream below.
       const applied = [];
-      for (const res of results){
+      let finished = 0;
+      const addResult = (res) => {
+        finished++;
+        setProgress(finished);
         if (res.ok) applied.push(res.node);
         const line = $('<div style="margin:3px 0;font-size:12px"></div>');
         const mark = $('<span></span>');
@@ -7246,7 +7257,34 @@ async function drawUpgrade(host){
           line.appendChild(why);
         }
         resBox.appendChild(line);
+      };
+      // The body is newline-delimited JSON, one object per peer plus a final
+      // {"done":true,...} summary, flushed as each peer finishes. Reading it
+      // as a byte stream (rather than resp.json(), which waits for the whole
+      // body — every peer — before returning anything) is what lets addResult
+      // fire per peer instead of all at once at the end.
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      const handleLine = (line) => {
+        if (!line.trim()) return;
+        let obj;
+        try { obj = JSON.parse(line); } catch { return; }
+        if (!obj.done) addResult(obj); // the final {"done":true,...} summary line carries nothing the per-peer lines above haven't already shown
+      };
+      while (true){
+        const { done: readDone, value } = await reader.read();
+        if (readDone) break;
+        buf += decoder.decode(value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf('\n')) !== -1){
+          handleLine(buf.slice(0, nl));
+          buf = buf.slice(nl + 1);
+        }
       }
+      if (buf) handleLine(buf);
+      clearInterval(pushDotsTimer); pushDotsTimer = null;
+
       const done = new Set(applied);
       const allApplied = applied.length === nodes.length;
 
@@ -9172,8 +9210,17 @@ async function showLatencyHistoryModal(netName, nodeId, label, overlay){
       minutes = m;
       durBar.querySelectorAll('.seg-btn').forEach(x => x.className = 'seg-btn');
       b.className = 'seg-btn active';
-      card = null; // force a full rebuild on a range change, same as renderMetricGraphs does for a different set of graphs
-      chartBox.innerHTML = '<div class="hint">loading\u2026</div>';
+      // Not a forced rebuild: load() below already redraws the existing
+      // chart in place via card._redraw when card is set — the same path
+      // the periodic refresh (the setInterval below) takes, and the same
+      // pattern the Metrics tab's own duration buttons use (renderMetricGraphs
+      // only rebuilds when the *set* of graphs changes, never for a duration
+      // change alone). Nulling card and blanking chartBox here — as this
+      // used to do — tore down and recreated the SVG, hover overlay, and
+      // its listeners on every single range click, which is exactly the
+      // blink/distort a click through the range buttons showed: nothing to
+      // do with the new data, just this handler discarding a perfectly
+      // reusable chart and rebuilding it from scratch.
       load();
     };
     durBar.appendChild(b);

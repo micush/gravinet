@@ -1248,13 +1248,26 @@ Distributes one uploaded source archive to several managed peers at once
 - `nodes` — a JSON array of peer node IDs (must arrive first)
 - `source` — the archive file
 
+The response is **newline-delimited JSON** (`Content-Type:
+application/x-ndjson`), not one JSON object: each line is written and
+flushed the instant that peer's own build+apply finishes, so a client
+reading the response as it arrives sees results one peer at a time
+instead of waiting for the slowest peer in the batch. Lines arrive in
+whatever order peers actually finish in, not the order `nodes` listed
+them:
+
 ```json
-{"sha256": "a1b2c3...", "pushed": 3,
- "results": [
-   {"node": "<id1>", "ok": true, "status": 200},
-   {"node": "<id2>", "ok": false, "error": "does not accept Manager-pushed upgrades"}
- ]}
+{"node": "<id1>", "ok": true, "status": 200}
+{"node": "<id2>", "ok": false, "error": "does not accept Manager-pushed upgrades"}
+{"node": "<id3>", "ok": true, "status": 200, "skipped": true}
+{"done": true, "sha256": "a1b2c3...", "pushed": 2, "total": 3}
 ```
+
+The final line always carries `"done": true` and the summary (`pushed`
+out of `total`); it's how a client knows every peer has reported in. A
+plain HTTP client that just wants the whole thing at once can still
+collect every line and treat the response the same way — `curl ... | jq
+.` prints each object in turn, and `jq -s` slurps them into one array.
 
 Each target peer only accepts the push if it has separately opted in via
 `/api/upgrade/accept-manager` — see below. Up to 4 peers are built
@@ -2236,6 +2249,11 @@ curl -sk -b cookies.txt -X POST $HOST/api/upgrade/push \
   -F 'nodes=["<peer1 id>","<peer2 id>"]' \
   -F 'source=@gravinet-src.tgz' | jq .
 ```
+
+The response streams one JSON line per peer as that peer finishes, plus a
+final `{"done":true,...}` summary line — see
+[`POST /api/upgrade/push`](#post-apiupgradepush) above. `jq .` handles a
+stream of objects fine; add `-s` to slurp them into a single array.
 
 ### Restart the service
 

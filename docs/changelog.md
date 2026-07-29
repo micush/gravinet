@@ -2,6 +2,97 @@
 
 ---
 
+## v716 — 2026-07-29
+
+**Fixed: the latency history modal (Monitor → Latency → click a trend
+sparkline) blinked and visibly redrew every time a different duration
+button (5 min / 15 min / 30 min / 60 min / 4 hr) was clicked.**
+
+**The chart was being thrown away and rebuilt for no reason.** The range
+button's click handler nulled out the live `graphCard` and blanked
+`chartBox` to a "loading…" placeholder before re-fetching, forcing
+`load()` down its from-scratch branch: a brand new SVG, a brand new hover
+overlay, and brand new listeners, every single click. The periodic
+refresh right below it (`setInterval(load, LATENCY_POLL_MS)`) takes a
+completely different path for the exact same chart — when a `card`
+already exists it calls `card._redraw(...)`, which swaps the grid and
+data layers inside the existing SVG in place — and that path never
+blinks. The Metrics tab's own duration buttons already do this correctly
+(`renderMetricGraphs` only rebuilds when the *set* of graphs changes,
+never for a duration change alone); this modal's range buttons were the
+one place still forcing a teardown on every click.
+
+**Fix:** the range button handler just updates `minutes` and calls
+`load()`, the same as the periodic refresh does. `load()` already redraws
+the existing chart in place via `card._redraw` whenever `card` is set, so
+switching from 15 min to 4 hr now updates the same chart element instead
+of destroying and recreating it — no blink, no flash of "loading…", no
+new hover overlay to re-bind.
+
+This fix lives entirely in `internal/webadmin/ui.go`'s
+`showLatencyHistoryModal` — client-side JS embedded in the Go binary, with
+no separate frontend build/test step, so it isn't covered by a Go test;
+verified by hand in the browser by opening a peer's latency trend and
+clicking through all five duration buttons.
+
+Verified with go1.22.2: `go build ./...` and `go vet ./...` clean, and
+the full `internal/webadmin` suite passes (unaffected — no Go-visible
+behavior changed).
+
+---
+
+## v715 — 2026-07-29
+
+**Changed: a fleet upgrade push now reports each peer's result the moment
+that peer finishes, instead of holding every result back until the
+slowest peer in the batch is done.**
+
+`handleUpgradePush` fans an uploaded source archive out to however many
+peers were selected, each of which runs its own multi-minute build,
+preflight and swap. Previously every result was written into a slice and
+the whole response — one JSON object holding a `results` array — was only
+sent once `wg.Wait()` returned. Pushing to five peers meant watching a
+static "Pushing…" for as long as the *slowest* one took, even though four
+of them may have finished in the first thirty seconds. A wedged peer hid
+every other peer's outcome behind it for the entire duration, and the
+operator had no way to tell the tab hadn't just frozen.
+
+**The response is now newline-delimited JSON.** Each per-peer result is
+written and flushed the instant `pushSourceTo` returns for that peer —
+via a buffered results channel so the writing goroutine and the worker
+goroutines never touch `http.ResponseWriter` concurrently — followed by a
+final `{"done":true,"sha256":...,"pushed":...,"total":...}` summary line
+once every peer has reported in. Lines arrive in whatever order peers
+actually finish in, not the order they were selected in. The spooled
+archive is still only removed after every worker has finished with it,
+even if the client disconnects mid-stream and the handler stops writing
+early.
+
+The web admin's push control (System → Upgrade) reads the response as a
+stream rather than waiting for `resp.json()`, rendering each peer's ✓/✗
+line — and a live "N of M finished so far" counter — as results come in.
+
+This changes the wire format of `POST /api/upgrade/push` (see
+`docs/API.md`): the old single `{"sha256","pushed","results"}` object is
+gone in favor of one object per line plus a trailing summary line. A
+plain `curl ... | jq .` still works unmodified — `jq` handles a stream of
+whitespace-separated JSON values on its own.
+
+**Tests** (`internal/webadmin/upgrade_push_test.go`):
+
+- `TestPushStreamsResultsAsPeersFinish` — against two fake target peers,
+  one that replies immediately and one held open on a channel, asserts
+  the fast peer's result is readable off the response body before the
+  slow peer is released, then that the slow peer's result and the
+  trailing summary both arrive once it is. Fails against the old
+  buffered implementation (the first read blocks until timeout) and
+  passes against the streaming one.
+
+Verified with go1.22.2: `go build ./...` and `go vet ./...` clean, and
+the full `internal/webadmin` suite passes.
+
+---
+
 ## v714 — 2026-07-29
 
 **Fixed: an unreachable TCP fallback address was dialled 13 times a second,

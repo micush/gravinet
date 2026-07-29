@@ -41,6 +41,14 @@ const pushConcurrency = 4
 // Request: a multipart POST carrying a "nodes" field (a JSON array of peer
 // names) and a "source" file (the archive). The archive is spooled once and
 // hashed once; every peer then receives the same bytes and the same digest.
+//
+// Response: newline-delimited JSON, one object per line. Each per-peer result
+// is written and flushed the moment that peer's own build+apply finishes —
+// not buffered until the slowest peer is done — so a client reading the
+// response as it arrives (see drawUpgrade's fetch in ui.go) can show each
+// peer's outcome as soon as it's known. Lines arrive in whatever order peers
+// actually finish in, not the order "nodes" listed them. A final line
+// {"done":true,...} carries the summary once every peer has reported in.
 func (s *Server) handleUpgradePush(w http.ResponseWriter, r *http.Request) {
 	// Local-only: this drives a fleet action, so it must originate at the node
 	// the operator is logged into, never arrive over the proxy from a peer.
@@ -116,13 +124,18 @@ func (s *Server) handleUpgradePush(w http.ResponseWriter, r *http.Request) {
 		Skipped bool   `json:"skipped,omitempty"`
 		Error   string `json:"error,omitempty"`
 	}
-	results := make([]result, len(nodes))
+
+	// resultsCh carries each peer's outcome the instant it's known. It is
+	// buffered to len(nodes) so that every worker can hand off its result and
+	// exit even if the loop below stops reading early (client gone) — nothing
+	// blocks waiting for a reader that may never come back.
+	resultsCh := make(chan result, len(nodes))
 
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, pushConcurrency)
-	for i, node := range nodes {
+	for _, node := range nodes {
 		wg.Add(1)
-		go func(i int, node string) {
+		go func(node string) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
@@ -133,27 +146,66 @@ func (s *Server) handleUpgradePush(w http.ResponseWriter, r *http.Request) {
 				if mte, ok := err.(*managedTargetError); ok {
 					msg = mte.msg
 				}
-				results[i] = result{Node: node, OK: false, Error: msg}
+				resultsCh <- result{Node: node, OK: false, Error: msg}
 				return
 			}
 			status, skipped, perr := s.pushSourceTo(target, spooled, sum)
 			if perr != nil {
-				results[i] = result{Node: node, OK: false, Status: status, Error: perr.Error()}
+				resultsCh <- result{Node: node, OK: false, Status: status, Error: perr.Error()}
 				return
 			}
-			results[i] = result{Node: node, OK: true, Status: status, Skipped: skipped}
-		}(i, node)
+			resultsCh <- result{Node: node, OK: true, Status: status, Skipped: skipped}
+		}(node)
 	}
-	wg.Wait()
+	go func() {
+		wg.Wait()
+		close(resultsCh)
+	}()
+
+	// Newline-delimited JSON, not one JSON array: an array's closing "]" only
+	// exists once every peer is done, which is exactly the wait this exists to
+	// remove. X-Accel-Buffering plus an explicit Flush after each line is the
+	// same pairing handleSpeedtestSource uses to get bytes to the browser as
+	// they're produced instead of batched by an intermediary.
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+	enc := json.NewEncoder(w)
 
 	pushed := 0
-	for _, r := range results {
-		if r.OK {
+	// clientGone stops writing to w once a write fails (the operator's tab
+	// closed or the connection dropped) but keeps draining resultsCh rather
+	// than returning early: the spooled archive is only removed once this
+	// handler returns (see the defer above), and workers are still mid-build
+	// against that file until wg.Wait() finishes, closing the channel below.
+	// Returning while they're still reading it would remove the file out from
+	// under them on platforms that don't tolerate deleting an open file.
+	clientGone := false
+	for res := range resultsCh {
+		if res.OK {
 			pushed++
 		}
+		if clientGone {
+			continue
+		}
+		if err := enc.Encode(res); err != nil {
+			clientGone = true
+			continue
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
 	}
+
 	s.log.Infof("upgrade: pushed source (sha256 %s) to %d of %d requested peer(s)", sum[:12], pushed, len(nodes))
-	writeJSON(w, http.StatusOK, map[string]any{"sha256": sum, "pushed": pushed, "results": results})
+	if !clientGone {
+		_ = enc.Encode(map[string]any{"done": true, "sha256": sum, "pushed": pushed, "total": len(nodes)})
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
 }
 
 // pushSourceTo streams one spooled source archive (digest first, then bytes) to

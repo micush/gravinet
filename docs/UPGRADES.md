@@ -67,8 +67,11 @@ binary from the same bytes.
 deliberately local-only — the switch that authorizes remote upgrades can never
 itself be flipped by a remote peer.
 
-**Then, from the Manager:** System → Upgrade → **Push to managed peers**. Pick
-the archive, tick the peers, push. Results come back per peer.
+**Then, from the Manager:** System → Upgrade. Pick the archive, pick the
+peers, push. Each peer's result — applied, already up to date, or failed
+with why — appears the moment that peer finishes, not after the whole
+batch does, so a slow or wedged peer never hides the others' outcomes
+behind it.
 
 A pushed archive is built and applied on a peer only if **all** of these hold,
 none of which the Manager controls:
