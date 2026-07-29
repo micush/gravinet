@@ -1023,11 +1023,29 @@ func (e *Engine) primeTCPSeeds(ns *netState) {
 	// Endpoints are read after ns.mu is released: ps.ep() takes ps.mu, and the
 	// lock order in this package is never ns.mu -> ps.mu.
 	reached := make(map[netip.Addr]bool, len(sessions))
+	connected := make(map[string]bool, len(sessions))
 	for _, ps := range sessions {
+		connected[ps.nodeID] = true
 		if ep := ps.ep(); ep.IsValid() {
 			reached[ep.Addr()] = true
 		}
 	}
+	// Addresses we know belong to a peer we already have a session with. The
+	// address-keyed set above cannot cover these: a peer reachable over IPv4
+	// has a different netip.Addr for its IPv6 address, so its v6 candidate got
+	// no credit for the v4 session and was dialled forever. Observed as 14,113
+	// dials in one window against one connected peer's other address family.
+	//
+	// This is the same mistake in a third place — comparing addresses where
+	// the question is "have we already reached this peer" (v701 on UDP seeds,
+	// v710 on TCP seeds). seedOwner is the mapping that answers it.
+	ns.mu.RLock()
+	for addr, owner := range ns.seedOwner {
+		if connected[owner] {
+			reached[addr.Addr()] = true
+		}
+	}
+	ns.mu.RUnlock()
 	for _, seed := range seeds {
 		if seed.Addr().IsValid() && fd.HasFallback(seed) {
 			reached[seed.Addr()] = true
@@ -1046,12 +1064,25 @@ func (e *Engine) primeTCPSeeds(ns *netState) {
 		if reached[seed.Addr()] {
 			continue // another port on this host is already carrying us
 		}
+		if ns.fallbackInBackoff(seed) {
+			continue // connected before without ever handshaking; still cooling down
+		}
 		s := seed
 		go func() {
 			if err := fd.DialFallback(s); err != nil {
-				e.log.Debugf("mesh: tcp seed dial %s: %v", s, err)
+				// A dial that fails outright gets the same cooldown as one
+				// that connects and never handshakes (v713). Both mean "this
+				// address is not usable right now", and this is by far the
+				// commoner of the two: v713 only covered the connect-then-fail
+				// path, leaving plain refusals and unreachables with no
+				// backoff at all. In the field that was 780 dials a minute —
+				// thirteen a second, indefinitely — against a single address
+				// that could never answer.
+				wait := ns.noteFallbackFailure(s)
+				e.log.Debugf("mesh: tcp seed dial %s: %v (not retrying for %s)", s, err, wait)
 				return
 			}
+			ns.clearFallbackBackoff(s)
 			e.AddSeed(netID, s) // route the handshake to this seed over the new TLS conn
 			e.log.Infof("mesh: dialed tcp seed %s", s)
 		}()
@@ -1279,9 +1310,63 @@ func (e *Engine) watchFallbackHandshake(ns *netState, fb netip.AddrPort) {
 	case <-t.C:
 	}
 	if e.connectedTo(ns, fb) {
-		return // handshake completed; nothing to warn about
+		ns.clearFallbackBackoff(fb) // handshake completed; forget any past failures
+		return
 	}
-	e.log.Warnf("mesh: tcp fallback to %s connected but no mesh session formed within %s — the address may not be running gravinet, may not be the peer expected, or the handshake may be failing (wrong key, banned, version mismatch)", fb, fallbackHandshakeGrace)
+	// Back off before redialling. A socket that connects and never handshakes
+	// is not transient: the address isn't running gravinet, isn't the peer
+	// expected, or the handshake is failing for a standing reason. Because
+	// DialFallback succeeded, HasFallback reports the address as connected, so
+	// nothing else suppresses it — it was redialled on the same cycle
+	// indefinitely, each attempt burning a 10s grace period. Observed against
+	// a local gateway that accepts connections to arbitrary addresses, which
+	// makes every unreachable LAN candidate look permanently "connected".
+	wait := ns.noteFallbackFailure(fb)
+	e.log.Warnf("mesh: tcp fallback to %s connected but no mesh session formed within %s — the address may not be running gravinet, may not be the peer expected, or the handshake may be failing (wrong key, banned, version mismatch); not retrying for %s", fb, fallbackHandshakeGrace, wait)
+}
+
+// Fallback backoff. Doubles from fallbackBackoffMin to fallbackBackoffMax and
+// resets the moment a session actually forms, so a genuinely transient failure
+// costs one extra dial while a permanently wrong address settles at one
+// attempt per fallbackBackoffMax instead of one per tick.
+const (
+	fallbackBackoffMin = 30 * time.Second
+	fallbackBackoffMax = 10 * time.Minute
+)
+
+func (ns *netState) noteFallbackFailure(fb netip.AddrPort) time.Duration {
+	ns.mu.Lock()
+	defer ns.mu.Unlock()
+	if ns.fallbackBackoff == nil {
+		ns.fallbackBackoff = map[netip.AddrPort]fallbackBackoffEntry{}
+	}
+	e := ns.fallbackBackoff[fb]
+	if e.wait == 0 {
+		e.wait = fallbackBackoffMin
+	} else if e.wait < fallbackBackoffMax {
+		e.wait *= 2
+		if e.wait > fallbackBackoffMax {
+			e.wait = fallbackBackoffMax
+		}
+	}
+	e.until = time.Now().Add(e.wait)
+	ns.fallbackBackoff[fb] = e
+	return e.wait
+}
+
+func (ns *netState) clearFallbackBackoff(fb netip.AddrPort) {
+	ns.mu.Lock()
+	defer ns.mu.Unlock()
+	delete(ns.fallbackBackoff, fb)
+}
+
+// fallbackInBackoff reports whether fb is still cooling down. Callers hold no
+// lock; this takes ns.mu itself.
+func (ns *netState) fallbackInBackoff(fb netip.AddrPort) bool {
+	ns.mu.RLock()
+	defer ns.mu.RUnlock()
+	e, ok := ns.fallbackBackoff[fb]
+	return ok && time.Now().Before(e.until)
 }
 
 // deadSeedGrace is how long a seed entry that's never once connected keeps

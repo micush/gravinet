@@ -2,6 +2,93 @@
 
 ---
 
+## v714 — 2026-07-29
+
+**Fixed: an unreachable TCP fallback address was dialled 13 times a second,
+indefinitely — including addresses belonging to peers already connected.**
+Measured in the field: 780 dials per minute sustained for fifteen minutes,
+14,113 of them against a single address.
+
+**Two gaps, both in the same blind spot.**
+
+*Failed dials had no cooldown at all.* v713 backed off a fallback that
+connects and then fails to handshake, which was the case visible at the
+time. A dial that fails outright — refused, unreachable — takes a
+different path and got nothing, and it is by far the commoner condition:
+every tick, every port, every unreachable host, forever. Failed dials now
+take the same doubling cooldown (30s to a 10-minute cap), cleared on a
+successful dial.
+
+*The reached-host check was keyed by address, not by peer.* v710 skips
+hosts already reached, but a peer connected over IPv4 has a different
+`netip.Addr` for its IPv6 address, so the v4 session gave its v6 address no
+credit — and that address was dialled forever while the peer sat healthy on
+the other family. `primeTCPSeeds` now also consults `seedOwner`: any
+address attributable to a peer with a live session is skipped regardless of
+family.
+
+**That second one is the same mistake in a third place.** v701 fixed it for
+UDP seeds (`initSeedTick` comparing endpoints rather than asking who owned
+them), v710 for TCP seeds (exact-address match with no notion of a host
+already reached), and now across address families. Every instance has been
+a check comparing addresses where the question is *"have we already reached
+this peer"*. Worth stating plainly for whoever finds the fourth.
+
+**Tests** (`internal/mesh/faileddial_test.go`), both confirmed to fail
+against the unfixed code with the field symptom:
+
+- `TestFailedDialBacksOff` — a refused dial leaves a cooldown, and ten
+  further ticks produce no dials.
+- `TestAddressesOfAConnectedPeerAreNotDialled` — the IPv6 address of a peer
+  connected over IPv4 is not dialled.
+
+Verified with go1.22.2: `go build ./...` and `go vet ./...` clean, and the
+full `internal/mesh` suite passes.
+
+---
+
+## v713 — 2026-07-29
+
+**Fixed: a TCP fallback whose socket connects but never yields a mesh
+session was redialled on every tick indefinitely.** It now backs off,
+doubling from 30s to a 10-minute cap, and resets the moment a session
+actually forms.
+
+**Why it never stopped.** `DialFallback` succeeding means only that the
+socket connected. `HasFallback` then reports the address as connected, so
+none of the existing suppression applies — including v710's, which skips
+hosts already reached. The watchdog added for this exact case
+(`watchFallbackHandshake`) noticed and warned every time, but warning was
+all it did, so each cycle burned a fresh 10-second handshake grace and
+logged another line.
+
+What made it conspicuous was a local gateway that accepts TCP connections
+to arbitrary addresses — captive-portal-style behaviour, common on
+tethered networks. Every unreachable LAN candidate then looks permanently
+"connected", and a node off its home network retried a handful of them
+around the clock: 26 dial failures a minute in the field, most against
+addresses that could never work from where it was.
+
+**The shape of the fix.** The failure is standing rather than transient —
+the address isn't running gravinet, isn't the peer expected, or the
+handshake is failing for a fixed reason (wrong key, banned, version
+mismatch). So the cooldown starts at 30s and doubles to 10 minutes, and
+`primeTCPSeeds` skips an address still cooling down. A genuinely transient
+failure costs one extra dial; a permanently wrong address settles at one
+attempt per ten minutes instead of one per tick.
+
+Clearing on success is what keeps that safe: the moment a handshake
+completes the entry is deleted and the address is dialled at full rate
+again, so a peer that was merely down recovers immediately rather than
+serving out a penalty it earned while broken.
+
+**Tests** (`internal/mesh/fallbackbackoff_test.go`): doubling and the cap,
+clearing on success and restarting from the minimum afterwards,
+per-address independence, and expiry — without which a temporarily-down
+peer would never be retried at all.
+
+---
+
 ## v712 — 2026-07-29
 
 **Changed: the "rejecting advertised route" debug line is now rate-limited

@@ -642,6 +642,9 @@ type netState struct {
 	seeds       []netip.AddrPort             // mutable; grows as peers are learned
 	tcpSeeds    []netip.AddrPort             // explicit TCP/TLS-fallback seeds to dial directly (ns.mu)
 	seedBackoff map[netip.AddrPort]time.Time // don't retry a seed before this time
+	// fallbackBackoff cools down TCP fallback addresses whose socket connects
+	// but which never yield a mesh session (see watchFallbackHandshake).
+	fallbackBackoff map[netip.AddrPort]fallbackBackoffEntry
 	// seedFallback records, per seed, the specific fallback address
 	// ensureFallback last resolved and dialed for it (same IP, a different
 	// port). Used by connectedTo/install to recognize "this seed's peer is
@@ -971,6 +974,13 @@ type routeEntry struct {
 
 // nodeInfo is what we know about a node in the mesh, whether or not we currently
 // hold a session to it. Used for gossip propagation and (step 6) hosts sync.
+// fallbackBackoffEntry is one address's cooldown: how long the current wait
+// is (doubling on each failure) and when it expires.
+type fallbackBackoffEntry struct {
+	wait  time.Duration
+	until time.Time
+}
+
 type nodeInfo struct {
 	nodeID   string
 	hostname string
