@@ -2,6 +2,55 @@
 
 ---
 
+## v708 — 2026-07-28
+
+**Added: a `tshoot` button in Monitor → Logs that downloads one text file
+containing everything needed to diagnose this node.**
+
+**Why.** Diagnosing a mesh problem currently means reconstructing the
+node's state one screenshot at a time — and the reconstruction is
+routinely wrong, because a table gets cropped above the row that matters,
+or routes are collected from one node and not its peer, or a counter
+nobody knew existed is never checked. A recent investigation spent a full
+day on exactly that and reached several confident conclusions that were
+false. Everything asked for over that day is in this file.
+
+**What it contains**, for every network on the node: the full peer list
+(reach, relay, endpoint, session age, path MTU, fragment counters and
+every drop counter, not the subset that fits in a table column), routes,
+bans, disabled peers, firewall rules and exemptions; and node-wide, the
+NAT status for v4 and v6, interfaces, the configuration file with secrets
+redacted, and the tail of the log.
+
+**Structured sections are marshalled from the source structs rather than
+hand-formatted.** Hand-formatting omits fields added later, which is how a
+diagnostic quietly goes stale; marshalling means a field added tomorrow
+appears in the bundle the day it is added, with no second place to
+remember to update.
+
+**The bundle states its own biggest limitation at the top:** it is one
+node's view. Peers hold their own, and the two can legitimately disagree —
+a session torn down on one side is not always torn down on the other, and
+in the field that disagreement *was* the diagnosis. For any problem
+involving a specific peer, collect from both ends.
+
+**Redaction.** The config is included because misconfiguration is a
+leading cause of what this exists to diagnose, so secrets have to be
+removed rather than the file omitted. The matcher is deliberately broad —
+key, secret, password, token, credential, psk, private, hash, salt — and
+it tracks indented blocks, because a list of keys has no per-item key name
+to match on and would otherwise pass straight through. A false positive
+costs one unreadable line; a false negative leaks a private key into a
+file whose whole purpose is being sent to someone else. Two tests cover
+it, including the nested-list case, which the first implementation got
+wrong.
+
+Verified with go1.22.2: `go build ./...` and `go vet ./...` clean, the
+`internal/webadmin` and `cmd/gravinet` suites pass, and the full
+`internal/mesh` suite passes.
+
+---
+
 ## v707 — 2026-07-28
 
 **Fixed: a peer reached through a relay kept a pointer to the relay's old

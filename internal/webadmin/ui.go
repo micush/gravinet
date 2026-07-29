@@ -9639,6 +9639,19 @@ function secLogs(c){
         const a = document.createElement('a'); a.href = url; a.download = 'gravinet.log'; a.click();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
       } },
+    { label:'tshoot', cls:'ghost', title:'download one file with everything needed to troubleshoot this node: every peer on every network with reach, relay, session age, path MTU, fragment and drop counters; routes; bans; disabled peers; firewall rules and exemptions; NAT status; interfaces; the config with secrets redacted; and the tail of the log. Collect it from both ends of any peer problem \u2014 the two nodes can legitimately disagree, and the disagreement is often the diagnosis.', onclick: async () => {
+        const r = await fetch('/api/tshoot', { credentials:'same-origin' });
+        if (!r.ok) { alert('could not build the bundle (HTTP '+r.status+')'); return; }
+        const text = await r.text();
+        const blob = new Blob([text], { type:'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        const stamp = new Date().toISOString().replace(/[-:T]/g,'').slice(0,15);
+        a.download = 'gravinet-tshoot-'+stamp+'.txt';
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      } },
     { label:'Clear', cls:'ghost', title:'clear the log file', onclick: async () => {
         if (!confirm('Clear the log file? This cannot be undone.')) return;
         const r = await api('/api/logs/clear', { method:'POST' });
