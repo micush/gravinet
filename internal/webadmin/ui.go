@@ -2724,7 +2724,7 @@ function secSettingsGeneral(c) {
   card.appendChild($('<h3>Config history</h3>'));
 
   const chRow = $('<div class="settings-row" id="config-history-limit-row"></div>');
-  const chLabel = $('<div><div class="settings-desc">How many automatic and manual configuration snapshots to keep (System \u2192 Config History), FIFO \u2014 oldest pruned first once you go over this. 0 uses the default (250). Applied immediately; no restart.</div></div>');
+  const chLabel = $('<div><div class="settings-desc">How many automatic and manual configuration snapshots to keep (System \u2192 Config History), FIFO \u2014 oldest pruned first once you go over this. 0 uses the default (250).</div></div>');
   const chInp = $('<input type="number" min="0" step="1" style="width:80px">');
   chInp.value = state.configHistoryLimit;
   chInp.onchange = async () => {

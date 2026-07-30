@@ -2,6 +2,31 @@
 
 ---
 
+## v734 — 2026-07-30
+
+**Removed a seventh "Applied immediately; no restart." note that v733
+missed — Config history retention limit, in
+`internal/webadmin/ui.go`.**
+
+v733's sweep searched for the phrase with a comma ("Applied
+immediately, no restart."), since that's how it read everywhere else.
+This one used a semicolon ("Applied immediately; no restart."), so it
+didn't match and was left behind in the Config history description
+under System → Config History. Removed the same way as the other six:
+deleted, description reads cleanly without it.
+
+Grepped `internal/webadmin/ui.go` case-insensitively for both
+"applied immediately" and "restarts to apply" afterward — zero
+matches, so this closes out the sweep v733 started.
+
+No functional change — static description string only.
+
+Verified with go1.22.2: `go build ./...`, `go vet ./...` clean (CGO
+disabled). Full `internal/webadmin` suite passes. Embedded `<script>`
+block extracted and `node --check`'d clean.
+
+---
+
 ## v733 — 2026-07-30
 
 **Removed the "Restarts to apply." / "Applied immediately, no restart."
