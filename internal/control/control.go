@@ -52,7 +52,7 @@ type Request struct {
 	Cmd   string `json:"cmd"`
 	Net   string `json:"net,omitempty"` // hex network id; optional if only one
 	Node  string `json:"node,omitempty"`
-	Notes string `json:"notes,omitempty"`
+	Notes string `json:"notes,omitempty"` // "ban": the operator's note on the ban. "reload": a CLI audit summary — see the "reload" case's own comment.
 	Force bool   `json:"force,omitempty"`
 
 	// Key distribution ("keydist" command).
@@ -206,6 +206,19 @@ func (s *Server) dispatch(req Request) Response {
 		}
 		if err := s.reload(); err != nil {
 			return Response{OK: false, Error: err.Error()}
+		}
+		// req.Notes carries the CLI's own (already-redacted — see
+		// cmd/gravinet's reloadDaemon/redactSensitiveCLIArgs) invocation
+		// summary for "reload" specifically, so a CLI-driven config change
+		// leaves a record in the daemon's own log — see reloadDaemon's doc
+		// comment for why this goes through s.log (the daemon's one
+		// existing writer for that file) rather than the CLI process
+		// opening a second, independent one. Web admin's own reload path
+		// (webSrv.SetReload, a separate Server instance) never reaches
+		// here, so this can't double-log a web-admin-driven change, which
+		// already gets a much richer record via config.OnCommit.
+		if req.Notes != "" && s.log != nil {
+			s.log.Infof("config change via CLI: gravinet %s", req.Notes)
 		}
 		return Response{OK: true}
 	case "nets":

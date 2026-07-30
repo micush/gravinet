@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -90,19 +91,80 @@ func commitCfg(cfg *config.Config, path string) {
 
 // reloadDaemon asks a running daemon to re-read its config. Returns false if no
 // daemon is listening (so the caller can say "applies on restart").
+//
+// Also carries a one-line audit summary of the CLI invocation that triggered
+// this reload, in Request.Notes, so it lands in the daemon's own log —
+// closing the gap left by config history (internal/config/history.go),
+// which only ever sees changes made through the web admin (its one call
+// site is webadmin.go's mutateConfig): a CLI-driven edit like this one
+// otherwise leaves no record anywhere once it's saved. This intentionally
+// doesn't try to give CLI edits full snapshot/diff/restore parity with web
+// admin's history — just a log line — so it's the CLI process sending a
+// string over the control socket it already talks to for reload, not a
+// second process independently writing the log file. That distinction
+// matters: RotatingFile tracks its size in memory per instance, and the
+// daemon already holds its own long-lived instance open on that exact file
+// (see cmd/gravinet's logx.SetOutput wiring) — a second, independent writer
+// from a short-lived CLI process could race that instance's FIFO trimming
+// and corrupt the file. Routing through the control socket keeps the
+// daemon's own logx.Logger (see control.Server.log) the only writer, ever.
 func reloadDaemon(sock string) bool {
 	// Normalize rather than only defaulting an empty value: a config still holding
 	// the stale "/run/gravinet.sock" is exactly the case where the daemon is bound
 	// somewhere else (the platform default), and dialing the stale path verbatim
 	// would report "daemon not reachable" about a daemon that is running fine.
 	endpoint, _ := config.NormalizeControlSocket(sock)
-	resp, err := control.Do(endpoint, control.Request{Cmd: "reload"})
+	summary := strings.Join(redactSensitiveCLIArgs(os.Args[1:]), " ")
+	resp, err := control.Do(endpoint, control.Request{Cmd: "reload", Notes: summary})
 	return err == nil && resp.Error == ""
+}
+
+// reTokenLike/reKeyLike identify the two shapes of secret this CLI ever
+// takes as a plain argument: a join token (config.joinTokenPrefix, "grav1.")
+// and a raw base64 AES-256 network key ("key set <KEY>", "network join ID
+// key KEY peer PEER"). reKeyLike matches base64's fixed output length for
+// exactly 32 random bytes (crypto.GenerateKey's own size) — 44 characters
+// including the trailing "=" pad — rather than any base64-looking string,
+// so an ordinary argument that merely contains a slash or plus sign isn't
+// swept up by accident.
+var (
+	reTokenLike = regexp.MustCompile(`^grav1\.`)
+	reKeyLike   = regexp.MustCompile(`^[A-Za-z0-9+/]{43}=$`)
+)
+
+// redactSensitiveCLIArgs returns args with anything matching reTokenLike/
+// reKeyLike replaced by a placeholder, so reloadDaemon's audit summary can
+// otherwise include the rest of the invocation verbatim. Deliberately
+// pattern-based rather than aware of which specific command/keyword
+// position carries the secret (e.g. "key set's 3rd arg" specifically) — a
+// future command that takes a secret positional stays covered by this
+// without needing a matching update here.
+func redactSensitiveCLIArgs(args []string) []string {
+	out := make([]string, len(args))
+	for i, a := range args {
+		if reTokenLike.MatchString(a) || reKeyLike.MatchString(a) {
+			out[i] = "<redacted>"
+			continue
+		}
+		out[i] = a
+	}
+	return out
 }
 
 // commitCfgStructural saves a structural change (one that needs the daemon to
 // rebuild interfaces/sessions, e.g. adding/joining/enabling a network) and, by
 // default, restarts the service so it takes effect immediately.
+//
+// Unlike commitCfg, this never reaches reloadDaemon — a full service restart
+// doesn't go through the control socket's "reload" command at all (the old
+// process is torn down and a new one started fresh), so a command that lands
+// here (mtu, subnet, address, key rotation) doesn't get the CLI audit line
+// reloadDaemon adds to the daemon's log — see its doc comment. The new
+// daemon's own startup sequence logs plenty about the resulting state, just
+// not "why" or "via which CLI command." Known gap, not fixed here: closing
+// it would mean passing a summary through the restart itself (an env var or
+// a marker file the new process reads at startup), which is a genuinely
+// different mechanism from reloadDaemon's, not a small extension of it.
 func commitCfgStructural(cfg *config.Config, path string, noRestart bool) {
 	if err := cfg.Validate(); err != nil {
 		fatal("invalid config after change: %v", err)
@@ -377,6 +439,176 @@ func cmdNetwork(args []string) {
 	// for what "live" actually does). A full restart would just needlessly
 	// drop every *other* network's sessions along with it.
 	commitCfg(cfg, path)
+}
+
+// quickstartUsage is printed on any usage error from cmdQuickstart — shared
+// so the two failure points in parseQuickstartArgs stay word-for-word
+// identical rather than drifting apart.
+const quickstartUsage = "usage: gravinet quickstart NAME [subnet CIDR] [subnet6 CIDR] [addr HOST:PORT] [expires DUR] [-config PATH] [-no-service]\n   or: gravinet quickstart join TOKEN [-config PATH] [-no-service]"
+
+// parseQuickstartArgs validates cmdQuickstart's invocation shape and reports
+// which of the two forms it is, given rest (the positional args left after
+// -config/-no-service have already been stripped by the caller). Pulled out
+// as its own pure function — like chooseSubnets/nextFreeSubnets above it —
+// specifically so the shape (empty args, "join" with no token) is unit-
+// testable without going through cmdQuickstart's fatal()/os.Exit path, and so
+// cmdQuickstart itself can never index rest[0]/rest[1] before this has
+// confirmed they exist: an earlier version indexed unconditionally and
+// panicked on a flags-only invocation (see TestParseQuickstartArgs).
+func parseQuickstartArgs(rest []string) (joining bool, netNameOrToken string, err error) {
+	if len(rest) == 0 {
+		return false, "", fmt.Errorf("%s", quickstartUsage)
+	}
+	if rest[0] == "join" {
+		if len(rest) < 2 {
+			return false, "", fmt.Errorf("usage: gravinet quickstart join TOKEN [-config PATH] [-no-service]")
+		}
+		return true, rest[1], nil
+	}
+	return false, rest[0], nil
+}
+
+// cmdQuickstart is a macro, not a new capability: it chains exactly the steps
+// the README already tells a new operator to run by hand — create (or load) a
+// config, add or join a network, mint a join token for the next node, and
+// install the OS service — into one command, in the right order, using the
+// exact same underlying calls (writeDefaultConfig, Config.NetworkAdd/
+// NetworkJoinToken/NetworkToken, commitCfg, service.Install) those individual
+// commands already use. It has no logic of its own beyond sequencing and
+// friendlier output; anything it does can still be done step by step with the
+// commands it wraps, and nothing here needs elevated trust beyond what those
+// already have.
+//
+// Two forms:
+//
+//	gravinet quickstart NAME [subnet CIDR] [subnet6 CIDR] [addr HOST:PORT] [expires DUR] [-config PATH] [-no-service]
+//	gravinet quickstart join TOKEN [-config PATH] [-no-service]
+//
+// The first stands up a brand-new mesh: NAME becomes the first (seed) node's
+// network, and the token printed at the end is exactly what "network token"
+// would print — hand it to the next machine's "gravinet quickstart join
+// <token>". "join" is a reserved first word here the same way it is under
+// "network"; a network genuinely named "join" needs "network add join"
+// directly instead of this shorthand.
+//
+// Unlike every other config-editing command in this file, this one is the
+// single place allowed to create the config file itself rather than fatal()
+// on a missing one (openCfg's whole contract) — that's the actual gap this
+// command exists to close: today a fresh install needs "run -init" (or a
+// first service start) before any "network add"/"join" can succeed at all.
+func cmdQuickstart(args []string) {
+	path, rest := extractOpt(args, "config")
+	if path == "" {
+		path = defaultConfigPath
+	}
+	noService, rest := hasFlag(rest, "no-service")
+
+	// Validate the invocation shape fully before touching the filesystem at
+	// all — writeDefaultConfig below is a real side effect (a file left on
+	// disk), and running it ahead of a usage error would mean a mistyped
+	// invocation (e.g. only flags, no NAME/TOKEN) leaves a stray empty
+	// config behind instead of just failing cleanly.
+	joining, netNameOrToken, err := parseQuickstartArgs(rest)
+	if err != nil {
+		fatal("%v", err)
+	}
+
+	// The one deviation from every other command here: create the config if
+	// it's not there yet, instead of erroring — see the doc comment above.
+	// writeDefaultConfig itself refuses nothing (it's also what an
+	// automatic first-start bootstrap uses), so this is safe to call
+	// whether or not a service has ever run against this path before.
+	freshConfig := false
+	if _, err := os.Stat(path); err != nil {
+		if !os.IsNotExist(err) {
+			fatal("stat %s: %v", path, err)
+		}
+		if err := writeDefaultConfig(path); err != nil {
+			fatal("write config: %v", err)
+		}
+		freshConfig = true
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		fatal("load config %s: %v", path, err)
+	}
+	if freshConfig {
+		fmt.Printf("wrote a new config to %s\n", path)
+	} else {
+		fmt.Printf("using existing config at %s\n", path)
+	}
+
+	var netName string
+	if joining {
+		id, name, err := cfg.NetworkJoinToken(netNameOrToken)
+		if err != nil {
+			fatal("%v", err)
+		}
+		netName = name
+		fmt.Printf("joined network %s%s from token\n  name and subnet are learned from the network once a peer connects\n",
+			id, ifStr(name != "", " ("+name+")", ""))
+	} else {
+		netName = netNameOrToken
+		v4 := optOrKw(rest, "subnet")
+		v6 := optOrKw(rest, "subnet6")
+		n, err := cfg.NetworkAdd(netName, v4, v6)
+		if err != nil {
+			fatal("%v", err)
+		}
+		fmt.Printf("added network %q (id %s, subnet4=%s subnet6=%s, generated key)\n",
+			netName, n.ID, orNone(n.Subnet4), orNone(n.Subnet6))
+
+		// Mint the token for the *next* node right away — the whole point of
+		// quickstart is that this is the very next thing an operator needs,
+		// so don't make them run "network token" as a separate step.
+		var extra []string
+		if a := strings.TrimSpace(kw(rest, "addr")); a != "" {
+			extra = append(extra, a)
+		}
+		var ttl time.Duration
+		if e := strings.TrimSpace(kw(rest, "expires")); e != "" {
+			d, derr := time.ParseDuration(e)
+			if derr != nil || d <= 0 {
+				fatal("invalid expires duration %q (use e.g. 24h, 72h)", e)
+			}
+			ttl = d
+		}
+		seedCount := cfg.TokenSeedCount(netName, extra)
+		tok, err := cfg.NetworkToken(netName, extra, ttl)
+		if err != nil {
+			fatal("%v", err)
+		}
+		fmt.Println("\njoin token for the next node:")
+		fmt.Println(tok)
+		fmt.Println("(contains the network key — share it over a secure channel; join with 'gravinet quickstart join <token>')")
+		if seedCount == 0 {
+			fmt.Println("no bootstrap seed embedded — pass 'addr HOST:PORT' (this node's reachable underlay endpoint) next time, or the joiner adds a seed manually")
+		}
+	}
+
+	fmt.Println()
+	commitCfg(cfg, path)
+
+	if noService {
+		fmt.Println("\nskipping service install (-no-service); run 'gravinet run -config " + path + "' directly, or 'gravinet service install' when ready")
+		return
+	}
+	opts := service.Defaults()
+	opts.ConfigPath = path
+	svcPath, next, err := service.Install(opts)
+	if err != nil {
+		fatal("service install: %v", err)
+	}
+	fmt.Println()
+	if svcPath != "" {
+		fmt.Printf("wrote %s\n", svcPath)
+	}
+	fmt.Printf("next: %s\n", next)
+	if !joining {
+		fmt.Printf("\nquickstart complete for network %q — run the command above to bring gravinet up, then hand the join token to the next node.\n", netName)
+	} else {
+		fmt.Printf("\nquickstart complete — run the command above to bring gravinet up and join network %q.\n", netName)
+	}
 }
 
 // ---- route -------------------------------------------------------------------

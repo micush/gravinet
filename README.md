@@ -307,7 +307,24 @@ one when needed, warning loudly if they can't.
 For the full walkthrough — installing, then almost everything else from the
 web UI (creating and joining networks, DNS, routes, clustering, keys,
 firewall, NAT, QoS, shaping, seeds, peers, bans, monitoring) — open the web
-admin and go to **Info → Getting Started**. This is the bare CLI path:
+admin and go to **Info → Getting Started**.
+
+The fastest CLI path is one command:
+
+```sh
+gravinet quickstart corp                    # first node: config + network + join token, in one shot
+gravinet quickstart join <token-from-above> # every other node: paste the token, done
+```
+
+This is a macro over the same steps below — `run -init`, `network add`,
+`network token`, `service install` — plus installing the OS service (unless
+you pass `-no-service`), so it also prints the one follow-up command
+(`systemctl enable --now gravinet`, or the launchd/SCM/rc.d equivalent) that
+actually brings the daemon up. `subnet CIDR`/`subnet6 CIDR`/`addr HOST:PORT`
+are all accepted on the first form, same syntax as `network add`/`network
+token` below.
+
+Or, the same thing spelled out step by step:
 
 ```sh
 gravinet run -config ./config.json -init   # scaffold a base config (no networks yet)

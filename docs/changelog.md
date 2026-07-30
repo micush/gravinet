@@ -2,6 +2,45 @@
 
 ---
 
+## v745 — 2026-07-30
+
+**Fix a real gap in config history: CLI-driven config changes (`network add`, `route add`, `quickstart`, ...) now leave a record in the daemon's own log. Previously only web-admin-originated changes did — `config.OnCommit` (the snapshot/diff/restore mechanism) has exactly one call site, in `webadmin.go`; every CLI edit went straight to disk with no trace anywhere.**
+
+Deliberately *not* full snapshot/diff/restore parity with web admin's history — just a log line, and a narrower mechanism to get there safely. The CLI (`reloadDaemon`, `cmd/gravinet/cli_config.go`) now sends a one-line summary of its own invocation (`os.Args[1:]`) alongside the existing "reload" request it already sends over the control socket, in `Request.Notes` (repurposed — unused by "reload" before now, and `Notes` already means something different for "ban"; each command in the dispatch switch only ever reads its own fields, so there's no collision). The daemon's control dispatch (`internal/control/control.go`) logs it through `s.log` — the exact same `*logx.Logger` instance already wired to the rotating log file at startup (`logx.Default()`), not a second writer.
+
+That last point mattered: `RotatingFile` tracks its size in memory per instance, and the daemon already holds one long-lived instance open on that file. A second, independent writer from the short-lived CLI process — which was the first design considered — could race the daemon's own FIFO trimming and corrupt the file. Routing through the control socket the CLI already talks to keeps the daemon's own logger the only writer, ever.
+
+**Redaction, checked carefully:** the raw invocation can contain a real secret — `key set <KEY>`, `network join ID key KEY peer PEER`, any `quickstart join <token>` or `network join <token>` — and writing that into a persistent, possibly syslog-forwarded log file would be a real escalation over today (a key typed on the CLI is already in shell history, but this is a second, more widely-reviewed place for it to live). `redactSensitiveCLIArgs` replaces anything matching a join token's `grav1.` prefix or the exact 44-character shape of a base64-encoded 32-byte key with `<redacted>`, pattern-based rather than aware of which command/keyword position carries the secret — so a future command with a secret positional stays covered without a matching update here.
+
+**Known, documented gap:** commands that land in `commitCfgStructural` instead of `commitCfg` (mtu, subnet, address, key rotation) go through a full service restart rather than the control socket's "reload," so they don't get this audit line — a restart tears down the old process and starts a new one, there's no live daemon to send a log line to at that point. The new process's own startup sequence logs plenty about the resulting state, just not which CLI command caused it. Noted in `commitCfgStructural`'s own doc comment rather than silently left unaddressed.
+
+Verified: `go build ./...` and `go vet ./...` clean, `gofmt` clean. `internal/control` and `cmd/gravinet` suites pass. New test `TestRedactSensitiveCLIArgs` (`cmd/gravinet/reload_audit_test.go`) covers a real generated key, a real-shaped join token, redaction regardless of argument position, and confirms an ordinary non-key-shaped argument is left untouched. Also manually verified against a real running daemon: a plain `route add` produces the exact audit line in the real log file; `network join` with an explicit raw key logs with the key redacted and everything else (network id, peer address) intact, confirmed by grepping the real key against the real log file and finding zero matches; same for a real `quickstart join <token>`.
+
+---
+
+## v744 — 2026-07-30
+
+**New: `gravinet quickstart` — stand up a fresh mesh (or join one) and install the OS service in a single command.**
+
+Not a new capability, a macro: it chains exactly the steps the README already documents as separate commands — create (or load) the config, add or join a network, mint a join token for the next node, and install the OS service — using the exact same underlying calls those individual commands use (`writeDefaultConfig`, `Config.NetworkAdd`/`NetworkJoinToken`/`NetworkToken`, `commitCfg`, `service.Install`). It closes a real gap: today a genuinely fresh install needs `run -init` (or a first service start) before any `network add`/`join` can succeed at all, since every other config-editing command `fatal()`s on a missing config file.
+
+Two forms:
+
+```
+gravinet quickstart NAME [subnet CIDR] [subnet6 CIDR] [addr HOST:PORT] [expires DUR] [-config PATH] [-no-service]
+gravinet quickstart join TOKEN [-config PATH] [-no-service]
+```
+
+The first stands up a brand-new mesh and prints a join token immediately — the very next thing an operator needs — instead of requiring a separate `network token` call. The second joins an existing one from that token. `-no-service` skips the OS service install for testing/scripting; otherwise it prints the same `next: systemctl enable --now gravinet`-style follow-up `service install` already does.
+
+**Bug found and fixed during manual testing, not shipped:** the first draft indexed the positional args unconditionally, so a flags-only invocation (`gravinet quickstart -config PATH`, no NAME/TOKEN) panicked — and worse, did so *after* already writing an empty config file to disk, leaving a stray file behind on a crash. Fixed by extracting the invocation-shape check into `parseQuickstartArgs`, a pure function (same pattern as the existing `chooseSubnets`/`nextFreeSubnets`) that's checked in full before any filesystem write, and is itself unit-tested without needing to touch `fatal()`'s `os.Exit`.
+
+New tests in `cmd/gravinet/quickstart_test.go`: `TestParseQuickstartArgs` (the invocation-shape validation, including the original panic case), `TestQuickstartCreateThenJoin` (a full create → token → join round trip, asserting the two resulting configs share the network id/key and that the joiner inherited the subnet and seed from the token), `TestQuickstartDuplicateNetworkNameFails` and `TestQuickstartFlagsOnlyLeavesNoTrace` (both run as a subprocess via the standard library's own `TestHelperProcess` re-exec pattern, since they're expected to hit `fatal()`/`os.Exit` and that can't be trapped in-process without touching shared CLI code every command relies on).
+
+Verified: `go build ./...` and `go vet ./...` clean, `gofmt` clean. Full `cmd/gravinet` and `internal/config` suites pass. Also manually exercised end to end outside the test suite: a real create → real join round trip with a real printed token, the service-install path (confirmed the generated systemd unit's `ExecStart` points at the correct binary and config path), duplicate-name rejection, and prefix-matching (`gravinet q` correctly reports the `quickstart`/`qos` ambiguity, `gravinet quick ...` resolves unambiguously).
+
+---
+
 ## v743 — 2026-07-30
 
 **Fix: Mesh > Networks' `mesh` (full/partial) toggle now actually restarts the node to apply the change, instead of silently saving a new mesh mode that never took effect.**

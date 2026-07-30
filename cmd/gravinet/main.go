@@ -48,7 +48,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "743"
+	version = "745"
 	commit  = "none"
 )
 
@@ -97,7 +97,7 @@ func main() {
 	// ("gravinet mon ..." => "gravinet monitor ..."); see prefix.go. The
 	// candidate list mirrors this switch's case arms — extend both together.
 	cmd := os.Args[1]
-	if m, cands := matchPrefixGroups(cmd, [][]string{{"run"}, {"genkey"}, {"genpass"}, {"ban"}, {"unban"}, {"list"}, {"status"}, {"latency"}, {"mesh"}, {"traffic"}, {"naming"}, {"monitor"}, {"info"}, {"settings"}, {"network", "net"}, {"key"}, {"route"}, {"seed"}, {"nat"}, {"host", "hosts"}, {"qos"}, {"bandwidth", "bw"}, {"fw"}, {"managed"}, {"manager"}, {"service"}, {"upgrade"}, {"selftest"}, {"version"}, {"help"}}); m != "" {
+	if m, cands := matchPrefixGroups(cmd, [][]string{{"run"}, {"genkey"}, {"genpass"}, {"quickstart"}, {"ban"}, {"unban"}, {"list"}, {"status"}, {"latency"}, {"mesh"}, {"traffic"}, {"naming"}, {"monitor"}, {"info"}, {"settings"}, {"network", "net"}, {"key"}, {"route"}, {"seed"}, {"nat"}, {"host", "hosts"}, {"qos"}, {"bandwidth", "bw"}, {"fw"}, {"managed"}, {"manager"}, {"service"}, {"upgrade"}, {"selftest"}, {"version"}, {"help"}}); m != "" {
 		cmd = m
 	} else if len(cands) > 1 {
 		fmt.Fprintf(os.Stderr, "gravinet: %q is ambiguous: %s\n", cmd, strings.Join(cands, ", "))
@@ -110,6 +110,8 @@ func main() {
 		cmdGenKey(os.Args[2:])
 	case "genpass":
 		cmdGenPass(os.Args[2:])
+	case "quickstart":
+		cmdQuickstart(os.Args[2:])
 	case "ban":
 		cmdBan(os.Args[2:])
 	case "unban":
@@ -201,6 +203,9 @@ than pretending to; use the web admin for those today.
 
 other commands (not tied to a web admin page):
   run        run the daemon
+  quickstart start a mesh (or join one) and install the service, in one shot:
+               gravinet quickstart NAME [subnet CIDR] [subnet6 CIDR] [addr HOST:PORT]
+               gravinet quickstart join TOKEN
   genkey     generate one or more base64 AES-256 keys
   genpass    generate a web-admin user credential (PBKDF2) for the config
   list       print the whole config
