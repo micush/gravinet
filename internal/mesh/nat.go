@@ -1,8 +1,10 @@
 package mesh
 
 import (
+	"fmt"
 	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -70,6 +72,17 @@ type natRule struct {
 	dst    netip.Prefix // match dest (invalid = any)
 	proto  uint8        // 0 = any
 	to     netip.Addr   // translation target
+	// dportLo/dportHi scope a DNAT rule to a specific destination port or
+	// range on the original (pre-translation) packet; 0,0 = any port.
+	// Unused for SNAT rules (see config.NATRule.DestPort's doc comment for
+	// why a rewritten *source* port has no equivalent match).
+	dportLo, dportHi uint16
+	// toPort, if nonzero, remaps the destination port to this fixed value
+	// on a matched DNAT packet instead of preserving the original port —
+	// port address translation (PAT). Only ever set alongside dportLo ==
+	// dportHi (a single matched port); see buildNATRule/toRule for why a
+	// range can't remap this way.
+	toPort uint16
 }
 
 type natKey struct {
@@ -304,17 +317,24 @@ func (t *natTable) translateIn(pkt []byte) {
 		if !prefixMatch(r.src, src) || !prefixMatch(r.dst, dst) {
 			continue
 		}
+		if r.dportLo != 0 && (dport < r.dportLo || dport > r.dportHi) {
+			continue
+		}
+		tport := dport
+		if r.toPort != 0 {
+			tport = r.toPort
+		}
 		fwd := natKey{proto, src, dst, sport, dport}
 		c := t.dnatFwd[fwd]
 		if c == nil {
 			c = &natConn{
 				oSrc: src, oDst: dst, oSport: sport, oDport: dport,
-				tSrc: src, tDst: r.to, tSport: sport, tDport: dport,
+				tSrc: src, tDst: r.to, tSport: sport, tDport: tport,
 				proto: proto,
 			}
 			t.dnatFwd[fwd] = c
-			// Reply will be src=internal host (r.to:dport) -> us (src:sport).
-			t.dnatRev[natKey{proto, r.to, src, dport, sport}] = c
+			// Reply will be src=internal host (r.to:tport) -> us (src:sport).
+			t.dnatRev[natKey{proto, r.to, src, tport, sport}] = c
 		}
 		c.lastSeen = now
 		setDst(pkt, ihl, c.tDst, c.tDport)
@@ -356,11 +376,20 @@ func (t *natTable) sweep(now time.Time) {
 type NATRuleSpec struct {
 	Source string // CIDR/host or empty=any
 	Dest   string
+	// DestPort/Proto scope a port-forward rule to a specific destination
+	// port or range — see config.NATRule.DestPort's doc comment. Both
+	// blank (the pre-PAT default) matches every port, same as before
+	// these fields existed.
+	DestPort string
+	Proto    string
 	// Translate names both the rewrite target and which mode the rule runs:
 	//   - "masquerade", or blank with Interface set: SNAT, rewrite source to
 	//     Interface's address.
 	//   - a literal IPv4: SNAT, rewrite source to that fixed address.
 	//   - "port-forward:<ipv4>": DNAT, rewrite destination to that address.
+	//   - "port-forward:<ipv4>:<port>": same, and also rewrite the
+	//     destination port to <port> (PAT) — only valid with a
+	//     single-value DestPort.
 	// See toRule for the parsing.
 	Translate string
 	Interface string // egress interface; its IPv4 is used when masquerading
@@ -375,9 +404,18 @@ const portForwardPrefix = "port-forward:"
 func (s NATRuleSpec) toRule() (natRule, bool) {
 	translate := strings.TrimSpace(s.Translate)
 	action := snatAction
+	var toPort uint16
 	if rest, ok := cutPrefixFold(translate, portForwardPrefix); ok {
 		translate = strings.TrimSpace(rest)
 		action = dnatAction
+		if addr, portStr, hasPort := strings.Cut(translate, ":"); hasPort {
+			translate = strings.TrimSpace(addr)
+			p, err := strconv.Atoi(strings.TrimSpace(portStr))
+			if err != nil || p < 1 || p > 65535 {
+				return natRule{}, false
+			}
+			toPort = uint16(p)
+		}
 	} else if (translate == "" || strings.EqualFold(translate, "masquerade")) && s.Interface != "" {
 		// Masquerade: when no explicit translate address is given (or it's the
 		// keyword "masquerade"), use the egress interface's primary IPv4.
@@ -399,7 +437,39 @@ func (s NATRuleSpec) toRule() (natRule, bool) {
 	if err != nil {
 		return natRule{}, false
 	}
-	return natRule{src: src, dst: dst, to: to, action: action}, true
+	var dpLo, dpHi uint16
+	if dp := strings.TrimSpace(s.DestPort); dp != "" {
+		lo, hi, perr := parsePortSpec(dp)
+		if perr != nil {
+			return natRule{}, false
+		}
+		dpLo, dpHi = lo, hi
+	}
+	return natRule{
+		src: src, dst: dst, to: to, action: action, proto: protoNum(s.Proto),
+		dportLo: dpLo, dportHi: dpHi, toPort: toPort,
+	}, true
+}
+
+// parsePortSpec parses "N" or "N-M" into inclusive bounds (a single port has
+// lo == hi). Mirrors config.validNATPortSpec; kept as mesh's own copy for
+// the same "packages intentionally don't depend on each other, they just
+// happen to agree on the same small grammar" reason portForwardPrefix does.
+func parsePortSpec(s string) (lo, hi uint16, err error) {
+	a, b, isRange := strings.Cut(s, "-")
+	if !isRange {
+		p, perr := strconv.Atoi(a)
+		if perr != nil || p < 1 || p > 65535 {
+			return 0, 0, fmt.Errorf("bad port %q", s)
+		}
+		return uint16(p), uint16(p), nil
+	}
+	lo64, lerr := strconv.Atoi(a)
+	hi64, herr := strconv.Atoi(b)
+	if lerr != nil || herr != nil || lo64 < 1 || lo64 > 65535 || hi64 < 1 || hi64 > 65535 || lo64 > hi64 {
+		return 0, 0, fmt.Errorf("bad port range %q", s)
+	}
+	return uint16(lo64), uint16(hi64), nil
 }
 
 // cutPrefixFold is strings.CutPrefix's case-insensitive counterpart — Go's

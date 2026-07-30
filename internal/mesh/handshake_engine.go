@@ -291,6 +291,21 @@ func (e *Engine) onHSInit(payload []byte, from netip.AddrPort, via *peerSession)
 		e.log.Debugf("mesh: rejecting handshake from locally-disabled peer %q on net %x", pl.NodeID, hdr.Network)
 		return
 	}
+	// Partial-mesh enforcement: reject a peer-to-peer link outright. Neither
+	// side being a seed is the only disqualifying case — seed-to-seed and
+	// seed-to-peer (in either dial direction) are both fine, so this is a
+	// single symmetric check rather than "am I a seed" or "are they." See
+	// NetSpec.PartialMesh's doc comment. Deliberately checked after auth
+	// (the PSK already opened pl above) so this can't be used to probe
+	// which nodes on a network are seeds without a valid key, and
+	// deliberately not fed into ns.throttle.Fail like an actual auth
+	// failure — a peer configured with a stale or mistaken seed address
+	// isn't attacking anything, it's just misconfigured, same treatment as
+	// isBanned/isPeerDisabled just above.
+	if ns.spec.PartialMesh && !ns.spec.SelfSeed && !pl.SelfSeed {
+		e.log.Debugf("mesh: rejecting handshake from %q on net %x: partial mesh — neither this node nor %q is a seed, so a direct link between them isn't allowed", pl.NodeID, hdr.Network, pl.NodeID)
+		return
+	}
 	if pl.NodeID == e.nodeID {
 		// A handshake claiming our own node id didn't come from a peer — the
 		// packet looped back to us, most often a symmetric-NAT node hairpinning
@@ -447,6 +462,19 @@ func (e *Engine) onHSResp(payload []byte, from netip.AddrPort, via *peerSession)
 		ns.mu.Lock()
 		delete(ns.pending, p.idxI)
 		ns.mu.Unlock()
+		return
+	}
+	// Partial-mesh enforcement, the initiator-side counterpart of onHSInit's
+	// check — see its comment for the reasoning, which applies identically
+	// here. This is what catches the case onHSInit can't: this node itself
+	// dialed a peer-to-peer link (e.g. a stale PeerCache entry, or a Seeds
+	// address that turned out not to belong to a seed after all) and only
+	// learns that from the responder's own SelfSeed claim in this reply.
+	if ns.spec.PartialMesh && !ns.spec.SelfSeed && !pl.SelfSeed {
+		ns.mu.Lock()
+		delete(ns.pending, p.idxI)
+		ns.mu.Unlock()
+		e.log.Debugf("mesh: dropping handshake response from %q on net %x: partial mesh — neither this node nor %q is a seed, so a direct link between them isn't allowed", pl.NodeID, hdr.Network, pl.NodeID)
 		return
 	}
 	if pl.NodeID == e.nodeID {

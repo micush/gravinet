@@ -12,7 +12,7 @@ func natTestCfg() *Config {
 func TestNATRuleAddFull(t *testing.T) {
 	c := natTestCfg()
 	// SNAT a source subnet toward a dest, translating to a literal address.
-	if err := c.NATRuleAdd("lan", "10.0.0.0/24", "203.0.113.0/24", "198.51.100.7", ""); err != nil {
+	if err := c.NATRuleAdd("lan", "10.0.0.0/24", "203.0.113.0/24", "", "", "198.51.100.7", ""); err != nil {
 		t.Fatalf("full rule: %v", err)
 	}
 	r := c.Networks[0].NAT.Rules[0]
@@ -23,7 +23,7 @@ func TestNATRuleAddFull(t *testing.T) {
 		t.Error("adding a rule should enable NAT")
 	}
 	// masquerade form
-	if err := c.NATRuleAdd("lan", "10.0.0.0/24", "", "masquerade", "eth0"); err != nil {
+	if err := c.NATRuleAdd("lan", "10.0.0.0/24", "", "", "", "masquerade", "eth0"); err != nil {
 		t.Fatalf("masquerade: %v", err)
 	}
 	m := c.Networks[0].NAT.Rules[1]
@@ -32,7 +32,7 @@ func TestNATRuleAddFull(t *testing.T) {
 	}
 	// port-forward form: DNAT, no interface — the mode and the target both
 	// live in Translate now, there's no separate direction field.
-	if err := c.NATRuleAdd("lan", "", "203.0.113.5", "port-forward:10.0.0.9", ""); err != nil {
+	if err := c.NATRuleAdd("lan", "", "203.0.113.5", "", "", "port-forward:10.0.0.9", ""); err != nil {
 		t.Fatalf("port-forward: %v", err)
 	}
 	pf := c.Networks[0].NAT.Rules[2]
@@ -42,20 +42,45 @@ func TestNATRuleAddFull(t *testing.T) {
 }
 
 func TestNATRuleAddRejectsBadInput(t *testing.T) {
-	cases := []struct{ src, dst, tr, iface string }{
-		{"not-an-ip", "", "masquerade", "eth0"}, // bad source
-		{"", "10.0.0.0/24", "masquerade", ""},   // masquerade without iface
-		{"", "", "999.1.1.1", ""},               // bad translate
-		{"fd00::/8", "", "masquerade", "eth0"},  // IPv6 source
-		{"", "", "port-forward:", ""},           // port-forward with no target
-		{"", "", "port-forward:not-an-ip", ""},  // port-forward with a bad target
-		{"", "", "port-forward:fd00::1", ""},    // port-forward target must be IPv4
+	cases := []struct{ src, dst, destPort, proto, tr, iface string }{
+		{"not-an-ip", "", "", "", "masquerade", "eth0"},                // bad source
+		{"", "10.0.0.0/24", "", "", "masquerade", ""},                  // masquerade without iface
+		{"", "", "", "", "999.1.1.1", ""},                              // bad translate
+		{"fd00::/8", "", "", "", "masquerade", "eth0"},                 // IPv6 source
+		{"", "", "", "", "port-forward:", ""},                          // port-forward with no target
+		{"", "", "", "", "port-forward:not-an-ip", ""},                 // port-forward with a bad target
+		{"", "", "", "", "port-forward:fd00::1", ""},                   // port-forward target must be IPv4
+		{"", "", "32400", "", "port-forward:10.0.0.9", ""},             // dest-port without proto
+		{"", "", "abc", "tcp", "port-forward:10.0.0.9", ""},            // unparseable dest-port
+		{"", "", "0", "tcp", "port-forward:10.0.0.9", ""},              // dest-port out of range
+		{"", "", "100-50", "tcp", "port-forward:10.0.0.9", ""},         // inverted range
+		{"", "", "32400", "sctp", "port-forward:10.0.0.9", ""},         // bad proto
+		{"", "", "32400", "tcp", "masquerade", "eth0"},                 // dest-port on a non-port-forward rule
+		{"", "", "8000-8010", "tcp", "port-forward:10.0.0.9:8000", ""}, // remap needs a single port, not a range
+		{"", "", "", "", "port-forward:10.0.0.9:notaport", ""},         // bad remap port
+		{"", "", "", "", "port-forward:10.0.0.9:99999", ""},            // remap port out of range
 	}
 	for i, tc := range cases {
 		c := natTestCfg()
-		if err := c.NATRuleAdd("lan", tc.src, tc.dst, tc.tr, tc.iface); err == nil {
+		if err := c.NATRuleAdd("lan", tc.src, tc.dst, tc.destPort, tc.proto, tc.tr, tc.iface); err == nil {
 			t.Errorf("case %d (%+v): expected error, got none", i, tc)
 		}
+	}
+}
+
+// TestNATRuleProtoOnlyWithoutDestPortIsValid checks that Proto can scope a
+// port-forward rule to a protocol with no specific port — a meaningful,
+// intentional shape (e.g. "forward all tcp traffic to 203.0.113.5,
+// regardless of port"), not an error. Only the reverse (a DestPort with no
+// Proto) is rejected, since a port only means something for one specific
+// protocol's port space.
+func TestNATRuleProtoOnlyWithoutDestPortIsValid(t *testing.T) {
+	c := natTestCfg()
+	if err := c.NATRuleAdd("lan", "", "203.0.113.5", "", "tcp", "port-forward:10.0.0.9", ""); err != nil {
+		t.Fatalf("proto with no dest-port should be accepted: %v", err)
+	}
+	if r := c.Networks[0].NAT.Rules[0]; r.Proto != "tcp" || r.DestPort != "" {
+		t.Fatalf("rule wrong: %+v", r)
 	}
 }
 
@@ -65,7 +90,7 @@ func TestNATRuleAddRejectsBadInput(t *testing.T) {
 // migrated from something else.
 func TestNATRulePortForwardPrefixCaseInsensitive(t *testing.T) {
 	c := natTestCfg()
-	if err := c.NATRuleAdd("lan", "", "", "Port-FORWARD:10.0.0.9", ""); err != nil {
+	if err := c.NATRuleAdd("lan", "", "", "", "", "Port-FORWARD:10.0.0.9", ""); err != nil {
 		t.Fatalf("mixed-case port-forward prefix should be accepted: %v", err)
 	}
 	r := c.Networks[0].NAT.Rules[0]
@@ -74,10 +99,49 @@ func TestNATRulePortForwardPrefixCaseInsensitive(t *testing.T) {
 	}
 }
 
+// TestNATRuleDestPortAndProto covers the PAT-specific fields: a
+// port-forward rule can be scoped to a single port or a range, and can
+// optionally remap the port on a single-port match.
+func TestNATRuleDestPortAndProto(t *testing.T) {
+	c := natTestCfg()
+	if err := c.NATRuleAdd("lan", "", "203.0.113.5", "32400", "tcp", "port-forward:10.0.0.5", ""); err != nil {
+		t.Fatalf("single port: %v", err)
+	}
+	r := c.Networks[0].NAT.Rules[0]
+	if r.DestPort != "32400" || r.Proto != "tcp" || r.Translate != "port-forward:10.0.0.5" {
+		t.Fatalf("single-port rule wrong: %+v", r)
+	}
+
+	if err := c.NATRuleAdd("lan", "", "203.0.113.5", "8000-8010", "udp", "port-forward:10.0.0.6", ""); err != nil {
+		t.Fatalf("range: %v", err)
+	}
+	rng := c.Networks[0].NAT.Rules[1]
+	if rng.DestPort != "8000-8010" || rng.Proto != "udp" {
+		t.Fatalf("range rule wrong: %+v", rng)
+	}
+
+	// Remap: a single dest-port with an explicit target port in Translate.
+	if err := c.NATRuleAdd("lan", "", "203.0.113.5", "8443", "tcp", "port-forward:10.0.0.7:443", ""); err != nil {
+		t.Fatalf("remap: %v", err)
+	}
+	remap := c.Networks[0].NAT.Rules[2]
+	if remap.Translate != "port-forward:10.0.0.7:443" || remap.DestPort != "8443" {
+		t.Fatalf("remap rule wrong: %+v", remap)
+	}
+
+	// Proto is normalized to lowercase.
+	if err := c.NATRuleAdd("lan", "", "203.0.113.5", "53", "UDP", "port-forward:10.0.0.8", ""); err != nil {
+		t.Fatalf("uppercase proto: %v", err)
+	}
+	if got := c.Networks[0].NAT.Rules[3].Proto; got != "udp" {
+		t.Errorf("proto normalization: got %q, want \"udp\"", got)
+	}
+}
+
 func TestNATRuleDeleteAt(t *testing.T) {
 	c := natTestCfg()
-	c.NATRuleAdd("lan", "10.0.0.0/24", "", "masquerade", "eth0")
-	c.NATRuleAdd("lan", "10.0.0.5/32", "", "198.51.100.9", "")
+	c.NATRuleAdd("lan", "10.0.0.0/24", "", "", "", "masquerade", "eth0")
+	c.NATRuleAdd("lan", "10.0.0.5/32", "", "", "", "198.51.100.9", "")
 	if err := c.NATRuleDeleteAt("lan", 0); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -161,7 +225,7 @@ func TestNATRuleDirectionMigration(t *testing.T) {
 
 func TestNATRuleSetEnabled(t *testing.T) {
 	c := natTestCfg()
-	if err := c.NATRuleAdd("lan", "10.0.0.0/24", "", "masquerade", "eth0"); err != nil {
+	if err := c.NATRuleAdd("lan", "10.0.0.0/24", "", "", "", "masquerade", "eth0"); err != nil {
 		t.Fatal(err)
 	}
 	// New NAT rules are enabled by default.
@@ -197,10 +261,10 @@ func TestNATRuleSetEnabled(t *testing.T) {
 
 func TestNATRuleUpdateAt(t *testing.T) {
 	c := natTestCfg()
-	if err := c.NATRuleAdd("lan", "10.0.0.0/24", "", "masquerade", "eth0"); err != nil {
+	if err := c.NATRuleAdd("lan", "10.0.0.0/24", "", "", "", "masquerade", "eth0"); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.NATRuleAdd("lan", "10.0.1.0/24", "", "198.51.100.7", ""); err != nil {
+	if err := c.NATRuleAdd("lan", "10.0.1.0/24", "", "", "", "198.51.100.7", ""); err != nil {
 		t.Fatal(err)
 	}
 	// Disable rule 0 so we can confirm the edit preserves state and position.
@@ -209,7 +273,7 @@ func TestNATRuleUpdateAt(t *testing.T) {
 	}
 
 	// Edit rule 0: switch from masquerade to port-forward (iface should clear).
-	if err := c.NATRuleUpdateAt("lan", 0, "10.0.0.0/24", "203.0.113.0/24", "port-forward:192.0.2.5", "eth0"); err != nil {
+	if err := c.NATRuleUpdateAt("lan", 0, "10.0.0.0/24", "203.0.113.0/24", "", "", "port-forward:192.0.2.5", "eth0"); err != nil {
 		t.Fatal(err)
 	}
 	r := c.Networks[0].NAT.Rules[0]
@@ -227,8 +291,16 @@ func TestNATRuleUpdateAt(t *testing.T) {
 		t.Fatalf("edit must not reorder/drop rules: %+v", c.Networks[0].NAT.Rules)
 	}
 
+	// Add dest-port/proto on the edit.
+	if err := c.NATRuleUpdateAt("lan", 0, "10.0.0.0/24", "203.0.113.0/24", "32400", "tcp", "port-forward:192.0.2.5", ""); err != nil {
+		t.Fatal(err)
+	}
+	if r := c.Networks[0].NAT.Rules[0]; r.DestPort != "32400" || r.Proto != "tcp" {
+		t.Fatalf("dest-port/proto not applied on edit: %+v", r)
+	}
+
 	// Edit back to masquerade preserving the (still disabled) state.
-	if err := c.NATRuleUpdateAt("lan", 0, "10.0.0.0/24", "", "masquerade", "eth1"); err != nil {
+	if err := c.NATRuleUpdateAt("lan", 0, "10.0.0.0/24", "", "", "", "masquerade", "eth1"); err != nil {
 		t.Fatal(err)
 	}
 	if r := c.Networks[0].NAT.Rules[0]; r.Translate != "masquerade" || r.Interface != "eth1" || r.Enabled {
@@ -236,15 +308,36 @@ func TestNATRuleUpdateAt(t *testing.T) {
 	}
 
 	// Masquerade without an interface is rejected (shared validation with add).
-	if err := c.NATRuleUpdateAt("lan", 0, "", "", "masquerade", ""); err == nil {
+	if err := c.NATRuleUpdateAt("lan", 0, "", "", "", "", "masquerade", ""); err == nil {
 		t.Error("masquerade without iface should error")
 	}
 	// Bad port-forward target rejected.
-	if err := c.NATRuleUpdateAt("lan", 0, "", "", "port-forward:not-an-ip", ""); err == nil {
+	if err := c.NATRuleUpdateAt("lan", 0, "", "", "", "", "port-forward:not-an-ip", ""); err == nil {
 		t.Error("bad port-forward target should error")
 	}
 	// Out-of-range index rejected.
-	if err := c.NATRuleUpdateAt("lan", 9, "", "", "masquerade", "eth0"); err == nil {
+	if err := c.NATRuleUpdateAt("lan", 9, "", "", "", "", "masquerade", "eth0"); err == nil {
 		t.Error("out-of-range index should error")
+	}
+}
+
+// TestForwardingEnabledDefaultsOn covers config.Config.ForwardingEnabled:
+// nil (the zero value, and what every config from before this field
+// existed has) means host IP forwarding is turned on at startup; only an
+// explicit false opts out.
+func TestForwardingEnabledDefaultsOn(t *testing.T) {
+	c := natTestCfg()
+	if !c.ForwardingEnabled() {
+		t.Error("a fresh config (IPForwarding unset) should default to forwarding enabled")
+	}
+	off := false
+	c.IPForwarding = &off
+	if c.ForwardingEnabled() {
+		t.Error("IPForwarding explicitly false should disable forwarding")
+	}
+	on := true
+	c.IPForwarding = &on
+	if !c.ForwardingEnabled() {
+		t.Error("IPForwarding explicitly true should enable forwarding")
 	}
 }

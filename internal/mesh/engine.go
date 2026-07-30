@@ -152,7 +152,15 @@ type NetSpec struct {
 	// exists alongside the address-based ManagedPeer.IsSeed checks rather
 	// than replacing them.
 	SelfSeed bool
-	Ban      config.BanPolicy
+	// PartialMesh is config.Network.MeshPartial(): true restricts this
+	// network to the hub-and-spoke topology described on config.Network.Mesh
+	// — seed-to-seed and seed-to-peer links only, with SelfSeed above as the
+	// sole seed/peer signal. false (the default, including for a config that
+	// predates this field) is the unrestricted full mesh, unchanged from
+	// always. See onHSInit/onHSResp for where this is actually enforced, and
+	// learnPeers for where gossip-driven auto-dial respects it.
+	PartialMesh bool
+	Ban         config.BanPolicy
 	// SeedTCPPort is an optional fallback port to dial Seeds on at cold start when
 	// their advertised port isn't known yet (from a join token). 0 = assume own port.
 	SeedTCPPort int

@@ -879,6 +879,44 @@ type Network struct {
 	// TCP onto a mesh using a non-default port. 0 means "assume our own port".
 	SeedTCPPort int `json:"seed_tcp_port,omitempty"`
 
+	// Mesh selects this network's connectivity topology: "full" (the default,
+	// including when left empty) grows every node toward a session with every
+	// other node it learns about, same as always. "partial" restricts the mesh
+	// to a hub-and-spoke shape built entirely out of each node's own SelfSeed
+	// declaration, with no separate roster to maintain: a node that has
+	// SelfSeed set is a seed for this purpose, every other node is a peer, and
+	// exactly two kinds of link are permitted — seed-to-seed and seed-to-peer.
+	// A peer-to-peer link is refused outright, on both the accepting and the
+	// completing side of the handshake, regardless of how the two nodes came
+	// to dial each other (gossip, a misconfigured Seeds entry, stale
+	// PeerCache) — see mesh.Engine.onHSInit/onHSResp. This is enforced by the
+	// engine itself, not merely by suppressing gossip-driven auto-dials
+	// between peers (learnPeers also stops proposing peer-to-peer dials in
+	// this mode, which is what actually keeps a large partial mesh's
+	// connection count down, but the handshake-level refusal is what makes it
+	// a hard guarantee rather than an optimization).
+	//
+	// Every node in a partial-mesh network decides this independently from
+	// its own config; there is no central list of "which network is partial"
+	// distributed over the wire. A node still on "full" (or an old build that
+	// predates this field) simply keeps dialing everyone as before, so mixing
+	// mesh modes on one network doesn't hard-fail — but it does forfeit the
+	// point of turning partial mesh on for anyone who hasn't, so all nodes on
+	// a given network should agree.
+	//
+	// Broadcast/multicast flooding (see mesh.Engine.flood) was built assuming
+	// full-mesh reach: it replicates a packet to every *directly* connected
+	// peer and relies on every node being directly connected to every other
+	// node for that single hop to cover the whole network, since a receiver
+	// never re-floods (that's what keeps it loop-free). On a partial mesh a
+	// peer is only ever directly connected to seeds, so its broadcast/
+	// multicast traffic reaches only those seeds, not the network's other
+	// peers — there is no multi-hop flooding to carry it further. Unicast,
+	// routed, and relayed traffic are unaffected; this is specific to
+	// broadcast/multicast delivery, and worth knowing before relying on a
+	// partial-mesh network for a broadcast-dependent protocol.
+	Mesh string `json:"mesh,omitempty"`
+
 	StormControl   StormControl `json:"storm_control"`
 	Throttle       Throttle     `json:"throttle"`
 	QoS            QoS          `json:"qos"`
@@ -950,10 +988,13 @@ type Network struct {
 	// reached over a faster gossiped LAN shortcut instead of its configured
 	// public address). Consulted by System > Upgrade's seed-aware push
 	// sequencing as an additional, authoritative signal alongside — never in
-	// place of — those address-based checks. Purely advisory: has no effect
-	// on connectivity, routing, or anything else the mesh actually does; a
-	// node with this set behaves identically to one without it in every way
-	// except how other nodes sequence upgrades that include it.
+	// place of — those address-based checks. On a "full" mesh network (see
+	// Mesh) this remains purely advisory: it has no effect on connectivity or
+	// routing, and a node with it set behaves identically to one without it
+	// except in how other nodes sequence upgrades that include it. On a
+	// "partial" mesh network it stops being advisory: it's the one signal
+	// that decides which nodes form the seed backbone, and every other node
+	// treats this node as a peer it may connect to only via a seed.
 	SelfSeed bool `json:"self_seed,omitempty"`
 }
 
@@ -999,6 +1040,17 @@ func (n *Network) UnmarshalJSON(b []byte) error {
 		}
 	}
 	return nil
+}
+
+// MeshPartial reports whether this network is configured for the restricted
+// hub-and-spoke topology (Mesh == "partial", case-insensitively). Any other
+// value, including the empty string left by every config written before this
+// field existed, means the unrestricted full mesh — the long-standing
+// default behavior. Callers should use this rather than comparing n.Mesh
+// directly, so a stray case difference (e.g. a hand-edited "Partial") isn't
+// silently read back as full mesh.
+func (n Network) MeshPartial() bool {
+	return strings.EqualFold(n.Mesh, "partial")
 }
 
 // KeySlot is one rotation slot. Empty Key means unused.
@@ -1781,10 +1833,32 @@ type Route struct {
 //     masquerading through an interface (static SNAT).
 //   - "port-forward:<ipv4>": rewrite the destination of ingress packets to
 //     that internal address instead (DNAT — replies get their source
-//     restored automatically).
+//     restored automatically). DestPort/Proto (below) scope which packets
+//     that covers; leaving both blank keeps the original all-ports
+//     behavior.
+//   - "port-forward:<ipv4>:<port>": same, but also rewrites the
+//     destination *port* to <port> — port address translation (PAT), e.g.
+//     forwarding a seed's public port 8443 through to an internal host's
+//     443. Only valid together with a single-value DestPort (see
+//     DestPort's own doc comment for why a range can't remap this way).
 type NATRule struct {
-	Source    string `json:"source"`
-	Dest      string `json:"dest"`
+	Source string `json:"source"`
+	Dest   string `json:"dest"`
+	// DestPort scopes a port-forward (DNAT) rule to a specific port or
+	// range on the *original* (pre-translation) destination — "32400" or
+	// "8000-8010" — instead of matching every port on Dest. Blank means
+	// every port, the original address-only behavior. Ignored for
+	// masquerade/static-SNAT rules, since a rewritten *source* port only
+	// ever comes from connection tracking (many local ports sharing one
+	// external address) — there's no meaningful "which source port does
+	// this rule apply to" the way there is for a DNAT rule's original
+	// destination port.
+	DestPort string `json:"dest_port,omitempty"`
+	// Proto restricts a DestPort match to "tcp" or "udp" — required
+	// whenever DestPort is set (a port only means something for those two
+	// protocols), and otherwise blank (matches any protocol, the same as
+	// before this field existed).
+	Proto     string `json:"proto,omitempty"`
 	Translate string `json:"translate"`
 	Interface string `json:"interface,omitempty"` // egress interface for masquerade
 	Enabled   bool   `json:"enabled"`
@@ -2348,6 +2422,9 @@ func (c *Config) Validate() error {
 			if _, err := netip.ParsePrefix(n.Subnet6); err != nil {
 				return fmt.Errorf("network %s: bad subnet6: %w", n.ID, err)
 			}
+		}
+		if n.Mesh != "" && !strings.EqualFold(n.Mesh, "full") && !strings.EqualFold(n.Mesh, "partial") {
+			return fmt.Errorf("network %s: mesh %q must be \"full\" or \"partial\" (or omitted, which means full)", n.ID, n.Mesh)
 		}
 		if n.Subnet4 == "" && n.Subnet6 == "" && len(n.Seeds) == 0 && len(n.PeerCache) == 0 {
 			return fmt.Errorf("network %s: needs subnet4 and/or subnet6 (or a seed to learn it from)", n.ID)

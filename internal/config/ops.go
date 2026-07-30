@@ -197,6 +197,29 @@ func (c *Config) NetworkSetSelfSeed(name string, on bool) error {
 	return nil
 }
 
+// NetworkSetMesh sets a network's connectivity topology — see Network.Mesh's
+// doc comment. mode must be "full" or "partial" (case-insensitive); an empty
+// string is accepted too and stored as "full" so the field always reads back
+// unambiguously once an operator has touched it at all. Not hot-reloadable —
+// mirrors NetworkSetSelfSeed/NetworkSetAllowRelay, set only at network
+// construction (mesh.NetSpec.PartialMesh, cmd/gravinet's buildOneNetSpec); a
+// restart is needed before the new topology actually takes effect.
+func (c *Config) NetworkSetMesh(name, mode string) error {
+	n := c.FindNetwork(name)
+	if n == nil {
+		return fmt.Errorf("no network named %q", name)
+	}
+	switch {
+	case mode == "" || strings.EqualFold(mode, "full"):
+		n.Mesh = "full"
+	case strings.EqualFold(mode, "partial"):
+		n.Mesh = "partial"
+	default:
+		return fmt.Errorf("mesh mode %q must be \"full\" or \"partial\"", mode)
+	}
+	return nil
+}
+
 // NetworkSetAllowRelay toggles whether this node is willing to relay other
 // peers' traffic on a network — see Network.AllowRelay's doc comment. Not
 // currently hot-reloadable (mirrors mesh.NetSpec.AllowRelay, which
@@ -1079,6 +1102,31 @@ func validNATCIDR(field, s string) (string, error) {
 	return "", fmt.Errorf("%s %q: not an IPv4 address or CIDR", field, s)
 }
 
+// validNATPortSpec parses a DestPort value: "" (any), "N" (a single port,
+// 1-65535), or "N-M" (an inclusive range, N <= M). Returns the bounds (0,0
+// for "any"); a single port has lo == hi.
+func validNATPortSpec(s string) (lo, hi uint16, err error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, 0, nil
+	}
+	badRange := fmt.Errorf("dest-port %q: must be 1-65535 or a range like 8000-8010", s)
+	a, b, isRange := strings.Cut(s, "-")
+	if !isRange {
+		p, perr := strconv.Atoi(a)
+		if perr != nil || p < 1 || p > 65535 {
+			return 0, 0, badRange
+		}
+		return uint16(p), uint16(p), nil
+	}
+	lo64, lerr := strconv.Atoi(a)
+	hi64, herr := strconv.Atoi(b)
+	if lerr != nil || herr != nil || lo64 < 1 || lo64 > 65535 || hi64 < 1 || hi64 > 65535 || lo64 > hi64 {
+		return 0, 0, badRange
+	}
+	return uint16(lo64), uint16(hi64), nil
+}
+
 // natPortForwardPrefix marks a translate value as DNAT — see NATRule's doc
 // comment. Kept as its own constant (rather than importing mesh's copy) since
 // config intentionally doesn't depend on mesh; the two packages just happen
@@ -1099,13 +1147,17 @@ func cutNATPortForwardPrefix(s string) (target string, ok bool) {
 
 // source/dest are empty ("any") or IPv4 addresses/CIDRs. translate is either
 // "masquerade" (requires iface, whose primary IPv4 is used), a literal IPv4
-// target (static SNAT), or "port-forward:<ipv4>" (DNAT to that address — see
-// NATRule's doc comment for why the mode lives in translate rather than a
-// separate field). buildNATRule validates and normalizes the user-supplied
-// fields of a NAT rule into a NATRule (with Enabled left false for the
-// caller to set). It is shared by NATRuleAdd and NATRuleUpdateAt so adding
-// and editing enforce identical rules.
-func buildNATRule(source, dest, translate, iface string) (NATRule, error) {
+// target (static SNAT), or "port-forward:<ipv4>[:<port>]" (DNAT to that
+// address, optionally remapping to <port> — see NATRule's doc comment for
+// why the mode lives in translate rather than a separate field).
+// destPort/proto scope a port-forward rule to a specific port or range —
+// see NATRule.DestPort's doc comment; both must be blank for a
+// masquerade/static-SNAT rule, since neither means anything there.
+// buildNATRule validates and normalizes the user-supplied fields of a NAT
+// rule into a NATRule (with Enabled left false for the caller to set). It
+// is shared by NATRuleAdd and NATRuleUpdateAt so adding and editing enforce
+// identical rules.
+func buildNATRule(source, dest, destPort, proto, translate, iface string) (NATRule, error) {
 	src, err := validNATCIDR("source", source)
 	if err != nil {
 		return NATRule{}, err
@@ -1114,18 +1166,45 @@ func buildNATRule(source, dest, translate, iface string) (NATRule, error) {
 	if err != nil {
 		return NATRule{}, err
 	}
+	destPort = strings.TrimSpace(destPort)
+	dpLo, dpHi, err := validNATPortSpec(destPort)
+	if err != nil {
+		return NATRule{}, err
+	}
+	proto = strings.ToLower(strings.TrimSpace(proto))
+	if proto != "" && proto != "tcp" && proto != "udp" {
+		return NATRule{}, fmt.Errorf("proto %q: must be \"tcp\" or \"udp\"", proto)
+	}
+	if destPort != "" && proto == "" {
+		return NATRule{}, fmt.Errorf("dest-port %q needs proto tcp or udp — a port only means something for one of those", destPort)
+	}
 	translate = strings.TrimSpace(translate)
 	iface = strings.TrimSpace(iface)
 	if rest, ok := cutNATPortForwardPrefix(translate); ok {
-		addr := strings.TrimSpace(rest)
-		ip, perr := netip.ParseAddr(addr)
+		addrPart, portPart, hasPort := strings.Cut(strings.TrimSpace(rest), ":")
+		addrPart = strings.TrimSpace(addrPart)
+		ip, perr := netip.ParseAddr(addrPart)
 		if perr != nil || !ip.Is4() {
-			return NATRule{}, fmt.Errorf("port-forward target %q: must be an IPv4 address", addr)
+			return NATRule{}, fmt.Errorf("port-forward target %q: must be an IPv4 address", addrPart)
+		}
+		out := natPortForwardPrefix + addrPart
+		if hasPort {
+			toPort, perr := strconv.Atoi(strings.TrimSpace(portPart))
+			if perr != nil || toPort < 1 || toPort > 65535 {
+				return NATRule{}, fmt.Errorf("port-forward remap port %q: must be 1-65535", portPart)
+			}
+			if dpLo == 0 || dpLo != dpHi {
+				return NATRule{}, fmt.Errorf("port-forward remap (%s:%d) needs a single dest-port, not a range or \"any\" — a range/any can't remap to one fixed port", addrPart, toPort)
+			}
+			out = fmt.Sprintf("%s%s:%d", natPortForwardPrefix, addrPart, toPort)
 		}
 		// Port-forwarding is a fixed rewrite target, not a per-interface
 		// masquerade, so it carries no interface — same as any other literal
 		// translate address.
-		return NATRule{Source: src, Dest: dst, Translate: natPortForwardPrefix + addr}, nil
+		return NATRule{Source: src, Dest: dst, DestPort: destPort, Proto: proto, Translate: out}, nil
+	}
+	if destPort != "" {
+		return NATRule{}, fmt.Errorf("dest-port only applies to a port-forward (DNAT) rule, not masquerade/static-SNAT")
 	}
 	masq := translate == "" || strings.EqualFold(translate, "masquerade")
 	if masq {
@@ -1136,19 +1215,19 @@ func buildNATRule(source, dest, translate, iface string) (NATRule, error) {
 	} else {
 		ip, perr := netip.ParseAddr(translate)
 		if perr != nil || !ip.Is4() {
-			return NATRule{}, fmt.Errorf("translate %q: must be an IPv4 address, \"masquerade\", or \"port-forward:<ipv4>\"", translate)
+			return NATRule{}, fmt.Errorf("translate %q: must be an IPv4 address, \"masquerade\", or \"port-forward:<ipv4>[:<port>]\"", translate)
 		}
 		iface = ""
 	}
 	return NATRule{Source: src, Dest: dst, Translate: translate, Interface: iface}, nil
 }
 
-func (c *Config) NATRuleAdd(netName, source, dest, translate, iface string) error {
+func (c *Config) NATRuleAdd(netName, source, dest, destPort, proto, translate, iface string) error {
 	n, err := c.PickNetwork(netName)
 	if err != nil {
 		return err
 	}
-	rule, err := buildNATRule(source, dest, translate, iface)
+	rule, err := buildNATRule(source, dest, destPort, proto, translate, iface)
 	if err != nil {
 		return err
 	}
@@ -1161,7 +1240,7 @@ func (c *Config) NATRuleAdd(netName, source, dest, translate, iface string) erro
 // NATRuleUpdateAt replaces the rule at index idx (as shown by NAT list / the UI)
 // in place, preserving its enabled/disabled state and its position. It backs the
 // click-to-edit rule fields in the UI. Validation matches NATRuleAdd.
-func (c *Config) NATRuleUpdateAt(netName string, idx int, source, dest, translate, iface string) error {
+func (c *Config) NATRuleUpdateAt(netName string, idx int, source, dest, destPort, proto, translate, iface string) error {
 	n, err := c.PickNetwork(netName)
 	if err != nil {
 		return err
@@ -1169,7 +1248,7 @@ func (c *Config) NATRuleUpdateAt(netName string, idx int, source, dest, translat
 	if idx < 0 || idx >= len(n.NAT.Rules) {
 		return fmt.Errorf("no NAT rule at index %d (have %d)", idx, len(n.NAT.Rules))
 	}
-	rule, err := buildNATRule(source, dest, translate, iface)
+	rule, err := buildNATRule(source, dest, destPort, proto, translate, iface)
 	if err != nil {
 		return err
 	}

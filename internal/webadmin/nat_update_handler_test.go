@@ -87,4 +87,18 @@ func TestHandleNATRuleUpdate(t *testing.T) {
 	if ok, _ := post(map[string]any{"op": "update", "net": "lan", "index": 9, "translate": "192.0.2.9"})["ok"].(bool); ok {
 		t.Error("out-of-range index should be rejected")
 	}
+
+	// dest_port/proto (PAT) round-trip through the same update op.
+	if ok, _ := post(map[string]any{"op": "update", "net": "lan", "index": 0,
+		"dest": "203.0.113.5", "dest_port": "32400", "proto": "tcp", "translate": "port-forward:10.0.0.5:32400"})["ok"].(bool); !ok {
+		t.Fatal("PAT update rejected")
+	}
+	if r := rule0(); r.DestPort != "32400" || r.Proto != "tcp" || r.Translate != "port-forward:10.0.0.5:32400" {
+		t.Fatalf("PAT fields not stored: %+v", r)
+	}
+	// dest_port without proto is rejected (needs both, or neither).
+	if ok, _ := post(map[string]any{"op": "update", "net": "lan", "index": 0,
+		"dest": "203.0.113.5", "dest_port": "32400", "translate": "port-forward:10.0.0.5"})["ok"].(bool); ok {
+		t.Error("dest_port without proto should be rejected")
+	}
 }

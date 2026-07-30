@@ -48,7 +48,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "738"
+	version = "742"
 	commit  = "none"
 )
 
@@ -2339,6 +2339,7 @@ func buildOneNetSpec(n config.Network, cfg *config.Config, overlays []netip.Pref
 		ExtraQueues: toMeshQueues(extraQueues),
 		AllowRelay:  n.AllowRelay,
 		SelfSeed:    n.SelfSeed,
+		PartialMesh: n.MeshPartial(),
 		Ban:         cfg.AuthBan,
 	}
 	// Let the engine rebuild this interface if the OS tears it down at runtime
@@ -2659,6 +2660,8 @@ func fillRuntimeSpec(spec *mesh.NetSpec, n config.Network, exempts []config.Fire
 			spec.NAT = append(spec.NAT, mesh.NATRuleSpec{
 				Source:    nr.Source,
 				Dest:      nr.Dest,
+				DestPort:  nr.DestPort,
+				Proto:     nr.Proto,
 				Translate: nr.Translate,
 				Interface: nr.Interface,
 			})
@@ -2689,15 +2692,33 @@ func kernelNATRules(cfg *config.Config) []netfilter.Rule {
 			src := parsePfx(r.Source)
 			dst := parsePfx(r.Dest)
 			t := strings.TrimSpace(r.Translate)
-			// port-forward:<addr> is DNAT — see config.NATRule's doc comment.
-			// Case-insensitive prefix match, same as config.buildNATRule's.
+			// port-forward:<addr>[:<port>] is DNAT — see config.NATRule's doc
+			// comment. Case-insensitive prefix match, same as
+			// config.buildNATRule's.
 			if len(t) >= len(natPortForwardPrefix) && strings.EqualFold(t[:len(natPortForwardPrefix)], natPortForwardPrefix) {
-				addr := strings.TrimSpace(t[len(natPortForwardPrefix):])
-				to, err := netip.ParseAddr(addr)
+				rest := strings.TrimSpace(t[len(natPortForwardPrefix):])
+				addrPart, portPart, hasPort := strings.Cut(rest, ":")
+				to, err := netip.ParseAddr(strings.TrimSpace(addrPart))
 				if err != nil || !to.IsValid() {
 					continue // DNAT needs a literal IPv4/IPv6 target
 				}
-				out = append(out, netfilter.Rule{Kind: netfilter.DNAT, Dest: dst, InIface: r.Interface, To: to, V6: to.Is6()})
+				var toPort uint16
+				if hasPort {
+					if p, perr := strconv.Atoi(strings.TrimSpace(portPart)); perr == nil && p >= 1 && p <= 65535 {
+						toPort = uint16(p)
+					}
+				}
+				var dpLo, dpHi uint16
+				if r.DestPort != "" {
+					lo, hi := parsePortRange(r.DestPort)
+					if lo >= 1 && lo <= 65535 && hi >= lo && hi <= 65535 {
+						dpLo, dpHi = uint16(lo), uint16(hi)
+					}
+				}
+				out = append(out, netfilter.Rule{
+					Kind: netfilter.DNAT, Dest: dst, InIface: r.Interface, To: to, V6: to.Is6(),
+					Proto: r.Proto, DPortLo: dpLo, DPortHi: dpHi, ToPort: toPort,
+				})
 				continue
 			}
 			if t == "" || strings.EqualFold(t, "masquerade") {

@@ -2,6 +2,121 @@
 
 ---
 
+## v742 — 2026-07-30
+
+**New: partial mesh. Mesh > Networks gained a `mesh` field (full / partial) that restricts a network to a seed-and-peer hub-and-spoke topology instead of the usual full mesh — seed-to-seed and seed-to-peer links only, with peer-to-peer links hard-refused.**
+
+Full mesh (the default, unchanged) grows every node toward a session with every other node it learns about. Partial mesh restricts that to exactly two kinds of link: a seed talking to another seed, or a seed talking to a peer — a peer never ends up connected to another peer. "Seed" reuses the existing per-node `Seed` declaration (`config.Network.SelfSeed`, Settings > Relay & Seed) rather than introducing a second roster to keep in sync; every node decides its own role from its own config.
+
+**Enforcement is at the handshake, not just at dial time.** `onHSInit` (accepting a handshake) and `onHSResp` (completing one this node initiated) both refuse to install a session when neither side is a seed — one symmetric check that permits seed↔seed and seed↔peer (either dial direction) and blocks peer↔peer, regardless of *how* the two nodes ended up dialing each other: gossip, a stale `PeerCache` entry, or an operator mistakenly listing a peer's address under `Seeds`. This is deliberately a hard guarantee, not an optimization — a misconfigured dial just gets refused, cleanly, after auth.
+
+`learnPeers` additionally stops proposing an auto-dial for a gossip-learned node unless it's advertised as a seed, on a partial-mesh network — this is what actually keeps a large partial mesh's connection count down, since without it every peer would still attempt (and have refused) a handshake with every other peer it ever heard about. The gossip peer-list wire format gained a new trailing block (`peerListSeedBlock`, same backward-compatible append-only shape as the TCP-port/local-endpoint/version blocks before it) so seed status can travel with a node it's only heard about secondhand, not just a direct neighbor.
+
+**Config (`internal/config/config.go`, `ops.go`):** `Network.Mesh` (`""`/`"full"`/`"partial"`, validated in `Config.Validate()`), `Network.MeshPartial()` helper, `Config.NetworkSetMesh`. Not hot-reloadable — same restart tier as `SelfSeed`/`AllowRelay` (`mesh.NetSpec.PartialMesh`, set only at network construction in `cmd/gravinet`'s `buildOneNetSpec`).
+
+**Web admin:** Mesh > Networks gained a `mesh` toggle column (full/partial) next to `state`, with a confirmation dialog — same tier as the MTU/address prompts, since it changes what the mesh actually connects to and needs a restart on every node in the network to take effect.
+
+Verified: `go build ./...` and `go vet ./...` clean, embedded `<script>` block `node --check`'d clean. `internal/config`, `cmd/gravinet`, and `internal/webadmin` suites pass. `internal/mesh` suite passes both a `-short` run (3m42s, includes the new partial-mesh tests) and a full run (12m27s, includes the two multi-minute self-seed/dead-seed reproductions, confirms no regression from the handshake/gossip changes). New tests: `TestPeerListCarriesSeed` (wire round-trip + backward-compat truncation), `TestPartialMeshPeerToPeerRejected` (the core guarantee, both dial directions), `TestPartialMeshSeedLinksAllowed` (seed↔seed and peer↔seed both still form), `TestPartialMeshGossipSkipsPeerToPeerAutoDial` (the auto-dial courtesy, exercised end-to-end through real gossip).
+
+---
+
+## v741 — 2026-07-30
+
+**Networks > NAT's `translate` field is now a mode dropdown (masquerade / static address / port-forward) with the right inputs shown per mode, instead of a free-text field with no explanation.**
+
+Previously `translate` was one text input where the value's *syntax* (`masquerade`, a literal IPv4, or `port-forward:<ip>[:<port>]`) carried the mode — nothing in the UI explained that, and the match-side fields (`dest`, `port(s)`, protocol) had dedicated inputs while the rewrite side didn't, including the port-forward remap port, which had to be hand-appended onto the string with a colon.
+
+`translate` is now a `<select>` (masquerade / static address / port-forward) plus mode-dependent fields: masquerade shows the `iface` dropdown (unchanged); static address and port-forward show an address input; port-forward additionally shows a `remap port` input (blank = keep the matched port, matching the pre-v741 default). `natParseTranslate`/`natBuildTranslate` convert between the stored string and the dropdown's fields — the wire format and backend (`config.NATRule`, `buildNATRule`) are completely unchanged, so this is purely a client-side editing change; existing rules of every form parse into the right mode/fields on first edit.
+
+Verified: `go build ./...` clean, embedded `<script>` block `node --check`'d clean, round-tripped `natParseTranslate`/`natBuildTranslate` against every translate form (masquerade, blank, static, port-forward with and without remap, mixed-case prefix, embedded whitespace) in isolation. Full `internal/webadmin` suite passes.
+
+---
+
+## v740 — 2026-07-30
+
+**Settings > Network's "Self-seed" toggle is now labeled "Seed."**
+
+Label only — the underlying field (`config.Network.SelfSeed`), its JSON key (`self_seed`), and the `/api/network` op name are all unchanged, so this doesn't affect existing configs, scripts, or anything hitting the API directly.
+
+Verified: `go build ./...` clean, embedded `<script>` block `node --check`'d clean.
+
+---
+
+## v739 — 2026-07-30
+
+**NAT rules can now match and remap a specific port or port range — port
+address translation (PAT) — instead of a port-forward rule always covering
+every port on an address. Also: `ip_forwarding` is now a Settings toggle
+(System → Network), on by default.**
+
+The motivating case: exposing one internal peer's app (say, tcp/32400)
+through a seed's public IP, without that seed's *other* ports/services
+riding along on the same forward.
+
+**Config (`internal/config/config.go`, `ops.go`):** `NATRule` gained
+`DestPort` (a port or `N-M` range, matched against the pre-translation
+destination) and `Proto` (`tcp`/`udp`, required whenever `DestPort` is
+set — a port only means something for one of those). `Translate`'s
+`port-forward:<ipv4>` syntax now optionally takes `:<port>` to remap the
+port too (`port-forward:10.0.0.5:32400`); remapping only works with a
+single port, not a range, since there's no sane 1:1 mapping for
+`8000-8010 → one fixed port`. `buildNATRule`/`NATRuleAdd`/
+`NATRuleUpdateAt` all take the two new params and validate them (range
+sanity, proto-required-with-port, dest-port-only-on-a-port-forward-rule).
+
+**Userspace NAT engine (`internal/mesh/nat.go`):** `natRule` matches on
+`dportLo`/`dportHi` and can remap to `toPort`. Worked through the
+connection-tracking math by hand for the remap case — a reply from the
+internal host (sourced from the *remapped* port) needs its source
+rewritten back to the *original* external port the sender actually
+talked to, not the internal one — and confirmed it with a round-trip
+test (`TestDNATPortRemapRoundTrip`).
+
+**Kernel NAT (`internal/netfilter/netfilter.go`, `cmd/gravinet/main.go`'s
+`kernelNATRules`):** all three of nft, pf, and iptables render the new
+proto+port match and remap target. WinNAT is the interesting one: it
+previously marked *every* DNAT rule unsupported specifically because
+`Add-NetNatStaticMapping` requires an explicit protocol+port pair per
+mapping — exactly what this feature now provides. A single-port,
+explicit-protocol, single-address DNAT rule now gets its own dedicated
+`New-NetNat`/`Add-NetNatStaticMapping` pair on Windows; a port *range* or
+the original address-only/all-ports form still correctly report
+unsupported (neither has a WinNAT equivalent).
+
+**CLI (`cmd/gravinet/cli_config.go`):** `gravinet nat add`/`list` gained
+`dest-port`/`proto` keywords and display.
+
+**UI (`internal/webadmin/ui.go`, `edit.go`):** the NAT table's dest cell
+shows `ip:port/proto` when set; add/edit rows gained port + protocol
+inputs. The port *remap* itself stays in the existing `translate` field
+(just accepts the extended syntax) rather than adding a separate input.
+
+**`ip_forwarding` (`internal/webadmin/edit.go`, `webadmin.go`, `ui.go`):**
+new System → Network toggle for `config.Config.IPForwarding` (host
+IPv4/IPv6 forwarding at startup — the on-ramp for redistributed routes
+and NAT), which already defaulted to on but had no admin-UI exposure.
+Same shape as the existing UPnP toggle: a top-level `Config` field, so
+`/api/config` reflects a save immediately even though the actual host
+sysctl only flips on the next restart.
+
+Tests added across every layer: `internal/config` (validation,
+`ForwardingEnabled` default), `internal/mesh` (`toRule` parsing,
+port-only-match, port-range-match, the remap round-trip),
+`internal/netfilter` (all four renderers, including the three
+still-genuinely-unsupported WinNAT shapes), `cmd/gravinet`
+(`kernelNATRules`), and `internal/webadmin` (the NAT handler's PAT
+fields, and a new `ipforwarding_handler_test.go`).
+
+Verified with go1.22.2: `go build ./...`, `go vet ./...` clean (CGO
+disabled). Full `internal/config`, `internal/netfilter`,
+`internal/webadmin`, and `cmd/gravinet` suites pass. `internal/mesh`
+verified to 320+ passing tests with zero failures (one unrelated,
+pre-existing slow/flaky real-network test — confirmed to hang
+identically on the pre-PAT baseline — was excluded from the timed run).
+Embedded `<script>` block extracted and `node --check`'d clean.
+
+---
+
 ## v738 — 2026-07-30
 
 **System > SNMP's two cards are now in swapped order: listen address/sysLocation/sysContact first, then the communities table.**

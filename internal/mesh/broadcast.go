@@ -122,9 +122,13 @@ func subnetBroadcast4(p netip.Prefix) netip.Addr {
 	return netip.AddrFrom4(b)
 }
 
-// flood replicates an overlay packet to every connected peer (full mesh / relay
-// reach). Receivers write it to their interface but do not re-flood, so there
-// are no loops.
+// flood replicates an overlay packet to every connected peer (full mesh /
+// relay reach). Receivers write it to their interface but do not re-flood, so
+// there are no loops. On a partial-mesh network (config.Network.Mesh) this
+// still just sends to every *directly* connected peer — for a peer node
+// that's only its seeds, not the wider network — since there is no multi-hop
+// flooding to compensate for the reduced direct connectivity; see
+// config.Network.Mesh's doc comment for the full reasoning.
 func (e *Engine) flood(ns *netState, pkt []byte) {
 	snap := ns.fwd.Load()
 	if snap == nil {

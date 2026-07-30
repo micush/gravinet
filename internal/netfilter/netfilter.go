@@ -47,6 +47,22 @@ type Rule struct {
 	InIface  string       // iifname, for DNAT
 	To       netip.Addr   // target for SNAT/DNAT (unused by Masquerade)
 	V6       bool         // address family: false = IPv4 (nft "ip"/iptables), true = IPv6 (nft "ip6"/ip6tables)
+
+	// Proto/DPortLo/DPortHi scope a DNAT rule to a specific destination
+	// port or range on the original (pre-translation) packet — port
+	// address translation (PAT) — instead of matching every port on Dest.
+	// DPortLo == 0 means every port (the original address-only DNAT
+	// behavior). Proto must be "tcp" or "udp" whenever DPortLo is set (a
+	// port only means something for those two). Unused by Masquerade/SNAT.
+	Proto   string
+	DPortLo uint16
+	DPortHi uint16
+	// ToPort, if nonzero, additionally remaps the destination port to this
+	// value instead of preserving the original one. Only ever set
+	// alongside DPortLo == DPortHi (a single matched port) — see
+	// config.NATRule.DestPort's doc comment for why a range can't remap
+	// this way.
+	ToPort uint16
 }
 
 // family returns the nft family keyword for the rule ("ip" or "ip6").
@@ -112,7 +128,7 @@ func nftScript(rules []Rule) string {
 			case SNAT:
 				fmt.Fprintf(&b, "add rule %s %s postrouting%s%s snat to %s\n", fam, tableName, nftSaddr(r), nftOif(r), r.To)
 			case DNAT:
-				fmt.Fprintf(&b, "add rule %s %s prerouting%s%s dnat to %s\n", fam, tableName, nftDaddr(r), nftIif(r), r.To)
+				fmt.Fprintf(&b, "add rule %s %s prerouting%s%s%s dnat to %s\n", fam, tableName, nftDaddr(r), nftIif(r), nftDport(r), nftDnatTo(r))
 			}
 		}
 	}
@@ -142,6 +158,33 @@ func nftIif(r Rule) string {
 		return fmt.Sprintf(" iifname %q", r.InIface)
 	}
 	return ""
+}
+
+// nftDport renders the DNAT port match — "" (every port) when DPortLo is
+// unset, else e.g. " tcp dport 32400" or " tcp dport 8000-8010".
+func nftDport(r Rule) string {
+	if r.DPortLo == 0 {
+		return ""
+	}
+	if r.DPortHi == r.DPortLo {
+		return fmt.Sprintf(" %s dport %d", r.Proto, r.DPortLo)
+	}
+	return fmt.Sprintf(" %s dport %d-%d", r.Proto, r.DPortLo, r.DPortHi)
+}
+
+// nftDnatTo renders the dnat target: the bare address, or "address:port"
+// when ToPort remaps it (IPv6 targets get bracketed, nft's own requirement
+// for disambiguating the address's colons from the port separator — not
+// reachable today since config.NATRule is IPv4-only, but this stays correct
+// if that ever changes).
+func nftDnatTo(r Rule) string {
+	if r.ToPort == 0 {
+		return r.To.String()
+	}
+	if r.To.Is6() {
+		return fmt.Sprintf("[%s]:%d", r.To, r.ToPort)
+	}
+	return fmt.Sprintf("%s:%d", r.To, r.ToPort)
 }
 
 // pfScript renders the ruleset as pf.conf-syntax nat/rdr lines, suitable for
@@ -176,9 +219,9 @@ func pfScript(rules []Rule) string {
 			}
 		case DNAT:
 			if r.InIface != "" {
-				fmt.Fprintf(&b, "rdr on %s %s from any to %s -> %s\n", r.InIface, fam, pfAddr(r.Dest), r.To)
+				fmt.Fprintf(&b, "rdr on %s %s%s from any to %s%s -> %s%s\n", r.InIface, fam, pfProto(r), pfAddr(r.Dest), pfDport(r), r.To, pfToPort(r))
 			} else {
-				fmt.Fprintf(&b, "rdr %s from any to %s -> %s\n", fam, pfAddr(r.Dest), r.To)
+				fmt.Fprintf(&b, "rdr %s%s from any to %s%s -> %s%s\n", fam, pfProto(r), pfAddr(r.Dest), pfDport(r), r.To, pfToPort(r))
 			}
 		}
 	}
@@ -193,6 +236,40 @@ func pfAddr(p netip.Prefix) string {
 	return "any"
 }
 
+// pfProto renders the DNAT protocol match — "" (any protocol, every port)
+// when DPortLo is unset, else " proto tcp"/" proto udp". pf requires an
+// explicit protocol whenever a port is matched, same as nft/iptables.
+func pfProto(r Rule) string {
+	if r.DPortLo == 0 {
+		return ""
+	}
+	return " proto " + r.Proto
+}
+
+// pfDport renders the DNAT destination port match on the "to" (pre-
+// translation) side — "" (every port) when DPortLo is unset, else
+// " port 32400", or a range using pf's own colon syntax (not a dash):
+// " port 8000:8010".
+func pfDport(r Rule) string {
+	if r.DPortLo == 0 {
+		return ""
+	}
+	if r.DPortHi == r.DPortLo {
+		return fmt.Sprintf(" port %d", r.DPortLo)
+	}
+	return fmt.Sprintf(" port %d:%d", r.DPortLo, r.DPortHi)
+}
+
+// pfToPort renders the redirect target's port when ToPort remaps it — ""
+// when ToPort is unset, relying on pf's own default of preserving the
+// original destination port when the target side names no port.
+func pfToPort(r Rule) string {
+	if r.ToPort == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" port %d", r.ToPort)
+}
+
 // winNATScript renders the PowerShell script that (re)programs Windows'
 // built-in NAT (WinNAT) to match the given ruleset, and separately reports
 // which rules WinNAT's model cannot express.
@@ -201,17 +278,27 @@ func pfAddr(p netip.Prefix) string {
 // internal address prefix (New-NetNat -InternalIPInterfaceAddressPrefix): it
 // always translates to whichever address the outbound interface currently
 // holds, the same shape as Masquerade here. It has no equivalent of "SNAT to
-// a fixed, arbitrary address" (iptables SNAT / pf "nat ... -> <addr>"), and
-// its only redirect primitive (Add-NetNatStaticMapping) requires an explicit
-// protocol and port pair per mapping, so it cannot express our address-only,
-// all-ports DNAT. Both are reported back as unsupported rather than silently
-// dropped or half-applied.
+// a fixed, arbitrary address" (iptables SNAT / pf "nat ... -> <addr>").
+//
+// DNAT is expressible too, but only for a single matched port with an
+// explicit protocol and a concrete external address (Dest as a /32) — the
+// exact shape Add-NetNatStaticMapping needs (protocol, external
+// address+port, internal address+port). The original address-only,
+// all-ports DNAT, and a DNAT rule matching a port *range*, both stay
+// unsupported: neither has a WinNAT equivalent (a static mapping is
+// necessarily one port at a time). Both are reported back as unsupported
+// rather than silently dropped or half-applied.
 //
 // The script is idempotent and replaces the prior gravinet-owned NetNat
 // objects wholesale: it removes any NetNat (and static mappings) whose name
 // starts with the gravinetNATPrefix, then recreates one NetNat per
-// expressible rule. OutIface is not passed to WinNAT: unlike nft/pf/iptables,
-// WinNAT has no oifname-style match — it always follows the routing table.
+// expressible rule — including, for each qualifying DNAT rule, a dedicated
+// NetNat scoped to the internal target as a /32 (WinNAT has no notion of a
+// static mapping without a NAT context to attach it to via -NatName, so
+// each DNAT rule gets its own rather than trying to share one across
+// unrelated internal targets). OutIface is not passed to WinNAT: unlike
+// nft/pf/iptables, WinNAT has no oifname-style match — it always follows
+// the routing table.
 func winNATScript(rules []Rule) (script string, unsupported []Rule) {
 	var b strings.Builder
 	b.WriteString("$ErrorActionPreference = 'Stop'\n")
@@ -233,11 +320,45 @@ func winNATScript(rules []Rule) (script string, unsupported []Rule) {
 			fmt.Fprintf(&b, "New-NetNat -Name %q -InternalIPInterfaceAddressPrefix %q | Out-Null\n",
 				fmt.Sprintf("%s%d", winNATPrefix, n), r.Source.String())
 			n++
+		case DNAT:
+			if !winNATDNATSupported(r) {
+				unsupported = append(unsupported, r) // address-only/all-ports, or a port range: no WinNAT equivalent
+				continue
+			}
+			name := fmt.Sprintf("%s%d", winNATPrefix, n)
+			n++
+			fmt.Fprintf(&b, "New-NetNat -Name %q -InternalIPInterfaceAddressPrefix %q | Out-Null\n", name, r.To.String()+"/32")
+			internalPort := r.DPortLo
+			if r.ToPort != 0 {
+				internalPort = r.ToPort
+			}
+			fmt.Fprintf(&b, "Add-NetNatStaticMapping -NatName %q -Protocol %s -ExternalIPAddress %q -ExternalPort %d -InternalIPAddress %q -InternalPort %d | Out-Null\n",
+				name, winNATProto(r.Proto), r.Dest.Addr().String(), r.DPortLo, r.To.String(), internalPort)
 		default:
-			unsupported = append(unsupported, r) // SNAT-to-fixed-address and DNAT: no WinNAT equivalent
+			unsupported = append(unsupported, r) // SNAT-to-fixed-address: no WinNAT equivalent
 		}
 	}
 	return b.String(), unsupported
+}
+
+// winNATDNATSupported reports whether r's DNAT can be expressed as a
+// WinNAT static mapping: a single matched port (not a range, not "every
+// port"), an explicit tcp/udp protocol, and a concrete external address
+// (Dest as a single /32 — Add-NetNatStaticMapping needs one specific
+// ExternalIPAddress, not a CIDR range or "any").
+func winNATDNATSupported(r Rule) bool {
+	return r.DPortLo != 0 && r.DPortLo == r.DPortHi &&
+		(r.Proto == "tcp" || r.Proto == "udp") &&
+		r.Dest.IsValid() && r.Dest.Bits() == 32
+}
+
+// winNATProto renders a protocol the way Add-NetNatStaticMapping's
+// -Protocol parameter expects it (title case).
+func winNATProto(proto string) string {
+	if proto == "udp" {
+		return "UDP"
+	}
+	return "TCP"
 }
 
 // winNATPrefix names every NetNat object gravinet owns, so Apply can find and
@@ -274,7 +395,32 @@ func iptablesRuleArgs(r Rule) []string {
 		if r.InIface != "" {
 			a = append(a, "-i", r.InIface)
 		}
-		return append(a, "-j", "DNAT", "--to-destination", r.To.String())
+		if r.DPortLo != 0 {
+			a = append(a, "-p", r.Proto, "--dport", iptDportArg(r))
+		}
+		return append(a, "-j", "DNAT", "--to-destination", iptToDestination(r))
 	}
 	return nil
+}
+
+// iptDportArg renders --dport's value: "32400", or a range using
+// iptables' own colon syntax (not a dash): "8000:8010".
+func iptDportArg(r Rule) string {
+	if r.DPortHi == r.DPortLo {
+		return fmt.Sprintf("%d", r.DPortLo)
+	}
+	return fmt.Sprintf("%d:%d", r.DPortLo, r.DPortHi)
+}
+
+// iptToDestination renders --to-destination's value: the bare address, or
+// "address:port" when ToPort remaps it (IPv6 targets get bracketed, same
+// as nftDnatTo — see that function's doc comment).
+func iptToDestination(r Rule) string {
+	if r.ToPort == 0 {
+		return r.To.String()
+	}
+	if r.To.Is6() {
+		return fmt.Sprintf("[%s]:%d", r.To, r.ToPort)
+	}
+	return fmt.Sprintf("%s:%d", r.To, r.ToPort)
 }

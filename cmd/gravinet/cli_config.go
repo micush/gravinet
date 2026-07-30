@@ -770,11 +770,14 @@ func cmdNAT(args []string) {
 			if dst == "" {
 				dst = "any"
 			}
+			if r.DestPort != "" {
+				dst += ":" + r.DestPort + "/" + r.Proto
+			}
 			tgt := r.Translate
 			if r.Interface != "" {
 				tgt = r.Translate + " (" + r.Interface + ")"
 			}
-			fmt.Printf("  [%d] src=%-18s dst=%-18s -> %-22s %s\n",
+			fmt.Printf("  [%d] src=%-18s dst=%-24s -> %-22s %s\n",
 				i, src, dst, tgt, onOff(r.Enabled))
 		}
 		return
@@ -816,18 +819,23 @@ func cmdNAT(args []string) {
 		// source/dest/translate/iface for a full rule. translate itself
 		// carries whether the rule masquerades/statically SNATs (a literal
 		// address, or "masquerade") or port-forwards/DNATs
-		// ("port-forward:<ipv4>") — there's no separate direction keyword.
+		// ("port-forward:<ipv4>[:<port>]") — there's no separate direction
+		// keyword. dest-port/proto scope a port-forward rule to a specific
+		// port or range (PAT) instead of every port on dest — see
+		// config.NATRule.DestPort's doc comment.
 		src := kw(rest, "source")
 		dst := kw(rest, "dest")
+		destPort := kw(rest, "dest-port")
+		proto := kw(rest, "proto")
 		translate := kw(rest, "translate")
 		iface := kw(rest, "iface")
-		if src == "" && dst == "" && translate == "" && iface == "" {
+		if src == "" && dst == "" && destPort == "" && proto == "" && translate == "" && iface == "" {
 			if len(rest) == 0 {
-				fatal("usage: gravinet nat add IFACE  |  nat add [source CIDR] [dest CIDR] (translate ADDR|masquerade|port-forward:ADDR | iface IFACE)")
+				fatal("usage: gravinet nat add IFACE  |  nat add [source CIDR] [dest CIDR] [dest-port N|N-M] [proto tcp|udp] (translate ADDR|masquerade|port-forward:ADDR[:PORT] | iface IFACE)")
 			}
 			iface = rest[0] // bare-interface masquerade shorthand
 		}
-		if err := cfg.NATRuleAdd(netName, src, dst, translate, iface); err != nil {
+		if err := cfg.NATRuleAdd(netName, src, dst, destPort, proto, translate, iface); err != nil {
 			fatal("%v", err)
 		}
 		fmt.Printf("added NAT rule on %s\n", n.Name)

@@ -58,6 +58,52 @@ func TestKernelNATRulesModes(t *testing.T) {
 		}
 	})
 
+	t.Run("port-forward with a single port and proto", func(t *testing.T) {
+		cfg := mk([]config.NATRule{{Dest: "203.0.113.5", DestPort: "32400", Proto: "tcp", Translate: "port-forward:10.0.0.9", Enabled: true}})
+		out := kernelNATRules(cfg)
+		if len(out) != 1 {
+			t.Fatalf("expected one rule, got %+v", out)
+		}
+		r := out[0]
+		if r.Kind != netfilter.DNAT || r.Proto != "tcp" || r.DPortLo != 32400 || r.DPortHi != 32400 || r.ToPort != 0 {
+			t.Fatalf("expected a tcp/32400 match with no remap, got %+v", r)
+		}
+	})
+
+	t.Run("port-forward with a port range", func(t *testing.T) {
+		cfg := mk([]config.NATRule{{Dest: "203.0.113.5", DestPort: "8000-8010", Proto: "udp", Translate: "port-forward:10.0.0.9", Enabled: true}})
+		out := kernelNATRules(cfg)
+		if len(out) != 1 {
+			t.Fatalf("expected one rule, got %+v", out)
+		}
+		if r := out[0]; r.DPortLo != 8000 || r.DPortHi != 8010 || r.Proto != "udp" {
+			t.Fatalf("expected a udp/8000-8010 range match, got %+v", r)
+		}
+	})
+
+	t.Run("port-forward with a remapped port", func(t *testing.T) {
+		cfg := mk([]config.NATRule{{Dest: "203.0.113.5", DestPort: "8443", Proto: "tcp", Translate: "port-forward:10.0.0.9:443", Enabled: true}})
+		out := kernelNATRules(cfg)
+		if len(out) != 1 {
+			t.Fatalf("expected one rule, got %+v", out)
+		}
+		r := out[0]
+		if r.DPortLo != 8443 || r.DPortHi != 8443 || r.ToPort != 443 || r.To != netip.MustParseAddr("10.0.0.9") {
+			t.Fatalf("expected 8443 remapped to 443 on 10.0.0.9, got %+v", r)
+		}
+	})
+
+	t.Run("port-forward without dest-port produces the old address-only match", func(t *testing.T) {
+		cfg := mk([]config.NATRule{{Dest: "203.0.113.5", Translate: "port-forward:10.0.0.9", Enabled: true}})
+		out := kernelNATRules(cfg)
+		if len(out) != 1 {
+			t.Fatalf("expected one rule, got %+v", out)
+		}
+		if r := out[0]; r.DPortLo != 0 || r.DPortHi != 0 || r.ToPort != 0 {
+			t.Fatalf("expected no port match/remap when DestPort is unset, got %+v", r)
+		}
+	})
+
 	t.Run("port-forward bad target skipped, not fatal", func(t *testing.T) {
 		cfg := mk([]config.NATRule{
 			{Translate: "port-forward:not-an-ip", Enabled: true},

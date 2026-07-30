@@ -50,11 +50,11 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 // redistribute-bgp are local changes and apply live.
 func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Op, Net, Id, NewName, Subnet4, Subnet6, Address4, Address6, Key, Peer, Token, Notes string
-		Enabled                                                                             bool
-		Metric                                                                              int
-		MTU                                                                                 int
-		Routes                                                                              []string // redistribute-bgp: selected BGP-learned CIDRs (see NetworkSetRedistributeBGPRoutes)
+		Op, Net, Id, NewName, Subnet4, Subnet6, Address4, Address6, Key, Peer, Token, Notes, Mode string
+		Enabled                                                                                   bool
+		Metric                                                                                    int
+		MTU                                                                                       int
+		Routes                                                                                    []string // redistribute-bgp: selected BGP-learned CIDRs (see NetworkSetRedistributeBGPRoutes)
 	}
 	if !decode(w, r, &req) {
 		return
@@ -92,6 +92,9 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 		case "allow_relay":
 			restart = true // not hot-reloadable — see NetworkSetAllowRelay's doc comment
 			return cfg.NetworkSetAllowRelay(req.Net, req.Enabled)
+		case "mesh_mode":
+			restart = true // not hot-reloadable — see NetworkSetMesh's doc comment
+			return cfg.NetworkSetMesh(req.Net, req.Mode)
 		case "subnet":
 			restart = true // re-addressing an interface needs a restart
 			return cfg.NetworkSetSubnets(req.Net, req.Subnet4, req.Subnet6)
@@ -776,6 +779,27 @@ func (s *Server) handleGeoIPSetting(w http.ResponseWriter, r *http.Request) {
 	s.editResult(w, err, true) // needs a restart — see doc comment above
 }
 
+// handleIPForwardingSetting toggles whether the daemon turns on host
+// IPv4/IPv6 forwarding at startup (config.Config.IPForwarding's doc
+// comment has the full behavior — the on-ramp for redistributed routes and
+// NAT, on by default). Same restart-required shape as handleGeoIPSetting
+// just above: IPForwarding is only ever read once, at startup, to decide
+// whether to flip the host's forwarding sysctls — there's no live "turn
+// host forwarding on/off" to reach for here, so a save takes effect on the
+// next restart, not immediately.
+func (s *Server) handleIPForwardingSetting(w http.ResponseWriter, r *http.Request) {
+	var req struct{ On bool }
+	if !decode(w, r, &req) {
+		return
+	}
+	err := s.mutateConfig(r, func(cfg *config.Config) error {
+		on := req.On
+		cfg.IPForwarding = &on
+		return nil
+	})
+	s.editResult(w, err, true) // needs a restart — see doc comment above
+}
+
 // handleUPnPSetting toggles gravinet's own best-effort UPnP IGD port-
 // mapping helper (config.Config.EnableUPnP's doc comment has the full
 // picture) — off by default. This needs a restart to take effect for a
@@ -985,6 +1009,8 @@ func (s *Server) handleNAT(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Op, Net                        string
 		Iface, Source, Dest, Translate string
+		DestPort                       string `json:"dest_port"`
+		Proto                          string
 		Index, Timeout                 int
 	}
 	if !decode(w, r, &req) {
@@ -995,12 +1021,12 @@ func (s *Server) handleNAT(w http.ResponseWriter, r *http.Request) {
 		case "add":
 			// Full rule when any rule field is set; otherwise the masquerade
 			// shorthand (interface only).
-			if req.Source != "" || req.Dest != "" || req.Translate != "" {
-				return cfg.NATRuleAdd(req.Net, req.Source, req.Dest, req.Translate, req.Iface)
+			if req.Source != "" || req.Dest != "" || req.DestPort != "" || req.Translate != "" {
+				return cfg.NATRuleAdd(req.Net, req.Source, req.Dest, req.DestPort, req.Proto, req.Translate, req.Iface)
 			}
 			return cfg.NATAdd(req.Net, req.Iface)
 		case "update":
-			return cfg.NATRuleUpdateAt(req.Net, req.Index, req.Source, req.Dest, req.Translate, req.Iface)
+			return cfg.NATRuleUpdateAt(req.Net, req.Index, req.Source, req.Dest, req.DestPort, req.Proto, req.Translate, req.Iface)
 		case "delete", "del", "remove":
 			if req.Iface != "" {
 				return cfg.NATDelete(req.Net, req.Iface)

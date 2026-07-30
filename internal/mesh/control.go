@@ -62,6 +62,19 @@ type peerEntry struct {
 	// includes peers known only indirectly, and those are exactly the rows
 	// that would otherwise show a blank version.
 	version string
+	// selfSeed is the peer's advertised hsPayload.SelfSeed, relayed onward
+	// the same way version is — see NetSpec.PartialMesh's doc comment. This
+	// is what lets learnPeers decide whether to auto-dial a node it has only
+	// heard about secondhand, before ever handshaking with it directly: the
+	// handshake-level check in onHSInit/onHSResp is the actual enforcement
+	// and doesn't depend on this being accurate, but without it a partial
+	// mesh would still gossip-dial every peer it hears about and simply have
+	// each of those attempts refused one at a time — correct, but noisy and
+	// pointless. Only trustworthy to the extent gossip itself is (see
+	// learnPeers' "second-hand gossip" comments); a node's own direct
+	// handshake with a peer (ps.selfSeed) always takes precedence over
+	// anything reported about it here.
+	selfSeed bool
 }
 
 // ---- control dispatch ----
@@ -163,9 +176,25 @@ func (e *Engine) sendControl(ps *peerSession, ctrl []byte) {
 	e.sealAndSend(ps, innerCtrl, ctrl)
 }
 
-// learnPeers records advertised nodes and dials any we are not yet connected to,
-// driving the mesh toward full connectivity. The advertising peer (ps) is noted
-// as a relay candidate for each node it reports.
+// learnPeers records advertised nodes and dials any we are not yet connected
+// to, driving the mesh toward full connectivity. The advertising peer (ps) is
+// noted as a relay candidate for each node it reports.
+//
+// On a network with NetSpec.PartialMesh set, the auto-dial below is
+// additionally restricted to entries advertising themselves as a seed
+// (en.selfSeed): a partial mesh only ever grows peer-to-seed and
+// seed-to-seed links on its own, regardless of which role this node has,
+// mirroring the hard rule enforced at the handshake itself (see
+// onHSInit/onHSResp). This is a courtesy, not the enforcement: even a wrong
+// decision here (e.g. dialing a peer this node incorrectly believes is a
+// seed, because en.selfSeed came via a relay running a build that predates
+// this bit and so never reports it either way) can only ever produce an
+// extra handshake attempt that the responder refuses — it can never produce
+// an actual peer-to-peer session. What it can get wrong in the other
+// direction — never gossip-dialing a genuine seed because every path to
+// hearing about it passed through such a relay — is why a partial-mesh
+// peer's own explicit Seeds/PeerCache config (which bypasses this function
+// entirely) remains the reliable way to reach a seed, same as it always was.
 func (e *Engine) learnPeers(ps *peerSession, entries []peerEntry) {
 	ns := ps.net
 	reported := make([]string, 0, len(entries))
@@ -232,6 +261,17 @@ func (e *Engine) learnPeers(ps *peerSession, entries []peerEntry) {
 			if len(en.extraUDPPorts) > 0 {
 				ni.extraUDPPorts = en.extraUDPPorts
 			}
+			// selfSeed mirrors the guards above: for a direct neighbor the
+			// handshake (install()'s ni.selfSeed = ps.selfSeed) is
+			// authoritative and this never overrides it. For a node known
+			// only secondhand it's the sole way this node can ever learn the
+			// other is a seed at all — unlike version/tcpPort/extraPorts
+			// there's no "unset" value to guard against blanking with
+			// (false legitimately means "not a seed" too), so a relay
+			// running a build that predates this bit reports every entry as
+			// non-seed; see learnPeers' doc comment for why that's an
+			// accepted, self-correcting limitation rather than a bug.
+			ni.selfSeed = en.selfSeed
 		}
 
 		// Address-conflict backstop: if a peer claims an overlay address we hold
@@ -253,7 +293,7 @@ func (e *Engine) learnPeers(ps *peerSession, entries []peerEntry) {
 			e.log.Warnf("mesh: overlay address conflict with %q on net %x; re-assigning", en.nodeID, ns.spec.ID)
 			e.maybeAssignAddress(ns)
 		}
-		if !directlyConnected && en.endpoint.IsValid() {
+		if !directlyConnected && en.endpoint.IsValid() && (!ns.spec.PartialMesh || en.selfSeed) {
 			e.AddSeedFor(ns.spec.ID, en.endpoint, en.nodeID) // initLoop dials it next tick
 			// Extra UDP ports (config extra_listen_ports on the peer's end)
 			// ride the same seed pool rather than a separate dial mechanism:
@@ -326,7 +366,7 @@ func (e *Engine) floodSinglePeer(ns *netState, ps *peerSession) {
 	entry := peerEntry{
 		nodeID: ps.nodeID, hostname: ps.hostname, overlay4: ps.overlay4, overlay6: ps.overlay6,
 		endpoint: ps.ep(), managed: ps.managed, manager: ps.manager, webPort: ps.webPort, tcpPort: ps.tcpPort,
-		extraTCPPorts: ps.extraTCPPorts, extraUDPPorts: ps.extraUDPPorts,
+		extraTCPPorts: ps.extraTCPPorts, extraUDPPorts: ps.extraUDPPorts, selfSeed: ps.selfSeed,
 	}
 	ns.mu.RUnlock()
 	if !stillConnected {
@@ -389,6 +429,7 @@ func (e *Engine) buildPeerList(ns *netState, exceptNodeID string) []byte {
 			extraUDPPorts:  p.extraUDPPorts,
 			localEndpoints: p.localEndpoints,
 			version:        p.version,
+			selfSeed:       p.selfSeed,
 		})
 	}
 	ns.mu.RUnlock()
@@ -427,10 +468,11 @@ func (ns *netState) peerListSig() string {
 	var b strings.Builder
 	for _, nid := range ids {
 		p := ns.byNode[nid]
-		fmt.Fprintf(&b, "%s\x00%s\x00%s\x00%s\x00%s\x00%t\x00%t\x00%d\x00%d\x00%v\x00%s\n",
+		fmt.Fprintf(&b, "%s\x00%s\x00%s\x00%s\x00%s\x00%t\x00%t\x00%d\x00%d\x00%v\x00%s\x00%t\n",
 			nid, p.hostname, p.overlay4, p.overlay6, p.ep(), p.managed, p.manager, p.webPort, p.tcpPort,
 			p.localEndpoints, // host candidates are gossiped too, so a change in them must re-flood
-			p.version)        // ...as is the build version: a peer restarting onto a new build
+			p.version,        // ...as is the build version: a peer restarting onto a new build
+			p.selfSeed)       // ...as is seed status, which a partial mesh needs fresh (see NetSpec.PartialMesh)
 		// otherwise keeps an identical signature (same hostname, overlay and
 		// endpoint), so without this the new version would only propagate at
 		// the next gossipFullRefresh rather than promptly.
@@ -1046,6 +1088,22 @@ func encodePeerList(entries []peerEntry) []byte {
 				b = appendLenStr(b, en.version)
 			}
 		}
+		// Seed status: one more trailing block, same rules again, and — like
+		// every block above — emitted after the ones that came before it and
+		// decoded in the same order, since a decoder predating it stops at
+		// the first marker it doesn't recognize. Only emitted when at least
+		// one entry is actually a seed, so a mesh with partial mesh unused
+		// anywhere costs nothing. See NetSpec.PartialMesh and peerEntry.selfSeed.
+		if peerListHasSeed(entries) {
+			b = append(b, peerListSeedBlock)
+			for _, en := range entries {
+				var v byte
+				if en.selfSeed {
+					v = 1
+				}
+				b = append(b, v)
+			}
+		}
 	}
 	return b
 }
@@ -1088,6 +1146,18 @@ func peerListHasVersion(entries []peerEntry) bool {
 	return false
 }
 
+// peerListHasSeed reports whether any entry is a seed, worth encoding a
+// trailing block for — see encodePeerList. Mirrors peerListHasVersion's
+// all-false-costs-nothing shape.
+func peerListHasSeed(entries []peerEntry) bool {
+	for _, en := range entries {
+		if en.selfSeed {
+			return true
+		}
+	}
+	return false
+}
+
 // peerListTCPBlock marks the optional trailing block of per-entry TCP fallback
 // ports in an encoded peer list. peerListExtraTCPBlock/peerListExtraUDPBlock
 // mark further optional trailing blocks of per-entry extra ports — see
@@ -1099,6 +1169,7 @@ const (
 	peerListExtraUDPBlock = 0x03
 	peerListLocalBlock    = 0x04
 	peerListVersionBlock  = 0x05
+	peerListSeedBlock     = 0x06
 )
 
 func appendLenStr(b []byte, s string) []byte {
@@ -1245,6 +1316,14 @@ blocks:
 					break blocks
 				}
 				entries[i].version = v
+			}
+		case peerListSeedBlock:
+			for i := range entries {
+				v, ok := r.byte()
+				if !ok {
+					break blocks
+				}
+				entries[i].selfSeed = v != 0
 			}
 		default:
 			break blocks // unrecognized block: stop rather than misparse

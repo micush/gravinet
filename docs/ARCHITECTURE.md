@@ -1,6 +1,7 @@
 # [gravinet] — architecture & roadmap
 
-A single-binary, full-mesh, encrypted overlay VPN. Go, stdlib-only core,
+A single-binary, encrypted overlay VPN — full mesh by default, with an
+optional partial (hub-and-spoke) topology per network. Go, stdlib-only core,
 `CGO_ENABLED=0` static build, cross-compiles to linux/windows/darwin/freebsd.
 
 ## Why Go
@@ -920,7 +921,9 @@ The TUN read path classifies each overlay packet's destination:
   **multicast** (224.0.0.0/4, or IPv6 ff00::/8) are flooded to every connected
   peer. Receivers write the packet to their own interface but never re-flood, so
   there are no loops (full-mesh / relay reach assumed; multi-hop flooding is out
-  of scope).
+  of scope). On a partial-mesh network (below) a peer is only ever directly
+  connected to seeds, so this single hop only ever reaches those seeds, not
+  the network's other peers.
 - **Storm control** is a per-network, per-class token bucket (configurable
   packets-per-second and burst). A node that exceeds its broadcast or multicast
   budget drops the excess at the source rather than amplifying a storm.
@@ -954,3 +957,47 @@ mesh-wide). The whole tree passes `-race` and cross-compiles to
 linux/windows/darwin on amd64/arm64. (Container IPv6 stays disabled, so v6 paths
 are validated by review and v4-equivalent tests; relaying and broadcast reach
 assume a full/relayed mesh.)
+
+## Partial mesh (v742)
+
+`config.Network.Mesh` (`full`/`partial`, per network) restricts a network to a
+hub-and-spoke topology instead of growing toward full connectivity: exactly
+two link types are permitted, seed-to-seed and seed-to-peer, and a
+peer-to-peer link is refused outright. "Seed" reuses the existing per-node
+`SelfSeed` declaration rather than a second roster — every node decides its
+own role from its own config, with no central "which network is partial" list
+distributed over the wire.
+
+- **Enforcement lives at the handshake**, not just at dial time.
+  `mesh.Engine.onHSInit`/`onHSResp` both refuse to install a session when
+  neither side is a seed — the one condition that permits seed↔seed and
+  seed↔peer (either dial direction) and blocks peer↔peer, regardless of how
+  the two nodes came to dial each other. This makes it a hard guarantee, not
+  an optimization: even a wrong or missing dial-side signal can only ever
+  produce an extra handshake attempt that gets refused, never an actual
+  peer-to-peer session.
+- **`learnPeers` respects it as a courtesy**, skipping the gossip-driven
+  auto-dial toward a node it's only heard about secondhand unless that node
+  advertises itself as a seed — this is what actually keeps a large partial
+  mesh's connection count down. The peer-list gossip payload carries seed
+  status in a new backward-compatible trailing block, same append-only shape
+  as every other optional field added to that wire format before it (TCP
+  ports, local endpoints, build version); an old peer relaying gossip simply
+  omits it, which the receiving side treats as "unknown, not a seed" —
+  self-correcting once a direct handshake with the real seed happens, and
+  never a security gap since the handshake-level check doesn't depend on it.
+- **Broadcast/multicast reach is reduced accordingly** — see the note in the
+  broadcast/multicast section above. Flooding was built assuming full-mesh
+  reach (one hop, no re-flood); a partial-mesh peer's broadcast now only
+  reaches the seeds it's directly connected to, not the network's other
+  peers. Unicast, routed, and relayed traffic are unaffected.
+
+Verified: `TestPartialMeshPeerToPeerRejected` (the core guarantee, exercised
+in both dial directions), `TestPartialMeshSeedLinksAllowed` (seed↔seed and
+peer↔seed both still form), `TestPartialMeshGossipSkipsPeerToPeerAutoDial`
+(the auto-dial courtesy, through real gossip end-to-end), and
+`TestPeerListCarriesSeed` (wire round-trip and backward-compat truncation).
+Full `internal/mesh` suite passes, including the existing multi-minute
+self-seed/dead-seed reproductions, confirming no regression from the
+handshake/gossip changes.
+

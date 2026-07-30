@@ -1009,6 +1009,7 @@ async function load() {
   state.natStateTimeout = (c.body && c.body.nat_state_timeout) || 0;
   state.geoipLookup = !!(c.body && c.body.geoip_lookup);
   state.enableUpnp = !!(c.body && c.body.enable_upnp);
+  state.ipForwarding = c.body ? (c.body.ip_forwarding !== false) : true;
   state.workerThreads = (c.body && c.body.worker_threads) || 0;
   state.tunQueues = (c.body && c.body.tun_queues) || 0;
   state.tunQueuesSupported = c.body ? !!c.body.tun_queues_supported : true;
@@ -1120,6 +1121,7 @@ function buildSearchIndex(){
     ['udpport-row', 'UDP port', 'The UDP port(s) this node listens on; comma-separated for more than one, so a peer behind a restrictive firewall can reach it on a well-known port too.', 'network'],
     ['tcpport-row', 'TCP port', 'The TCP port(s) this node listens on for the TLS fallback; comma-separated for more than one.', 'network'],
     ['natstate-row', 'NAT state timeout', 'How long an idle translated NAT connection is remembered before its mapping is reclaimed.', 'network'],
+    ['ip-forwarding-row', 'IP forwarding', 'Whether this node turns on host IPv4/IPv6 forwarding at startup \u2014 the on-ramp for redistributed routes and NAT. On by default; needs a restart to take effect.', 'network'],
     ['upnp-row', 'UPnP', 'Ask the LAN router to forward every port this node listens on \u2014 UDP, TCP fallback, and any extra ports \u2014 from its WAN side to this host automatically, so peers can reach it without a manual port forward. Off by default. upnp port forwarding nat traversal', 'network'],
     ['worker-threads-row', 'Worker threads', 'How many goroutines process outbound TUN traffic and inbound UDP traffic.', 'performance'],
     ['tun-queues-row', 'TUN queues', 'How many independent read queues to open on each overlay interface.', 'performance'],
@@ -2644,7 +2646,7 @@ function buildPortListRow(id, label, desc, initialPorts, apiPath, onSaved, initi
 // now owns it.
 function secSettings(c) {
   state.settingsTab = state.settingsTab || 'general';
-  secHint(c, 'Console, security, and node-wide settings. <b>General</b> covers the interface and local housekeeping; <b>Security</b> covers access control, certificates, and what a Manager peer may do here; <b>Network</b> covers mesh timing, ports, NAT, relay, and self-seed; <b>Performance</b> is advanced tuning most setups never need to touch.');
+  secHint(c, 'Console, security, and node-wide settings. <b>General</b> covers the interface and local housekeeping; <b>Security</b> covers access control, certificates, and what a Manager peer may do here; <b>Network</b> covers mesh timing, ports, NAT, relay, and seed; <b>Performance</b> is advanced tuning most setups never need to touch.');
   c.appendChild(buildTabBar([['general','General'],['security','Security'],['network','Network'],['performance','Performance']], state.settingsTab,
     (tab) => { state.settingsTab = tab; renderSection(); }));
 
@@ -3116,7 +3118,7 @@ function secSettingsNetwork(c) {
       card.appendChild(relayRow);
 
       const seedRow = $('<div class="settings-row"></div>');
-      seedRow.appendChild($('<div><div class="settings-label">Self-seed'+suffix+'</div><div class="settings-desc">An explicit declaration that this node should be treated as a seed for this network \u2014 see System \u203a Upgrade, which trusts this over trying to infer seed status by matching addresses. Off by default; not the same as actually being listed on the Seeds page.</div></div>'));
+      seedRow.appendChild($('<div><div class="settings-label">Seed'+suffix+'</div><div class="settings-desc">An explicit declaration that this node should be treated as a seed for this network \u2014 see System \u203a Upgrade, which trusts this over trying to infer seed status by matching addresses. Off by default; not the same as actually being listed on the Seeds page.</div></div>'));
       const seedSw = $('<label class="sw"><input type="checkbox"><span class="sw-slider"></span></label>');
       const seedCb = seedSw.querySelector('input');
       seedCb.checked = !!cf.self_seed;
@@ -3166,6 +3168,20 @@ function secSettingsNetwork(c) {
   };
   up.appendChild(upLabel); up.appendChild(upSw);
   card.appendChild(up);
+
+  const ipf = $('<div class="settings-row" id="ip-forwarding-row"></div>');
+  const ipfLabel = $('<div><div class="settings-label">IP forwarding</div><div class="settings-desc">Whether this node turns on host IPv4/IPv6 forwarding at startup \u2014 the on-ramp for redistributed routes and NAT. On by default. Needs a restart to take effect.</div></div>');
+  const ipfSw = $('<label class="sw"><input type="checkbox" id="ip-forwarding-toggle-cb"><span class="sw-slider"></span></label>');
+  const ipfCb = ipfSw.querySelector('input');
+  ipfCb.checked = state.ipForwarding;
+  ipfCb.onchange = async () => {
+    const want = ipfCb.checked;
+    const ok = await edit('/api/ipforwarding', { on: want }, true); // needs a restart once saved
+    if (ok) { state.ipForwarding = want; }
+    else { ipfCb.checked = !want; }
+  };
+  ipf.appendChild(ipfLabel); ipf.appendChild(ipfSw);
+  card.appendChild(ipf);
 
   c.appendChild(card);
 }
@@ -3577,16 +3593,18 @@ function secNetworks(c) {
   const cfgs = state.cfg;
   secHint(c, 'Add, remove, and manage networks. Double-click on an existing network to edit the name, subnet, overlay address, or notes for that network, or toggle the network state to enabled or disabled.<br><br><b>+</b> creates a network, <b>=</b> joins an existing one (paste a join token, or enter id/key/seed), <b>\u25cf</b> generates a join token for a ticked network to paste on another node, <b>\u2212</b> deletes the selected networks and all associated items, and <b>\u21bb reset</b> drops the selected networks\' peer connections and immediately reconnects to their peers and seeds.');
   const card = $('<div class="card"></div>');
-  let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>name</th><th>id</th><th>state</th><th>subnet4</th><th>overlay4</th><th>subnet6</th><th>overlay6</th><th title="overlay interface MTU. Sized so a full packet fits one underlay datagram; larger than the path can carry means every packet is fragmented and reassembled.">mtu</th><th>peers</th><th>seeds</th><th>notes</th></tr>';
-  if (!cfgs.length) h += '<tr><td colspan="12" class="empty">no networks — click + to create one, or = to join an existing one</td></tr>';
+  let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>name</th><th>id</th><th>state</th><th title="full: every node connects to every other node it learns about, as always. partial: restricted to a seed backbone \u2014 only seed\u2013seed and seed\u2013peer links form; peer\u2013peer links are refused outright. A node is a seed here when its Seed setting (Settings \u203a Relay & Seed) is on. Double-click to switch; needs a restart on every node in the network to take effect, and every node should agree.">mesh</th><th>subnet4</th><th>overlay4</th><th>subnet6</th><th>overlay6</th><th title="overlay interface MTU. Sized so a full packet fits one underlay datagram; larger than the path can carry means every packet is fragmented and reassembled.">mtu</th><th>peers</th><th>seeds</th><th>notes</th></tr>';
+  if (!cfgs.length) h += '<tr><td colspan="13" class="empty">no networks — click + to create one, or = to join an existing one</td></tr>';
   else for (const cf of cfgs) {
     const live = state.status.find(s=>s.id===cf.id) || {};
     const en = cf.enabled !== false;
     const st = '<span class="'+(en?'on':'off')+' tag-toggle" data-nettoggle="'+esc(cf.id)+'" data-en="'+(en?1:0)+'" title="double-click to '+(en?'disable':'enable')+'">'+(en?'enabled':'disabled')+'</span>';
+    const partial = cf.mesh === 'partial';
+    const mesh = '<span class="'+(partial?'off':'on')+' tag-toggle" data-meshtoggle="'+esc(cf.id)+'" data-mode="'+(partial?'partial':'full')+'" title="double-click to switch to '+(partial?'full':'partial')+' mesh">'+(partial?'partial':'full')+'</span>';
     h += '<tr class="netrow" data-netid="'+esc(cf.id)+'" data-netname="'+esc(cf.name)+'">'
       + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
       + '<td class="editable" data-edit="name" data-net="'+esc(cf.id)+'" title="double-click to rename">'+esc(cf.name)+'</td>'
-      + '<td><span class="net-id">'+esc(cf.id)+'</span></td><td>'+st+'</td>'
+      + '<td><span class="net-id">'+esc(cf.id)+'</span></td><td>'+st+'</td><td>'+mesh+'</td>'
       + '<td class="editable" data-edit="subnet4" data-net="'+esc(cf.id)+'" title="double-click to edit">'+esc(cf.subnet4||'—')+'</td>'
       + '<td class="editable" data-edit="address4" data-net="'+esc(cf.id)+'" title="double-click to edit this node\'s overlay address">'+esc(cf.address4||'auto')+'</td>'
       + '<td class="editable" data-edit="subnet6" data-net="'+esc(cf.id)+'" title="double-click to edit">'+esc(cf.subnet6||'—')+'</td>'
@@ -3611,6 +3629,23 @@ function secNetworks(c) {
       s.title = 'double-click to ' + (on ? 'disable' : 'enable');
       api('/api/network', { method:'POST', body: JSON.stringify({ op:(on?'enable':'disable'), net:s.dataset.nettoggle }) })
         .then(r => { if (!r.ok) console.warn('network toggle failed:', (r.body&&r.body.error)||'failed'); })
+        .finally(refresh);
+    };
+  });
+  t.querySelectorAll('[data-meshtoggle]').forEach(s => {
+    s.ondblclick = () => {
+      const net = s.dataset.meshtoggle, name = nameOf(net);
+      const want = s.dataset.mode === 'full' ? 'partial' : 'full';
+      // Unlike enable/disable above, this changes what the mesh actually
+      // connects to (and needs a restart on every node in the network to
+      // take effect), so confirm rather than fire-and-flip — same tier as
+      // the subnet/MTU/address prompts in startInlineEdit.
+      const msg = want === 'partial'
+        ? 'Switch "'+name+'" to partial mesh?\n\nOnly seed\u2013seed and seed\u2013peer links will be allowed; existing peer\u2013peer sessions on this node will be refused on their next handshake. This node restarts immediately to apply it \u2014 make the same change on every other node in this network.'
+        : 'Switch "'+name+'" back to full mesh?\n\nEvery node will resume connecting to every other node it learns about. This node restarts immediately to apply it \u2014 make the same change on every other node in this network.';
+      if (!confirm(msg)) return;
+      api('/api/network', { method:'POST', body: JSON.stringify({ op:'mesh_mode', net, mode:want }) })
+        .then(r => { if (!r.ok) alert((r.body&&r.body.error)||'could not change mesh mode'); })
         .finally(refresh);
     };
   });
@@ -5869,7 +5904,7 @@ function svcAddRow(table){
 
 function secNAT(c) {
   if (!state.cfg.length) return emptyCard(c, 'No networks.');
-  secHint(c, 'NAT rewrites IPv4 addresses (IPv4-only). <b>source</b> and <b>dest</b> select which packets a rule matches (blank = any). <b>translate</b> is where those packets get rewritten to, and which direction the rewrite runs, all in one value: <i>masquerade</i> (rewrite the source to the chosen interface\u2019s address, many\u21921, for outbound traffic sharing one address), a literal IPv4 (rewrite the source to that fixed address instead), or <code>port-forward:</code> followed by an IPv4 (rewrite the destination to that address instead, for inbound traffic reaching an internal host). Use + to add a rule; double-click a field to edit a rule, or the state tag to toggle it; tick rows and \u2212 to remove.');
+  secHint(c, 'NAT rewrites IPv4 addresses (IPv4-only). <b>source</b> and <b>dest</b> select which packets a rule matches (blank = any); a port-forward rule can further scope <b>dest</b> to one port or a range (e.g. <code>32400</code> or <code>8000-8010</code>) and a protocol, instead of matching every port \u2014 leave both blank to match all ports. <b>translate</b> is a mode dropdown: <i>masquerade</i> (rewrite the source to the chosen interface\u2019s address, many\u21921, for outbound traffic sharing one address), <i>static address</i> (rewrite the source to a fixed IPv4 instead), or <i>port-forward</i> (rewrite the destination to an internal host, for inbound traffic reaching it) \u2014 port-forward also has a remap-port field: leave it blank to keep the matched port unchanged, or set it to translate to a different port on the internal host (port address translation / PAT). Use + to add a rule; double-click a field to edit a rule, or the state tag to toggle it; tick rows and \u2212 to remove.');
   for (const cf of state.cfg) {
     const nat = cf.nat||{}; const en = !!nat.enabled;
     const card = $('<div class="card"></div>');
@@ -5882,12 +5917,13 @@ function secNAT(c) {
       const tgt = r.interface ? (esc(r.translate||'masquerade')+' ('+esc(r.interface)+')') : esc(r.translate||'');
       const enabled = r.enabled!==false;
       const stTag = '<span class="tag-toggle '+(enabled?'on':'off')+'" data-natstate="1" title="double-click to '+(enabled?'disable':'enable')+'">'+(enabled?'enabled':'disabled')+'</span>';
+      const dstShown = esc(r.dest||'any') + (r.dest_port ? ':'+esc(r.dest_port)+'/'+esc(r.proto||'') : '');
       h += '<tr class="natrow'+(enabled?'':' fw-disabled')+'" data-idx="'+i+'" data-enabled="'+(enabled?1:0)+'"'
-        + ' data-source="'+esc(r.source||'')+'" data-dest="'+esc(r.dest||'')+'" data-translate="'+esc(r.translate||'')+'" data-iface="'+esc(r.interface||'')+'">'
+        + ' data-source="'+esc(r.source||'')+'" data-dest="'+esc(r.dest||'')+'" data-dest-port="'+esc(r.dest_port||'')+'" data-proto="'+esc(r.proto||'')+'" data-translate="'+esc(r.translate||'')+'" data-iface="'+esc(r.interface||'')+'">'
         + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
         + '<td class="nat-state">'+stTag+'</td>'
         + '<td class="nat-field nat-src-cell">'+esc(r.source||'any')+'</td>'
-        + '<td class="nat-field nat-dst-cell">'+esc(r.dest||'any')+'</td>'
+        + '<td class="nat-field nat-dst-cell">'+dstShown+'</td>'
         + '<td class="nat-field nat-tr-cell">'+tgt+'</td></tr>';
     });
     const t = $('<div></div>'); t.innerHTML = h+'</table>'; card.appendChild(t);
@@ -5917,24 +5953,106 @@ function secNAT(c) {
   }
 }
 
+// natParseTranslate reads a stored translate string back into
+// {mode, addr, port} for the mode-dropdown editor: "masquerade" (or blank)
+// is mode masquerade; "port-forward:<ip>[:<port>]" is mode port-forward,
+// split into the target address and an optional remap port; anything else
+// is a literal IPv4 (mode static).
+function natParseTranslate(tr){
+  tr = (tr||'').trim();
+  if (/^port-forward:/i.test(tr)){
+    const rest = tr.slice('port-forward:'.length).trim();
+    const ci = rest.indexOf(':');
+    if (ci >= 0) return { mode:'port-forward', addr: rest.slice(0,ci).trim(), port: rest.slice(ci+1).trim() };
+    return { mode:'port-forward', addr: rest, port: '' };
+  }
+  if (tr === '' || tr.toLowerCase() === 'masquerade') return { mode:'masquerade', addr:'', port:'' };
+  return { mode:'static', addr: tr, port:'' };
+}
+
+// natBuildTranslate is natParseTranslate's inverse — what actually gets
+// posted as the translate field, from the mode dropdown's current values.
+function natBuildTranslate(mode, addr, port){
+  if (mode === 'masquerade') return 'masquerade';
+  if (mode === 'port-forward') return 'port-forward:' + addr + (port ? ':' + port : '');
+  return addr; // static
+}
+
+// natTranslateCellHTML renders the mode dropdown + its mode-dependent
+// fields (address, remap port, iface) — shared by natAddRow and
+// startNATEdit so the two editors can't drift apart.
+function natTranslateCellHTML(cur){
+  const mode = cur.mode || 'masquerade';
+  const opt = (v, label) => '<option value="'+v+'"'+(mode===v?' selected':'')+'>'+label+'</option>';
+  return '<select class="nate-mode" style="width:118px">'
+    + opt('masquerade', 'masquerade') + opt('static', 'static address') + opt('port-forward', 'port-forward')
+    + '</select>'
+    + ' <input class="nate-addr" style="width:110px" value="'+esc(cur.addr||'')+'">'
+    + ' <input class="nate-remap" placeholder="remap port" title="port-forward only \u2014 leave blank to keep the matched port unchanged" style="width:90px" value="'+esc(cur.port||'')+'">'
+    + ' <select class="nate-iface" style="width:100px"><option value="">iface\u2026</option></select>'
+    + ' <button class="sm nate-save">save</button> <button class="ghost sm nate-cancel">cancel</button>';
+}
+
+// natWireTranslateFields shows/hides natTranslateCellHTML's fields to match
+// the selected mode (masquerade only needs iface; static/port-forward only
+// need the address; only port-forward shows the remap-port field) and
+// populates the iface dropdown, keeping curIface selected even if it's no
+// longer a real interface on this host.
+function natWireTranslateFields(cell, curIface){
+  const modeSel = cell.querySelector('.nate-mode');
+  const addrIn = cell.querySelector('.nate-addr');
+  const remapIn = cell.querySelector('.nate-remap');
+  const ifaceSel = cell.querySelector('.nate-iface');
+  const sync = () => {
+    const mode = modeSel.value;
+    addrIn.style.display = (mode === 'masquerade') ? 'none' : '';
+    addrIn.placeholder = mode === 'static' ? 'IPv4 to translate to' : 'internal host IPv4';
+    remapIn.style.display = (mode === 'port-forward') ? '' : 'none';
+    ifaceSel.style.display = (mode === 'masquerade') ? '' : 'none';
+  };
+  modeSel.onchange = sync;
+  sync();
+  systemInterfaces().then(list => {
+    const opts = list.slice();
+    if (curIface && !opts.includes(curIface)) opts.push(curIface); // keep an iface no longer present
+    ifaceSel.innerHTML = '<option value="">iface\u2026</option>' + opts.map(n => '<option value="'+esc(n)+'"'+(n===curIface?' selected':'')+'>'+esc(n)+'</option>').join('');
+  });
+}
+
+// natReadTranslateCell reads natTranslateCellHTML's fields back into what
+// /api/nat expects ({translate, iface}), or null if the mode needs an
+// address that wasn't given.
+function natReadTranslateCell(cell){
+  const mode = cell.querySelector('.nate-mode').value;
+  const addr = cell.querySelector('.nate-addr').value.trim();
+  const port = cell.querySelector('.nate-remap').value.trim();
+  const iface = cell.querySelector('.nate-iface').value;
+  if (mode !== 'masquerade' && !addr) return null;
+  return { translate: natBuildTranslate(mode, addr, port), iface: mode === 'masquerade' ? iface : '' };
+}
+
 function natAddRow(table, net){
   const tr = document.createElement('tr');
   tr.innerHTML = '<td class="selcol"></td>'
     + '<td class="nat-state"><span class="on">enabled</span></td>'
     + '<td><input class="nate-src" placeholder="any or CIDR" style="width:120px"></td>'
-    + '<td><input class="nate-dst" placeholder="any or CIDR" style="width:120px"></td>'
-    + '<td><input class="nate-tr" value="masquerade" title="masquerade, a literal IPv4, or port-forward:IPv4" style="width:150px"> <select class="nate-iface" style="width:108px"><option value="">iface…</option></select> <button class="sm nate-save">save</button> <button class="ghost sm nate-cancel">cancel</button></td>';
+    + '<td><input class="nate-dst" placeholder="any or CIDR" style="width:110px"> <input class="nate-dport" placeholder="port(s)" title="dest-port: a single port or a range like 8000-8010 \u2014 port-forward rules only" style="width:70px"> <select class="nate-proto" title="required when dest-port is set"><option value="">any</option><option value="tcp">tcp</option><option value="udp">udp</option></select></td>'
+    + '<td class="nate-tr-cell-new">' + natTranslateCellHTML({mode:'masquerade'}) + '</td>';
   if (!insertNewRow(table, tr)) return;
-  const sel = tr.querySelector('.nate-iface');
-  systemInterfaces().then(list => { sel.innerHTML = '<option value="">iface…</option>' + list.map(n => '<option value="'+esc(n)+'">'+esc(n)+'</option>').join(''); });
+  const trCell = tr.querySelector('.nate-tr-cell-new');
+  natWireTranslateFields(trCell, '');
   tr.querySelector('.nate-cancel').onclick = () => refresh();
   tr.querySelector('.nate-save').onclick = () => {
+    const t = natReadTranslateCell(trCell);
+    if (!t){ alert('address is required for static address / port-forward'); return; }
     edit('/api/nat', {
       op:'add', net:net,
       source: tr.querySelector('.nate-src').value.trim(),
       dest: tr.querySelector('.nate-dst').value.trim(),
-      translate: tr.querySelector('.nate-tr').value.trim(),
-      iface: sel.value
+      dest_port: tr.querySelector('.nate-dport').value.trim(),
+      proto: tr.querySelector('.nate-proto').value,
+      translate: t.translate,
+      iface: t.iface
     });
   };
 }
@@ -5942,9 +6060,12 @@ function natAddRow(table, net){
 // startNATEdit turns a NAT rule row into an inline editor (reusing the add-row
 // field layout) prefilled from the row's data attributes. Saving sends the
 // update op, which replaces the rule in place while preserving its enabled
-// state. translate + interface are edited together because they are
-// interdependent (masquerade needs an interface; a literal IPv4 or
-// port-forward:IPv4 clears it).
+// state. translate + interface are edited together via the mode dropdown
+// (natTranslateCellHTML/natWireTranslateFields/natReadTranslateCell) since
+// they're interdependent (masquerade needs an interface; static/port-forward
+// need an address instead); dest + dest-port + proto are edited together for
+// the same reason (dest-port only means anything alongside a port-forward
+// translate, and needs proto set alongside it).
 function startNATEdit(tr, net){
   if (tr.querySelector('.nate-src')) return; // already editing
   const idx = parseInt(tr.dataset.idx, 10);
@@ -5952,23 +6073,27 @@ function startNATEdit(tr, net){
   const dstCell = tr.querySelector('.nat-dst-cell');
   const trCell  = tr.querySelector('.nat-tr-cell');
   srcCell.innerHTML = '<input class="nate-src" placeholder="any or CIDR" style="width:120px" value="'+esc(tr.dataset.source||'')+'">';
-  dstCell.innerHTML = '<input class="nate-dst" placeholder="any or CIDR" style="width:120px" value="'+esc(tr.dataset.dest||'')+'">';
-  trCell.innerHTML  = '<input class="nate-tr" title="masquerade, a literal IPv4, or port-forward:IPv4" style="width:150px" value="'+esc(tr.dataset.translate||'')+'"> <select class="nate-iface" style="width:108px"><option value="">iface…</option></select> <button class="sm nate-save">save</button> <button class="ghost sm nate-cancel">cancel</button>';
-  const sel = trCell.querySelector('.nate-iface');
-  const curIface = tr.dataset.iface || '';
-  systemInterfaces().then(list => {
-    const opts = list.slice();
-    if (curIface && !opts.includes(curIface)) opts.push(curIface); // keep an iface no longer present
-    sel.innerHTML = '<option value="">iface…</option>' + opts.map(n => '<option value="'+esc(n)+'"'+(n===curIface?' selected':'')+'>'+esc(n)+'</option>').join('');
-  });
+  const curProto = tr.dataset.proto || '';
+  dstCell.innerHTML = '<input class="nate-dst" placeholder="any or CIDR" style="width:110px" value="'+esc(tr.dataset.dest||'')+'">'
+    + ' <input class="nate-dport" placeholder="port(s)" title="dest-port: a single port or a range like 8000-8010 \u2014 port-forward rules only" style="width:70px" value="'+esc(tr.dataset.destPort||'')+'">'
+    + ' <select class="nate-proto" title="required when dest-port is set">'
+    + '<option value=""'+(curProto===''?' selected':'')+'>any</option>'
+    + '<option value="tcp"'+(curProto==='tcp'?' selected':'')+'>tcp</option>'
+    + '<option value="udp"'+(curProto==='udp'?' selected':'')+'>udp</option></select>';
+  trCell.innerHTML = natTranslateCellHTML(natParseTranslate(tr.dataset.translate));
+  natWireTranslateFields(trCell, tr.dataset.iface || '');
   tr.querySelector('.nate-cancel').onclick = () => refresh();
   tr.querySelector('.nate-save').onclick = async () => {
+    const t = natReadTranslateCell(trCell);
+    if (!t){ alert('address is required for static address / port-forward'); return; }
     const r = await api('/api/nat', { method:'POST', body: JSON.stringify({
       op:'update', net:net, index:idx,
       source: srcCell.querySelector('.nate-src').value.trim(),
       dest: dstCell.querySelector('.nate-dst').value.trim(),
-      translate: trCell.querySelector('.nate-tr').value.trim(),
-      iface: sel.value
+      dest_port: dstCell.querySelector('.nate-dport').value.trim(),
+      proto: dstCell.querySelector('.nate-proto').value,
+      translate: t.translate,
+      iface: t.iface
     })});
     if (!r.ok){ alert((r.body&&r.body.error)||'update failed'); }
     refresh();

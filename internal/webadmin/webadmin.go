@@ -535,6 +535,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/history/snapshot", s.authed(s.handleHistorySnapshot))
 	mux.HandleFunc("/api/history/limit", s.authed(s.handleConfigHistoryLimit))
 	mux.HandleFunc("/api/geoip", s.authed(s.handleGeoIPSetting))
+	mux.HandleFunc("/api/ipforwarding", s.authed(s.handleIPForwardingSetting))
 	mux.HandleFunc("/api/upnp", s.authed(s.handleUPnPSetting))
 	mux.HandleFunc("/api/worker-threads", s.authed(s.handleWorkerThreads))
 	mux.HandleFunc("/api/tun-queues", s.authed(s.handleTunQueues))
@@ -1033,6 +1034,11 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		// Networks needs a restart of this node before it's advertised.
 		AllowRelay bool `json:"allow_relay"`
 		SelfSeed   bool `json:"self_seed"`
+		// Mesh mirrors config.Network.Mesh verbatim (empty or "full" means
+		// unrestricted, "partial" means the seed/peer hub-and-spoke
+		// restriction) — see its doc comment. Also not hot-reloadable, same
+		// restart caveat as AllowRelay/SelfSeed above.
+		Mesh string `json:"mesh"`
 		// RedistributeBGPRoutes/RedistributeBGPMetric mirror config.Network's
 		// own fields verbatim — see its doc comment. Surfaced here (not
 		// folded into Routes above) because they're a single per-network
@@ -1062,10 +1068,14 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 				Set: k.Key != "", Expires: k.Expires, Distributed: k.Distributed, Notes: k.Notes,
 			})
 		}
+		meshMode := "full"
+		if n.MeshPartial() {
+			meshMode = "partial"
+		}
 		out = append(out, cfgNet{
 			ID: id, Name: n.Name, Enabled: n.Enabled, Notes: n.Notes,
 			Subnet4: n.Subnet4, Subnet6: n.Subnet6, Address4: n.Address4, Address6: n.Address6, MTU: n.MTU, Seeds: n.Seeds,
-			Routes: n.Routes, RouteRej: n.RouteRej, AllowRelay: n.AllowRelay, SelfSeed: n.SelfSeed,
+			Routes: n.Routes, RouteRej: n.RouteRej, AllowRelay: n.AllowRelay, SelfSeed: n.SelfSeed, Mesh: meshMode,
 			RedistributeBGPRoutes: n.RedistributeBGPRoutes, RedistributeBGPMetric: n.RedistributeBGPMetric,
 			NAT: n.NAT, QoS: n.QoS, Throttle: n.Throttle, Firewall: n.Firewall, Hosts: n.HostsAdvertise, HostsRej: n.HostsReject,
 			DNS: n.DNSAdvertise, DNSRej: n.DNSReject, Keys: keys,
@@ -1090,7 +1100,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		tlsNotAfter = s.tlsCert.NotAfter.UTC().Format(time.RFC3339)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"nets": out, "primary_port": cfg.PrimaryPort, "tcp_fallback_port": cfg.TCPFallbackPortValue(), "tcp_fallback_disabled": !cfg.TCPFallbackEnabled(), "extra_listen_ports": cfg.ExtraListenPorts, "extra_tcp_listen_ports": cfg.ExtraTCPListenPorts, "nat_state_timeout": cfg.NATStateTimeout, "geoip_lookup": s.cfg.GeoIPEnabled(), "enable_upnp": cfg.EnableUPnP, "allow_remote_shell": s.cfg.AllowRemoteShell, "login_ban_max_failures": s.cfg.LoginBan.EffectiveMaxFailures(), "login_ban_seconds": s.cfg.LoginBan.EffectiveBanSeconds(), "tls_source": tlsSource, "tls_common_name": tlsCN, "tls_not_after": tlsNotAfter, "config_history_limit": cfg.EffectiveConfigHistoryLimit(), "config_history_count": config.Count(s.configPath), "shell_supported": ptySupported, "bgp_supported": bgpSupported(), "snmp_supported": snmpSupported, "l2disco_supported": l2discoSupported, "syslog_supported": syslogSupported, "log_level": s.be.LogLevel(), "log_max_size": cfg.LogMaxSizeString(),
+		"nets": out, "primary_port": cfg.PrimaryPort, "tcp_fallback_port": cfg.TCPFallbackPortValue(), "tcp_fallback_disabled": !cfg.TCPFallbackEnabled(), "extra_listen_ports": cfg.ExtraListenPorts, "extra_tcp_listen_ports": cfg.ExtraTCPListenPorts, "nat_state_timeout": cfg.NATStateTimeout, "geoip_lookup": s.cfg.GeoIPEnabled(), "enable_upnp": cfg.EnableUPnP, "ip_forwarding": cfg.ForwardingEnabled(), "allow_remote_shell": s.cfg.AllowRemoteShell, "login_ban_max_failures": s.cfg.LoginBan.EffectiveMaxFailures(), "login_ban_seconds": s.cfg.LoginBan.EffectiveBanSeconds(), "tls_source": tlsSource, "tls_common_name": tlsCN, "tls_not_after": tlsNotAfter, "config_history_limit": cfg.EffectiveConfigHistoryLimit(), "config_history_count": config.Count(s.configPath), "shell_supported": ptySupported, "bgp_supported": bgpSupported(), "snmp_supported": snmpSupported, "l2disco_supported": l2discoSupported, "syslog_supported": syslogSupported, "log_level": s.be.LogLevel(), "log_max_size": cfg.LogMaxSizeString(),
 		"worker_threads": cfg.WorkerThreads, "tun_queues": cfg.TunQueues, "tun_queues_supported": tunMultiQueueSupported, "udp_gso": cfg.UDPGSOEnabled(), "udp_gso_supported": udpGSOSupported, "socket_buffer_mb": cfg.SocketBufferMB(), "socket_buffer_max_mb": config.SocketBufferMaxBytes >> 20,
 		// Node-global firewall object/service catalog (see Config.FirewallObjects'
 		// doc comment) — shared by every network above, not nested under any one
