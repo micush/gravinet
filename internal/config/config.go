@@ -411,11 +411,26 @@ type Config struct {
 }
 
 // SNMPConfig is this node's read-only SNMPv2c agent configuration, rendered
-// into net-snmp's snmpd.conf. Ported from parapet's Snmp model.
+// into net-snmp's snmpd.conf. Ported from parapet's Snmp model; grew from a
+// single community string to a list in v736 so an agent can answer more
+// than one community (e.g. a stricter one scoped by the monitoring
+// system's own source-IP allowlist, alongside a looser one for ad-hoc
+// polling) without giving every consumer the same string.
 type SNMPConfig struct {
 	Enabled bool `json:"enabled"`
-	// Community is the SNMPv2c read-only community string (e.g. "public").
-	// Required for the agent to actually run — see IsRunnable.
+	// Communities are the SNMPv2c read-only community strings this agent
+	// accepts — each becomes its own rocommunity line in snmpd.conf. At
+	// least one enabled entry with a non-empty string is required for the
+	// agent to actually run — see IsRunnable. A disabled entry is kept in
+	// the list but not written to snmpd.conf, the same zero-value-is-
+	// enabled convention as FirewallRule.Disabled/FirewallExempt.Disabled
+	// elsewhere in this package (and service.SyslogTarget.Disabled).
+	Communities []SNMPCommunity `json:"communities,omitempty"`
+	// Community is deprecated: the pre-v736 single-community field. Load
+	// migrates any non-empty value into Communities (see Validate) and
+	// clears this, so it is never written back out by a save that went
+	// through this package — retained only so a config file from before
+	// v736 still parses and its community string isn't silently dropped.
 	Community string `json:"community,omitempty"`
 	// ListenAddr is snmpd's listen spec, e.g. "udp:161" or "0.0.0.0:161".
 	// Empty means snmpd's own default (udp:161 on every address).
@@ -425,12 +440,28 @@ type SNMPConfig struct {
 	Contact  string `json:"contact,omitempty"`
 }
 
-// IsRunnable reports whether this config is enough to actually start snmpd:
-// enabled, with a community string (an agent with no community string can't
-// answer anything, so there's no point starting it — matches parapet's own
-// Snmp::is_runnable).
+// SNMPCommunity is one SNMPv2c read-only community string this node's
+// agent accepts.
+type SNMPCommunity struct {
+	Community string `json:"community"`
+	Disabled  bool   `json:"disabled,omitempty"`
+}
+
+// IsRunnable reports whether this config is enough to actually start
+// snmpd: enabled, with at least one enabled, non-empty community string
+// (an agent with no active community can't answer anything, so there's no
+// point starting it — matches parapet's own Snmp::is_runnable, extended
+// from "the one community is non-empty" to "at least one is").
 func (s SNMPConfig) IsRunnable() bool {
-	return s.Enabled && s.Community != ""
+	if !s.Enabled {
+		return false
+	}
+	for _, c := range s.Communities {
+		if !c.Disabled && c.Community != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // DiscoveryIface is one interface row in the LLDP/CDP configuration table.
@@ -2241,6 +2272,14 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("log_max_size: %v", err)
 		}
 	}
+	// SNMP grew from a single community string to a list in v736. Migrate
+	// any legacy value into the new field (only if the new field is still
+	// unset, so a config already using Communities is never second-guessed)
+	// and clear the old one so it's never written back out.
+	if len(c.SNMP.Communities) == 0 && c.SNMP.Community != "" {
+		c.SNMP.Communities = []SNMPCommunity{{Community: c.SNMP.Community}}
+	}
+	c.SNMP.Community = ""
 	// NAT state timeout is a single global setting. Migrate any legacy per-network
 	// value (largest wins) into the global field, then clear the old fields so
 	// they are no longer written.

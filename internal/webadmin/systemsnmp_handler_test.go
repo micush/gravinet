@@ -62,7 +62,7 @@ func TestSystemSNMPGet(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"enabled", "community", "listen_addr", "location", "contact", "running", "supported", "hint"} {
+	for _, k := range []string{"enabled", "communities", "listen_addr", "location", "contact", "running", "supported", "hint"} {
 		if _, ok := out[k]; !ok {
 			t.Errorf("reply is missing %q; the page reads it directly", k)
 		}
@@ -70,10 +70,14 @@ func TestSystemSNMPGet(t *testing.T) {
 	if enabled, _ := out["enabled"].(bool); enabled {
 		t.Error("a fresh config should report enabled:false")
 	}
+	communities, _ := out["communities"].([]any)
+	if len(communities) != 0 {
+		t.Errorf("a fresh config should report an empty communities list, got %v", communities)
+	}
 }
 
-// TestSystemSNMPRejectsEnabledWithoutCommunity is the one POST case this
-// suite covers, deliberately: it's the only request shape guaranteed to be
+// TestSystemSNMPRejectsEnabledWithoutCommunity is one of the POST cases
+// this suite covers, deliberately: it's a request shape guaranteed to be
 // refused by validation *before* the handler ever reaches
 // service.ApplySNMP, which — for any request that gets past validation —
 // goes on to actually enable/disable or start/stop the real snmpd service
@@ -85,7 +89,7 @@ func TestSystemSNMPGet(t *testing.T) {
 // for useradd/groupadd, applied here to systemctl instead.
 func TestSystemSNMPRejectsEnabledWithoutCommunity(t *testing.T) {
 	ts, c := snmpTestServer(t)
-	body, _ := json.Marshal(map[string]any{"enabled": true, "community": ""})
+	body, _ := json.Marshal(map[string]any{"enabled": true, "communities": []map[string]any{}})
 	req, _ := http.NewRequest("POST", ts.URL+"/api/system/snmp", strings.NewReader(string(body)))
 	req.AddCookie(c)
 	resp, err := http.DefaultClient.Do(req)
@@ -94,13 +98,55 @@ func TestSystemSNMPRejectsEnabledWithoutCommunity(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == 200 {
-		t.Fatal("enabled:true with an empty community must be rejected")
+		t.Fatal("enabled:true with no communities must be rejected")
 	}
 	var out map[string]any
 	json.NewDecoder(resp.Body).Decode(&out)
 	msg, _ := out["error"].(string)
 	if !strings.Contains(msg, "community") {
 		t.Errorf("error = %q, want it to mention the missing community string", msg)
+	}
+}
+
+// TestSystemSNMPRejectsEnabledWithOnlyDisabledCommunity checks that a
+// community list containing only disabled entries doesn't satisfy the
+// "at least one enabled community" requirement — same reasoning as
+// TestSNMPRunnableRequiresCommunity in the service package, exercised
+// through the handler's own validation this time.
+func TestSystemSNMPRejectsEnabledWithOnlyDisabledCommunity(t *testing.T) {
+	ts, c := snmpTestServer(t)
+	body, _ := json.Marshal(map[string]any{"enabled": true, "communities": []map[string]any{
+		{"community": "public", "disabled": true},
+	}})
+	req, _ := http.NewRequest("POST", ts.URL+"/api/system/snmp", strings.NewReader(string(body)))
+	req.AddCookie(c)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == 200 {
+		t.Fatal("enabled:true with only a disabled community must be rejected")
+	}
+}
+
+// TestSystemSNMPRejectsEmptyCommunityString checks a blank community
+// string in the list is refused before anything real is touched, the same
+// per-entry validation service.SetHostSyslog applies to its own targets.
+func TestSystemSNMPRejectsEmptyCommunityString(t *testing.T) {
+	ts, c := snmpTestServer(t)
+	body, _ := json.Marshal(map[string]any{"enabled": false, "communities": []map[string]any{
+		{"community": "  "},
+	}})
+	req, _ := http.NewRequest("POST", ts.URL+"/api/system/snmp", strings.NewReader(string(body)))
+	req.AddCookie(c)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == 200 {
+		t.Fatal("a blank community string must be rejected even while disabled overall")
 	}
 }
 
@@ -137,5 +183,21 @@ func TestSystemSNMPNavPlacement(t *testing.T) {
 	}
 	if !strings.Contains(indexHTML, "function secSNMP(") {
 		t.Error("secSNMP is not defined")
+	}
+}
+
+// TestSystemSNMPTableShape checks the page renders an actual manageable
+// communities table (state/community columns, add/remove wiring) rather
+// than the old single-community field, so this doesn't regress back.
+func TestSystemSNMPTableShape(t *testing.T) {
+	fn := indexHTML[strings.Index(indexHTML, "function secSNMP("):]
+	fn = fn[:strings.Index(fn, "\nfunction secL2Disco(")]
+	for _, want := range []string{"<th>state</th>", "<th>community</th>", "_rowAdd", "_rowRemove", "sn-community"} {
+		if !strings.Contains(fn, want) {
+			t.Errorf("secSNMP is missing %q — expected a manageable communities table, not the old single-community field", want)
+		}
+	}
+	if strings.Contains(fn, "id=\"snmp-community\"") {
+		t.Error("secSNMP still has the old single #snmp-community input")
 	}
 }

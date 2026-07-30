@@ -178,8 +178,17 @@ func renderSNMPConf(cfg config.SNMPConfig) string {
 	// rocommunity grants read-only access from any source; gravinet doesn't
 	// manage a host firewall rule to scope who can reach it — restrict
 	// reachability with the host's own firewall if that matters in your
-	// environment.
-	b.WriteString("rocommunity " + cleanSNMPCommunity(cfg.Community) + "\n")
+	// environment. One line per enabled community; a disabled entry is
+	// skipped entirely (its whole point is not being live), not commented
+	// out — unlike the syslog-forwarding drop-in, nothing here needs to
+	// recover a disabled entry's state by re-reading this file, since
+	// config.SNMPConfig itself (not snmpd.conf) is the source of truth.
+	for _, cm := range cfg.Communities {
+		if cm.Disabled || cm.Community == "" {
+			continue
+		}
+		b.WriteString("rocommunity " + cleanSNMPCommunity(cm.Community) + "\n")
+	}
 	if cfg.Location != "" {
 		b.WriteString("sysLocation " + snmpConfValue(cfg.Location) + "\n")
 	}

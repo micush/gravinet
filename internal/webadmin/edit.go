@@ -1694,10 +1694,12 @@ func systemUsersJSON(authMode string) map[string]any {
 }
 
 // handleSystemSNMP reads or replaces this node's SNMP agent configuration —
-// the backend for System > SNMP. Unlike Time (several independent ops) or
-// Users (a list of entries with per-row CRUD), SNMP config is one cohesive
-// settings blob, so this takes the same shape parapet's own PUT /api/snmp
-// does: GET returns it, POST replaces it wholesale.
+// the backend for System > SNMP. Unlike Time (several independent ops),
+// SNMP config is still one cohesive settings blob saved wholesale on any
+// change — including a communities-table edit, which (like the rest of
+// this page) posts the *whole* SNMPConfig with just its Communities list
+// updated, not a separate per-row endpoint the way the Firewall Allow List
+// or System > Syslog get one. GET returns it, POST replaces it wholesale.
 //
 // Saving always writes config.SNMP first — that's gravinet's own source of
 // truth regardless of what the OS service does with it — then calls
@@ -1724,21 +1726,34 @@ func (s *Server) handleSystemSNMP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Enabled    bool   `json:"enabled"`
-		Community  string `json:"community"`
-		ListenAddr string `json:"listen_addr"`
-		Location   string `json:"location"`
-		Contact    string `json:"contact"`
+		Enabled     bool            `json:"enabled"`
+		Communities []communityView `json:"communities"`
+		ListenAddr  string          `json:"listen_addr"`
+		Location    string          `json:"location"`
+		Contact     string          `json:"contact"`
 	}
 	if !decode(w, r, &req) {
 		return
 	}
-	if req.Enabled && req.Community == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "SNMP requires a community string"})
+	communities := make([]config.SNMPCommunity, 0, len(req.Communities))
+	activeCount := 0
+	for i, v := range req.Communities {
+		community := strings.TrimSpace(v.Community)
+		if community == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("community %d: community string is required", i+1)})
+			return
+		}
+		if !v.Disabled {
+			activeCount++
+		}
+		communities = append(communities, config.SNMPCommunity{Community: community, Disabled: v.Disabled})
+	}
+	if req.Enabled && activeCount == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "SNMP requires at least one enabled community string"})
 		return
 	}
 	snmp := config.SNMPConfig{
-		Enabled: req.Enabled, Community: req.Community, ListenAddr: req.ListenAddr,
+		Enabled: req.Enabled, Communities: communities, ListenAddr: req.ListenAddr,
 		Location: req.Location, Contact: req.Contact,
 	}
 
@@ -1746,7 +1761,7 @@ func (s *Server) handleSystemSNMP(w http.ResponseWriter, r *http.Request) {
 	if snmp.IsRunnable() {
 		action = "enabling"
 	}
-	s.log.Infof("webadmin: %s the SNMP agent (requested from admin UI)", action)
+	s.log.Infof("webadmin: %s the SNMP agent (%d communit(y/ies)) (requested from admin UI)", action, len(communities))
 	if err := s.mutateConfig(r, func(cfg *config.Config) error {
 		cfg.SNMP = snmp
 		return nil
@@ -1769,18 +1784,30 @@ func (s *Server) handleSystemSNMP(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// communityView is one SNMP community as shown in the UI's table — the
+// state/community columns, same "flatten exactly what the page draws"
+// shape exemptView/syslogTargetView use for their own tables.
+type communityView struct {
+	Community string `json:"community"`
+	Disabled  bool   `json:"disabled,omitempty"`
+}
+
 // systemSNMPJSON flattens an SNMPConfig plus live service state for the
-// wire. community is returned in cleartext, the same way BGP neighbor
+// wire. Communities are returned in cleartext, the same way BGP neighbor
 // passwords already are in this API — an authenticated session can already
-// read this node's full config, so hiding one field of it here would be
-// false security, not real security. The page shows it in plain text too
-// (SNMPv2c has no real secrecy to protect here either — the community
-// string travels unencrypted on the wire to any agent that will accept
-// it), rather than masking a field that was never actually confidential.
+// read this node's full config, so hiding them here would be false
+// security, not real security. The page shows them in plain text too
+// (SNMPv2c has no real secrecy to protect here either — a community string
+// travels unencrypted on the wire to any agent that will accept it),
+// rather than masking a field that was never actually confidential.
 func systemSNMPJSON(cfg config.SNMPConfig) map[string]any {
 	supported, hint := service.SNMPSupported()
+	communities := make([]communityView, 0, len(cfg.Communities))
+	for _, c := range cfg.Communities {
+		communities = append(communities, communityView{Community: c.Community, Disabled: c.Disabled})
+	}
 	return map[string]any{
-		"enabled": cfg.Enabled, "community": cfg.Community,
+		"enabled": cfg.Enabled, "communities": communities,
 		"listen_addr": cfg.ListenAddr,
 		"location":    cfg.Location, "contact": cfg.Contact,
 		"running":   supported && service.SNMPServiceRunning(),

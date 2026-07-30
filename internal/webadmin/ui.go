@@ -6576,24 +6576,30 @@ function secTime(c){
 }
 
 // secSNMP renders System > SNMP: a read-only SNMPv2c monitoring agent
-// (net-snmp's snmpd) on this host. Mirrors parapet's SNMP page almost
-// exactly — community string, listen address, sysLocation/sysContact.
+// (net-snmp's snmpd) on this host. Mirrors parapet's SNMP page for listen
+// address / sysLocation / sysContact; the community string grew into a
+// manageable table (state, community) in v736 so the agent can answer
+// more than one community, the same add/edit/toggle/remove shape every
+// other gravinet table uses (mirrors secAlwaysAllowed's Allow List table).
 //
-// All fields save together on any one field's blur, the same "several
-// fields, one write" pattern secResolver's DNS card uses \u2014 there's one
-// config.SNMPConfig on the wire per save, not independent per-field ops.
-// The enabled/disabled pill sits next to the page's own <h2> title (the
-// same placement NAT/QoS/Shaping use for their per-network pill, next to
-// each card's own name) and is a second, independent way to flip
-// cfg.SNMP.Enabled: double-clicking it posts whatever is currently in the
-// fields with just that one flag inverted, same "flip on the wire, don't
-// wait for a field edit" idiom netCardHead's own pill uses. Filling in or
-// clearing the community field still flips it too, on its own blur \u2014 the
-// two paths write the same flag, neither is more authoritative than the
-// other, and each save's response is what the pill actually reflects
-// afterward either way.
+// Everything on this page still saves through the one config.SNMPConfig
+// blob per request — including the communities table: a row action posts
+// the *whole* SNMPConfig with just Communities updated, not a separate
+// per-row endpoint (see handleSystemSNMP's doc comment). The
+// listen/location/contact fields keep the existing "several fields, one
+// write on blur" pattern secResolver's DNS card uses and don't trigger a
+// full page rebuild on save, so typing in one doesn't lose focus; a table
+// action does rebuild the page (renderSection()), the same as every other
+// table here, since a row click isn't a "keep typing" situation. The
+// enabled/disabled pill sits next to the page's own <h2> title (the same
+// placement NAT/QoS/Shaping use for their per-network pill) and is now
+// the *only* way to flip cfg.SNMP.Enabled — unlike before v736, adding or
+// editing a community no longer implicitly turns the agent on, since
+// "which communities are configured" and "is the agent on at all" are
+// separate questions once there's more than one community to reason
+// about.
 function secSNMP(c){
-  secHint(c, 'A read-only SNMPv2c monitoring agent (net-snmp\u2019s snmpd) on this host. Acts on the node you\u2019re currently managing.');
+  secHint(c, 'A read-only SNMPv2c monitoring agent (net-snmp\u2019s snmpd) on this host. Acts on the node you\u2019re currently managing. Double-click the state tag to toggle a community, or any other cell to edit it.');
 
   const body = $('<div></div>');
   body.innerHTML = '<div class="hint">loading\u2026</div>';
@@ -6613,12 +6619,96 @@ function secSNMP(c){
       return;
     }
 
+    // cur is this page's single in-memory copy of config.SNMPConfig —
+    // every save (a field blur, the pill, or a table action) reads and
+    // writes it, so no two paths can save stale copies of parts they
+    // didn't touch.
+    const cur = {
+      enabled: !!snmp.enabled,
+      communities: (snmp.communities||[]).map(x => ({ community:x.community||'', disabled:!!x.disabled })),
+      listen: snmp.listen_addr||'', location: snmp.location||'', contact: snmp.contact||'',
+    };
+
+    // postSNMP is the one place that actually writes cfg.SNMP.
+    const postSNMP = (next) => api('/api/system/snmp', { method:'POST', body: JSON.stringify({
+      enabled: next.enabled,
+      communities: next.communities.map(x => ({ community:x.community, disabled: !!x.disabled })),
+      listen_addr: next.listen, location: next.location, contact: next.contact,
+    }) });
+
+    // saveAndRerender is what every communities-table action funnels
+    // through — same "whole list" reasoning syslogSave/exemptSave already
+    // give, just one request wider here (enabled/listen/location/contact
+    // ride along unchanged). Rebuilds the page on completion, the same as
+    // every other table here.
+    const saveAndRerender = async (next) => {
+      const res = await postSNMP(next);
+      if (!res.ok){ alert((res.body && res.body.error) || 'could not save SNMP settings'); }
+      else if (res.body && res.body.note) alert(res.body.note);
+      renderSection();
+    };
+
+    // Communities table.
+    const list = cur.communities;
+    let ch = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>community</th></tr>';
+    if (!list.length){
+      ch += '<tr><td colspan="3" class="empty">no communities configured</td></tr>';
+    } else {
+      list.forEach((cm, i) => {
+        const enabled = !cm.disabled;
+        ch += '<tr data-idx="'+i+'"'+(enabled?'':' class="fw-disabled"')+'>'
+          + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
+          + '<td class="sn-state"><span class="tag-toggle '+(enabled?'on':'off')+'" title="double-click to '+(enabled?'disable':'enable')+'">'+(enabled?'enabled':'disabled')+'</span></td>'
+          + '<td class="sn-community" title="double-click to edit">'+esc(cm.community||'')+'</td>'
+          + '</tr>';
+      });
+    }
+    ch += '</table>';
+    const commCard = $('<div class="card"></div>');
+    const ct = $('<div></div>'); ct.innerHTML = ch;
+    const commTable = ct.querySelector('table');
+    commCard.appendChild(ct);
+    body.appendChild(commCard);
+    selAllWire(ct);
+    list.forEach((cm, i) => {
+      const tr = commTable.querySelector('tr[data-idx="'+i+'"]');
+      if (!tr) return;
+      tr.querySelector('.sn-state').ondblclick = () => {
+        const next = Object.assign({}, cur, { communities: list.map((t,j) => j===i ? Object.assign({},t,{disabled:!t.disabled}) : t) });
+        saveAndRerender(next);
+      };
+      const cellTd = tr.querySelector('.sn-community');
+      cellTd.ondblclick = () => inlineCellEdit(cellTd, cm.community||'', 'community string', v => {
+        if (!v){ alert('community is required'); renderSection(); return; }
+        const next = Object.assign({}, cur, { communities: list.map((t,j) => j===i ? Object.assign({},t,{community:v}) : t) });
+        saveAndRerender(next);
+      });
+    });
+    commTable._rowAdd = () => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = '<td class="selcol"></td>'
+        + '<td class="sn-state"><span class="on">enabled</span></td>'
+        + '<td><input class="sna-community" placeholder="public" style="width:160px"> <button class="sm sna-save">save</button> <button class="ghost sm sna-cancel">cancel</button></td>';
+      if (!insertNewRow(commTable, tr)) return;
+      tr.querySelector('.sna-cancel').onclick = () => renderSection();
+      tr.querySelector('.sna-save').onclick = () => {
+        const v = tr.querySelector('.sna-community').value.trim();
+        if (!v){ alert('community is required'); return; }
+        saveAndRerender(Object.assign({}, cur, { communities: list.concat([{community:v, disabled:false}]) }));
+      };
+    };
+    commTable._rowRemove = () => {
+      const sel = selCheckedRows(commTable);
+      if (!sel.length){ alert('tick one or more rows to remove'); return; }
+      const drop = new Set(sel.map(tr => Number(tr.dataset.idx)));
+      saveAndRerender(Object.assign({}, cur, { communities: list.filter((_,i) => !drop.has(i)) }));
+    };
+    enhanceTable(commTable); // async render missed renderSection's own blanket pass
+
+    // Listen address / sysLocation / sysContact — unchanged from before
+    // v736: several fields, one write on blur, no full rebuild on save.
     const card = $('<div class="card"></div>');
     const row = $('<div style="display:flex;flex-direction:column;gap:10px"></div>');
-
-    row.appendChild($('<div><div class="hint" style="margin:0 0 4px">Community string</div>'
-      + '<input id="snmp-community" type="text" autocomplete="off" spellcheck="false" value="'+esc(snmp.community||'')+'" placeholder="public" style="width:100%">'
-      + '</div>'));
     row.appendChild($('<div><div class="hint" style="margin:0 0 4px">Listen address</div>'
       + '<input id="snmp-listen" value="'+esc(snmp.listen_addr||'')+'" placeholder="udp:161 or 0.0.0.0:161 \u2014 blank = snmpd\u2019s own default" style="width:100%"></div>'));
     row.appendChild($('<div style="border-top:1px solid var(--line);padding-top:10px;margin-top:2px"><div class="hint" style="margin:0 0 4px">sysLocation</div>'
@@ -6626,21 +6716,16 @@ function secSNMP(c){
     row.appendChild($('<div><div class="hint" style="margin:0 0 4px">sysContact</div>'
       + '<input id="snmp-contact" value="'+esc(snmp.contact||'')+'" placeholder="noc@example.com" style="width:100%"></div>'));
     card.appendChild(row);
-    card.appendChild($('<div class="hint" style="margin:8px 0 0">Filling in the community string turns the agent <b>on</b>; clearing it turns it <b>off</b> \u2014 or double-click the pill next to the page title to flip it directly. Saves automatically when you click or tab away.</div>'));
+    card.appendChild($('<div class="hint" style="margin:8px 0 0">Double-click the pill next to the page title to turn the agent on or off. Saves automatically when you click or tab away.</div>'));
     body.appendChild(card);
 
-    const communityIn = row.querySelector('#snmp-community');
     const listenIn = row.querySelector('#snmp-listen');
     const locationIn = row.querySelector('#snmp-location');
     const contactIn = row.querySelector('#snmp-contact');
 
-    // Enabled/disabled pill, placed next to the page's own <h2> title (a
-    // sibling of this card, built by renderSection before secSNMP ever
-    // runs) rather than inside this card's own header \u2014 the same "pill
-    // next to the name" spot NAT/QoS/Shaping's netCardHead already uses,
-    // just next to the page title instead of a per-network name since SNMP
-    // has only the one, system-wide config. tag-toggle gets its double-click
-    // handler below, once the field inputs it needs to read exist.
+    // Enabled/disabled pill — the only way to flip cfg.SNMP.Enabled now
+    // (see this function's doc comment for why the old
+    // fill-the-community-field-to-turn-it-on auto-derive is gone).
     const h2 = c.querySelector('h2.sec');
     const pill = $('<span class="pill tag-toggle"></span>');
     const setPill = (en) => {
@@ -6648,60 +6733,36 @@ function secSNMP(c){
       pill.textContent = en ? 'enabled' : 'disabled';
       pill.title = 'double-click to ' + (en ? 'disable' : 'enable');
     };
-    setPill(!!snmp.enabled);
+    setPill(cur.enabled);
     h2.appendChild(document.createTextNode(' '));
     h2.appendChild(pill);
 
-    const readFields = () => ({
-      community: communityIn.value.trim(), listen: listenIn.value.trim(),
-      location: locationIn.value.trim(), contact: contactIn.value.trim(),
-    });
-    // postSNMP is the one place that actually writes cfg.SNMP \u2014 both
-    // saveSNMP (fields changed, enabled derived from community) and the
-    // pill's own double-click (enabled flipped directly, fields unchanged)
-    // funnel through this rather than each building the request body its
-    // own way.
-    const postSNMP = (enabled, fields) => api('/api/system/snmp', { method:'POST', body: JSON.stringify({
-      enabled, community: fields.community, listen_addr: fields.listen,
-      location: fields.location, contact: fields.contact,
-    }) });
-
-    let last = {
-      community: snmp.community||'', listen: snmp.listen_addr||'',
-      location: snmp.location||'', contact: snmp.contact||'',
-    };
-    const saveSNMP = async () => {
-      const cur = readFields();
-      if (cur.community===last.community && cur.listen===last.listen && cur.location===last.location && cur.contact===last.contact) return;
-      const res = await postSNMP(!!cur.community, cur);
+    let lastFields = { listen: cur.listen, location: cur.location, contact: cur.contact };
+    const saveFields = async () => {
+      const fields = { listen: listenIn.value.trim(), location: locationIn.value.trim(), contact: contactIn.value.trim() };
+      if (fields.listen===lastFields.listen && fields.location===lastFields.location && fields.contact===lastFields.contact) return;
+      const next = Object.assign({}, cur, fields);
+      const res = await postSNMP(next);
       if (!res.ok){ alert((res.body && res.body.error) || 'could not save SNMP settings'); return; }
-      last = cur; // the baseline moves even if the fields have since changed further underneath this save
-      if (res.body) setPill(!!res.body.enabled);
+      cur.listen = fields.listen; cur.location = fields.location; cur.contact = fields.contact;
+      lastFields = fields;
       if (res.body && res.body.note) alert(res.body.note);
     };
-    [communityIn, listenIn, locationIn, contactIn].forEach(inp => {
-      inp.onblur = saveSNMP;
+    [listenIn, locationIn, contactIn].forEach(inp => {
+      inp.onblur = saveFields;
       inp.onkeydown = (e) => { if (e.key === 'Enter'){ e.preventDefault(); inp.blur(); } };
     });
 
-    // Double-click the pill to flip enabled independent of the community
-    // field's own auto-derive-on-blur above \u2014 flips immediately and posts
-    // in the background, the same "flip now, don't wait on the round trip"
-    // idiom NAT/QoS/Bandwidth's own netCardHead pill already uses (see
-    // toggleTagState's doc comment for why: a failure logs to the console
-    // rather than blocking on an alert or reverting the flip). Turning on
-    // with no community reproduces the same "SNMP requires a community
-    // string" rejection clearing-then-refilling the field would hit; that
-    // failure surfaces the same way any other toggle failure here does \u2014
-    // in the console, not a blocking alert \u2014 and the next visit to this
-    // page re-reads the true state from the server either way.
+    // Double-click the pill to flip enabled — flips immediately and posts
+    // in the background, the same "flip now, don't wait on the round
+    // trip" idiom NAT/QoS/Bandwidth's own netCardHead pill already uses.
     pill.ondblclick = () => {
       const on = !pill.classList.contains('on');
       setPill(on);
-      const cur = readFields();
-      postSNMP(on, cur).then(res => {
+      const next = Object.assign({}, cur, { enabled: on });
+      postSNMP(next).then(res => {
         if (!res.ok) { console.warn('/api/system/snmp toggle failed:', (res.body&&res.body.error)||'failed'); return; }
-        last = cur;
+        cur.enabled = on;
         if (res.body) setPill(!!res.body.enabled);
         if (res.body && res.body.note) alert(res.body.note);
       });

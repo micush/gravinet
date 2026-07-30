@@ -2,6 +2,64 @@
 
 ---
 
+## v736 — 2026-07-30
+
+**System > SNMP now supports multiple communities via a manageable table
+(state, community), replacing the single community-string field.**
+
+Previously this page could configure exactly one SNMPv2c read-only
+community string. Net-snmp's `rocommunity` directive can be repeated —
+operators who want a stricter community for one monitoring system
+alongside a looser one for ad-hoc polling had no way to express that from
+here.
+
+**Config (`internal/config/config.go`):** `SNMPConfig.Community` (a single
+string) is replaced by `Communities []SNMPCommunity` (`Community`,
+`Disabled`). The old field is kept, deprecated, purely for migration: a
+config file from before v736 still parses, and `Validate` hoists any
+non-empty legacy value into a one-entry `Communities` list and clears the
+old field, the same "migrate once, then never write the legacy field
+again" shape `NAT.StateTimeout` → `Config.NATStateTimeout` already uses.
+`IsRunnable` now requires at least one *enabled* community rather than
+one non-empty string.
+
+**Rendering (`internal/service/snmp.go`):** `renderSNMPConf` writes one
+`rocommunity` line per enabled community. A disabled entry is skipped
+outright, not written out inert — unlike System > Syslog's host-file-is-
+truth design, `config.SNMPConfig` itself is SNMP's source of truth, so
+there's nothing to recover by re-parsing `snmpd.conf` and no need to
+preserve a disabled entry's presence in the rendered file.
+
+**API (`internal/webadmin/edit.go`):** `handleSystemSNMP` takes a
+`communities` list instead of a single `community` string, validates each
+entry (non-empty after trimming) and requires at least one enabled entry
+when `enabled:true`.
+
+**UI (`internal/webadmin/ui.go`):** `secSNMP` gained a communities table
+(state/community columns, add/edit/toggle/remove — same building blocks
+as System > Syslog's and the Firewall Allow List's tables) above the
+existing listen-address/sysLocation/sysContact fields, which keep their
+original save-on-blur behavior unchanged. The enabled/disabled pill is
+now the *only* way to toggle the agent on or off — adding, editing, or
+removing a community no longer implicitly flips it, since "which
+communities are configured" and "is the agent on at all" stopped being
+the same question once there's more than one community to reason about.
+
+Tests rewritten/added: `internal/service/snmp_test.go` (multi-community
+rendering, disabled-skipped-not-commented, runnable-requires-*enabled*-
+community), a new `internal/config/snmp_community_migration_test.go`
+(legacy-field migration, skipped-when-already-populated, runs-even-while-
+disabled), and `internal/webadmin/systemsnmp_handler_test.go` (new list
+shape, reject-empty-list, reject-all-disabled, reject-blank-string,
+table-shape assertion).
+
+Verified with go1.22.2: `go build ./...`, `go vet ./...` clean (CGO
+disabled). Full `internal/config`, `internal/service`, and
+`internal/webadmin` suites pass. Embedded `<script>` block extracted and
+`node --check`'d clean.
+
+---
+
 ## v735 — 2026-07-30
 
 **System > Syslog is now a manageable table (state, remote, port,

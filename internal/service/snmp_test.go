@@ -55,7 +55,10 @@ func TestSNMPListenValidation(t *testing.T) {
 	}
 }
 
-// TestSNMPRunnableRequiresCommunity ports parapet's runnable_requires_community.
+// TestSNMPRunnableRequiresCommunity ports parapet's runnable_requires_community,
+// extended for a list: at least one *enabled* community is required, a
+// disabled-only list doesn't count, and a second disabled entry alongside
+// an enabled one doesn't stop it from being runnable.
 func TestSNMPRunnableRequiresCommunity(t *testing.T) {
 	var s config.SNMPConfig
 	if s.IsRunnable() {
@@ -63,11 +66,15 @@ func TestSNMPRunnableRequiresCommunity(t *testing.T) {
 	}
 	s.Enabled = true
 	if s.IsRunnable() {
-		t.Error("enabled with no community should not be runnable")
+		t.Error("enabled with no communities should not be runnable")
 	}
-	s.Community = "public"
+	s.Communities = []config.SNMPCommunity{{Community: "public", Disabled: true}}
+	if s.IsRunnable() {
+		t.Error("enabled with only a disabled community should not be runnable")
+	}
+	s.Communities = append(s.Communities, config.SNMPCommunity{Community: "private"})
 	if !s.IsRunnable() {
-		t.Error("enabled with a community string should be runnable")
+		t.Error("enabled with one enabled community (alongside a disabled one) should be runnable")
 	}
 }
 
@@ -75,10 +82,10 @@ func TestSNMPRunnableRequiresCommunity(t *testing.T) {
 // conf_includes_location_and_contact.
 func TestSNMPConfIncludesLocationAndContact(t *testing.T) {
 	cfg := config.SNMPConfig{
-		Enabled:   true,
-		Community: "public",
-		Location:  "Server Room A",
-		Contact:   "noc@example.com",
+		Enabled:     true,
+		Communities: []config.SNMPCommunity{{Community: "public"}},
+		Location:    "Server Room A",
+		Contact:     "noc@example.com",
 	}
 	conf := renderSNMPConf(cfg)
 	if !strings.Contains(conf, "rocommunity public\n") {
@@ -95,9 +102,45 @@ func TestSNMPConfIncludesLocationAndContact(t *testing.T) {
 // TestSNMPConfOmitsEmptyLocationAndContact checks the directives are left
 // out entirely when unset, rather than rendered as sysLocation "".
 func TestSNMPConfOmitsEmptyLocationAndContact(t *testing.T) {
-	conf := renderSNMPConf(config.SNMPConfig{Enabled: true, Community: "public"})
+	conf := renderSNMPConf(config.SNMPConfig{Enabled: true, Communities: []config.SNMPCommunity{{Community: "public"}}})
 	if strings.Contains(conf, "sysLocation") || strings.Contains(conf, "sysContact") {
 		t.Errorf("conf should omit sysLocation/sysContact when empty:\n%s", conf)
+	}
+}
+
+// TestSNMPConfMultipleCommunities checks each enabled community gets its
+// own rocommunity line, in order, and a disabled one is skipped entirely
+// rather than written out inert — unlike syslog's host-file-is-truth
+// design, config.SNMPConfig itself is the source of truth here, so there's
+// nothing to recover by re-parsing snmpd.conf; a disabled community simply
+// isn't rendered.
+func TestSNMPConfMultipleCommunities(t *testing.T) {
+	cfg := config.SNMPConfig{
+		Enabled: true,
+		Communities: []config.SNMPCommunity{
+			{Community: "public"},
+			{Community: "internal-ro", Disabled: true},
+			{Community: "monitoring"},
+		},
+	}
+	conf := renderSNMPConf(cfg)
+	var roLines []string
+	for _, ln := range strings.Split(conf, "\n") {
+		if strings.HasPrefix(ln, "rocommunity ") {
+			roLines = append(roLines, ln)
+		}
+	}
+	want := []string{"rocommunity public", "rocommunity monitoring"}
+	if len(roLines) != len(want) {
+		t.Fatalf("got %d rocommunity lines %v, want %d %v", len(roLines), roLines, len(want), want)
+	}
+	for i, w := range want {
+		if roLines[i] != w {
+			t.Errorf("rocommunity line %d = %q, want %q", i, roLines[i], w)
+		}
+	}
+	if strings.Contains(conf, "internal-ro") {
+		t.Errorf("disabled community leaked into the rendered conf:\n%s", conf)
 	}
 }
 
@@ -106,9 +149,9 @@ func TestSNMPConfOmitsEmptyLocationAndContact(t *testing.T) {
 // actually inject one — the whole point of cleanSNMPCommunity/snmpConfValue.
 func TestSNMPConfInjectionResistance(t *testing.T) {
 	cfg := config.SNMPConfig{
-		Enabled:   true,
-		Community: "public\nrwcommunity evil",
-		Location:  "a\"\nrwcommunity evil2\nsysLocation \"b",
+		Enabled:     true,
+		Communities: []config.SNMPCommunity{{Community: "public\nrwcommunity evil"}},
+		Location:    "a\"\nrwcommunity evil2\nsysLocation \"b",
 	}
 	conf := renderSNMPConf(cfg)
 	// The real question isn't whether stray characters happen to spell out
