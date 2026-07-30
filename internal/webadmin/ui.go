@@ -3653,7 +3653,43 @@ function secNetworks(c) {
         ? 'Switch "'+name+'" to partial mesh?\n\nOnly seed\u2013seed and seed\u2013peer links will be allowed; existing peer\u2013peer sessions on this node will be refused once it reconnects. This node restarts immediately to apply it \u2014 make the same change on every other node in this network.'
         : 'Switch "'+name+'" back to full mesh?\n\nEvery node will resume connecting to every other node it learns about. This node restarts immediately to apply it \u2014 make the same change on every other node in this network.';
       if (!confirm(msg)) return;
-      await edit('/api/network', { op:'mesh_mode', net, mode:want }, true); // restarts automatically once saved; refreshes on success, alerts on error
+
+      // The restart this triggers genuinely takes real seconds (the daemon
+      // tears down and rebuilds the network, quietRestart then polls /api/
+      // ping up to 20 times at 1s intervals waiting for the new process),
+      // and until now the toggle just sat there completely unchanged for
+      // that whole window — no different from the request having silently
+      // failed, from an operator's point of view. Nothing was actually
+      // blocked (await here never freezes the page, the rest of the UI
+      // stayed live the whole time), but it read as stuck. Reflect
+      // "in progress" the moment the operator confirms, the same way the
+      // peers table already shows a still-connecting peer as "connecting…"
+      // with no on/off coloring rather than leaving its row looking idle —
+      // see secPeers' stLabel/stCls handling of p.pending for the
+      // precedent. Restored on failure; left alone on success, since
+      // quietRestart's own poll-back calls refresh() once the new process
+      // is up, which rebuilds this whole table (this span included) from
+      // the post-restart state anyway.
+      const prevClass = s.className, prevText = s.textContent, prevTitle = s.title;
+      s.className = 'tag-toggle';
+      s.textContent = 'restarting…';
+      s.title = 'applying the new mesh mode — this node is restarting';
+      s.style.pointerEvents = 'none'; // ignore a rapid second click while this is in flight
+
+      const ok = await edit('/api/network', { op:'mesh_mode', net, mode:want }, true); // restarts automatically once saved; refreshes on success, alerts on error
+      if (!ok) {
+        // edit() already alerted why; nothing actually changed server-side,
+        // so put back exactly what was showing before. Restoring the
+        // properties in place (not replacing the element, e.g. via
+        // outerHTML) matters here: ondblclick is a JS property set below,
+        // not serialized markup, so swapping the element out from under
+        // it would silently leave the toggle unresponsive to further
+        // clicks until some unrelated refresh() happened to rebuild it.
+        s.className = prevClass;
+        s.textContent = prevText;
+        s.title = prevTitle;
+        s.style.pointerEvents = '';
+      }
     };
   });
   selAllWire(t);

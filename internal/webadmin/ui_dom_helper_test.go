@@ -580,6 +580,38 @@ func TestMeshToggleAutoRestart(t *testing.T) {
 	}
 }
 
+// TestMeshTogglePendingFeedback guards two things about the mesh toggle's
+// confirm-to-restart window, added after an operator reported it looking
+// frozen: (1) it gives immediate in-progress feedback the moment the
+// operator confirms, rather than leaving the toggle showing its old value
+// unchanged for however long the actual restart+reconnect takes (several
+// real seconds — quietRestart polls /api/ping up to 20 times at 1s
+// intervals); and (2) failure recovery restores the toggle's properties in
+// place rather than replacing the element outright (e.g. via outerHTML) —
+// an earlier draft of this used outerHTML, which silently drops
+// ondblclick (a JS property, not serialized markup) and leaves the toggle
+// permanently unresponsive to further clicks after any failed attempt.
+func TestMeshTogglePendingFeedback(t *testing.T) {
+	nwf := strings.Index(indexHTML, "function secNetworks(c) {")
+	if nwf < 0 {
+		t.Fatal("secNetworks is missing")
+	}
+	block := indexHTML[nwf:]
+	if end := strings.Index(block, "\nfunction secPeers"); end > 0 {
+		block = block[:end]
+	}
+	for _, want := range []string{
+		"pointerEvents = 'none'", // ignore a rapid second click while in flight
+	} {
+		if !strings.Contains(block, want) {
+			t.Errorf("secNetworks is missing %q — the mesh toggle no longer gives immediate in-progress feedback", want)
+		}
+	}
+	if strings.Contains(block, "s.outerHTML") {
+		t.Error("secNetworks assigns s.outerHTML somewhere in the mesh toggle's handler — this silently drops the ondblclick handler (a JS property, not markup) and leaves the toggle dead after any failed attempt; restore individual properties (className/textContent/title) in place instead")
+	}
+}
+
 // TestBgpNeighborFiltersPillWired guards the BGP neighbor editor's filters
 // UI: a clickable per-neighbor summary pill that opens a shared panel with
 // two CIDR chip editors (filter in/out), rather than raw comma-separated

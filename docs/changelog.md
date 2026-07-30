@@ -2,6 +2,22 @@
 
 ---
 
+## v746 — 2026-07-30
+
+**Fix: the Mesh > Networks mesh (full/partial) toggle now gives immediate feedback instead of sitting unchanged for the whole restart.**
+
+Nothing was actually blocking — `await` in a JS event handler never freezes the browser, the rest of the page stayed fully interactive the whole time. But the toggle itself gave zero visual indication anything was happening for however long the restart genuinely takes: the daemon tears down and rebuilds the network, and `quietRestart` polls `/api/ping` up to 20 times at 1-second intervals waiting for the new process to answer. From an operator's point of view that read as identical to the click having silently failed.
+
+The toggle now shows "restarting…" (no on/off coloring, plain text — matching the peers table's own existing convention for a still-connecting peer, `p.pending` → "connecting…") the instant the operator confirms, and disables further clicks on it (`pointer-events: none`) until the request resolves. `quietRestart`'s own poll-back already calls `refresh()` once the new process is up, which rebuilds this whole table (this toggle included) from the real post-restart state — nothing further needed on success. On failure, the toggle's properties are restored to exactly what they showed before.
+
+**Caught and fixed during implementation, not shipped:** the first draft restored the failure case via `s.outerHTML = ...`, which looked reasonable but is wrong — `ondblclick` is a JS property assigned separately, not serialized HTML markup, so replacing the element via `outerHTML` silently drops it. That would have left the toggle permanently unresponsive to further clicks after any single failed attempt, until some unrelated `refresh()` happened to rebuild the table. Fixed by restoring the three mutated properties (`className`/`textContent`/`title`) in place on the same element instead of replacing it.
+
+Added `TestMeshTogglePendingFeedback` (`internal/webadmin/ui_dom_helper_test.go`), which specifically guards against `s.outerHTML` reappearing in this handler — confirmed it fails against the buggy version and passes against the fix, not just written and assumed correct.
+
+Verified: `go build ./...` and `go vet ./...` clean, embedded `<script>` block `node --check`'d clean, `gofmt` clean. Full `internal/webadmin` suite passes, including the existing `TestMeshToggleAutoRestart` (confirms the exact `edit('/api/network', { op:'mesh_mode', net, mode:want }, true)` call survived this rewrite unchanged) and the new `TestMeshTogglePendingFeedback`.
+
+---
+
 ## v745 — 2026-07-30
 
 **Fix a real gap in config history: CLI-driven config changes (`network add`, `route add`, `quickstart`, ...) now leave a record in the daemon's own log. Previously only web-admin-originated changes did — `config.OnCommit` (the snapshot/diff/restore mechanism) has exactly one call site, in `webadmin.go`; every CLI edit went straight to disk with no trace anywhere.**
