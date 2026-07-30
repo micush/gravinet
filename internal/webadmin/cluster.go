@@ -136,6 +136,10 @@ type clusterPeer struct {
 	// which nodes are behind before pushing to them. Empty for a peer too
 	// old to advertise it; the UI shows that as unknown.
 	Version string `json:"version,omitempty"`
+	// IsSeed mirrors mesh.ManagedPeer.IsSeed — see its doc comment. Consulted
+	// by the System > Upgrade push logic (ui.go) to hold seeds back until
+	// last, and push them one at a time rather than batched with the rest.
+	IsSeed bool `json:"is_seed,omitempty"`
 }
 
 // handleCluster lists managed peers heard within the TTL, plus whether this node
@@ -158,6 +162,7 @@ func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 			Manageable: ip.IsValid() && m.WebPort != 0,
 			Manager:    m.Manager,
 			Version:    m.Version,
+			IsSeed:     m.IsSeed,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{

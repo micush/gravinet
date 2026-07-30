@@ -1027,6 +1027,12 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		Seeds    config.SeedList      `json:"seeds"`
 		Routes   []config.Route       `json:"routes"`
 		RouteRej []config.RejectRoute `json:"route_reject"`
+		// AllowRelay/SelfSeed mirror config.Network's own fields verbatim —
+		// see their doc comments. Neither is currently hot-reloadable (see
+		// NetworkSetAllowRelay/NetworkSetSelfSeed); a toggle in Settings >
+		// Networks needs a restart of this node before it's advertised.
+		AllowRelay bool `json:"allow_relay"`
+		SelfSeed   bool `json:"self_seed"`
 		// RedistributeBGPRoutes/RedistributeBGPMetric mirror config.Network's
 		// own fields verbatim — see its doc comment. Surfaced here (not
 		// folded into Routes above) because they're a single per-network
@@ -1059,7 +1065,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		out = append(out, cfgNet{
 			ID: id, Name: n.Name, Enabled: n.Enabled, Notes: n.Notes,
 			Subnet4: n.Subnet4, Subnet6: n.Subnet6, Address4: n.Address4, Address6: n.Address6, MTU: n.MTU, Seeds: n.Seeds,
-			Routes: n.Routes, RouteRej: n.RouteRej,
+			Routes: n.Routes, RouteRej: n.RouteRej, AllowRelay: n.AllowRelay, SelfSeed: n.SelfSeed,
 			RedistributeBGPRoutes: n.RedistributeBGPRoutes, RedistributeBGPMetric: n.RedistributeBGPMetric,
 			NAT: n.NAT, QoS: n.QoS, Throttle: n.Throttle, Firewall: n.Firewall, Hosts: n.HostsAdvertise, HostsRej: n.HostsReject,
 			DNS: n.DNSAdvertise, DNSRej: n.DNSReject, Keys: keys,

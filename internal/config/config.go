@@ -908,32 +908,48 @@ type Network struct {
 	PeerNotes map[string]string `json:"peer_notes,omitempty"`
 
 	AllowRelay bool `json:"allow_relay"` // permit relaying others' traffic through us
+
+	// SelfSeed is an explicit operator declaration: "treat this node as a
+	// seed for this network." Advertised to every peer in the handshake
+	// (hsPayload.SelfSeed) so they don't have to infer seed status by
+	// matching addresses against their own configured Seeds list — an
+	// inference that's necessarily approximate (see mesh.ManagedPeer.IsSeed's
+	// doc comment for the specific ways it can fall short: two seeds sharing
+	// one host:port disambiguated only by transport, or a seed habitually
+	// reached over a faster gossiped LAN shortcut instead of its configured
+	// public address). Consulted by System > Upgrade's seed-aware push
+	// sequencing as an additional, authoritative signal alongside — never in
+	// place of — those address-based checks. Purely advisory: has no effect
+	// on connectivity, routing, or anything else the mesh actually does; a
+	// node with this set behaves identically to one without it in every way
+	// except how other nodes sequence upgrades that include it.
+	SelfSeed bool `json:"self_seed,omitempty"`
 }
 
-// UnmarshalJSON backfills DNSSync to its documented on-by-default value
-// (NewNetworkDefaults's {Enabled:true, GossipPPS:5, TTLSeconds:300}) when a
-// network's JSON has no "dns_sync" key at all, instead of leaving it at
-// encoding/json's zero value of {Enabled:false, GossipPPS:0, TTLSeconds:0}.
+// UnmarshalJSON backfills DNSSync and AllowRelay to their documented
+// on-by-default values (NewNetworkDefaults's DNSSync.Enabled=true and
+// AllowRelay=true) when a network's JSON has no "dns_sync"/"allow_relay" key
+// at all, instead of leaving them at encoding/json's zero value of false.
 //
-// This matters because DNSSync was added after HostsSync: every config ever
-// written by gravinet has always had "hosts_sync" (it predates the public
-// project), so HostsSync's identically-shaped Enabled bool never hits this.
-// Any config saved before conditional DNS forwarding existed has no
-// "dns_sync" key at all, so without this backfill it silently loads as fully
-// disabled — indistinguishable from an operator's deliberate choice, and,
-// worse, the very next SaveTo (triggered by any unrelated edit: adding a
-// seed, a host record, anything) marshals that zero value back out as an
-// explicit "enabled": false. At that point the key is no longer absent, it's
-// explicit, and DNS forwarding stays silently off across every future
-// restart until someone notices — restarting the daemon re-reads the same
-// file and gets the same answer every time.
+// This matters because both fields were added after HostsSync: every config
+// ever written by gravinet has always had "hosts_sync" (it predates the
+// public project), so HostsSync's identically-shaped Enabled bool never hits
+// this. Any config saved before conditional DNS forwarding (or before
+// AllowRelay) existed has no corresponding key at all, so without this
+// backfill it silently loads as fully disabled — indistinguishable from an
+// operator's deliberate choice, and, worse, the very next SaveTo (triggered
+// by any unrelated edit: adding a seed, a host record, anything) marshals
+// that zero value back out as an explicit "enabled": false / "allow_relay":
+// false. At that point the key is no longer absent, it's explicit, and the
+// feature stays silently off across every future restart until someone
+// notices — restarting the daemon re-reads the same file and gets the same
+// answer every time.
 //
 // Only the true "key entirely absent" case is backfilled; a config that
-// already has an explicit "dns_sync" object (even one that happens to be
-// all zeros, which is also a valid deliberate choice: disabled, unlimited
-// gossip, default TTL) is left exactly as written — this can only add the
-// default for networks that never had an opinion recorded, never override
-// one that did.
+// already has an explicit "dns_sync" object or "allow_relay" key (even one
+// that's all zeros / literal false, which is also a valid deliberate
+// choice) is left exactly as written — this can only add the default for a
+// network that never had an opinion recorded, never override one that did.
 func (n *Network) UnmarshalJSON(b []byte) error {
 	type alias Network
 	var a alias
@@ -946,6 +962,9 @@ func (n *Network) UnmarshalJSON(b []byte) error {
 	if err := json.Unmarshal(b, &probe); err == nil {
 		if _, present := probe["dns_sync"]; !present {
 			n.DNSSync = NewNetworkDefaults().DNSSync
+		}
+		if _, present := probe["allow_relay"]; !present {
+			n.AllowRelay = NewNetworkDefaults().AllowRelay
 		}
 	}
 	return nil

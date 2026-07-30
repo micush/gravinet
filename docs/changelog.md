@@ -2,6 +2,542 @@
 
 ---
 
+## v729 — 2026-07-30
+
+Version bump only, no code change — for testing the upgrade push
+mechanism itself.
+
+---
+
+## v728 — 2026-07-30
+
+**Fixed: relay and self-seed were placed on the Networks list page
+(Mesh \u2192 Networks) — wrong page. Moved to Settings \u2192 Network,
+where every other node-behavior setting (ports, NAT, UPnP) already
+lives.**
+
+Networks is for network *administration* — create, delete, rename,
+subnet/address CRUD. Relay and self-seed aren't administrative actions,
+they're node-behavior settings, and putting them in the admin list
+mixed two different kinds of page for no good reason.
+
+**The complication, and how it's handled:** `AllowRelay`/`SelfSeed` are
+genuinely per-network config (`config.Network` fields) — each mesh
+network a node belongs to has its own independent value — while
+Settings \u2192 Network's other content (route/keepalive/peer-timeout
+intervals, ports, NAT state timeout, UPnP) is genuinely node-global, one
+value for the whole daemon. Rather than force a false single value or
+leave multi-network setups unhandled, the new "Relay & Seed" card
+renders one settings-row pair per network the operator has — the
+common case (one network) reads as a plain pair of toggles with no
+clutter; more than one network gets each row labeled with its network
+name to disambiguate.
+
+**Also switched the toggle style to match the page it's actually on:**
+the Networks table's `tag-toggle` spans (double-click, inline in a
+table cell) made sense there; Settings pages use `<label class="sw">`
+switch checkboxes throughout (see the UPnP toggle right below this new
+section) — matches now instead of importing a different page's widget
+convention.
+
+The `edit(..., true)` auto-restart fix from v727 carries over unchanged
+— both toggles still restart the node automatically via the same
+mechanism as GeoIP/UPnP/remote-shell, just correctly located.
+
+`internal/webadmin/ui_dom_helper_test.go`'s `TestNetworkBoolTogglesAutoRestart`
+rewritten for the new location and implementation (checks
+`secSettingsNetwork` for the per-network row loop and both `edit()`
+calls; added an explicit negative check that `secNetworks` — the
+Networks list — no longer mentions either op at all, so this specific
+misplacement can't quietly happen again). Also caught and fixed a
+structural bug in the previous edit to this test file: a doc comment
+had ended up attached to the wrong function's signature (bodies were
+never affected, purely a comment-pairing mistake) — re-verified the
+whole file parses and every test in it still passes before treating
+this as done.
+
+No config, wire-protocol, or Go-side changes — this was entirely a
+frontend relocation. `NetworkSetSelfSeed`/`NetworkSetAllowRelay`
+themselves are unchanged.
+
+Verified with go1.22.2: `go build ./...` and `go vet ./...` clean (CGO
+disabled — this sandbox has no PAM dev headers). Both rewritten/guard
+tests pass, full `internal/webadmin` suite passes, embedded `<script>`
+block extracted and `node --check`'d clean.
+
+---
+
+## v727 — 2026-07-30
+
+**Fixed: the relay and self-seed toggles (added in v726) required the
+operator to notice a restart-pending indicator and act on it — every
+other setting in gravinet that needs a restart does it automatically.**
+
+v726 implemented these two toggles with their own hand-rolled
+save-then-flag-pending logic (a raw `api()` call, then
+`state.restartPending = true` on success), rather than routing through
+`edit()`'s existing `autoRestart` mechanism — the same one GeoIP, UPnP,
+remote shell, and even other `/api/network` edits (subnet, address,
+MTU) already use to restart immediately once a change needing one is
+saved. No good reason for these two to behave differently; it just
+wasn't wired through the established path the first time.
+
+**Fix:** `internal/webadmin/ui.go`'s `wireNetBoolToggle` (Settings \u2192
+Networks) now calls `edit('/api/network', { op, net, enabled }, true)`
+— the same `autoRestart=true` pattern already used for the toggles
+right below it on other settings pages. On success this restarts the
+node automatically (`quietRestart`, which polls `/api/ping` until the
+new boot shows up, then refreshes); on failure `edit()` has already
+alerted, and a plain `refresh()` reverts the optimistic UI flip back to
+the last-known-good state, same as it always did on error.
+
+Added `TestNetworkBoolTogglesAutoRestart` (`ui_dom_helper_test.go`),
+guarding both that the toggles exist and that they specifically route
+through `edit(..., true)` rather than a bare payload with no third
+argument — which would silently regress back to the
+notice-it-yourself behavior this fixes. Also asserts `secNetworks`
+never sets `state.restartPending` directly.
+
+No config, wire-protocol, or Go-side changes at all — this was purely
+a frontend fix. `NetworkSetSelfSeed`/`NetworkSetAllowRelay` themselves
+are unchanged; both remain not-hot-reloadable at the daemon level
+(restart genuinely is required), it's specifically *who triggers that
+restart* that changed.
+
+Verified with go1.22.2: `go build ./...` and `go vet ./...` clean (CGO
+disabled — this sandbox has no PAM dev headers). The new test and the
+existing `TestUpgradeAllThenLocalOption` (edited in the same pass,
+re-verified structurally intact) both pass. Full `internal/webadmin`
+suite passes. Embedded `<script>` block extracted and `node --check`'d
+clean.
+
+---
+
+## v726 — 2026-07-30
+
+**Feature: an explicit "I am a seed" toggle per network** —
+`config.Network.SelfSeed` — checked by System > Upgrade's push
+sequencing ahead of, and independent from, every address-based
+inference built up over v723–v725. Motivated directly by the last few
+versions' back-and-forth: address/transport/roaming inference can only
+ever be approximate, and `gn-cush1`/`gn-cush2` specifically ran into a
+case (an unresponsive seed's TCP listener, plus a faster LAN shortcut
+winning out over ever dialing the public address) that no amount of
+smarter inference could fix, because the underlying handshake it all
+depends on simply never completes. An operator declaring it directly
+sidesteps the whole problem.
+
+**How it's wired**, mirroring `AllowRelay`'s existing shape end to end:
+- `config.Network.SelfSeed` (new) — plain per-network bool, default
+  `false`.
+- Advertised over the wire as bit 2 of `hsPayload`'s existing `mflag`
+  byte, right alongside `Managed` (bit 0) and `Manager` (bit 1) — no new
+  wire field, and fully backward-compatible: an older peer simply never
+  sends the bit, which decodes as `false`, the correct "hasn't declared
+  itself" default.
+- Threaded through `NetSpec.SelfSeed` → `peerSession.selfSeed` →
+  `nodeInfo.selfSeed` (identical shape to how `Managed`/`Manager`
+  already flow).
+- `ManagedPeers` (`ban.go`) checks `ni.selfSeed` **first** — authoritative
+  the instant it's set — then still runs every existing address-based
+  check regardless, so an old peer or one the operator hasn't gotten to
+  yet degrades to exactly the v723–v725 behavior, never to "never a
+  seed."
+- `NetworkSetSelfSeed` (`ops.go`) + a new `self_seed` op on
+  `/api/network`, surfaced as a toggle in the Networks table (Settings
+  \u2192 Networks), matching the existing per-network `state` toggle's
+  look. **Not hot-reloadable** — a restart is needed, same as
+  `AllowRelay` already required; the UI's restart-pending indicator
+  fires correctly on toggle.
+
+**Caught and reverted my own mistake mid-implementation:** the first
+pass claimed in its own doc comments that this would apply live, no
+restart needed, on the theory that adding the field to
+`fillRuntimeSpec` was sufficient. Checked before shipping it: `ns.spec`
+is never actually reassigned anywhere in `ReloadRuntime` — only
+specific fields get selectively applied to other live state — so that
+line would have been a silent no-op, and toggling the setting live
+would have done nothing until a restart, contradicting what the
+comment promised. Correctly wiring live-apply would mean mutating
+`ns.spec` from a reload path while handshake-building code reads the
+same fields from other goroutines — a real concurrency question I
+didn't have grounds to answer confidently under time pressure — so
+reverted to the same construction-only, restart-required behavior
+`AllowRelay` already safely has, rather than ship an undercooked
+concurrency change.
+
+**Also, as requested: exposed `AllowRelay` in the UI for the first
+time** (it existed in config since before this session but had no
+toggle anywhere — confirmed already defaults to `true` for new
+networks). While wiring it up, found and fixed a real latent bug along
+the way: `AllowRelay` had no backfill for a config with no
+`"allow_relay"` key at all (any config predating the field), so it was
+silently loading as `false` — indistinguishable from a deliberate
+choice, and permanently cemented as `false` on the very next save
+(identical problem `DNSSync` already had a documented fix for).
+Extended `Network.UnmarshalJSON`'s existing backfill to cover
+`AllowRelay` too. `NetworkSetAllowRelay` + an `allow_relay` op added
+alongside `self_seed`, also restart-required, also surfaced in the
+Networks table.
+
+**Config audit, as requested:** swept `config.go` for other bool/flag
+fields not yet exposed in Settings. Found one genuine candidate —
+`EnableIPv4`/`EnableIPv6` (node-global underlay toggles, both default
+`true`, config already guards against disabling both at once) — not
+implemented here since it wasn't explicitly asked for, just reported.
+Several others looked unexposed from a raw grep but turned out to
+already be covered on closer inspection: `DisableTCPFallback` (the TCP
+port row's `-` to disable), `Managed`/`Manager`/`AcceptManagerUpgrades`/
+`AllowRemoteShell`/`EnableUPnP`/GeoIP (all have existing toggles).
+`ObjectsCatalogSeeded`/`ServicesCatalogSeeded` are internal bookkeeping,
+never meant to be user-facing.
+
+Tests added: `internal/mesh/selfseed_wire_test.go` (encode/decode
+round-trip; independence from the `Managed`/`Manager` bits sharing the
+same byte — dropped a third, hand-rolled "old peer" truncation test
+after verifying my own byte-offset math was wrong and it wasn't
+actually testing what it claimed). `internal/mesh/managedpeers_seed_test.go`:
+added selfSeed-precedence cases (true regardless of address; false
+doesn't veto a real address match), plus
+`TestManagedPeersRecognizesSelfSeedFromRealHandshake` — a real
+handshake over real loopback sockets, which caught a genuine test bug
+of its own (forgot to mark the test peer as `Managed`, a separate
+concept from `SelfSeed` that `ManagedPeers` filters on — the node
+silently didn't appear in results at all until fixed).
+`internal/config/selfseed_allowrelay_test.go`: the `AllowRelay`
+backfill (missing key \u2192 true; explicit value always respected,
+mirroring `DNSSync`'s existing tests) and both new setters.
+
+Verified with go1.22.2: `go build ./...` and `go vet ./...` clean (CGO
+disabled — this sandbox has no PAM dev headers). All new tests pass.
+Ran the full handshake/fallback/seedOwner/install/connectedTo/
+reflexive/NAT-status/ManagedPeers set together again (100s, no
+regressions). Full `internal/webadmin`, `internal/config`, and
+`cmd/gravinet` suites pass. Embedded `<script>` block extracted and
+`node --check`'d clean.
+
+---
+
+## v725 — 2026-07-29
+
+**Resolved the remaining known limitation from v724: two seeds
+configured at the identical `host:port`, disambiguated only by
+transport (UDP vs TCP) — `gn-cush1`/`gn-cush2`'s exact real-fleet
+setup — can now both be independently recognized, instead of only
+whichever one most recently completed a handshake.**
+
+v724's `ns.seedOwner`-based roaming attribution was correct as far as
+it went, but `ns.seedOwner` is keyed by `netip.AddrPort` alone, with no
+notion of transport — a structural ceiling, not a bug in how it was
+used. Confirmed live: `gn-ionos1` (a normal, unshared seed) correctly
+benefited from v724's fix; `gn-cush1` (sharing its address with
+`gn-cush2`, disambiguated only by protocol) did not, exactly as flagged
+as a known risk at the time.
+
+**Fix:** added `netState.configuredSeedOwnerUDP`/`configuredSeedOwnerTCP`
+— dedicated, transport-split attribution maps, separate from the
+existing shared `ns.seedOwner` (which is untouched, still serving its
+original purpose for dial-priority/backoff exactly as before). Populated
+in `internal/mesh/handshake_engine.go`'s `onHSResp`, right alongside the
+existing `ns.seedOwner` write: which transport the *completing*
+handshake arrived over is determined via `fallbackDialer.HasFallback`
+— the exact same check `ListPeers` already uses to report a connected
+peer's transport accurately — read under `e.mu`, the same locking
+convention `send()`/`ListPeers` already use for that field, computed
+before any other logic in the function runs so it can't interact with
+existing behavior. Each write is bounded by a membership check against
+`configuredSeeds`/`configuredTCPSeeds` (never grows unconditionally —
+at most one entry per actually-configured seed, mirroring the existing
+concern about `ns.seedOwner`'s own unbounded-growth history).
+`ManagedPeers` (`ban.go`) now reads these two maps instead of the
+shared one — `gn-cush1`'s TCP entry and `gn-cush2`'s UDP entry, despite
+sharing an address, now live in genuinely separate maps and can each
+be independently attributed.
+
+Given the risk of touching a live handshake-completion path, verified
+more thoroughly than the last several patches:
+
+- `internal/mesh/managedpeers_seed_test.go`: `TestOutboundHandshakeAttributesConfiguredSeedOwner`
+  drives a **real handshake over real loopback UDP sockets** (same
+  pattern as the existing `TestOutboundHandshakeAttributesSeedOwner`,
+  which proves the analogous thing for the older mechanism) to confirm
+  the actual `onHSResp` write path populates `configuredSeedOwnerUDP`
+  correctly and leaves `configuredSeedOwnerTCP` empty — not just
+  pre-seeded state, the real code path, including the locking and
+  transport detection.
+- `TestManagedPeersIsSeedResolvesTwoSeedsSharingOneAddressByTransport`
+  replaces v724's `...Ambiguous...` test (which documented the
+  limitation as *expected*): both peers sharing one address, one via
+  each transport, are now correctly recognized independently.
+- Ran the full set of handshake/fallback/seedOwner/install/connectedTo/
+  reflexive/NAT-status tests together (49 tests, ~100s) — all pass, no
+  regressions from touching `onHSResp`.
+
+Verified with go1.22.2: `go build ./...` and `go vet ./...` clean (CGO
+disabled — this sandbox has no PAM dev headers). Full `internal/webadmin`
+and `cmd/gravinet` suites pass.
+
+---
+
+## v724 — 2026-07-29
+
+**Improved (not a bug fix this time): a configured seed whose live
+session has roamed off its configured address — a different NAT-mapped
+port, a TCP fallback path, or even a completely different address (a
+private LAN shortcut, on the real fleet this was checked against) — is
+now still recognized as a seed for upgrade-sequencing purposes.**
+
+v723's exact-match check was correct as far as it went, but a seed that
+had roamed simply stopped matching — a real, if lower-severity, gap
+called out explicitly at the time as a known trade-off rather than a
+bug: falling back to being pushed like an ordinary peer, not a safety
+problem.
+
+**What closes the gap:** `internal/mesh` already has almost exactly the
+right mechanism for this, built for a related purpose. Every completed,
+authenticated handshake against a directly-dialed address records
+`ns.seedOwner[address] = nodeID` regardless of how that address was
+added (`handshake_engine.go`'s `onHandshakeResponse`), and — for an
+address the operator explicitly configured specifically — that
+attribution is exempted from the pruning that would otherwise clear it
+the moment the node roams elsewhere (see `install()`'s "explicitSeed
+exemption"). So a node once confirmed at a configured seed address
+keeps reading as a seed here even after its current session has moved
+on, without its live endpoint needing to match anymore.
+`ManagedPeers` (`internal/mesh/ban.go`) now credits a node as a seed if
+*either* its live endpoint matches a configured seed exactly (v723's
+check, unchanged) *or* `ns.seedOwner` attributes one of the configured
+seed addresses to it.
+
+**A real limitation, found while digging into this rather than left for
+someone else to discover: `ns.seedOwner` is keyed by address alone, with
+no notion of transport.** Two distinct seeds configured at the identical
+`host:port`, disambiguated only by UDP vs TCP — a real pattern, not
+hypothetical: this exact fleet has two peers behind one NAT gateway,
+port-forwarded to the same external address on different protocols —
+can only ever have that one shared key attributed to whichever of the
+two most recently completed a handshake against it. The other is
+invisible to this check regardless of how it's currently connected.
+Nothing in this change resolves that; giving such seeds distinct ports
+would sidestep it entirely, but that's a config change on the operator's
+side, not something this patch can paper over.
+
+**Given that limitation is real, this is not a confirmed fix for the
+specific two peers (`gn-cush1`, `gn-cush2`) that motivated it** — both
+are configured at the exact same shared `174.64.247.165:65432`, disambiguated only
+by protocol, so whether this helps either of them specifically depends
+on whether a direct handshake against that address was ever completed
+for each of them in the first place, and if so, which one currently
+holds the shared `seedOwner` key. It should genuinely help any seed
+that roamed but doesn't share its address with another seed — that
+part is on solid ground. The shared-address case needs to be tested
+directly, not assumed.
+
+`internal/mesh/managedpeers_seed_test.go`: added
+`TestManagedPeersIsSeedSurvivesRoamingViaSeedOwner` (the general case —
+a roamed node with a `seedOwner` attribution is still recognized) and
+`TestManagedPeersIsSeedAmbiguousWhenTwoSeedsShareOneAddress`, which
+exists specifically to *prove* the limitation above rather than leave
+it as an unverified claim in a comment — it documents the current
+(undesired but structurally forced) outcome, with an explicit note that
+it should start failing, in a good way, if a future change makes
+address-sharing seeds independently attributable.
+
+Verified with go1.22.2: `go build ./...` and `go vet ./...` clean (CGO
+disabled — this sandbox has no PAM dev headers). All 7 cases in
+`managedpeers_seed_test.go` pass. Full `internal/webadmin` and
+`cmd/gravinet` suites pass.
+
+---
+
+## v723 — 2026-07-29
+
+**Fixed the real bug behind v722's still-broken seed sequencing: ordinary
+peers that had never been configured as seeds were getting flagged as
+one anyway, while some genuine seeds correctly matched — because
+`ManagedPeers` was reading the wrong list entirely.**
+
+v722 fixed a real problem (IP-only matching false-positived on any peer
+sharing a seed's public IP). Retested against a live fleet immediately
+after, it was *still* wrong in a way v722's fix couldn't explain: exact
+`host:port` matching should only ever produce fewer matches than
+IP-only, never different ones on the non-seed side, yet ordinary peers
+(`gn-debian`, `gn-freebsd` — never configured as seeds) were landing in
+the seed batch while genuine configured seeds (`gn-cush1`, `gn-cush2`)
+were landing in the non-seed batch.
+
+**Root cause, found by cross-referencing the operator's actual Seeds
+table against a live tshoot bundle from the pushing node (`mcfed`)
+itself:** `ManagedPeers` reads `ns.seeds`/`ns.tcpSeeds` — but those
+are *not* a clean view of the operator's configured Seeds. `cmd/
+gravinet/main.go` builds them from `boot := append(n.Seeds.Addrs()...,
+n.PeerCache...)` — deliberately folding in `PeerCache`, the list of
+every address any peer has ever been seen at, kept around purely to
+speed up reconnecting after a restart. That's exactly the right thing
+for `ns.seeds`' actual job (the live bootstrap-dial set), and entirely
+wrong for "is this address one the operator configured as a seed" —
+`gn-debian`'s and `gn-freebsd`'s current live endpoints simply happened
+to already be sitting in `mcfed`'s own `peer_cache`, which is nearly
+guaranteed for any peer that's ever reconnected.
+
+**Fix:** added `NetSpec.ConfiguredSeeds`/`ConfiguredTCPSeeds` — resolved
+from exactly `n.Seeds.Addrs()`, with no `PeerCache` folded in, using the
+same `resolveSeeds`/`resolveTCPSeeds` (multi-port-list expansion,
+`tcp://` scheme handling — unchanged) at both of `cmd/gravinet/main.go`'s
+call sites (initial construction and live reload). Threaded through as
+new `netState.configuredSeeds`/`configuredTCPSeeds` fields, wholesale-
+*replaced* on every reload (`internal/mesh/reload.go`) rather than
+merged the way the operational `seeds`/`tcpSeeds` deliberately are — a
+seed removed from config should stop counting for this purpose
+immediately, unlike the live dial set, which intentionally keeps a
+removed seed around until restart for connectivity stability.
+`ManagedPeers` (`internal/mesh/ban.go`) now reads these clean fields
+instead. Nothing about the actual dial/bootstrap/reconnect path
+changed at all — this is purely additive, a second, parallel, read-only
+view alongside the existing operational lists.
+
+Considered and rejected: reusing the existing `ns.explicitSeed` map
+(named as if it already tracked exactly this). It doesn't — it's built
+from the same contaminated `spec.Seeds`, so it inherited the identical
+problem and fixing its population would mean touching dial-priority/
+backoff logic that has nothing to do with this feature.
+
+`internal/mesh/managedpeers_seed_test.go`: updated existing cases to
+set `configuredSeeds`/`configuredTCPSeeds`, and added
+`TestManagedPeersIsSeedIgnoresPeerCacheContamination` — an address
+present in `ns.seeds` (the contaminated list) but absent from
+`ns.configuredSeeds` (the clean one) must not be flagged; confirmed
+this fails against the pre-fix code path (which read `ns.seeds`
+directly) and passes against the fix.
+
+Verified with go1.22.2: `go build ./...` and `go vet ./...` clean (CGO
+disabled — this sandbox has no PAM dev headers). All
+`managedpeers_seed_test.go` cases pass. The existing
+`TestResolveSeeds*`/`TestResolveTCPSeeds*` suite (`cmd/gravinet`, the
+functions this reuses unmodified) passes, as does the full `cmd/gravinet`
+package suite (10.6s) and the full `internal/webadmin` suite.
+
+---
+
+## v722 — 2026-07-29
+
+**Fixed: v721's new seed-aware upgrade sequencing flagged every peer
+sharing a seed's public IP as a seed itself, not just the actual seed —
+observed live on a real fleet where the "non-seed batch, then seeds one
+at a time" split never happened at all; every one of 13 peers got
+pushed one at a time instead.**
+
+**Root cause:** `ManagedPeers` (v721) identified a seed by comparing a
+node's known endpoint against configured seed addresses, deliberately
+comparing IP only and ignoring port — reasoning that a seed's observed
+port could drift across transport paths. That reasoning doesn't hold
+where multiple distinct peers legitimately share one public IP behind a
+single NAT gateway or office router, differing only by port — confirmed
+against this exact fleet's own tshoot data from earlier in this session,
+where `gn-debian`/`freebsd`/`macos`/`manjaro`/`rocky`/`win10`/`win11`
+all reported the same `174.64.247.165` with only the port differing.
+Comparing IP only meant every one of those siblings matched right
+alongside the real seed.
+
+**Fix:** `internal/mesh/ban.go` now compares the full `host:port`, not
+just the IP — a seed is configured as an exact address (parsed straight
+from `config.Seed.Address`), and the port is precisely what
+distinguishes it from another peer sharing the same NAT'd IP. Accepted
+trade-off, stated explicitly in the updated comment: a genuine seed
+answering from an unexpected port (its own NAT remapping, an unplanned
+transport path) now won't be recognized and just falls back to being
+pushed like an ordinary peer — a missed optimization, not a safety
+problem, and far preferable to the false-positive failure mode this
+replaces.
+
+`internal/mesh/managedpeers_seed_test.go`: rewrote the base
+classification test to match on exact address, and added
+`TestManagedPeersIsSeedDoesNotMatchOtherPeerSharingSeedIP` — a
+regression test keyed directly to the real topology that exposed this
+(three nodes sharing one IP, only one of them actually configured as
+the seed), rather than a synthetic case that wouldn't have caught it.
+
+Verified with go1.22.2: `go build ./...` and `go vet ./...` clean (CGO
+disabled — this sandbox has no PAM dev headers). All `managedpeers_seed_test.go`
+cases pass, including the new regression test (confirmed it fails
+against the prior IP-only comparison — all three synthetic siblings
+would have matched). Full `internal/webadmin` suite passes.
+
+---
+
+## v721 — 2026-07-29
+
+**Feature: System \u2192 Upgrade now holds a network's configured seeds back
+until last, and pushes them one at a time — never batched with the rest
+of the fleet, or with each other.**
+
+The motivating concern: a seed is a network's bootstrap/rendezvous
+point (`NetSpec.Seeds`/`TCPSeeds`, dialed directly at a fixed address to
+get a new or reconnecting node into the mesh at all). Upgrading more
+than one of them at once — or upgrading one alongside a big batch of
+ordinary peers — risks a peer that's mid-reconnect losing every way
+back in, right in the middle of a rollout that's supposed to be making
+things safer, not less so.
+
+**The gap this closes:** a seed is identified purely by address
+(`config.Seed.Address`) — that's necessarily how it's dialed, before its
+node id is even known — so there was previously no link at all between
+"this managed peer, by node id" (what an upgrade push targets) and "this
+configured seed, by address". Nothing in the push path could have told
+seeds apart from ordinary peers even if it had wanted to.
+
+**Fix, in two parts:**
+
+- `internal/mesh/ban.go` — `ManagedPeers` now cross-references each
+  node's known endpoint (`nodeInfo.endpoint`, set at handshake) against
+  that network's configured `seeds`/`tcpSeeds` (IP only, not port — a
+  seed's dial port is fixed at configuration time, but the port a live
+  handshake actually landed on can differ across paths, while the
+  address itself staying stable is exactly what makes it usable as a
+  seed at all). Surfaced as a new `ManagedPeer.IsSeed` bool, computed
+  once per node across all its networks — not lost just because a
+  different network happened to be picked as that node's "best"
+  representative record.
+- `internal/webadmin/cluster.go` — `IsSeed` is threaded through
+  `/api/cluster` as `is_seed` on each peer.
+- `internal/webadmin/ui.go` (System \u2192 Upgrade) — the push flow now
+  splits the target list into non-seed and seed nodes. Non-seed peers
+  are pushed exactly as before (one batched call, bounded server-side
+  concurrency, results streamed back as each finishes). Seeds are then
+  pushed one at a time, and only attempted at all once every non-seed
+  peer has fully succeeded — there is no "partial fleet, but push seeds
+  anyway". Any single seed failing stops the rollout right there, same
+  all-or-nothing rule the rest of the flow already followed, so a bad
+  build can't reach the remaining seeds (or the local node) just
+  because it happened to fail partway through the seed list. The
+  push-and-stream logic itself was factored into one `pushBatch` helper
+  shared by both the batched non-seed call and every single-seed call,
+  rather than duplicated.
+
+Added `internal/mesh/managedpeers_seed_test.go`: a node at a configured
+seed's address (different port) reads as a seed, a `tcpSeeds` address
+counts exactly the same as `seeds`, and a node with no known endpoint
+at all reads as not-a-seed rather than a false positive off a
+zero-value address. Extended `TestUpgradeAllThenLocalOption`
+(`ui_dom_helper_test.go`) to guard the new split/sequencing, including
+that the non-seed batch runs (and is checked) strictly before the seed
+loop, and that each seed is pushed as a genuine single-element batch.
+
+Verified with go1.22.2: `go build ./...` and `go vet ./...` clean (CGO
+disabled — this sandbox has no PAM dev headers). The new mesh tests
+pass directly, and the full `internal/webadmin` suite passes (50s) —
+unaffected by the `ban.go`/`cluster.go` changes aside from the one
+test intentionally updated above. Extracted and `node --check`'d the
+embedded `<script>` block — clean.
+
+**Not fully verified:** as with v720, the complete `internal/mesh` test
+suite could not be run to completion in this sandbox (single CPU core).
+The targeted new tests and the existing reflexive/NAT tests all pass
+directly; recommend a full `go test ./internal/mesh/...` on real
+hardware before relying on this build broadly.
+
+---
+
 ## v720 — 2026-07-29
 
 **Fixed: a directly multi-homed host — real public IPs, no NAT device at

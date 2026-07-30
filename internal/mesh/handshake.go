@@ -23,6 +23,23 @@ type hsPayload struct {
 	Name      string // network name, advertised so a joiner inherits it
 	Managed   bool   // node opts into remote management ("managed" cluster mode)
 	Manager   bool   // node opts into managing other Managed peers (see config.Config.Manager)
+	// SelfSeed is this node's own config.Network.SelfSeed: an explicit
+	// operator declaration "treat me as a seed for this network," advertised
+	// so peers don't have to infer it by matching addresses against their
+	// own configured Seeds list. That inference (mesh.ManagedPeer.IsSeed's
+	// address/seedOwner-based checks) is necessarily approximate — it can
+	// only recognize a seed whose configured address a peer actually
+	// completes a direct handshake against, which two seeds sharing one
+	// host:port, or a seed habitually reached via a faster gossiped LAN
+	// shortcut instead, can each defeat in their own way. A node simply
+	// saying "I am one" sidesteps all of that: no address matching, no
+	// transport, no roaming to account for, authoritative the moment it's
+	// set. Consulted by ManagedPeers purely as an additional, OR'd-in signal
+	// alongside the existing address-based checks, never a replacement for
+	// them — an unset SelfSeed on an old peer, or one the operator hasn't
+	// gotten to yet, should degrade to the previous approximate behavior,
+	// not to "never a seed."
+	SelfSeed  bool
 	WebPort   uint16 // web-admin port, advertised so a manager can reach it over the overlay
 	TCPPort   uint16 // TCP/TLS fallback port, advertised so peers can dial it when UDP fails
 	// ExtraTCPPorts/ExtraUDPPorts are additional listen ports (config
@@ -227,15 +244,19 @@ func encodeHSPayload(p hsPayload) []byte {
 	b = append(b, nm...)
 
 	// Managed-cluster advertisement (optional trailing field): [mflag:1][webPort:2].
-	// mflag bit 0 is Managed, bit 1 is Manager (see config.Config.Manager) —
-	// packed into the same byte rather than a new trailing field since both are
-	// simple booleans and this keeps the wire format from growing per-flag.
+	// mflag bit 0 is Managed, bit 1 is Manager (see config.Config.Manager),
+	// bit 2 is SelfSeed (see hsPayload.SelfSeed) — packed into the same byte
+	// rather than a new trailing field since all three are simple booleans
+	// and this keeps the wire format from growing per-flag.
 	var mflag byte
 	if p.Managed {
 		mflag |= 1
 	}
 	if p.Manager {
 		mflag |= 2
+	}
+	if p.SelfSeed {
+		mflag |= 4
 	}
 	b = append(b, mflag)
 	var wp [2]byte
@@ -438,6 +459,7 @@ func decodeHSPayload(b []byte) (hsPayload, error) {
 	if mflag, ok := r.byte(); ok {
 		p.Managed = mflag&1 != 0
 		p.Manager = mflag&2 != 0
+		p.SelfSeed = mflag&4 != 0
 		if wp, ok := r.take(2); ok {
 			p.WebPort = binary.BigEndian.Uint16(wp)
 		}

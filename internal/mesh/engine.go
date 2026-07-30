@@ -122,15 +122,37 @@ type NetSpec struct {
 	// ever returns a single Device (nil queues) is exactly the pre-multi-queue
 	// contract — this field is additive, not a behavior change for existing
 	// callers.
-	NewDevice  func() (Device, []Queue, error)
-	Subnet4    netip.Prefix
-	Subnet6    netip.Prefix
-	Self4      netip.Addr // this node's overlay v4 (advertised in handshakes)
-	Self6      netip.Addr
-	Seeds      []netip.AddrPort
-	TCPSeeds   []netip.AddrPort // seeds to dial over the TCP/TLS fallback directly (cold bootstrap when UDP is blocked)
-	AllowRelay bool
-	Ban        config.BanPolicy
+	NewDevice func() (Device, []Queue, error)
+	Subnet4   netip.Prefix
+	Subnet6   netip.Prefix
+	Self4     netip.Addr // this node's overlay v4 (advertised in handshakes)
+	Self6     netip.Addr
+	Seeds     []netip.AddrPort
+	TCPSeeds  []netip.AddrPort // seeds to dial over the TCP/TLS fallback directly (cold bootstrap when UDP is blocked)
+	// ConfiguredSeeds/ConfiguredTCPSeeds are Seeds/TCPSeeds' clean counterparts:
+	// resolved from exactly the operator's configured Seed list (config.Config's
+	// Network.Seeds), with none of PeerCache folded in the way the caller does
+	// for Seeds/TCPSeeds themselves (see cmd/gravinet's boot :=
+	// append(n.Seeds.Addrs()..., n.PeerCache...) — deliberate there, since a
+	// broader bootstrap list makes reconnecting after a restart faster and
+	// that's Seeds/TCPSeeds' actual job). These exist purely so something
+	// wanting to know "is this address one the operator actually configured
+	// as a seed" — not "one of everywhere we might try dialing at startup" —
+	// has a place to ask that isn't itself contaminated by the broader list.
+	// The System > Upgrade seed-aware push sequencing (ManagedPeers.IsSeed)
+	// is the first and so far only consumer; a version that read Seeds/
+	// TCPSeeds directly for this shipped briefly and flagged every peer ever
+	// seen (anything in PeerCache) as a seed, not just the real ones.
+	ConfiguredSeeds    []netip.AddrPort
+	ConfiguredTCPSeeds []netip.AddrPort
+	AllowRelay         bool
+	// SelfSeed is config.Network.SelfSeed: an explicit operator declaration
+	// that this node should be treated as a seed for this network by peers
+	// that connect to it — see hsPayload.SelfSeed's doc comment for why this
+	// exists alongside the address-based ManagedPeer.IsSeed checks rather
+	// than replacing them.
+	SelfSeed bool
+	Ban      config.BanPolicy
 	// SeedTCPPort is an optional fallback port to dial Seeds on at cold start when
 	// their advertised port isn't known yet (from a join token). 0 = assume own port.
 	SeedTCPPort int
@@ -633,15 +655,45 @@ type netState struct {
 	hsSeenMu sync.Mutex
 	hsSeen   map[string]time.Time // ephemeral-pubkey -> expiry
 
-	mu          sync.RWMutex
-	byNode      map[string]*peerSession
-	routes4     map[netip.Addr]*peerSession
-	routes6     map[netip.Addr]*peerSession
-	fwd         atomic.Pointer[fwdSnap]
-	pending     map[uint32]*pendingHS        // by initiator index (idxI)
-	seeds       []netip.AddrPort             // mutable; grows as peers are learned
-	tcpSeeds    []netip.AddrPort             // explicit TCP/TLS-fallback seeds to dial directly (ns.mu)
-	seedBackoff map[netip.AddrPort]time.Time // don't retry a seed before this time
+	mu       sync.RWMutex
+	byNode   map[string]*peerSession
+	routes4  map[netip.Addr]*peerSession
+	routes6  map[netip.Addr]*peerSession
+	fwd      atomic.Pointer[fwdSnap]
+	pending  map[uint32]*pendingHS // by initiator index (idxI)
+	seeds    []netip.AddrPort      // mutable; grows as peers are learned
+	tcpSeeds []netip.AddrPort      // explicit TCP/TLS-fallback seeds to dial directly (ns.mu)
+	// configuredSeeds/configuredTCPSeeds mirror NetSpec.ConfiguredSeeds/
+	// ConfiguredTCPSeeds -- unlike seeds/tcpSeeds above, these are NOT mutable
+	// bootstrap-dial working sets (no PeerCache folded in, nothing added as
+	// peers are learned): a clean, current snapshot of exactly what the
+	// operator has configured as this network's seeds right now, wholesale-
+	// replaced (not merged) on every reload so a removed seed stops counting
+	// immediately rather than lingering the way seeds/tcpSeeds deliberately
+	// do. See NetSpec.ConfiguredSeeds' doc comment for why this exists at
+	// all rather than reusing seeds/tcpSeeds directly.
+	configuredSeeds    []netip.AddrPort
+	configuredTCPSeeds []netip.AddrPort
+	// configuredSeedOwnerUDP/configuredSeedOwnerTCP are ManagedPeers.IsSeed's
+	// own dedicated attribution maps -- deliberately separate from the
+	// shared ns.seedOwner above, and deliberately split by transport, which
+	// ns.seedOwner (keyed by address alone) cannot represent at all. Without
+	// the split, two seeds configured at the identical host:port and
+	// disambiguated only by UDP vs TCP -- a real pattern: two peers behind
+	// one NAT gateway, port-forwarded to the same external address on
+	// different protocols -- can only ever have that one shared address
+	// attributed to whichever most recently completed a handshake, making
+	// the other permanently unrecognizable regardless of how it's
+	// connected. Populated only in onHSResp, only for an address that's
+	// actually in configuredSeeds/configuredTCPSeeds (bounded: at most one
+	// entry per configured seed, never grows with gossip or NAT churn the
+	// way ns.seeds/seedOwner deliberately do), keyed by whether the
+	// completing connection was over the TCP fallback (see fallbackDialer.
+	// HasFallback, the same check ListPeers already uses to report
+	// transport) or plain UDP.
+	configuredSeedOwnerUDP map[netip.AddrPort]string
+	configuredSeedOwnerTCP map[netip.AddrPort]string
+	seedBackoff            map[netip.AddrPort]time.Time // don't retry a seed before this time
 	// fallbackBackoff cools down TCP fallback addresses whose socket connects
 	// but which never yield a mesh session (see watchFallbackHandshake).
 	fallbackBackoff map[netip.AddrPort]fallbackBackoffEntry
@@ -989,6 +1041,9 @@ type nodeInfo struct {
 	endpoint netip.AddrPort
 	managed  bool
 	manager  bool // node advertised Manager mode (see config.Config.Manager)
+	// selfSeed mirrors peerSession's field of the same name — see hsPayload.
+	// SelfSeed's doc comment. Consulted directly by ManagedPeers.
+	selfSeed bool
 	// bgpASN mirrors peerSession's field of the same name — the
 	// gossip/handshake-learned copy for a node that isn't (or isn't
 	// currently) a direct peer. Not itself propagated through the wider
@@ -1027,6 +1082,10 @@ type peerSession struct {
 	// mixed-version mesh behaves exactly as it did before the field existed.
 	allowRelay bool
 	relayKnown bool
+	// selfSeed is the peer's advertised hsPayload.SelfSeed: their own explicit
+	// declaration that they should be treated as a seed. See hsPayload.
+	// SelfSeed's doc comment.
+	selfSeed bool
 	// localEndpoints are the peer's advertised host candidates — see
 	// hsPayload.LocalEndpoints. Kept on the session so buildPeerList can
 	// re-gossip them onward, which is how a node learns the LAN address of a
@@ -1402,48 +1461,52 @@ func (e *Engine) newNetState(spec NetSpec) *netState {
 		coalesce = 3 * time.Second // fold a single join's key-tries into one failure
 	}
 	ns := &netState{
-		spec:                 spec,
-		throttle:             ratelimit.New(b.MaxFailures, b.Window(), b.Ban(), coalesce),
-		byNode:               make(map[string]*peerSession),
-		routes4:              make(map[netip.Addr]*peerSession),
-		routes6:              make(map[netip.Addr]*peerSession),
-		pending:              make(map[uint32]*pendingHS),
-		seeds:                append([]netip.AddrPort(nil), spec.Seeds...),
-		tcpSeeds:             append([]netip.AddrPort(nil), spec.TCPSeeds...),
-		seedBackoff:          make(map[netip.AddrPort]time.Time),
-		seedFallback:         make(map[netip.AddrPort]netip.AddrPort),
-		seedOwner:            make(map[netip.AddrPort]string),
-		explicitSeed:         explicitSeedSet(spec.Seeds),
-		explicitSeedNode:     make(map[string]bool),
-		hostCand:             make(map[netip.AddrPort]bool),
-		hostCandDead:         make(map[netip.AddrPort]bool),
-		upgradeNodeAt:        make(map[string]time.Time),
-		fallbackAttempt:      make(map[netip.AddrPort]time.Time),
-		seedFirstSeen:        make(map[netip.AddrPort]time.Time),
-		directUpgradeAttempt: make(map[netip.AddrPort]time.Time),
-		everConnected:        make(map[netip.AddrPort]bool),
-		dialing:              make(map[netip.AddrPort]bool),
-		nodes:                make(map[string]*nodeInfo),
-		relayRefusedLog:      make(map[string]time.Time),
-		relayDeclinedLog:     make(map[string]time.Time),
-		self4:                spec.Self4,
-		self6:                spec.Self6,
-		subnet4:              spec.Subnet4,
-		subnet6:              spec.Subnet6,
-		name:                 spec.Name,
-		bans:                 make(map[string]*banRecord),
-		disabledPeers:        make(map[string]bool),
-		peerNotes:            make(map[string]string),
-		knownRoute:           make(map[string]bool),
-		learnedHosts:         make(map[string]*learnedHost),
-		learnedDNS:           make(map[string]*learnedDNS),
-		osMetric:             make(map[netip.Prefix]int),
-		demotedGatewayMetric: make(map[netip.Prefix]int),
-		physicalGW:           make(map[int]physicalGWCache),
-		hsSeen:               make(map[string]time.Time),
-		pendingPeerAdds:      make(map[string]int),
-		done:                 make(chan struct{}),
-		dpGenCh:              make(chan struct{}),
+		spec:                   spec,
+		throttle:               ratelimit.New(b.MaxFailures, b.Window(), b.Ban(), coalesce),
+		byNode:                 make(map[string]*peerSession),
+		routes4:                make(map[netip.Addr]*peerSession),
+		routes6:                make(map[netip.Addr]*peerSession),
+		pending:                make(map[uint32]*pendingHS),
+		seeds:                  append([]netip.AddrPort(nil), spec.Seeds...),
+		tcpSeeds:               append([]netip.AddrPort(nil), spec.TCPSeeds...),
+		configuredSeeds:        append([]netip.AddrPort(nil), spec.ConfiguredSeeds...),
+		configuredTCPSeeds:     append([]netip.AddrPort(nil), spec.ConfiguredTCPSeeds...),
+		seedBackoff:            make(map[netip.AddrPort]time.Time),
+		seedFallback:           make(map[netip.AddrPort]netip.AddrPort),
+		seedOwner:              make(map[netip.AddrPort]string),
+		configuredSeedOwnerUDP: make(map[netip.AddrPort]string),
+		configuredSeedOwnerTCP: make(map[netip.AddrPort]string),
+		explicitSeed:           explicitSeedSet(spec.Seeds),
+		explicitSeedNode:       make(map[string]bool),
+		hostCand:               make(map[netip.AddrPort]bool),
+		hostCandDead:           make(map[netip.AddrPort]bool),
+		upgradeNodeAt:          make(map[string]time.Time),
+		fallbackAttempt:        make(map[netip.AddrPort]time.Time),
+		seedFirstSeen:          make(map[netip.AddrPort]time.Time),
+		directUpgradeAttempt:   make(map[netip.AddrPort]time.Time),
+		everConnected:          make(map[netip.AddrPort]bool),
+		dialing:                make(map[netip.AddrPort]bool),
+		nodes:                  make(map[string]*nodeInfo),
+		relayRefusedLog:        make(map[string]time.Time),
+		relayDeclinedLog:       make(map[string]time.Time),
+		self4:                  spec.Self4,
+		self6:                  spec.Self6,
+		subnet4:                spec.Subnet4,
+		subnet6:                spec.Subnet6,
+		name:                   spec.Name,
+		bans:                   make(map[string]*banRecord),
+		disabledPeers:          make(map[string]bool),
+		peerNotes:              make(map[string]string),
+		knownRoute:             make(map[string]bool),
+		learnedHosts:           make(map[string]*learnedHost),
+		learnedDNS:             make(map[string]*learnedDNS),
+		osMetric:               make(map[netip.Prefix]int),
+		demotedGatewayMetric:   make(map[netip.Prefix]int),
+		physicalGW:             make(map[int]physicalGWCache),
+		hsSeen:                 make(map[string]time.Time),
+		pendingPeerAdds:        make(map[string]int),
+		done:                   make(chan struct{}),
+		dpGenCh:                make(chan struct{}),
 	}
 	if spec.Dev != nil {
 		ns.setDev(spec.Dev) // seed the live-device holder; swapped later by a rebuild

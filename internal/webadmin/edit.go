@@ -86,6 +86,12 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 			return cfg.NetworkRename(req.Net, req.NewName)
 		case "notes":
 			return cfg.NetworkSetNotes(req.Net, req.Notes)
+		case "self_seed":
+			restart = true // not hot-reloadable — see NetworkSetSelfSeed's doc comment
+			return cfg.NetworkSetSelfSeed(req.Net, req.Enabled)
+		case "allow_relay":
+			restart = true // not hot-reloadable — see NetworkSetAllowRelay's doc comment
+			return cfg.NetworkSetAllowRelay(req.Net, req.Enabled)
 		case "subnet":
 			restart = true // re-addressing an interface needs a restart
 			return cfg.NetworkSetSubnets(req.Net, req.Subnet4, req.Subnet6)

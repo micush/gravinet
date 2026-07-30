@@ -394,10 +394,14 @@ func TestPushUsesTheSharedChipPicker(t *testing.T) {
 // TestUpgradeAllThenLocalOption guards the "all peers, then this node" rollout
 // mode: the picker offers a single item that pushes to every reachable peer and
 // then, only if every one applied, upgrades the local (control-plane) node last.
-// The two things that make it safe rather than a footgun are asserted here — it
-// drives both endpoints (fleet push, then local source apply), and it gates the
-// local phase on every peer having applied, so a bad build reverts on the peers
-// before it can reach the node the operator is logged into.
+// The things that make it safe rather than a footgun are asserted here — it
+// drives both endpoints (fleet push, then local source apply), it gates the
+// local phase on every peer having applied (so a bad build reverts on the peers
+// before it can reach the node the operator is logged into), and it holds
+// configured seeds back until last and pushes them one at a time rather than
+// batched with the rest of the fleet or with each other (see mesh.ManagedPeer.
+// IsSeed's doc comment for why: losing more than one rendezvous point at once
+// risks a peer mid-reconnect finding no way back into the mesh).
 func TestUpgradeAllThenLocalOption(t *testing.T) {
 	if !strings.Contains(indexHTML, "all peers, then this node") {
 		t.Error("the Upgrade picker no longer offers the 'all peers, then this node' option")
@@ -411,14 +415,90 @@ func TestUpgradeAllThenLocalOption(t *testing.T) {
 		block = block[:end]
 	}
 	for _, want := range []string{
-		"/api/upgrade/push",               // phase one: the fleet
-		"/api/upgrade/source",             // phase two: this node
-		"allThenLocal",                    // the mode flag the handler branches on
-		"applied.length === nodes.length", // the "every peer applied" gate on the local phase
+		"/api/upgrade/push",                  // the fleet push endpoint
+		"/api/upgrade/source",                // the local-apply endpoint, upgraded last
+		"allThenLocal",                       // the mode flag the handler branches on
+		"appliedAll.length === nodes.length", // the "every peer applied" gate on the local phase
+		"is_seed",                            // seed status, read from the cluster/targets data
+		"seedNodes",                          // the split-out seed subset
+		"nonSeedNodes",                       // the split-out non-seed subset, pushed first
+		"pushBatch",                          // the shared per-batch push+stream helper
 	} {
 		if !strings.Contains(block, want) {
 			t.Errorf("the all-peers-then-local flow is missing %q", want)
 		}
+	}
+	// Seeds must be pushed one at a time (a single-element batch per call),
+	// not folded into the same batched call as the rest of the fleet.
+	if !strings.Contains(block, "pushBatch([seedId])") {
+		t.Error("seeds are no longer pushed one at a time — expected a pushBatch call with a single-element node list")
+	}
+	// The non-seed batch and the seed loop must be strictly sequential
+	// (seeds only attempted once every non-seed peer has already applied),
+	// not run concurrently with each other.
+	nonSeedIdx := strings.Index(block, "if (nonSeedNodes.length){")
+	seedLoopIdx := strings.Index(block, "if (!stoppedEarly && seedNodes.length){")
+	if nonSeedIdx < 0 || seedLoopIdx < 0 || seedLoopIdx < nonSeedIdx {
+		t.Error("expected the non-seed batch to run, and be checked via stoppedEarly, before the seed loop")
+	}
+}
+
+// TestNetworkBoolTogglesAutoRestart guards the relay and self-seed toggles
+// (Settings > Network — per-network config, config.Network.AllowRelay/
+// SelfSeed, so one row pair per network rather than folded into the rest of
+// that page's genuinely node-global settings): neither NetworkSetAllowRelay
+// nor NetworkSetSelfSeed is hot-reloadable, so both must go through edit()'s
+// autoRestart=true path (the same mechanism GeoIP/UPnP/remote-shell already
+// use — see quietRestart) rather than a manual "restartPending" flag the
+// operator would have to notice and act on themselves. An earlier version
+// did exactly that, in the wrong place (the Networks list) to boot; this
+// exists so neither mistake can quietly happen again.
+func TestNetworkBoolTogglesAutoRestart(t *testing.T) {
+	nf := strings.Index(indexHTML, "function secSettingsNetwork(c) {")
+	if nf < 0 {
+		t.Fatal("secSettingsNetwork is missing")
+	}
+	block := indexHTML[nf:]
+	if end := strings.Index(block, "\nfunction secSettingsPerformance"); end > 0 {
+		block = block[:end]
+	}
+	for _, want := range []string{
+		"allow_relay", // the relay op
+		"self_seed",   // the self-seed op
+		"rsCfgs",      // the per-network iteration this section is built from
+	} {
+		if !strings.Contains(block, want) {
+			t.Errorf("secSettingsNetwork is missing %q", want)
+		}
+	}
+	// The actual save calls: autoRestart=true is the third argument to
+	// edit(), not a bare payload object followed by nothing (which would
+	// leave the setting merely restart-pending).
+	for _, want := range []string{
+		"edit('/api/network', { op:'allow_relay', net:cf.id, enabled:want }, true)",
+		"edit('/api/network', { op:'self_seed', net:cf.id, enabled:want }, true)",
+	} {
+		if !strings.Contains(block, want) {
+			t.Errorf("relay/self-seed toggle no longer routes through edit()'s autoRestart=true — expected %q", want)
+		}
+	}
+	// Must not have regressed back to a hand-rolled restart flag for either.
+	if strings.Contains(block, "state.restartPending = true") {
+		t.Error("secSettingsNetwork sets state.restartPending directly somewhere — the relay/self-seed toggles should rely on edit()'s built-in handling instead")
+	}
+	// Must not have regressed back onto the Networks list page (secNetworks)
+	// — these are per-network config, but this page's own settings-row
+	// layout, not that table's columns.
+	nwf := strings.Index(indexHTML, "function secNetworks(c) {")
+	if nwf < 0 {
+		t.Fatal("secNetworks is missing")
+	}
+	nwBlock := indexHTML[nwf:]
+	if end := strings.Index(nwBlock, "\nfunction secPeers"); end > 0 {
+		nwBlock = nwBlock[:end]
+	}
+	if strings.Contains(nwBlock, "allow_relay") || strings.Contains(nwBlock, "self_seed") {
+		t.Error("relay/self-seed appear back on the Networks list page (secNetworks) — they belong in Settings > Network instead")
 	}
 }
 

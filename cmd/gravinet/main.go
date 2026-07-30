@@ -48,7 +48,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "720"
+	version = "729"
 	commit  = "none"
 )
 
@@ -1097,6 +1097,12 @@ func cmdRun(args []string) {
 					boot := append(append([]string{}, n.Seeds.Addrs()...), n.PeerCache...)
 					spec.Seeds = resolveSeeds(boot, newCfg.PrimaryPort, overlays)
 					spec.TCPSeeds = resolveTCPSeeds(boot, newCfg.TCPFallbackPortValue(), overlays)
+					// Clean counterparts: exactly the operator's configured Seeds,
+					// none of PeerCache folded in -- see NetSpec.ConfiguredSeeds'
+					// doc comment. Same resolver, same expansion rules (multi-port
+					// lists, tcp:// scheme), just without boot's extra addresses.
+					spec.ConfiguredSeeds = resolveSeeds(n.Seeds.Addrs(), newCfg.PrimaryPort, overlays)
+					spec.ConfiguredTCPSeeds = resolveTCPSeeds(n.Seeds.Addrs(), newCfg.TCPFallbackPortValue(), overlays)
 					if ks, kerr := crypto.NewKeySet(keyStrings(n)); kerr == nil {
 						spec.Keys = ks
 						spec.KeyLabels = keyLabelMap(n)
@@ -2332,6 +2338,7 @@ func buildOneNetSpec(n config.Network, cfg *config.Config, overlays []netip.Pref
 		Dev:         dev,
 		ExtraQueues: toMeshQueues(extraQueues),
 		AllowRelay:  n.AllowRelay,
+		SelfSeed:    n.SelfSeed,
 		Ban:         cfg.AuthBan,
 	}
 	// Let the engine rebuild this interface if the OS tears it down at runtime
@@ -2395,6 +2402,10 @@ func buildOneNetSpec(n config.Network, cfg *config.Config, overlays []netip.Pref
 	boot := append(append([]string{}, n.Seeds.Addrs()...), n.PeerCache...)
 	spec.Seeds = resolveSeeds(boot, cfg.PrimaryPort, overlays)
 	spec.TCPSeeds = resolveTCPSeeds(boot, cfg.TCPFallbackPortValue(), overlays)
+	// Clean counterparts: exactly the operator's configured Seeds, none of
+	// PeerCache folded in -- see NetSpec.ConfiguredSeeds' doc comment.
+	spec.ConfiguredSeeds = resolveSeeds(n.Seeds.Addrs(), cfg.PrimaryPort, overlays)
+	spec.ConfiguredTCPSeeds = resolveTCPSeeds(n.Seeds.Addrs(), cfg.TCPFallbackPortValue(), overlays)
 
 	spec.HostsSync = n.HostsSync.Enabled
 	spec.HostsPath = n.HostsSync.Path

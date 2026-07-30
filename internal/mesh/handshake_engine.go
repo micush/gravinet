@@ -80,6 +80,7 @@ func (e *Engine) install(ns *netState, ps *peerSession) {
 	ni.endpoint = ps.endpoint
 	ni.managed = ps.managed
 	ni.manager = ps.manager
+	ni.selfSeed = ps.selfSeed
 	ni.bgpASN = ps.bgpASN
 	ni.version = ps.version
 	ni.webPort = ps.webPort
@@ -343,6 +344,7 @@ func (e *Engine) onHSInit(payload []byte, from netip.AddrPort, via *peerSession)
 		managed:        pl.Managed,
 		manager:        pl.Manager,
 		allowRelay:     pl.AllowRelay,
+		selfSeed:       pl.SelfSeed,
 		relayKnown:     pl.RelayKnown,
 		localEndpoints: pl.LocalEndpoints,
 		webPort:        pl.WebPort,
@@ -375,6 +377,7 @@ func (e *Engine) onHSInit(payload []byte, from netip.AddrPort, via *peerSession)
 		Managed:        e.managed.Load(),
 		Manager:        e.manager.Load(),
 		AllowRelay:     ns.spec.AllowRelay,
+		SelfSeed:       ns.spec.SelfSeed,
 		LocalEndpoints: e.localEndpoints(),
 		WebPort:        e.webPort,
 		TCPPort:        uint16(e.fallbackPort.Load()),
@@ -418,6 +421,17 @@ func (e *Engine) onHSResp(payload []byte, from netip.AddrPort, via *peerSession)
 	if p == nil {
 		return // unknown or already-completed handshake
 	}
+	// Whether *this* completing handshake arrived over the TCP fallback or
+	// plain UDP — same check ListPeers already uses to report a connected
+	// peer's transport accurately, reused here (see configuredSeedOwnerUDP/
+	// TCP's doc comment on netState) to attribute a configured seed's owner
+	// per-transport instead of by address alone. Read-only, e.tr locked the
+	// same way send()/ListPeers already do, computed before any of the
+	// logic below so it can never interact with or be affected by it.
+	e.mu.RLock()
+	fd, hasFB := e.tr.(fallbackDialer)
+	e.mu.RUnlock()
+	viaTCP := hasFB && fd.HasFallback(p.endpoint)
 
 	// The response is sealed under whichever key the responder matched; try our
 	// keys (≤8) to open it. This is robust to key cycling on our side.
@@ -477,6 +491,7 @@ func (e *Engine) onHSResp(payload []byte, from netip.AddrPort, via *peerSession)
 		managed:        pl.Managed,
 		manager:        pl.Manager,
 		allowRelay:     pl.AllowRelay,
+		selfSeed:       pl.SelfSeed,
 		relayKnown:     pl.RelayKnown,
 		localEndpoints: pl.LocalEndpoints,
 		webPort:        pl.WebPort,
@@ -507,6 +522,27 @@ func (e *Engine) onHSResp(payload []byte, from netip.AddrPort, via *peerSession)
 	// it did, which is what produced the once-a-second "tunnel up" churn for
 	// a subset of peers rather than a one-time connect.
 	ns.seedOwner[p.endpoint] = pl.NodeID
+	// Same proof, but per-transport and bounded to the operator's actually-
+	// configured seeds -- see configuredSeedOwnerUDP/TCP's doc comment on
+	// netState for why ns.seedOwner above can't serve this on its own. The
+	// membership check (rather than writing unconditionally) is what keeps
+	// these two maps small: at most one entry per configured seed, ever,
+	// never growing with gossip or NAT churn the way ns.seeds does.
+	if viaTCP {
+		for _, s := range ns.configuredTCPSeeds {
+			if s == p.endpoint {
+				ns.configuredSeedOwnerTCP[p.endpoint] = pl.NodeID
+				break
+			}
+		}
+	} else {
+		for _, s := range ns.configuredSeeds {
+			if s == p.endpoint {
+				ns.configuredSeedOwnerUDP[p.endpoint] = pl.NodeID
+				break
+			}
+		}
+	}
 	ns.mu.Unlock()
 	e.install(ns, ps)
 	if ns.absorbIdentity(pl) {
@@ -746,6 +782,7 @@ func (e *Engine) buildHSInit(ns *netState, p *pendingHS) []byte {
 		Managed:        e.managed.Load(),
 		Manager:        e.manager.Load(),
 		AllowRelay:     ns.spec.AllowRelay,
+		SelfSeed:       ns.spec.SelfSeed,
 		LocalEndpoints: e.localEndpoints(),
 		WebPort:        e.webPort,
 		TCPPort:        uint16(e.fallbackPort.Load()),

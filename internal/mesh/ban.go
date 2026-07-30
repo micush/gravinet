@@ -369,6 +369,18 @@ type ManagedPeer struct {
 	// enough detail yet); render as unknown rather than substituting
 	// anything.
 	Version string
+	// IsSeed reports whether this node is reachable at an address matching
+	// one of this node's own configured bootstrap seeds (NetSpec.Seeds or
+	// TCPSeeds), on any network it's part of. A seed is identified purely by
+	// address (see config.Seed) since that's necessarily how it's first
+	// dialed, before its node id is even known — there's no other link
+	// between "this peer" and "this seed entry" to consult. Surfaced so an
+	// upgrade rollout can treat seeds specially: taking down more than one
+	// of a network's rendezvous points at once risks a peer that's mid-
+	// reconnect losing every way back into the mesh, so seeds are worth
+	// upgrading last, and one at a time, rather than batched with everyone
+	// else (see the System > Upgrade page's push logic in ui.go).
+	IsSeed bool
 }
 
 // manageable reports whether this entry can actually be proxied to: it needs an
@@ -416,8 +428,63 @@ func betterManaged(a, b ManagedPeer) bool {
 func (e *Engine) ManagedPeers(maxAge time.Duration) []ManagedPeer {
 	now := time.Now()
 	best := map[string]ManagedPeer{}
+	// isSeed is tracked separately from best/ManagedPeer itself: seed status
+	// depends on which network a node is a seed *on*, but best keeps only
+	// the single most-manageable representative record across all of a
+	// node's networks (see betterManaged) -- a node must not lose its seed
+	// status just because its chosen representative happened to come from a
+	// different network than the one it's a seed on.
+	isSeed := map[string]bool{}
 	for id, ns := range e.netSnapshot() {
 		ns.mu.RLock()
+		// Snapshotted once per network rather than per node below: cheap,
+		// and every node checked against it belongs to this same ns anyway.
+		// Deliberately ns.configuredSeeds/configuredTCPSeeds, not ns.seeds/
+		// tcpSeeds -- those two are the live *dial* set, which folds in
+		// PeerCache (every address any peer has ever been seen at, kept
+		// around purely to speed up reconnecting after a restart) on top of
+		// the operator's actual Seeds config. Reading them directly here
+		// once flagged every peer the node had ever connected to as a
+		// "seed", not just the real ones -- see NetSpec.ConfiguredSeeds'
+		// doc comment for the full story.
+		var seeds []netip.AddrPort
+		if len(ns.configuredSeeds) > 0 || len(ns.configuredTCPSeeds) > 0 {
+			seeds = make([]netip.AddrPort, 0, len(ns.configuredSeeds)+len(ns.configuredTCPSeeds))
+			seeds = append(seeds, ns.configuredSeeds...)
+			seeds = append(seeds, ns.configuredTCPSeeds...)
+		}
+		// A live-endpoint match (below) misses a seed the instant it roams to
+		// a different address or transport — a real gap, not hypothetical:
+		// confirmed on a real fleet where one seed's live session had moved
+		// to a private LAN shortcut, and another's to a TCP fallback port,
+		// neither matching the exact address configured for it anymore.
+		// configuredSeedOwnerUDP/TCP exist almost exactly for this: a
+		// completed, authenticated handshake against a dialed address proves
+		// who's really there (handshake_engine.go's onHSResp), recorded per
+		// transport specifically so two seeds sharing one host:port —
+		// disambiguated only by UDP vs TCP, a real pattern on this exact
+		// fleet: two peers behind one NAT gateway, port-forwarded to the
+		// same external address on different protocols — can each still be
+		// attributed independently, which the older address-only ns.seedOwner
+		// could never do (see netState's doc comment on these two fields for
+		// the full story, including why ns.seedOwner itself couldn't just be
+		// reused). So a node once confirmed at one of this network's
+		// configured seed addresses, on the specific transport it was
+		// actually configured for, keeps reading as a seed here even after
+		// its current session has moved to a completely different address —
+		// including, now, one of a pair sharing an address with another
+		// seed.
+		seedOwnerNodes := map[string]bool{}
+		for _, s := range ns.configuredSeeds {
+			if owner := ns.configuredSeedOwnerUDP[s]; owner != "" {
+				seedOwnerNodes[owner] = true
+			}
+		}
+		for _, s := range ns.configuredTCPSeeds {
+			if owner := ns.configuredSeedOwnerTCP[s]; owner != "" {
+				seedOwnerNodes[owner] = true
+			}
+		}
 		for nodeID, ni := range ns.nodes {
 			if nodeID == e.nodeID || !ni.managed {
 				continue
@@ -425,6 +492,37 @@ func (e *Engine) ManagedPeers(maxAge time.Duration) []ManagedPeer {
 			_, connected := ns.byNode[nodeID]
 			if !connected && maxAge > 0 && now.Sub(ni.lastSeen) > maxAge {
 				continue
+			}
+			// The operator's own explicit declaration (config.Network.SelfSeed,
+			// advertised as hsPayload.SelfSeed) is authoritative the moment
+			// it's set — no address, transport, or roaming to account for.
+			// Checked first since it's the most reliable signal available,
+			// but the address-based checks below still run regardless: an
+			// old peer, or one the operator hasn't gotten to yet, should
+			// fall back to the previous approximate behavior, not to "never
+			// a seed."
+			if ni.selfSeed {
+				isSeed[nodeID] = true
+			}
+			// Exact address match, port included: a seed is configured as a
+			// specific host:port (config.Seed.Address, parsed into
+			// NetSpec.Seeds/TCPSeeds), and that port is precisely what
+			// disambiguates it from another, unrelated peer sharing the same
+			// public IP behind the same NAT gateway or office router — a very
+			// real topology, not a hypothetical one (confirmed against a real
+			// fleet: several peers legitimately shared one IP, differing only
+			// by port, and an earlier IP-only version of this check flagged
+			// every one of them as a seed instead of just the actual seed).
+			if ni.endpoint.IsValid() {
+				for _, s := range seeds {
+					if s == ni.endpoint {
+						isSeed[nodeID] = true
+						break
+					}
+				}
+			}
+			if seedOwnerNodes[nodeID] {
+				isSeed[nodeID] = true
 			}
 			cur := ManagedPeer{
 				NodeID: nodeID, Hostname: ni.hostname, Network: id,
@@ -439,7 +537,8 @@ func (e *Engine) ManagedPeers(maxAge time.Duration) []ManagedPeer {
 		ns.mu.RUnlock()
 	}
 	out := make([]ManagedPeer, 0, len(best))
-	for _, m := range best {
+	for nodeID, m := range best {
+		m.IsSeed = isSeed[nodeID]
 		out = append(out, m)
 	}
 	// best is a map, and Go deliberately randomizes map iteration order on

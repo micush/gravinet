@@ -2633,7 +2633,7 @@ function buildPortListRow(id, label, desc, initialPorts, apiPath, onSaved, initi
 // now owns it.
 function secSettings(c) {
   state.settingsTab = state.settingsTab || 'general';
-  secHint(c, 'Console, security, and node-wide settings. <b>General</b> covers the interface and local housekeeping; <b>Security</b> covers access control, certificates, and what a Manager peer may do here; <b>Network</b> covers mesh timing, ports, and NAT; <b>Performance</b> is advanced tuning most setups never need to touch.');
+  secHint(c, 'Console, security, and node-wide settings. <b>General</b> covers the interface and local housekeeping; <b>Security</b> covers access control, certificates, and what a Manager peer may do here; <b>Network</b> covers mesh timing, ports, NAT, relay, and self-seed; <b>Performance</b> is advanced tuning most setups never need to touch.');
   c.appendChild(buildTabBar([['general','General'],['security','Security'],['network','Network'],['performance','Performance']], state.settingsTab,
     (tab) => { state.settingsTab = tab; renderSection(); }));
 
@@ -3072,6 +3072,52 @@ function secSettingsNetwork(c) {
     [state.tcpPort, ...(state.extraTCPPorts||[])], '/api/tcpport',
     (ports, disabled) => { state.tcpFallbackDisabled = disabled; if (!disabled) { state.tcpPort = ports[0]; state.extraTCPPorts = ports.slice(1); } },
     state.tcpFallbackDisabled));
+
+  c.appendChild(card); card = $('<div class="card"></div>');
+
+  // Relay and self-seed are per-network config (config.Network.AllowRelay/
+  // SelfSeed), unlike everything else on this page (ports, NAT timeout,
+  // UPnP), which is genuinely node-global. One settings-row pair per
+  // network handles that honestly rather than pretending there's a single
+  // node-wide value — the common case (one network) reads as a single pair
+  // of rows with no name clutter; more than one network gets the name
+  // appended to disambiguate.
+  card.appendChild($('<h3>Relay & Seed</h3>'));
+  const rsCfgs = state.cfg;
+  if (!rsCfgs.length) {
+    card.appendChild($('<div class="hint">no networks \u2014 create one under Networks first</div>'));
+  } else {
+    const multiNet = rsCfgs.length > 1;
+    for (const cf of rsCfgs) {
+      const suffix = multiNet ? ' \u2014 ' + esc(cf.name) : '';
+
+      const relayRow = $('<div class="settings-row"></div>');
+      relayRow.appendChild($('<div><div class="settings-label">Relay'+suffix+'</div><div class="settings-desc">Whether this node is willing to relay other peers\' traffic on this network when they can\'t reach each other directly. On by default. Restarts to apply.</div></div>'));
+      const relaySw = $('<label class="sw"><input type="checkbox"><span class="sw-slider"></span></label>');
+      const relayCb = relaySw.querySelector('input');
+      relayCb.checked = cf.allow_relay !== false;
+      relayCb.onchange = async () => {
+        const want = relayCb.checked;
+        const ok = await edit('/api/network', { op:'allow_relay', net:cf.id, enabled:want }, true);
+        if (!ok) relayCb.checked = !want;
+      };
+      relayRow.appendChild(relaySw);
+      card.appendChild(relayRow);
+
+      const seedRow = $('<div class="settings-row"></div>');
+      seedRow.appendChild($('<div><div class="settings-label">Self-seed'+suffix+'</div><div class="settings-desc">An explicit declaration that this node should be treated as a seed for this network \u2014 see System \u203a Upgrade, which trusts this over trying to infer seed status by matching addresses. Off by default; not the same as actually being listed on the Seeds page. Restarts to apply.</div></div>'));
+      const seedSw = $('<label class="sw"><input type="checkbox"><span class="sw-slider"></span></label>');
+      const seedCb = seedSw.querySelector('input');
+      seedCb.checked = !!cf.self_seed;
+      seedCb.onchange = async () => {
+        const want = seedCb.checked;
+        const ok = await edit('/api/network', { op:'self_seed', net:cf.id, enabled:want }, true);
+        if (!ok) seedCb.checked = !want;
+      };
+      seedRow.appendChild(seedSw);
+      card.appendChild(seedRow);
+    }
+  }
 
   c.appendChild(card); card = $('<div class="card"></div>');
 
@@ -7203,7 +7249,7 @@ async function drawUpgrade(host){
     // (buildRouteChipPicker), keyed on node_id but labelled with the hostname:
     // a checkbox list is fine for three peers and unreadable for thirty.
     const peerRow = $('<div class="settings-row"></div>');
-    peerRow.appendChild($('<div><div class="settings-label">Peers</div><div class="settings-desc">Pick specific peers to upgrade (this node stays untouched), or <b>all peers, then this node</b> to roll the whole fleet, applying to this node last. Leave empty to upgrade only this node. Each target peer needs <b>Accept Manager-pushed upgrades</b> turned on, and reverts on its own if it can\u2019t rejoin the mesh.</div></div>'));
+    peerRow.appendChild($('<div><div class="settings-label">Peers</div><div class="settings-desc">Pick specific peers to upgrade (this node stays untouched), or <b>all peers, then this node</b> to roll the whole fleet, applying to this node last. Leave empty to upgrade only this node. Each target peer needs <b>Accept Manager-pushed upgrades</b> turned on, and reverts on its own if it can\u2019t rejoin the mesh. Any of this network\u2019s configured seeds are always held back until last and pushed one at a time, never batched with the rest \u2014 losing more than one rendezvous point at once risks a peer mid-reconnect finding no way back into the mesh.</div></div>'));
     targets = computeSortedManageablePeers();
     // Offer the "all peers, then this node" sentinel only when there is at least
     // one peer to roll; with none it would just mean "this node", which the
@@ -7243,18 +7289,34 @@ async function drawUpgrade(host){
     const allThenLocal = sel.indexOf(ALL_PEERS) !== -1;
     const nodes = allThenLocal ? targets.map(p => p.node_id) : sel;
 
+    // Seeds are held back until last and pushed one at a time, never batched
+    // with the rest of the fleet or with each other — see targetById.is_seed
+    // (mesh.ManagedPeer.IsSeed's doc comment has the full reasoning): taking
+    // down more than one of a network's bootstrap/rendezvous points at once
+    // risks a peer that's mid-reconnect losing every way back into the mesh.
+    // Looked up from targets (this render's snapshot of computeSortedManageablePeers),
+    // not state.cluster directly — nodes may include ids from an explicit
+    // selection made against that same snapshot, so the two always agree.
+    const targetById = new Map(targets.map(p => [p.node_id, p]));
+    const isSeedId = (id) => !!(targetById.get(id) && targetById.get(id).is_seed);
+    const seedNodes = nodes.filter(isSeedId);
+    const nonSeedNodes = nodes.filter(id => !isSeedId(id));
+
     // Confirm (modal) before anything is disabled or sent.
     if (nodes.length){
+      const seedNote = seedNodes.length
+        ? ('\n\n' + seedNodes.length + ' of them ' + (seedNodes.length === 1 ? 'is a configured seed' : 'are configured seeds') + ' for this network and will be upgraded last, one at a time.')
+        : '';
       const msg = allThenLocal
-        ? 'Upgrade all ' + nodes.length + ' peer' + (nodes.length === 1 ? '' : 's') + ', then this node?\n\nThis node is upgraded only after every peer has applied. If any peer fails, this node is left as-is.'
-        : (nodes.length === 1 ? 'Upgrade this peer?' : 'Upgrade these ' + nodes.length + ' peers?');
+        ? 'Upgrade all ' + nodes.length + ' peer' + (nodes.length === 1 ? '' : 's') + ', then this node?\n\nThis node is upgraded only after every peer has applied. If any peer fails, this node is left as-is.' + seedNote
+        : (nodes.length === 1 ? 'Upgrade this peer?' : 'Upgrade these ' + nodes.length + ' peers?') + seedNote;
       if (!confirm(msg)) return;
     } else {
       if (!confirm('Upgrade this node?')) return;
     }
 
     // applyLocal builds+applies on THIS node (/api/upgrade/source) and restarts
-    // into it. Used for an empty selection and as the second phase of "all
+    // into it. Used for an empty selection and as the final phase of "all
     // peers, then this node". Assumes the caller has already disabled the button.
     // buildDotsTimer animates the label for as long as the build+apply request
     // is in flight, same reasoning as pushDotsTimer below: a local build can
@@ -7284,28 +7346,24 @@ async function drawUpgrade(host){
     };
 
     upgradeBtn.disabled = true;
-    // pushDotsTimer animates the Pushing label for as long as the push
+    // pushDotsTimer animates the Pushing label for as long as any push
     // request is actually in flight — a build+preflight+swap on N peers can
     // legitimately take minutes (see handleUpgradePush's own comment), and a
     // static "Pushing…" gives no sign the tab hasn't just frozen. Declared
     // here (not inside the try below) so the finally block can always clear
-    // it, even if something throws before the explicit clear after the
-    // fetch resolves — otherwise a stray tick could overwrite the "Upgrade"
+    // it, even if something throws before the explicit clear after the last
+    // push resolves — otherwise a stray tick could overwrite the "Upgrade"
     // label the finally block sets afterward.
     let pushDotsTimer = null;
     try {
       if (!nodes.length){ await applyLocal(); return; }
 
-      // Push phase: one archive to every target peer. The server fans out with
-      // a bounded concurrency and streams each peer's result back the instant
-      // that peer finishes (see handleUpgradePush), so "all peers first" is
-      // still guaranteed before the local phase can start, but the operator
-      // watches results land one by one instead of staring at "Pushing…" until
-      // the slowest peer in the batch is done.
       resBox.innerHTML = '';
       const progress = $('<div class="hint"></div>');
-      const setProgress = (n) => { progress.textContent = 'Building on ' + nodes.length + ' peer(s)\u2026 ' + n + ' of ' + nodes.length + ' finished so far.'; };
-      setProgress(0);
+      const totalCount = nodes.length;
+      let finished = 0;
+      const setProgress = () => { progress.textContent = 'Building on ' + totalCount + ' peer(s)\u2026 ' + finished + ' of ' + totalCount + ' finished so far.'; };
+      setProgress();
       resBox.appendChild(progress);
       let pushDots = 0;
       upgradeBtn.textContent = 'Pushing';
@@ -7313,19 +7371,7 @@ async function drawUpgrade(host){
         pushDots = (pushDots + 1) % 4;
         upgradeBtn.textContent = 'Pushing' + '.'.repeat(pushDots);
       }, 450);
-      // Order matters: the peer list is read before the archive so the server
-      // knows the targets before it spends anything spooling.
-      const fd = new FormData();
-      fd.append('nodes', JSON.stringify(nodes));
-      fd.append('source', fileIn.files[0]);
-      const resp = await fetch('/api/upgrade/push', { method:'POST', body: fd });
-      if (!resp.ok || !resp.body){
-        clearInterval(pushDotsTimer); pushDotsTimer = null;
-        const body = await resp.json().catch(()=>({}));
-        resBox.innerHTML = '';
-        resBox.appendChild($('<div class="hint" style="color:var(--danger,#b33)">'+esc(body.error || 'push failed')+'</div>'));
-        return;
-      }
+
       // resultLabel is peerLabel without the id/version suffix: useful in the
       // picker above, where "which builds are behind" is the point, but
       // actively misleading here — the version it would show is this peer's
@@ -7339,13 +7385,13 @@ async function drawUpgrade(host){
       };
       // addResult renders one peer's line the moment it's known, rather than
       // a loop over a fully-collected array once every peer is done — that's
-      // the whole point of reading the response as a stream below.
-      const applied = [];
-      let finished = 0;
+      // the whole point of reading each push's response as a stream below.
+      // Shared across every batch (the non-seed one and every single-seed
+      // one after it) so the progress line counts up continuously across
+      // the whole rollout instead of resetting per phase.
       const addResult = (res) => {
         finished++;
-        setProgress(finished);
-        if (res.ok) applied.push(res.node);
+        setProgress();
         const line = $('<div style="margin:3px 0;font-size:12px"></div>');
         const mark = $('<span></span>');
         mark.textContent = res.ok ? '\u2713 ' : '\u2717 ';
@@ -7359,35 +7405,86 @@ async function drawUpgrade(host){
         }
         resBox.appendChild(line);
       };
-      // The body is newline-delimited JSON, one object per peer plus a final
-      // {"done":true,...} summary, flushed as each peer finishes. Reading it
-      // as a byte stream (rather than resp.json(), which waits for the whole
-      // body — every peer — before returning anything) is what lets addResult
-      // fire per peer instead of all at once at the end.
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = '';
-      const handleLine = (line) => {
-        if (!line.trim()) return;
-        let obj;
-        try { obj = JSON.parse(line); } catch { return; }
-        if (!obj.done) addResult(obj); // the final {"done":true,...} summary line carries nothing the per-peer lines above haven't already shown
+
+      // pushBatch pushes exactly batchNodes in one /api/upgrade/push call,
+      // streaming each result into addResult the instant it's known (see
+      // handleUpgradePush's own comment on why the response is
+      // newline-delimited JSON rather than one array), and resolves once
+      // every one of them has reported in. Returns the subset that actually
+      // applied — or null for a request-level failure (the push never
+      // reached the server, or it rejected the request outright), which is
+      // deliberately distinct from a per-peer failure: null tells the caller
+      // to abort the whole rollout immediately rather than treat it as
+      // "these particular nodes failed".
+      const pushBatch = async (batchNodes) => {
+        const fd = new FormData();
+        fd.append('nodes', JSON.stringify(batchNodes));
+        fd.append('source', fileIn.files[0]);
+        const resp = await fetch('/api/upgrade/push', { method:'POST', body: fd });
+        if (!resp.ok || !resp.body){
+          const body = await resp.json().catch(()=>({}));
+          resBox.appendChild($('<div class="hint" style="color:var(--danger,#b33)">'+esc(body.error || 'push failed')+'</div>'));
+          return null;
+        }
+        const applied = [];
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        const handleLine = (line) => {
+          if (!line.trim()) return;
+          let obj;
+          try { obj = JSON.parse(line); } catch { return; }
+          if (obj.done) return; // the final {"done":true,...} summary line carries nothing the per-peer lines above haven't already shown
+          if (obj.ok) applied.push(obj.node);
+          addResult(obj);
+        };
+        while (true){
+          const { done: readDone, value } = await reader.read();
+          if (readDone) break;
+          buf += decoder.decode(value, { stream: true });
+          let nl;
+          while ((nl = buf.indexOf('\n')) !== -1){
+            handleLine(buf.slice(0, nl));
+            buf = buf.slice(nl + 1);
+          }
+        }
+        if (buf) handleLine(buf);
+        return applied;
       };
-      while (true){
-        const { done: readDone, value } = await reader.read();
-        if (readDone) break;
-        buf += decoder.decode(value, { stream: true });
-        let nl;
-        while ((nl = buf.indexOf('\n')) !== -1){
-          handleLine(buf.slice(0, nl));
-          buf = buf.slice(nl + 1);
+
+      const appliedAll = [];
+      let stoppedEarly = false;
+
+      // Phase 1: every non-seed peer, batched exactly as before (server-side
+      // bounded concurrency, results streamed back as each one finishes).
+      if (nonSeedNodes.length){
+        const applied = await pushBatch(nonSeedNodes);
+        if (applied === null) return; // request-level failure: abort, touch nothing else
+        appliedAll.push(...applied);
+        if (applied.length !== nonSeedNodes.length) stoppedEarly = true;
+      }
+
+      // Phase 2: seeds, one at a time, and only attempted at all if every
+      // non-seed peer already succeeded — a seed is exactly the node a
+      // struggling peer needs to still be there while everything else is
+      // mid-upgrade, so there is no "partial fleet, but push seeds anyway".
+      // Any one seed failing stops the loop right there, same all-or-nothing
+      // rule as phase 1, so a bad build can't reach the rest of the seeds
+      // (or the local node) just because it happened to fail on seed #2.
+      if (!stoppedEarly && seedNodes.length){
+        resBox.appendChild($('<div class="hint" style="margin-top:6px">upgrading seeds one at a time\u2026</div>'));
+        for (const seedId of seedNodes){
+          const applied = await pushBatch([seedId]);
+          if (applied === null) return; // request-level failure: abort, touch nothing else
+          appliedAll.push(...applied);
+          if (!applied.length){ stoppedEarly = true; break; }
         }
       }
-      if (buf) handleLine(buf);
+
       clearInterval(pushDotsTimer); pushDotsTimer = null;
 
-      const done = new Set(applied);
-      const allApplied = applied.length === nodes.length;
+      const done = new Set(appliedAll);
+      const allApplied = appliedAll.length === nodes.length;
 
       if (allThenLocal){
         // The picker holds the ALL sentinel, not individual chips. On full
@@ -7400,9 +7497,9 @@ async function drawUpgrade(host){
           resBox.appendChild($('<div class="hint">All peers applied or already up to date \u2014 upgrading this node now\u2026</div>'));
           await applyLocal();
         } else {
-          resBox.appendChild($('<div class="hint" style="color:var(--danger,#b33)">'+applied.length+' of '+nodes.length+' peers applied or already up to date; this node was left as-is. Fix or retry the failed peers, then upgrade this node.</div>'));
+          resBox.appendChild($('<div class="hint" style="color:var(--danger,#b33)">'+appliedAll.length+' of '+nodes.length+' peers applied or already up to date; this node was left as-is. Fix or retry the failed peers, then upgrade this node.</div>'));
         }
-      } else if (applied.length){
+      } else if (appliedAll.length){
         // Explicit selection: drop the peers that applied, keep any that failed
         // so they can be retried without re-adding them.
         peerPicker.set(peerPicker.get().filter(n => !done.has(n)));

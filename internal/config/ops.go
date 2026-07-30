@@ -183,6 +183,34 @@ func (c *Config) NetworkSetEnabled(name string, on bool) error {
 	return nil
 }
 
+// NetworkSetSelfSeed toggles this node's own SelfSeed declaration for a
+// network — see Network.SelfSeed's doc comment. Not currently hot-reloadable
+// (mirrors mesh.NetSpec.AllowRelay, set only at network construction, never
+// on live reload — see cmd/gravinet's buildOneNetSpec); a restart is needed
+// for a change here to be advertised to peers.
+func (c *Config) NetworkSetSelfSeed(name string, on bool) error {
+	n := c.FindNetwork(name)
+	if n == nil {
+		return fmt.Errorf("no network named %q", name)
+	}
+	n.SelfSeed = on
+	return nil
+}
+
+// NetworkSetAllowRelay toggles whether this node is willing to relay other
+// peers' traffic on a network — see Network.AllowRelay's doc comment. Not
+// currently hot-reloadable (mirrors mesh.NetSpec.AllowRelay, which
+// cmd/gravinet only reads at network construction, not on live reload); a
+// restart is needed for a change here to take effect.
+func (c *Config) NetworkSetAllowRelay(name string, on bool) error {
+	n := c.FindNetwork(name)
+	if n == nil {
+		return fmt.Errorf("no network named %q", name)
+	}
+	n.AllowRelay = on
+	return nil
+}
+
 // NetworkRename changes a network's local label. The name is config-only metadata
 // (the engine identifies networks by their immutable ID), so this is safe and does
 // not need a restart.

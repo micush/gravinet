@@ -2,6 +2,7 @@ package mesh
 
 import (
 	"fmt"
+	"net/netip"
 
 	"gravinet/internal/crypto"
 	"gravinet/internal/protocol"
@@ -119,6 +120,15 @@ func (e *Engine) ReloadRuntime(networkID uint64, spec NetSpec) error {
 	for _, s := range spec.TCPSeeds {
 		e.addTCPSeed(networkID, s)
 	}
+
+	// configuredSeeds/configuredTCPSeeds: unlike the merge just above, this is
+	// a wholesale replace, not additive -- see netState.configuredSeeds' doc
+	// comment for why a removed seed needs to stop counting here immediately
+	// rather than lingering the way the live dial set intentionally does.
+	ns.mu.Lock()
+	ns.configuredSeeds = append([]netip.AddrPort(nil), spec.ConfiguredSeeds...)
+	ns.configuredTCPSeeds = append([]netip.AddrPort(nil), spec.ConfiguredTCPSeeds...)
+	ns.mu.Unlock()
 
 	// Redistributed routes: swap the advertised/reject sets and flood the delta
 	// (advertise new routes, withdraw removed ones) so changes apply live.
