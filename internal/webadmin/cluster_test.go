@@ -87,6 +87,70 @@ func TestClusterEndpoint(t *testing.T) {
 	}
 }
 
+// TestClusterManageableRequiresReachability pins the fix for the header
+// picker listing peers that are structurally unreachable on a partial-mesh
+// network: gossip about a node's overlay address travels across the whole
+// mesh independent of whether a session to it can ever form (partial mesh
+// refuses both direct and relayed links between two non-seeds — see
+// handshake_engine.go), so a known overlay IP+port alone is not enough to
+// call a peer manageable. Manageable must also require Connected (a live
+// session, direct or relayed) or IsSeed (partial mesh always permits a link
+// to a seed, so one connecting shortly is expected even if not up this
+// instant).
+func TestClusterManageableRequiresReachability(t *testing.T) {
+	_, be, ts := newTestServer(t)
+	be.managed = true
+	be.managedPeers = []mesh.ManagedPeer{
+		{
+			// Gossip-only, non-seed, never connected: this is exactly the
+			// partial-mesh case that used to show up as manageable and then
+			// silently fail when picked.
+			NodeID: "peer-unreachable", Hostname: "node-unreachable",
+			Overlay4: netip.MustParseAddr("10.0.0.4"), WebPort: 8443,
+			LastSeen: time.Now(), Connected: false, IsSeed: false,
+		},
+		{
+			// A seed we're not currently connected to (e.g. mid-reconnect):
+			// partial mesh always permits a link here, so it stays listed.
+			NodeID: "peer-seed", Hostname: "node-seed",
+			Overlay4: netip.MustParseAddr("10.0.0.5"), WebPort: 8443,
+			LastSeen: time.Now(), Connected: false, IsSeed: true,
+		},
+		{
+			// Connected but not a seed: reachable right now via its own live
+			// session, so still listed regardless of seed status.
+			NodeID: "peer-connected", Hostname: "node-connected",
+			Overlay4: netip.MustParseAddr("10.0.0.6"), WebPort: 8443,
+			LastSeen: time.Now(), Connected: true, IsSeed: false,
+		},
+	}
+	c := sessionFor(t, ts)
+	req, _ := http.NewRequest("GET", ts.URL+"/api/cluster", nil)
+	req.AddCookie(c)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var body struct {
+		Peers []clusterPeer `json:"peers"`
+	}
+	json.NewDecoder(resp.Body).Decode(&body)
+	byHost := map[string]clusterPeer{}
+	for _, p := range body.Peers {
+		byHost[p.Hostname] = p
+	}
+	if p, ok := byHost["node-unreachable"]; !ok || p.Manageable {
+		t.Errorf("node-unreachable (gossip-only, non-seed, disconnected) should not be manageable, got %+v", p)
+	}
+	if p, ok := byHost["node-seed"]; !ok || !p.Manageable {
+		t.Errorf("node-seed (disconnected but a seed) should still be manageable, got %+v", p)
+	}
+	if p, ok := byHost["node-connected"]; !ok || !p.Manageable {
+		t.Errorf("node-connected (live session, non-seed) should be manageable, got %+v", p)
+	}
+}
+
 // TestProxyRejectsManagedManagerPaths locks in that Managed/Manager mode can
 // never be changed on a remote peer through the proxy, regardless of what a
 // client sends — the server-side trust boundary, not just the frontend's own

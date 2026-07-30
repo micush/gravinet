@@ -2,6 +2,24 @@
 
 ---
 
+## v747 — 2026-07-30
+
+**Fix: the header node picker ("choose which node this GUI configures") no longer lists peers that are structurally unreachable for management on a partial-mesh network.**
+
+`clusterPeer.Manageable` was computed purely from gossip — a valid overlay IP plus an advertised web port — with no check that a management hop could actually get there. On a partial-mesh network that's not the same thing: gossip about a node's address travels across the whole mesh independent of whether a session to it can ever form (see `peerListSeedBlock`, added when partial mesh shipped, specifically so seed status "can travel with a node it's only heard about secondhand, not just a direct neighbor"), while partial mesh itself hard-refuses *both* direct and relayed links between two non-seeds (`handshake_engine.go`). A non-seed node therefore heard about, and listed, every other non-seed peer on the network — none of which it could ever actually open a session to.
+
+Picking one of those didn't error either: v669 removed the peer-proxy failure alert, so the header dropdown just silently fell back to managing the local node with no indication anything had gone wrong. An operator on a partial-mesh network could stare at the picker, pick a peer they'd never be able to reach, and get nothing.
+
+`Manageable` now additionally requires `Connected` (a live session, direct or relayed — actually reachable right now) or `IsSeed` (partial mesh always permits a link to a seed, so one not currently up is still expected to connect shortly). A peer that's neither is dropped from the list rather than offered and then silently failing.
+
+**Minor behavior note:** on a *full*-mesh network, a brand-new gossip-learned peer can now be briefly absent from the picker until its own session comes up, instead of appearing the instant it's heard about. Full mesh eagerly dials every peer it learns of, so this is expected to self-resolve within a couple of seconds and isn't treated as a regression — just documenting the shift from "shows up immediately" to "shows up once actually reachable."
+
+Added `TestClusterManageableRequiresReachability` (`internal/webadmin/cluster_test.go`), covering all three cases: a gossip-only non-seed peer that's never been connected (now correctly excluded), a currently-disconnected seed (still included), and a connected non-seed (still included). Confirmed it fails against the pre-fix computation and passes against the fix.
+
+Verified: `go build ./...` and `go vet ./...` clean, `gofmt` clean. Full `internal/webadmin` suite passes, including the pre-existing `TestClusterEndpoint` and `TestProxyRejectsManagedManagerPaths` (both unaffected — their fixtures already set `Connected: true`).
+
+---
+
 ## v746 — 2026-07-30
 
 **Fix: the Mesh > Networks mesh (full/partial) toggle now gives immediate feedback instead of sitting unchanged for the whole restart.**

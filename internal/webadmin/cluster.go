@@ -123,8 +123,21 @@ type clusterPeer struct {
 	WebPort    int    `json:"web_port"` // its web-admin port
 	AgeSeconds int    `json:"age_seconds"`
 	Connected  bool   `json:"connected"`
-	Manageable bool   `json:"manageable"` // we have an overlay IP + port to proxy to
-	Manager    bool   `json:"manager"`    // peer currently advertises Manager mode — only a
+	// Manageable reports whether the header picker should offer this node as a
+	// proxy target: we have an overlay IP + port to dial (from gossip), AND
+	// there's an actual path there — either a live session (Connected) or the
+	// peer is a Seed, which partial mesh always permits a link to regardless
+	// of whether one happens to be up this instant. Gossip about a node's
+	// address travels across the whole mesh independent of whether a session
+	// to it can ever form (see partial mesh's peerListSeedBlock), so without
+	// the Connected||IsSeed half of this check, a non-seed node would list
+	// other non-seed peers it can structurally never reach — direct AND
+	// relayed links between two non-seeds are both refused under partial
+	// mesh (handshake_engine.go) — and picking one just silently fails back
+	// to managing this node locally (see v669's removal of the peer-proxy
+	// failure alert) with no indication why.
+	Manageable bool `json:"manageable"`
+	Manager    bool `json:"manager"` // peer currently advertises Manager mode — only a
 	// Manager-mode peer is accepted by another node's overlay-sourced auth
 	// bypass (see webadmin.authed / mesh.IsManagerAddr), so this is what the
 	// Speedtest "from" picker filters on: a merely-Managed peer looks
@@ -159,7 +172,10 @@ func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 			WebPort:    int(m.WebPort),
 			AgeSeconds: int(now.Sub(m.LastSeen).Seconds()),
 			Connected:  m.Connected,
-			Manageable: ip.IsValid() && m.WebPort != 0,
+			// See clusterPeer.Manageable's doc comment: a known overlay
+			// address alone isn't enough on a partial-mesh network, where a
+			// gossip-only, non-seed peer can be permanently unreachable.
+			Manageable: ip.IsValid() && m.WebPort != 0 && (m.Connected || m.IsSeed),
 			Manager:    m.Manager,
 			Version:    m.Version,
 			IsSeed:     m.IsSeed,
