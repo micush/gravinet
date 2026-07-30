@@ -886,12 +886,27 @@ func (e *Engine) teardownSessions(ns *netState, dead []*peerSession, reason stri
 	if len(dead) == 0 {
 		return
 	}
+	now := time.Now()
 	ns.mu.Lock()
 	var goneNodes []string
 	for _, ps := range dead {
 		if ns.byNode[ps.nodeID] == ps {
 			delete(ns.byNode, ps.nodeID)
 			goneNodes = append(goneNodes, ps.nodeID)
+			// Only counted here, inside this check: e.sessions can hold
+			// several simultaneous sessions for one node (the multi-port
+			// seed-candidate pile-up — see NetSpec.ConfiguredSeeds' doc
+			// comment for why that happens at all — leaves duplicates
+			// behind that this same sweep also reaps), and only one of
+			// them is ever ns.byNode's actual current session. Counting
+			// every duplicate's cleanup as its own "reconnect" would
+			// report one churn burst as N flaps instead of the one that
+			// actually mattered: the active session dying.
+			if ni := ns.nodes[ps.nodeID]; ni != nil {
+				ni.reconnects++
+				ni.lastReconnectReason = reason
+				ni.lastReconnectAt = now
+			}
 		}
 		if ps.overlay4.IsValid() && ns.routes4[ps.overlay4] == ps {
 			delete(ns.routes4, ps.overlay4)

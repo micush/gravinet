@@ -93,6 +93,23 @@ type PeerInfo struct {
 
 	Transport string `json:"transport"` // active underlay transport for this peer: "udp" or "tcp" (TLS fallback)
 
+	// Reconnects/LastReconnectReason/LastReconnectAgoSeconds surface
+	// nodeInfo.reconnects et al — see its doc comment. The point of these:
+	// a session can look perfectly healthy in a single snapshot (good RTT,
+	// recent EstablishedAt) while the *link* has actually been flapping
+	// every few minutes, each time settling on a fresh, healthy-looking
+	// session — invisible without a durable counter, previously only
+	// reconstructable by grepping a log tail for "pruned"/"reconnecting"
+	// lines by hand, often across two different nodes' tshoot bundles to
+	// even see the whole picture. LastReconnectAgoSeconds rather than a raw
+	// timestamp so a tshoot bundle read well after it was generated still
+	// reads correctly without the reader diffing two clocks themselves.
+	// All three omitted when there's never been one — a healthy peer's
+	// payload doesn't grow fields that are always zero/empty.
+	Reconnects              int    `json:"reconnects,omitempty"`
+	LastReconnectReason     string `json:"last_reconnect_reason,omitempty"`
+	LastReconnectAgoSeconds int    `json:"last_reconnect_ago_seconds,omitempty"`
+
 	// EstablishedAt is when the current session with this peer was installed
 	// (see install()); it resets to now on every reconnect, so it doubles as
 	// "how long this session has been up" for the admin UI.
@@ -1012,6 +1029,14 @@ func (e *Engine) ListPeers(networkID uint64) []PeerInfo {
 		}
 		if rtt := ps.rttNanos.Load(); rtt != 0 {
 			pi.RTTMs = float64(rtt) / 1e6
+		}
+		// ns.mu is already held (RLock, deferred above), same as the
+		// ns.peerNotes/ns.keyLabelFor lookups above — nodeInfo's reconnect
+		// fields are written under this same lock in teardownSessions.
+		if ni := ns.nodes[ps.nodeID]; ni != nil && ni.reconnects > 0 {
+			pi.Reconnects = ni.reconnects
+			pi.LastReconnectReason = ni.lastReconnectReason
+			pi.LastReconnectAgoSeconds = int(time.Since(ni.lastReconnectAt).Seconds())
 		}
 		if ps.overlay4.IsValid() {
 			pi.Overlay4 = ps.overlay4.String()

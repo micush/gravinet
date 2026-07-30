@@ -2,6 +2,204 @@
 
 ---
 
+## v733 — 2026-07-30
+
+**Removed the "Restarts to apply." / "Applied immediately, no restart."
+notes from the Settings descriptions in the web admin UI
+(`internal/webadmin/ui.go`).**
+
+These six notes (Log level x2, Geo-IP lookups, Relay, Self-seed, UPnP)
+were leftover guidance from before settings changes were applied
+per-node rather than restart-gated, and no longer reflect how the
+setting is actually applied. Removed rather than corrected, since the
+descriptions read cleanly without them and a per-setting apply-behavior
+note isn't something this panel promises elsewhere.
+
+No functional change — these are static label/description strings in
+the settings metadata table and in two inline `settings-desc` blocks;
+nothing reads or depends on the removed text.
+
+Verified with go1.22.2: `go build ./...`, `go vet ./...` clean (CGO
+disabled). Full `internal/webadmin` suite passes (50s). Embedded
+`<script>` block extracted and `node --check`'d clean.
+
+---
+
+## v732 — 2026-07-30
+
+**Fixed a real bug in v731's canary policy, caught immediately on the
+first real push: `gn-cush1` — a configured seed — got pushed first,
+alone, ahead of the rest of the fleet, directly contradicting "seeds
+always held back until last."**
+
+**Root cause:** the canary was picked as `nodes[0]` with no seed check
+at all. On this fleet, `gn-cush1` happens to sort alphabetically first
+among peer hostnames — so it became the canary. Pushing it alone,
+first, isn't unsafe in the narrow sense the earlier design worried
+about (only one seed was ever touched at a time), but it defeats the
+actual point of "seeds last": a seed is exactly the node the rest of
+the fleet may need to reconnect through while everything else is
+mid-upgrade, and pulling one forward to go first — even briefly, even
+alone — means it's unavailable during its own restart+self-test window
+at precisely the point in the rollout when other peers are most likely
+to need it.
+
+**Fix:** `internal/webadmin/ui.go` — the canary is now selected as
+`nodes.find(id => !isSeedId(id)) || nodes[0]`: the first *non-seed*
+peer in the target list, falling back to `nodes[0]` only if the target
+set is nothing but seeds (in which case there's no other option).
+`rest` is now computed as `nodes.filter(id => id !== canary)` rather
+than `nodes.slice(1)` — the latter silently assumed the canary was
+always positionally first, which stopped being true the moment seed-
+exclusion was added; keying the filter on the canary's actual identity
+instead means this can't quietly break again if the selection logic
+changes further.
+
+`TestUpgradeAllThenLocalOption` (`ui_dom_helper_test.go`) updated with
+two assertions specifically for this: the canary-selection line must
+contain the seed-exclusion (`nodes.find(id => !isSeedId(id))`), and
+`rest` must be computed by filtering on the canary's identity, not by
+`slice(1)`. Confirmed this test fails against the old `nodes[0]`-only
+code and passes against the fix.
+
+Verified with go1.22.2: `go build ./...`, `go vet ./...` clean (CGO
+disabled — this sandbox has no PAM dev headers). Updated test passes,
+full `internal/webadmin` suite passes (50s). Embedded `<script>` block
+extracted and `node --check`'d clean.
+
+---
+
+## v731 — 2026-07-30
+
+**Two robustness fixes for System > Upgrade, both prompted directly by
+a real push where one peer's transient network error (`gn-freebsd`,
+`Post .../api/upgrade/remote-apply: EOF`) blocked all 5 configured
+seeds from ever being attempted at all.**
+
+**1. Transient network failures are now retried before giving up on a
+peer.** `pushSourceTo` (`internal/webadmin/upgrade_push.go`) made
+exactly one HTTP request per peer with no retry at all — a momentary
+blip (a dropped connection, the peer's daemon mid-restart from
+something unrelated) was indistinguishable from a genuine rejection.
+New `pushSourceToWithRetry` retries up to twice (3 attempts total,
+short fixed backoff) — but **only** a genuine transport-level failure
+(`status == 0`, meaning the request never got as far as a response at
+all). A peer that *did* respond, even with a rejection — wrong
+version, hasn't opted in, a real compile error — is never retried:
+retrying a deliberate refusal wastes time and serves no purpose.
+`pushRetryBackoff` is a var, not a plain func, specifically so tests
+don't have to sit through real multi-second sleeps.
+
+**2. The stop-condition changed from "stop on any failure" to "stop
+only if the first peer fails."** Previously, any single peer failing
+anywhere in the batch set a blanket flag that blocked every later
+phase — including the entire seed sequence — regardless of whether
+that failure had anything to do with the build itself. Now: the first
+peer in the target list is pushed alone, first, as a canary. Only its
+failure stops the rollout before anything else is touched — a
+reasonable bar, since a failure right at the very start plausibly
+means something fundamental is wrong (a bad build, a broken push
+mechanism). Once the canary succeeds, every other peer is attempted
+regardless of failures elsewhere: the old non-seed-batch-then-seed-loop
+structure is unchanged (seeds are still held back until last and still
+pushed one at a time — that safety property is independent of this
+policy and untouched by it), but nothing in "the rest" can stop
+anything else from being attempted anymore. The local node still only
+upgrades if literally every peer applied — that gate
+(`appliedAll.length === nodes.length`) is unchanged; only *how many
+peers actually get a chance to try* changed.
+
+Updated the confirm-dialog copy for both rollout modes to describe the
+new policy rather than the old one.
+
+`internal/webadmin/upgrade_push_retry_test.go` (new): a peer that fails
+once then succeeds — retried, overall success; one that always fails
+at the transport level — retried exactly `pushTransientRetries+1`
+times, then reports failure; a peer that responds with a real
+rejection — hit exactly once, never retried. Existing
+`TestPushStreamsResultsAsPeersFinish` re-verified unaffected by routing
+through the new retry wrapper.
+
+`TestUpgradeAllThenLocalOption` (`ui_dom_helper_test.go`) rewritten for
+the canary structure: asserts the canary is pushed alone
+(`pushBatch([canary])`) and checked before anything in `rest` is
+touched, and — by explicit absence — that the old blanket
+`stoppedEarly` flag and its two gated `if` conditions haven't crept
+back in.
+
+Verified with go1.22.2: `go build ./...`, `go vet ./...` clean (CGO
+disabled — this sandbox has no PAM dev headers). All three new retry
+tests pass, the rewritten guard test passes, full `internal/webadmin`
+suite passes (50s), full `cmd/gravinet` suite passes. Embedded
+`<script>` block extracted and `node --check`'d clean.
+
+---
+
+## v730 — 2026-07-30
+
+**Feature: peers now carry a durable reconnect counter, so "has this
+link been flapping" shows up directly in tshoot instead of requiring a
+manual grep through a raw log tail — often across two different nodes'
+bundles to see the whole picture, which is exactly what the last few
+messages in this session had to do by hand for `gn-ionos1`/`mcfed`.**
+
+**The gap:** a session dying and getting torn down (`pruneDead`,
+silent too long; `sweepStuckKeepalive`, keepalive stopped completing)
+only ever logged a line and cleaned up state — nothing survived the
+individual session to record that it had happened at all. A peer could
+look perfectly healthy in any single snapshot (good RTT, a recent
+`EstablishedAt`) while the underlying link had actually been dying and
+reconnecting every few minutes, invisible unless someone happened to
+be watching the log in real time or went and grepped for
+"pruned"/"reconnecting" lines by hand.
+
+**Fix:** `nodeInfo` (`internal/mesh/engine.go`) gains `reconnects`,
+`lastReconnectReason`, `lastReconnectAt` — unlike `peerSession`,
+`nodeInfo` survives the individual sessions that come and go, so it's
+the natural place for something durable. `teardownSessions`
+(`control.go`, the shared cleanup both `pruneDead` and
+`sweepStuckKeepalive` funnel into) now increments it for every session
+that dies. One real subtlety, worth being explicit about since a wrong
+version of this would have been actively misleading: the multi-
+candidate-port seed pile-up (`NetSpec.ConfiguredSeeds`' doc comment)
+can leave several simultaneous sessions for one node reaped in the same
+sweep, and only one of them was ever the node's actual current session
+— counting every duplicate's cleanup as its own "reconnect" would
+report one churn burst as N flaps instead of the one that actually
+mattered. Only counted when the torn-down session was `ns.byNode`'s
+actual current entry for that node.
+
+Surfaced via `PeerInfo` (`ban.go`) as `reconnects`,
+`last_reconnect_reason`, `last_reconnect_ago_seconds` — the "ago" form
+rather than a raw timestamp so a tshoot bundle read well after it was
+generated still reads correctly without the reader diffing two clocks
+themselves. All three omitted when zero, so a healthy peer's payload
+doesn't grow fields that are always empty. `ListPeers` populates them
+from `nodeInfo` under the same `ns.mu` lock it already holds for the
+`peerNotes`/`keyLabelFor` lookups right next to it. `tshoot.go` needed
+no changes at all — it already passes `ListPeers()` straight through,
+so every future bundle picks this up automatically.
+
+`internal/mesh/reconnects_test.go`: records a reconnect correctly (count,
+reason, fresh timestamp); the specific anti-inflation case above
+(two simultaneous sessions for one node, only the current one should
+count); accumulates correctly across separate events rather than
+overwriting; and `ListPeers` surfaces it for a node with history while
+correctly omitting it (zero values) for one that's never reconnected.
+
+Verified with go1.22.2: `go build ./...`, `go vet ./...` clean (CGO
+disabled — this sandbox has no PAM dev headers). All four new tests
+pass. Re-ran the full handshake/fallback/seedOwner/install/connectedTo/
+reflexive/NATStatus/ManagedPeers/pruneDead/stuckKeepalive/ListPeers set
+together (100s, no regressions from touching `teardownSessions`). Full
+`internal/webadmin` and `cmd/gravinet` suites pass.
+
+Not done here, and worth a follow-up if wanted: this only surfaces in
+raw peer data (and so tshoot); the live Monitor \u2192 Peers admin UI
+doesn't show it yet.
+
+---
+
 ## v729 — 2026-07-30
 
 Version bump only, no code change — for testing the upgrade push

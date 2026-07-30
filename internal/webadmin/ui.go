@@ -1112,7 +1112,7 @@ function buildSearchIndex(){
     ['shell-allow-row', 'Remote shell', 'Let a Manager peer open a real OS shell on this node through the web admin.', 'security'],
     ['accept-manager-upg-row', 'Accept Manager-pushed upgrades', 'Let a directly-connected Manager peer push and apply a new gravinet binary to this node. Off by default; local-only.', 'security'],
     ['geoip-row', 'Geo-IP lookups', 'Show an approximate location on a peer or seed\u2019s info panel, looked up from a third-party service (ipapi.co). geoip', 'security'],
-    ['loglevel-row', 'Log level', 'How much this node logs (error, warn, info, debug). Applied immediately, no restart.', 'general'],
+    ['loglevel-row', 'Log level', 'How much this node logs (error, warn, info, debug).', 'general'],
     ['logsize-row', 'Log size', 'Maximum size of the log file; once full the oldest lines are dropped (FIFO). e.g. 200M, 1G, 99K.', 'general'],
     ['routeadv-row', 'Route advertisement interval', 'How often this node re-advertises the routes it originates.', 'network'],
     ['keepalive-row', 'Keepalive interval', 'How often this node pings each connected peer, keeping NAT mappings open and measuring round-trip time.', 'network'],
@@ -2677,7 +2677,7 @@ function secSettingsGeneral(c) {
 
   // Log level.
   const lg = $('<div class="settings-row" id="loglevel-row"></div>');
-  const lgLabel = $('<div><div class="settings-label">Log level</div><div class="settings-desc">How much this node logs (error, warn, info, debug). Switch to <b>debug</b> to see rejected handshakes and connection failures that don\u2019t show at info. Applied immediately, no restart. Leave on info normally; debug is chatty.</div></div>');
+  const lgLabel = $('<div><div class="settings-label">Log level</div><div class="settings-desc">How much this node logs (error, warn, info, debug). Switch to <b>debug</b> to see rejected handshakes and connection failures that don\u2019t show at info. Leave on info normally; debug is chatty.</div></div>');
   const lgSel = $('<select class="sel" id="loglevel-sel"><option value="error">error</option><option value="warn">warn</option><option value="info">info</option><option value="debug">debug</option></select>');
   lgSel.value = state.logLevel || 'info';
   lgSel.onchange = async () => {
@@ -2969,7 +2969,7 @@ function secSettingsSecurity(c) {
 
   card.appendChild($('<h3>Privacy</h3>'));
   const gi = $('<div class="settings-row" id="geoip-row"></div>');
-  const giLabel = $('<div><div class="settings-label">Geo-IP lookups</div><div class="settings-desc">Show an approximate location and map on a peer or seed\u2019s info panel, looked up from its public address. On by default. Sends the address to a third-party service (ipapi.co) over HTTPS \u2014 turn off to avoid that. Restarts to apply.</div></div>');
+  const giLabel = $('<div><div class="settings-label">Geo-IP lookups</div><div class="settings-desc">Show an approximate location and map on a peer or seed\u2019s info panel, looked up from its public address. On by default. Sends the address to a third-party service (ipapi.co) over HTTPS \u2014 turn off to avoid that.</div></div>');
   const giSw = $('<label class="sw"><input type="checkbox" id="geoip-toggle-cb"><span class="sw-slider"></span></label>');
   const giCb = giSw.querySelector('input');
   giCb.checked = state.geoipLookup;
@@ -3092,7 +3092,7 @@ function secSettingsNetwork(c) {
       const suffix = multiNet ? ' \u2014 ' + esc(cf.name) : '';
 
       const relayRow = $('<div class="settings-row"></div>');
-      relayRow.appendChild($('<div><div class="settings-label">Relay'+suffix+'</div><div class="settings-desc">Whether this node is willing to relay other peers\' traffic on this network when they can\'t reach each other directly. On by default. Restarts to apply.</div></div>'));
+      relayRow.appendChild($('<div><div class="settings-label">Relay'+suffix+'</div><div class="settings-desc">Whether this node is willing to relay other peers\' traffic on this network when they can\'t reach each other directly. On by default.</div></div>'));
       const relaySw = $('<label class="sw"><input type="checkbox"><span class="sw-slider"></span></label>');
       const relayCb = relaySw.querySelector('input');
       relayCb.checked = cf.allow_relay !== false;
@@ -3105,7 +3105,7 @@ function secSettingsNetwork(c) {
       card.appendChild(relayRow);
 
       const seedRow = $('<div class="settings-row"></div>');
-      seedRow.appendChild($('<div><div class="settings-label">Self-seed'+suffix+'</div><div class="settings-desc">An explicit declaration that this node should be treated as a seed for this network \u2014 see System \u203a Upgrade, which trusts this over trying to infer seed status by matching addresses. Off by default; not the same as actually being listed on the Seeds page. Restarts to apply.</div></div>'));
+      seedRow.appendChild($('<div><div class="settings-label">Self-seed'+suffix+'</div><div class="settings-desc">An explicit declaration that this node should be treated as a seed for this network \u2014 see System \u203a Upgrade, which trusts this over trying to infer seed status by matching addresses. Off by default; not the same as actually being listed on the Seeds page.</div></div>'));
       const seedSw = $('<label class="sw"><input type="checkbox"><span class="sw-slider"></span></label>');
       const seedCb = seedSw.querySelector('input');
       seedCb.checked = !!cf.self_seed;
@@ -3143,7 +3143,7 @@ function secSettingsNetwork(c) {
   ntInput.onkeydown = (e) => { if (e.key === 'Enter') { ntInput.blur(); } };
 
   const up = $('<div class="settings-row" id="upnp-row"></div>');
-  const upLabel = $('<div><div class="settings-label">UPnP</div><div class="settings-desc">Ask this node\u2019s LAN router to forward its ports (UDP, TCP fallback, and any extras above) automatically, so a node behind a home/office router can be reached without a manual port forward. Off by default. Best-effort \u2014 a router without UPnP just silently skips it. Restarts to apply.</div></div>');
+  const upLabel = $('<div><div class="settings-label">UPnP</div><div class="settings-desc">Ask this node\u2019s LAN router to forward its ports (UDP, TCP fallback, and any extras above) automatically, so a node behind a home/office router can be reached without a manual port forward. Off by default. Best-effort \u2014 a router without UPnP just silently skips it.</div></div>');
   const upSw = $('<label class="sw"><input type="checkbox" id="upnp-toggle-cb"><span class="sw-slider"></span></label>');
   const upCb = upSw.querySelector('input');
   upCb.checked = state.enableUpnp;
@@ -7308,8 +7308,8 @@ async function drawUpgrade(host){
         ? ('\n\n' + seedNodes.length + ' of them ' + (seedNodes.length === 1 ? 'is a configured seed' : 'are configured seeds') + ' for this network and will be upgraded last, one at a time.')
         : '';
       const msg = allThenLocal
-        ? 'Upgrade all ' + nodes.length + ' peer' + (nodes.length === 1 ? '' : 's') + ', then this node?\n\nThis node is upgraded only after every peer has applied. If any peer fails, this node is left as-is.' + seedNote
-        : (nodes.length === 1 ? 'Upgrade this peer?' : 'Upgrade these ' + nodes.length + ' peers?') + seedNote;
+        ? 'Upgrade all ' + nodes.length + ' peer' + (nodes.length === 1 ? '' : 's') + ', then this node?\n\nIf the first one fails, the rollout stops there and nothing else is touched. Otherwise every peer is attempted regardless of failures elsewhere, and this node is upgraded last, only if every one of them applied.' + seedNote
+        : (nodes.length === 1 ? 'Upgrade this peer?' : 'Upgrade these ' + nodes.length + ' peers? If the first one fails, the rollout stops there \u2014 otherwise every one of them is attempted regardless of failures elsewhere.') + seedNote;
       if (!confirm(msg)) return;
     } else {
       if (!confirm('Upgrade this node?')) return;
@@ -7453,31 +7453,64 @@ async function drawUpgrade(host){
       };
 
       const appliedAll = [];
-      let stoppedEarly = false;
 
-      // Phase 1: every non-seed peer, batched exactly as before (server-side
-      // bounded concurrency, results streamed back as each one finishes).
-      if (nonSeedNodes.length){
-        const applied = await pushBatch(nonSeedNodes);
-        if (applied === null) return; // request-level failure: abort, touch nothing else
-        appliedAll.push(...applied);
-        if (applied.length !== nonSeedNodes.length) stoppedEarly = true;
-      }
+      // Canary: the first *non-seed* peer in the target list, pushed alone
+      // before anyone else is touched at all. Deliberately never a seed
+      // unless the target set contains nothing else — a seed is exactly the
+      // node the rest of the fleet needs to still be online and stable
+      // while everything else is mid-upgrade (see targetById.is_seed's doc
+      // comment), so pulling one forward to go first, alone, ahead of
+      // everyone else — even briefly, even for just its own restart+
+      // self-test window — reintroduces the exact risk "seeds always last"
+      // exists to avoid. An earlier version picked nodes[0] outright, with
+      // no seed check at all; on a real fleet where a configured seed
+      // happened to sort alphabetically first among peer hostnames, that
+      // seed became the canary and was pushed first instead of last.
+      //
+      // This replaces the old "stop on any failure" rule with a narrower
+      // one: only the canary failing stops the rollout before it reaches
+      // anyone else. A failure right at the start still gets the benefit of
+      // the doubt that something's fundamentally wrong — a bad build, a
+      // broken push mechanism — worth stopping for; once it's proven
+      // itself, one later peer having a bad moment (a transient network
+      // blip pushSourceToWithRetry didn't manage to ride out, or a real
+      // peer-specific problem) no longer costs every other healthy peer its
+      // chance to upgrade too.
+      const canary = nodes.find(id => !isSeedId(id)) || nodes[0];
+      const rest = nodes.filter(id => id !== canary);
 
-      // Phase 2: seeds, one at a time, and only attempted at all if every
-      // non-seed peer already succeeded — a seed is exactly the node a
-      // struggling peer needs to still be there while everything else is
-      // mid-upgrade, so there is no "partial fleet, but push seeds anyway".
-      // Any one seed failing stops the loop right there, same all-or-nothing
-      // rule as phase 1, so a bad build can't reach the rest of the seeds
-      // (or the local node) just because it happened to fail on seed #2.
-      if (!stoppedEarly && seedNodes.length){
-        resBox.appendChild($('<div class="hint" style="margin-top:6px">upgrading seeds one at a time\u2026</div>'));
-        for (const seedId of seedNodes){
-          const applied = await pushBatch([seedId]);
+      const canaryApplied = await pushBatch([canary]);
+      if (canaryApplied === null) return; // request-level failure: abort, touch nothing else
+      appliedAll.push(...canaryApplied);
+      const canaryFailed = !canaryApplied.length;
+
+      if (!canaryFailed && rest.length){
+        const restNonSeed = rest.filter(id => !isSeedId(id));
+        const restSeed = rest.filter(isSeedId);
+
+        // Every remaining non-seed peer, batched exactly as before — but a
+        // failure here no longer blocks anything that follows. "Do them
+        // all" once the canary has cleared: nothing here can stop the
+        // rollout early anymore, only report what happened.
+        if (restNonSeed.length){
+          const applied = await pushBatch(restNonSeed);
           if (applied === null) return; // request-level failure: abort, touch nothing else
           appliedAll.push(...applied);
-          if (!applied.length){ stoppedEarly = true; break; }
+        }
+
+        // Seeds: still held back until last and still pushed one at a time
+        // — that safety property (see targetById.is_seed's doc comment) is
+        // independent of the canary policy above and unchanged by it — but
+        // now attempted regardless of whether every non-seed peer above
+        // succeeded. Only the canary can stop the rollout before it gets
+        // here; nothing in this loop does either.
+        if (restSeed.length){
+          resBox.appendChild($('<div class="hint" style="margin-top:6px">upgrading seeds one at a time\u2026</div>'));
+          for (const seedId of restSeed){
+            const applied = await pushBatch([seedId]);
+            if (applied === null) return; // request-level failure: abort, touch nothing else
+            appliedAll.push(...applied);
+          }
         }
       }
 
@@ -7489,13 +7522,16 @@ async function drawUpgrade(host){
       if (allThenLocal){
         // The picker holds the ALL sentinel, not individual chips. On full
         // success clear it (this node is about to restart anyway); on partial
-        // failure replace it with just the peers that failed, so a retry targets
-        // exactly those and the operator is back in explicit control before this
-        // node is ever touched.
+        // failure replace it with just the peers that failed (or, if the
+        // canary failed, the entire original list — nothing else was ever
+        // attempted), so a retry targets exactly those and the operator is
+        // back in explicit control before this node is ever touched.
         peerPicker.set(allApplied ? [] : nodes.filter(n => !done.has(n)));
         if (allApplied){
           resBox.appendChild($('<div class="hint">All peers applied or already up to date \u2014 upgrading this node now\u2026</div>'));
           await applyLocal();
+        } else if (canaryFailed){
+          resBox.appendChild($('<div class="hint" style="color:var(--danger,#b33)">the first peer (' + resultLabel(canary) + ') failed \u2014 the rollout stopped there before touching anything else. Fix or retry it, then upgrade this node.</div>'));
         } else {
           resBox.appendChild($('<div class="hint" style="color:var(--danger,#b33)">'+appliedAll.length+' of '+nodes.length+' peers applied or already up to date; this node was left as-is. Fix or retry the failed peers, then upgrade this node.</div>'));
         }

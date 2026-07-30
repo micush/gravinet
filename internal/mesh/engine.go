@@ -1044,6 +1044,17 @@ type nodeInfo struct {
 	// selfSeed mirrors peerSession's field of the same name — see hsPayload.
 	// SelfSeed's doc comment. Consulted directly by ManagedPeers.
 	selfSeed bool
+	// reconnects counts how many times a session for this node has been torn
+	// down (pruneDead or sweepStuckKeepalive — see teardownSessions) since
+	// this process started. nodeInfo, unlike peerSession, survives the
+	// individual sessions that come and go, so it's the one place "has this
+	// link been flapping" can actually be answered rather than reconstructed
+	// by grepping a log tail for "pruned"/"reconnecting" lines by hand.
+	// Surfaced via PeerInfo (ListPeers, and so tshoot) alongside
+	// lastReconnectReason/lastReconnectAt below.
+	reconnects          int
+	lastReconnectReason string
+	lastReconnectAt     time.Time
 	// bgpASN mirrors peerSession's field of the same name — the
 	// gossip/handshake-learned copy for a node that isn't (or isn't
 	// currently) a direct peer. Not itself propagated through the wider

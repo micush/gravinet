@@ -397,11 +397,20 @@ func TestPushUsesTheSharedChipPicker(t *testing.T) {
 // The things that make it safe rather than a footgun are asserted here — it
 // drives both endpoints (fleet push, then local source apply), it gates the
 // local phase on every peer having applied (so a bad build reverts on the peers
-// before it can reach the node the operator is logged into), and it holds
+// before it can reach the node the operator is logged into), it holds
 // configured seeds back until last and pushes them one at a time rather than
 // batched with the rest of the fleet or with each other (see mesh.ManagedPeer.
 // IsSeed's doc comment for why: losing more than one rendezvous point at once
-// risks a peer mid-reconnect finding no way back into the mesh).
+// risks a peer mid-reconnect finding no way back into the mesh), and — the
+// canary policy — only the first *non-seed* peer's failure stops the rollout
+// before it reaches anyone else; a later peer failing no longer costs every
+// other healthy peer its chance to upgrade too (replaced the old "stop on any
+// failure" rule, which meant one unrelated peer's transient hiccup could block
+// every configured seed from ever being attempted at all). The canary must
+// never be a seed unless the target set is nothing but seeds — a real fleet
+// hit this exact bug: nodes[0] alone, with no seed check, picked a seed that
+// happened to sort alphabetically first among peer hostnames, pushing it
+// first instead of last.
 func TestUpgradeAllThenLocalOption(t *testing.T) {
 	if !strings.Contains(indexHTML, "all peers, then this node") {
 		t.Error("the Upgrade picker no longer offers the 'all peers, then this node' option")
@@ -420,26 +429,54 @@ func TestUpgradeAllThenLocalOption(t *testing.T) {
 		"allThenLocal",                       // the mode flag the handler branches on
 		"appliedAll.length === nodes.length", // the "every peer applied" gate on the local phase
 		"is_seed",                            // seed status, read from the cluster/targets data
-		"seedNodes",                          // the split-out seed subset
-		"nonSeedNodes",                       // the split-out non-seed subset, pushed first
 		"pushBatch",                          // the shared per-batch push+stream helper
+		"canaryFailed",                       // the sole stop-the-rollout condition
 	} {
 		if !strings.Contains(block, want) {
 			t.Errorf("the all-peers-then-local flow is missing %q", want)
 		}
+	}
+	// The regression test itself: the canary must be selected by excluding
+	// seeds first (nodes.find(id => !isSeedId(id))), not just nodes[0] with
+	// no seed check at all — and rest must be computed by excluding whatever
+	// the canary actually turned out to be, not by assuming it was
+	// positionally first (nodes.slice(1) would silently reintroduce the bug
+	// the moment the canary isn't nodes[0]).
+	if !strings.Contains(block, "const canary = nodes.find(id => !isSeedId(id)) || nodes[0];") {
+		t.Error("the canary is no longer seed-excluded — a seed sorting first in the target list could be pushed first instead of last again")
+	}
+	if !strings.Contains(block, "const rest = nodes.filter(id => id !== canary);") {
+		t.Error("'rest' is no longer computed by excluding the actual canary — expected a filter keyed on the canary's real identity, not its list position")
+	}
+	// The canary must be pushed alone, by itself, before anything else in
+	// the list is touched at all.
+	if !strings.Contains(block, "pushBatch([canary])") {
+		t.Error("the canary is no longer pushed as its own single-element batch ahead of everyone else")
 	}
 	// Seeds must be pushed one at a time (a single-element batch per call),
 	// not folded into the same batched call as the rest of the fleet.
 	if !strings.Contains(block, "pushBatch([seedId])") {
 		t.Error("seeds are no longer pushed one at a time — expected a pushBatch call with a single-element node list")
 	}
-	// The non-seed batch and the seed loop must be strictly sequential
-	// (seeds only attempted once every non-seed peer has already applied),
-	// not run concurrently with each other.
-	nonSeedIdx := strings.Index(block, "if (nonSeedNodes.length){")
-	seedLoopIdx := strings.Index(block, "if (!stoppedEarly && seedNodes.length){")
-	if nonSeedIdx < 0 || seedLoopIdx < 0 || seedLoopIdx < nonSeedIdx {
-		t.Error("expected the non-seed batch to run, and be checked via stoppedEarly, before the seed loop")
+	// Only the canary can stop the rollout early — a failure anywhere in the
+	// "rest" (non-seed batch or seed loop) must not gate anything that
+	// follows it. Guarded by absence: neither of these should exist anymore.
+	for _, mustNotHave := range []string{
+		"stoppedEarly",                 // the old blanket stop-on-any-failure flag
+		"if (nonSeedNodes.length){",    // the old (unconditional-push, but gate-setting) non-seed phase
+		"if (!stoppedEarly && seedNodes.length){", // the old seed phase, gated on the non-seed batch's success
+	} {
+		if strings.Contains(block, mustNotHave) {
+			t.Errorf("found %q — the canary-only stop condition may have regressed back toward stop-on-any-failure", mustNotHave)
+		}
+	}
+	// The canary's own result must be checked, and checked before anything
+	// else in the list is pushed — "rest" (everything after the canary)
+	// must not be touched until canaryFailed has been determined.
+	canaryIdx := strings.Index(block, "const canaryApplied = await pushBatch([canary]);")
+	restIdx := strings.Index(block, "if (!canaryFailed && rest.length){")
+	if canaryIdx < 0 || restIdx < 0 || restIdx < canaryIdx {
+		t.Error("expected the canary to be pushed and checked before any of 'rest' is attempted")
 	}
 }
 

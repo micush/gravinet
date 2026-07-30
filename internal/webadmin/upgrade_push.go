@@ -149,7 +149,7 @@ func (s *Server) handleUpgradePush(w http.ResponseWriter, r *http.Request) {
 				resultsCh <- result{Node: node, OK: false, Error: msg}
 				return
 			}
-			status, skipped, perr := s.pushSourceTo(target, spooled, sum)
+			status, skipped, perr := s.pushSourceToWithRetry(node, target, spooled, sum)
 			if perr != nil {
 				resultsCh <- result{Node: node, OK: false, Status: status, Error: perr.Error()}
 				return
@@ -205,6 +205,45 @@ func (s *Server) handleUpgradePush(w http.ResponseWriter, r *http.Request) {
 		if flusher != nil {
 			flusher.Flush()
 		}
+	}
+}
+
+// pushTransientRetries is how many extra attempts pushSourceToWithRetry makes
+// after a transport-level failure — one that never got as far as a response
+// at all (connection refused, reset, EOF mid-request, timeout) — before
+// giving up on that peer. 2 retries (3 attempts total): enough to ride out a
+// momentary blip (a brief network hiccup, the peer's daemon mid-restart from
+// something unrelated) without turning a single flaky moment into "this peer
+// failed" and, upstream, potentially stopping an otherwise-healthy rollout
+// (see handleUpgradePush's canary/rest split) over nothing wrong with the
+// build at all.
+const pushTransientRetries = 2
+
+// pushRetryBackoff is how long to wait before retry attempt n (1-indexed):
+// short and fixed rather than exponential — this is riding out a moment, not
+// backing off from an overloaded server, and every extra second here is a
+// second added to how long the whole rollout takes to report back. A var,
+// not a plain func, so tests can substitute a near-zero backoff rather than
+// actually sleeping through it.
+var pushRetryBackoff = func(attempt int) time.Duration {
+	return time.Duration(attempt) * 3 * time.Second
+}
+
+// pushSourceToWithRetry wraps pushSourceTo with a few retries, but only for a
+// genuine transport-level failure — status == 0, meaning the request never
+// got as far as a response at all. A peer that *did* respond, just
+// unsuccessfully (wrong version, hasn't opted in, a real compile error), is
+// never retried: retrying wouldn't help, and re-running a build that
+// genuinely failed serves no purpose beyond delaying the result.
+func (s *Server) pushSourceToWithRetry(node string, target *clusterPeerTarget, srcPath, sum string) (status int, skipped bool, err error) {
+	for attempt := 1; ; attempt++ {
+		status, skipped, err = s.pushSourceTo(target, srcPath, sum)
+		if err == nil || status != 0 || attempt > pushTransientRetries {
+			return status, skipped, err
+		}
+		s.log.Debugf("upgrade: push to %s: transport-level error (attempt %d/%d), retrying: %v",
+			node, attempt, pushTransientRetries+1, err)
+		time.Sleep(pushRetryBackoff(attempt))
 	}
 }
 
