@@ -539,6 +539,47 @@ func TestNetworkBoolTogglesAutoRestart(t *testing.T) {
 	}
 }
 
+// TestMeshToggleAutoRestart guards the Mesh > Networks "mesh" (full/partial)
+// toggle the same way TestNetworkBoolTogglesAutoRestart guards relay/self-
+// seed: config.Network.Mesh is not hot-reloadable (NetworkSetMesh's doc
+// comment), so the save must go through edit()'s autoRestart=true path
+// (quietRestart) rather than a bare api() call that persists the new value
+// but never actually restarts the node to apply it — a real bug an earlier
+// version of this toggle had, caught only by hand rather than by a test.
+// Unlike relay/self-seed (Settings > Network, per TestNetworkBoolTogglesAuto-
+// Restart), this control belongs on the Networks list itself (secNetworks):
+// it's the topology of the network, displayed and edited right alongside
+// subnet/MTU/address, not a node-local preference.
+func TestMeshToggleAutoRestart(t *testing.T) {
+	nwf := strings.Index(indexHTML, "function secNetworks(c) {")
+	if nwf < 0 {
+		t.Fatal("secNetworks is missing")
+	}
+	block := indexHTML[nwf:]
+	if end := strings.Index(block, "\nfunction secPeers"); end > 0 {
+		block = block[:end]
+	}
+	for _, want := range []string{
+		"data-meshtoggle", // the toggle element itself
+		"mesh_mode",       // the op name
+	} {
+		if !strings.Contains(block, want) {
+			t.Errorf("secNetworks is missing %q", want)
+		}
+	}
+	// The actual save call: autoRestart=true is the third argument to
+	// edit(), not a bare api() call (which would silently persist the
+	// change without ever restarting the node to apply it) and not a
+	// manual state.restartPending flag (which would leave the operator to
+	// notice a banner and act on it themselves).
+	if !strings.Contains(block, "edit('/api/network', { op:'mesh_mode', net, mode:want }, true)") {
+		t.Error("mesh toggle no longer routes through edit()'s autoRestart=true path — it will save the new mesh mode without ever restarting the node to apply it")
+	}
+	if strings.Contains(block, "state.restartPending = true") {
+		t.Error("secNetworks sets state.restartPending directly somewhere — the mesh toggle should rely on edit()'s built-in handling instead")
+	}
+}
+
 // TestBgpNeighborFiltersPillWired guards the BGP neighbor editor's filters
 // UI: a clickable per-neighbor summary pill that opens a shared panel with
 // two CIDR chip editors (filter in/out), rather than raw comma-separated

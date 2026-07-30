@@ -3633,20 +3633,27 @@ function secNetworks(c) {
     };
   });
   t.querySelectorAll('[data-meshtoggle]').forEach(s => {
-    s.ondblclick = () => {
+    s.ondblclick = async () => {
       const net = s.dataset.meshtoggle, name = nameOf(net);
       const want = s.dataset.mode === 'full' ? 'partial' : 'full';
       // Unlike enable/disable above, this changes what the mesh actually
       // connects to (and needs a restart on every node in the network to
       // take effect), so confirm rather than fire-and-flip — same tier as
-      // the subnet/MTU/address prompts in startInlineEdit.
+      // the subnet/MTU/address prompts in startInlineEdit. And, like those
+      // (and unlike the plain api()+refresh() calls elsewhere on this page),
+      // it must go through edit()'s autoRestart=true path, not a bare api()
+      // call — this op comes back from the server with restart:true (see
+      // NetworkSetMesh's doc comment), and only edit() knows to act on that
+      // flag by firing the actual restart (quietRestart) rather than saving
+      // a config value that silently never takes effect until something
+      // else happens to restart the node. See TestNetworkBoolTogglesAuto-
+      // Restart, which guards the relay/self-seed toggles against exactly
+      // this mistake.
       const msg = want === 'partial'
-        ? 'Switch "'+name+'" to partial mesh?\n\nOnly seed\u2013seed and seed\u2013peer links will be allowed; existing peer\u2013peer sessions on this node will be refused on their next handshake. This node restarts immediately to apply it \u2014 make the same change on every other node in this network.'
+        ? 'Switch "'+name+'" to partial mesh?\n\nOnly seed\u2013seed and seed\u2013peer links will be allowed; existing peer\u2013peer sessions on this node will be refused once it reconnects. This node restarts immediately to apply it \u2014 make the same change on every other node in this network.'
         : 'Switch "'+name+'" back to full mesh?\n\nEvery node will resume connecting to every other node it learns about. This node restarts immediately to apply it \u2014 make the same change on every other node in this network.';
       if (!confirm(msg)) return;
-      api('/api/network', { method:'POST', body: JSON.stringify({ op:'mesh_mode', net, mode:want }) })
-        .then(r => { if (!r.ok) alert((r.body&&r.body.error)||'could not change mesh mode'); })
-        .finally(refresh);
+      await edit('/api/network', { op:'mesh_mode', net, mode:want }, true); // restarts automatically once saved; refreshes on success, alerts on error
     };
   });
   selAllWire(t);

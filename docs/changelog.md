@@ -2,6 +2,20 @@
 
 ---
 
+## v743 — 2026-07-30
+
+**Fix: Mesh > Networks' `mesh` (full/partial) toggle now actually restarts the node to apply the change, instead of silently saving a new mesh mode that never took effect.**
+
+`config.Network.Mesh` isn't hot-reloadable, so a change needs an actual restart before the new topology is live — the same tier as the relay/self-seed toggles and the subnet/MTU/address edits, all of which route through `edit()`'s `autoRestart=true` path, which reads the server's `restart:true` response and fires a silent `quietRestart()`. The mesh toggle shipped in v742 called `api()` directly instead: it persisted `mesh: "partial"` to config and showed a confirmation dialog claiming "this node restarts immediately to apply it," but nothing actually restarted the daemon. The config was correct; the running process just kept enforcing whatever mode it booted with until something unrelated happened to restart it.
+
+Fixed by routing the toggle through `edit('/api/network', { op:'mesh_mode', net, mode:want }, true)`, matching every other restart-requiring control on this page.
+
+Added `TestMeshToggleAutoRestart` (`internal/webadmin/ui_dom_helper_test.go`), sibling to the existing `TestNetworkBoolTogglesAutoRestart` (which guards relay/self-seed against this exact class of bug): asserts the save call is literally `edit('/api/network', { op:'mesh_mode', net, mode:want }, true)`, not a bare `api()` call, and that nothing sets `state.restartPending` manually instead. Confirmed the test fails against the v742 handler and passes against the fix.
+
+Verified: `go build ./...` and `go vet ./...` clean, embedded `<script>` block `node --check`'d clean. Full `internal/webadmin` suite passes.
+
+---
+
 ## v742 — 2026-07-30
 
 **New: partial mesh. Mesh > Networks gained a `mesh` field (full / partial) that restricts a network to a seed-and-peer hub-and-spoke topology instead of the usual full mesh — seed-to-seed and seed-to-peer links only, with peer-to-peer links hard-refused.**
