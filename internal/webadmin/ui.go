@@ -6668,7 +6668,6 @@ function secSNMP(c){
     const ct = $('<div></div>'); ct.innerHTML = ch;
     const commTable = ct.querySelector('table');
     commCard.appendChild(ct);
-    body.appendChild(commCard);
     selAllWire(ct);
     list.forEach((cm, i) => {
       const tr = commTable.querySelector('tr[data-idx="'+i+'"]');
@@ -6718,6 +6717,7 @@ function secSNMP(c){
     card.appendChild(row);
     card.appendChild($('<div class="hint" style="margin:8px 0 0">Double-click the pill next to the page title to turn the agent on or off. Saves automatically when you click or tab away.</div>'));
     body.appendChild(card);
+    body.appendChild(commCard);
 
     const listenIn = row.querySelector('#snmp-listen');
     const locationIn = row.querySelector('#snmp-location');
@@ -6933,7 +6933,7 @@ async function syslogReload(body){
   }
   const list = sy.targets || [];
   state.syslogTargets = list; // lets buildSearchIndex see this without its own round trip — see that function's comment
-  let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>remote</th><th>port</th><th>protocol</th></tr>';
+  let h = '<div class="card"><table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>remote</th><th>port</th><th>protocol</th></tr>';
   if (!list.length){
     h += '<tr><td colspan="5" class="empty">no remote syslog servers configured</td></tr>';
   } else {
@@ -6948,7 +6948,7 @@ async function syslogReload(body){
         + '</tr>';
     });
   }
-  h += '</table>';
+  h += '</table></div>';
   body.innerHTML = h;
   const table = body.querySelector('table');
   table._syslogTargets = list;

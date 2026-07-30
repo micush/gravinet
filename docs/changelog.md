@@ -2,6 +2,26 @@
 
 ---
 
+## v738 — 2026-07-30
+
+**System > SNMP's two cards are now in swapped order: listen address/sysLocation/sysContact first, then the communities table.**
+
+`secSNMP` appended the communities table card to the page before building/appending the field-settings card. Swapped which gets appended first — no change to either card's own contents or wiring.
+
+Verified: `go build ./...` clean, embedded `<script>` block `node --check`'d clean.
+
+---
+
+## v737 — 2026-07-30
+
+**System > Syslog's filter box and table now sit inside a card, matching every other table on the page.**
+
+`syslogReload` built the table as a bare `<table>` directly in the section body instead of wrapping it in `<div class="card">` the way `secAlwaysAllowed`'s Allow List and every other table-driven section do. `enhanceTable`'s toolbar (filter box, +/-) inserts itself immediately before the table, so wrapping the table in a card carries the toolbar in with it — no separate fix needed there.
+
+Verified: `go build ./...` clean, embedded `<script>` block `node --check`'d clean.
+
+---
+
 ## v736 — 2026-07-30
 
 **System > SNMP now supports multiple communities via a manageable table
