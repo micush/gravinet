@@ -1317,25 +1317,39 @@ func hostTimeJSON(t service.TimeInfo) map[string]any {
 	}
 }
 
-// handleSystemSyslog reads or changes this host's remote-syslog-forwarding
-// configuration — the backend for System > Syslog. Like Resolver and Time,
-// this follows the currently selected node and nothing here is stored in
-// gravinet's own config; the host's own syslog daemon config is the source
-// of truth (see hostsyslog.go's package comment). Also like Resolver and
-// Time — and unlike SNMP/L2Disco, which keep a separate always-accepted
-// copy in gravinet's own config.json — there's no such fallback here, so
-// any failure (bad input, or the daemon reload itself failing) is a
-// straight rejection rather than a "saved, but..." note: there is nothing
+// syslogTargetView is one remote syslog target as shown in the UI — the
+// table's four columns (state, remote, port, protocol) plus nothing else,
+// same "flatten exactly what the page draws" shape exemptView uses for the
+// Allow List table.
+type syslogTargetView struct {
+	Remote   string `json:"remote"`
+	Port     int    `json:"port"`
+	Protocol string `json:"protocol"`
+	Disabled bool   `json:"disabled,omitempty"`
+}
+
+// handleSystemSyslog reads or replaces this host's remote-syslog-forwarding
+// target list — the backend for System > Syslog's table. Like Resolver and
+// Time, this follows the currently selected node and nothing here is
+// stored in gravinet's own config; the host's own syslog daemon config is
+// the source of truth (see hostsyslog.go's package comment), including
+// each target's enabled/disabled state. Also like Resolver and Time — and
+// unlike SNMP/L2Disco, which keep a separate always-accepted copy in
+// gravinet's own config.json — there's no such fallback here, so any
+// failure (bad input, or the daemon reload itself failing) is a straight
+// rejection rather than a "saved, but..." note: there is nothing
 // gravinet's own source of truth already accepted independently of it.
 //
-// POST takes {enabled, target, protocol}:
+// POST takes the whole target list and replaces it outright — add, edit,
+// remove, and toggle-state in the table all reduce to "save the list as it
+// now stands", the same one-mutator shape handleExempt already uses for
+// the Allow List table:
 //
-//	{"enabled": true, "target": "log.example.com:514", "protocol": "udp"}
-//	{"enabled": false}
+//	{"targets": [{"remote":"log.example.com","port":514,"protocol":"udp"}]}
 //
-// Enabling only ever adds gravinet's own forwarding rule alongside whatever
-// this host already logs locally — see service.SetHostSyslog's doc comment.
-// Disabling removes only that rule.
+// An empty (or absent) list removes gravinet's forwarding entirely.
+// Forwarding only ever adds gravinet's own rules alongside whatever this
+// host already logs locally — see service.SetHostSyslog's doc comment.
 func (s *Server) handleSystemSyslog(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		writeJSON(w, http.StatusOK, hostSyslogJSON(service.HostSyslog()))
@@ -1343,16 +1357,19 @@ func (s *Server) handleSystemSyslog(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Enabled  bool   `json:"enabled"`
-		Target   string `json:"target"`
-		Protocol string `json:"protocol"`
+		Targets []syslogTargetView `json:"targets"`
 	}
 	if !decode(w, r, &req) {
 		return
 	}
-	s.log.Infof("webadmin: %s host syslog forwarding (requested from admin UI)",
-		map[bool]string{true: "enabling", false: "disabling"}[req.Enabled])
-	if ok, note := service.SetHostSyslog(req.Enabled, req.Target, req.Protocol); !ok {
+	targets := make([]service.SyslogTarget, 0, len(req.Targets))
+	for _, v := range req.Targets {
+		targets = append(targets, service.SyslogTarget{
+			Remote: v.Remote, Port: v.Port, Protocol: v.Protocol, Disabled: v.Disabled,
+		})
+	}
+	s.log.Infof("webadmin: saving host syslog forwarding (%d target(s)) (requested from admin UI)", len(targets))
+	if ok, note := service.SetHostSyslog(targets); !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": note})
 		return
 	}
@@ -1366,8 +1383,14 @@ func (s *Server) handleSystemSyslog(w http.ResponseWriter, r *http.Request) {
 // TimeInfo's "can_*" convention, since this page is modeled on SNMP/L2
 // Disco's supported-gate pattern rather than Time's.
 func hostSyslogJSON(sy service.SyslogInfo) map[string]any {
+	targets := make([]syslogTargetView, 0, len(sy.Targets))
+	for _, t := range sy.Targets {
+		targets = append(targets, syslogTargetView{
+			Remote: t.Remote, Port: t.Port, Protocol: t.Protocol, Disabled: t.Disabled,
+		})
+	}
 	return map[string]any{
-		"enabled": sy.Enabled, "target": sy.Target, "protocol": sy.Protocol,
+		"targets": targets,
 		"manager": sy.Manager, "supported": sy.CanSyslog, "hint": sy.Hint,
 	}
 }

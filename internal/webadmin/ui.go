@@ -1154,6 +1154,17 @@ function buildSearchIndex(){
     add(label, 'Firewall allow list', 'firewall', null, {kind:'section', section:'firewall', tab:'allowlist'});
   }
 
+  // The remote syslog forwarding list (System > Syslog) is fetched on
+  // demand the same way the firewall allow list is above (syslogReload),
+  // so it's only searchable once that page has been opened at least once
+  // this session; state.syslogTargets is empty (this loop a no-op) until
+  // then. Lands on the section itself rather than pinpointing the row,
+  // same reasoning as the allow list entry above.
+  for (const t of (state.syslogTargets||[])) {
+    const label = (t.remote||'')+':'+(t.port||'')+' '+(t.protocol||'udp');
+    add(label, 'System \u00b7 Syslog', 'syslog', null, {kind:'section', section:'syslog'});
+  }
+
   for (const cf of (state.cfg||[])) {
     add(cf.name, 'Network', 'networks', cf.id, {kind:'net'}, cf.id+' '+(cf.subnet4||'')+' '+(cf.subnet6||'')+' '+(cf.notes||''));
     for (const k of (cf.keys||[])) {
@@ -6825,115 +6836,138 @@ function secL2Disco(c){
   load();
 }
 
-// secSyslog renders System > Syslog: point this host's local syslog
-// daemon at a remote collector. Local logging is never touched — enabling
-// this only ever adds gravinet's own forwarding rule alongside whatever
-// this host already logs by default (see hostsyslog.go's package comment
-// for exactly what "local logging untouched" means per platform).
-//
-// Same "single field's blur (or the pill) writes the whole thing" shape
-// secSNMP already uses: filling in the target turns forwarding on,
-// clearing it turns it off, and the pill is a second, independent way to
-// flip the same flag without touching the field values.
+// secSyslog renders System > Syslog: point this host's local syslog daemon
+// at one or more remote collectors, as a manageable table (state, remote,
+// port, protocol) — the same add/edit/toggle/remove shape every other
+// gravinet table uses (mirrors secAlwaysAllowed's Allow List table closely;
+// see that function's doc comment for the pattern this borrows). Local
+// logging is never touched — a target here only ever adds gravinet's own
+// forwarding rule alongside whatever this host already logs by default
+// (see hostsyslog.go's package comment for exactly what "local logging
+// untouched" means per platform). Acts on the node you're currently
+// managing, like Resolver/Time/SNMP/L2Disco.
 function secSyslog(c){
-  secHint(c, 'Forward this host\u2019s syslog to a remote collector. Local logging keeps working as before \u2014 this only adds a copy going out, never a replacement. Acts on the node you\u2019re currently managing.');
-
+  secHint(c, 'Forward this host\u2019s syslog to one or more remote collectors. Local logging keeps working as before \u2014 this only adds copies going out, never a replacement. Acts on the node you\u2019re currently managing. Double-click the state tag to toggle a target, or any other cell to edit it.');
   const body = $('<div></div>');
   body.innerHTML = '<div class="hint">loading\u2026</div>';
   c.appendChild(body);
+  syslogReload(body);
+}
 
-  const load = async () => {
-    const r = await api('/api/system/syslog');
-    if (!r.ok || !r.body){ body.innerHTML = '<div class="hint">could not read this host\u2019s syslog settings.</div>'; return; }
-    draw(r.body);
-  };
-
-  const draw = (sy) => {
+// syslogReload fetches this host's remote-syslog-forwarding targets and
+// (re)builds the table, or shows the "not supported on this host" message
+// hostsyslog.go's CanSyslog/Hint reports. Rebuilds the whole table (not
+// just its rows) inside an async callback, so — like infoRoutes' identical
+// situation — this happens after renderSection()'s own blanket
+// enhanceTable pass already ran, and enhanceTable has to be called here
+// explicitly once the table exists.
+async function syslogReload(body){
+  const r = await api('/api/system/syslog');
+  if (!r.ok || !r.body){ body.innerHTML = '<div class="hint">could not read this host\u2019s syslog settings.</div>'; return; }
+  const sy = r.body;
+  if (sy.supported === false){
     body.innerHTML = '';
-
-    if (sy.supported === false){
-      body.appendChild($('<div class="card"></div>')).appendChild($('<div class="empty">'+esc(sy.hint||'syslog forwarding isn\u2019t supported on this host')+'</div>'));
-      return;
-    }
-
-    const card = $('<div class="card"></div>');
-    const row = $('<div style="display:flex;flex-direction:column;gap:10px"></div>');
-
-    row.appendChild($('<div><div class="hint" style="margin:0 0 4px">Remote target</div>'
-      + '<input id="syslog-target" type="text" autocomplete="off" spellcheck="false" value="'+esc(sy.target||'')+'" placeholder="log.example.com:514" style="width:100%">'
-      + '</div>'));
-    row.appendChild($('<div><div class="hint" style="margin:0 0 4px">Protocol</div>'
-      + '<select id="syslog-proto" style="width:100%">'
-      + '<option value="udp"'+((sy.protocol||'udp')==='udp'?' selected':'')+'>UDP</option>'
-      + '<option value="tcp"'+(sy.protocol==='tcp'?' selected':'')+'>TCP</option>'
-      + '</select></div>'));
-    card.appendChild(row);
-    card.appendChild($('<div class="hint" style="margin:8px 0 0">Filling in a remote target turns forwarding <b>on</b>; clearing it turns it <b>off</b> \u2014 or double-click the pill next to the page title to flip it directly.'
-      + (sy.manager ? ' Applied via ' + esc(sy.manager) + '.' : '')
-      + ' Saves automatically when you click or tab away.</div>'));
-    body.appendChild(card);
-
-    const targetIn = row.querySelector('#syslog-target');
-    const protoIn = row.querySelector('#syslog-proto');
-
-    // Enabled/disabled pill, placed next to the page's own <h2> title \u2014
-    // the same spot and shape secSNMP's own pill uses, for the same
-    // "system-wide config, no per-item name to attach it to" reason.
-    const h2 = c.querySelector('h2.sec');
-    const pill = $('<span class="pill tag-toggle"></span>');
-    const setPill = (en) => {
-      pill.className = 'pill tag-toggle ' + (en?'on':'off');
-      pill.textContent = en ? 'enabled' : 'disabled';
-      pill.title = 'double-click to ' + (en ? 'disable' : 'enable');
-    };
-    setPill(!!sy.enabled);
-    h2.appendChild(document.createTextNode(' '));
-    h2.appendChild(pill);
-
-    const readFields = () => ({ target: targetIn.value.trim(), protocol: protoIn.value });
-    // postSyslog is the one place that actually writes the config \u2014 both
-    // saveSyslog (fields changed, enabled derived from target) and the
-    // pill's own double-click (enabled flipped directly, fields unchanged)
-    // funnel through this rather than each building the request its own way.
-    const postSyslog = (enabled, fields) => api('/api/system/syslog', { method:'POST', body: JSON.stringify({
-      enabled, target: fields.target, protocol: fields.protocol,
-    }) });
-
-    let last = { target: sy.target||'', protocol: sy.protocol||'udp' };
-    const saveSyslog = async () => {
-      const cur = readFields();
-      if (cur.target===last.target && cur.protocol===last.protocol) return;
-      const res = await postSyslog(!!cur.target, cur);
-      if (!res.ok){ alert((res.body && res.body.error) || 'could not save syslog settings'); targetIn.value = last.target; protoIn.value = last.protocol; return; }
-      last = cur;
-      if (res.body) setPill(!!res.body.enabled);
-    };
-    [targetIn, protoIn].forEach(inp => {
-      inp.onblur = saveSyslog;
-      inp.onkeydown = (e) => { if (e.key === 'Enter'){ e.preventDefault(); inp.blur(); } };
+    body.appendChild($('<div class="card"></div>')).appendChild($('<div class="empty">'+esc(sy.hint||'syslog forwarding isn\u2019t supported on this host')+'</div>'));
+    return;
+  }
+  const list = sy.targets || [];
+  state.syslogTargets = list; // lets buildSearchIndex see this without its own round trip — see that function's comment
+  let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>remote</th><th>port</th><th>protocol</th></tr>';
+  if (!list.length){
+    h += '<tr><td colspan="5" class="empty">no remote syslog servers configured</td></tr>';
+  } else {
+    list.forEach((tgt, i) => {
+      const enabled = !tgt.disabled;
+      h += '<tr data-idx="'+i+'"'+(enabled?'':' class="fw-disabled"')+'>'
+        + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
+        + '<td class="sy-state"><span class="tag-toggle '+(enabled?'on':'off')+'" title="double-click to '+(enabled?'disable':'enable')+'">'+(enabled?'enabled':'disabled')+'</span></td>'
+        + '<td class="sy-remote" title="double-click to edit">'+esc(tgt.remote||'')+'</td>'
+        + '<td class="sy-port" title="double-click to edit">'+esc(tgt.port||'')+'</td>'
+        + '<td class="sy-proto" title="double-click to change">'+esc((tgt.protocol||'udp').toUpperCase())+'</td>'
+        + '</tr>';
     });
-    protoIn.onchange = saveSyslog;
-
-    // Double-click the pill to flip enabled independent of the target
-    // field's own auto-derive-on-blur above \u2014 same "flip now, don't wait
-    // on the round trip" idiom secSNMP's own pill uses. Turning on with an
-    // empty target reproduces the same rejection clearing-then-refilling
-    // the field would hit; that failure surfaces in the console here too,
-    // not a blocking alert, and the next visit to this page re-reads the
-    // true state from the server either way.
-    pill.ondblclick = () => {
-      const on = !pill.classList.contains('on');
-      setPill(on);
-      const cur = readFields();
-      postSyslog(on, cur).then(res => {
-        if (!res.ok) { console.warn('/api/system/syslog toggle failed:', (res.body&&res.body.error)||'failed'); return; }
-        last = cur;
-        if (res.body) setPill(!!res.body.enabled);
-      });
+  }
+  h += '</table>';
+  body.innerHTML = h;
+  const table = body.querySelector('table');
+  table._syslogTargets = list;
+  table._rowAdd = () => syslogAddRow(table);
+  table._rowRemove = () => syslogRemoveChecked(table);
+  selAllWire(body);
+  list.forEach((tgt, i) => {
+    const tr = table.querySelector('tr[data-idx="'+i+'"]');
+    if (!tr) return;
+    // Double-click the state tag to toggle just this target — like the
+    // Allow List table, this flips the in-memory list and re-saves the
+    // whole thing (see syslogSave's doc comment for why "whole list" is
+    // the one mutator every edit here reduces to).
+    tr.querySelector('.sy-state').ondblclick = () => {
+      const next = list.map((t,j) => j===i ? Object.assign({},t,{disabled:!t.disabled}) : t);
+      syslogSave(next);
     };
-  };
+    const remoteTd = tr.querySelector('.sy-remote');
+    remoteTd.ondblclick = () => inlineCellEdit(remoteTd, tgt.remote||'', 'host or IP', v => {
+      if (!v){ alert('remote is required'); renderSection(); return; }
+      syslogSave(list.map((t,j) => j===i ? Object.assign({},t,{remote:v}) : t));
+    });
+    const portTd = tr.querySelector('.sy-port');
+    portTd.ondblclick = () => inlineCellEdit(portTd, String(tgt.port||''), '1-65535', v => {
+      const n = Number(v);
+      if (!Number.isInteger(n) || n < 1 || n > 65535){ alert('port must be 1-65535'); renderSection(); return; }
+      syslogSave(list.map((t,j) => j===i ? Object.assign({},t,{port:n}) : t));
+    });
+    // Protocol only ever has two legal values, so double-click just flips
+    // it rather than opening a free-text editor — there's nothing to type
+    // that inlineCellEdit's validation would do better than a toggle here.
+    tr.querySelector('.sy-proto').ondblclick = () => {
+      const nextProto = (tgt.protocol||'udp') === 'udp' ? 'tcp' : 'udp';
+      syslogSave(list.map((t,j) => j===i ? Object.assign({},t,{protocol:nextProto}) : t));
+    };
+  });
+  enhanceTable(table); // async render missed renderSection's own blanket pass
+}
 
-  load();
+// syslogPayload normalizes the in-memory list for the wire.
+function syslogPayload(list){
+  return list.map(t => ({ remote:t.remote, port:t.port, protocol:t.protocol||'udp', disabled: !!t.disabled }));
+}
+
+// syslogSave replaces the whole target list — the one mutator add, edit,
+// toggle-state, and remove in this table all reduce to, same shape
+// exemptSave already uses for the Allow List table.
+async function syslogSave(list){
+  const r = await api('/api/system/syslog', { method:'POST', body: JSON.stringify({ targets: syslogPayload(list) }) });
+  if (!r.ok){ alert((r.body && r.body.error) || 'save failed'); }
+  renderSection();
+}
+
+function syslogAddRow(table){
+  const tr = document.createElement('tr');
+  tr.innerHTML = '<td class="selcol"></td>'
+    + '<td class="sy-state"><span class="on">enabled</span></td>'
+    + '<td><input class="sya-remote" placeholder="log.example.com or 10.0.0.1" style="width:160px"></td>'
+    + '<td><input class="sya-port" type="number" min="1" max="65535" value="514" style="width:80px"></td>'
+    + '<td><select class="sya-proto" style="width:90px"><option value="udp">UDP</option><option value="tcp">TCP</option></select> <button class="sm sya-save">save</button> <button class="ghost sm sya-cancel">cancel</button></td>';
+  if (!insertNewRow(table, tr)) return;
+  tr.querySelector('.sya-cancel').onclick = () => renderSection();
+  tr.querySelector('.sya-save').onclick = () => {
+    const remote = tr.querySelector('.sya-remote').value.trim();
+    if (!remote){ alert('remote is required'); return; }
+    const port = Number(tr.querySelector('.sya-port').value);
+    if (!Number.isInteger(port) || port < 1 || port > 65535){ alert('port must be 1-65535'); return; }
+    const protocol = tr.querySelector('.sya-proto').value;
+    const list = (table._syslogTargets || []).slice();
+    list.push({ remote, port, protocol, disabled:false });
+    syslogSave(list);
+  };
+}
+
+async function syslogRemoveChecked(table){
+  const sel = selCheckedRows(table);
+  if (!sel.length){ alert('tick one or more rows to remove'); return; }
+  const drop = new Set(sel.map(tr => Number(tr.dataset.idx)));
+  const list = (table._syslogTargets || []).filter((t,i) => !drop.has(i));
+  syslogSave(list);
 }
 
 // ---- Users (System -> Users) -----------------------------------------------

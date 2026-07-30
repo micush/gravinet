@@ -7,46 +7,43 @@ import (
 	"testing"
 )
 
-// TestValidSyslogTargetRejectsInjection: every target that reaches
+// TestValidSyslogHostRejectsInjection: every host that reaches
 // SetHostSyslog is written straight into a daemon's own config file (an
 // rsyslog action() attribute or a BSD syslog.conf line), so a stray quote,
 // newline, or shell metacharacter must be refused before it ever gets
 // there — the same reasoning TestValidTimezoneRejectsInjection applies to
 // validTimezone.
-func TestValidSyslogTargetRejectsInjection(t *testing.T) {
+func TestValidSyslogHostRejectsInjection(t *testing.T) {
 	bad := []string{
 		"",
-		"log.example.com",           // no port
-		"log.example.com:",          // empty port
-		"log.example.com:0",         // out of range
-		"log.example.com:70000",     // out of range
-		"log.example.com:notaport",  // non-numeric port
-		"evil.com:514\nNTP=evil",    // newline injection
-		"evil\".com:514",            // quote injection
-		"evil.com; rm -rf /:514",    // shell metacharacters in host
-		"$(id).example.com:514",     // command substitution shape
-		"`id`.example.com:514",      // backtick shape
-		"../../etc/shadow:514",      // path traversal shape
-		strings.Repeat("a", 260) + ":514",
+		"evil.com\nNTP=evil",     // newline injection
+		`evil".com`,              // quote injection
+		"evil.com; rm -rf /",     // shell metacharacters
+		"$(id).example.com",      // command substitution shape
+		"`id`.example.com",       // backtick shape
+		"../../etc/shadow",       // path traversal shape
+		strings.Repeat("a", 260), // too long
 	}
-	for _, tgt := range bad {
-		if err := validSyslogTarget(tgt); err == nil {
-			t.Errorf("validSyslogTarget(%q) accepted a value it must reject", tgt)
+	for _, h := range bad {
+		if err := validSyslogHost(h); err == nil {
+			t.Errorf("validSyslogHost(%q) accepted a value it must reject", h)
 		}
 	}
 }
 
-// TestValidSyslogTargetAcceptsRealTargets checks hostnames, IPv4, and
-// bracketed IPv6 literals all parse — a remote syslog collector is
-// legitimately named any of these ways.
-func TestValidSyslogTargetAcceptsRealTargets(t *testing.T) {
+// TestValidSyslogHostAcceptsRealHosts checks hostnames and both IPv4 and
+// IPv6 literals all parse — a remote syslog collector is legitimately
+// named any of these ways. Unlike the old combined host:port form, an
+// IPv6 literal here needs no brackets: Remote and Port are separate
+// structured fields.
+func TestValidSyslogHostAcceptsRealHosts(t *testing.T) {
 	good := []string{
-		"log.example.com:514", "10.0.0.1:514", "192.168.1.1:1514",
-		"[2001:db8::1]:514", "localhost:601", "syslog-collector.internal:6514",
+		"log.example.com", "10.0.0.1", "192.168.1.1",
+		"2001:db8::1", "localhost", "syslog-collector.internal",
 	}
-	for _, tgt := range good {
-		if err := validSyslogTarget(tgt); err != nil {
-			t.Errorf("validSyslogTarget(%q) rejected a legitimate target: %v", tgt, err)
+	for _, h := range good {
+		if err := validSyslogHost(h); err != nil {
+			t.Errorf("validSyslogHost(%q) rejected a legitimate host: %v", h, err)
 		}
 	}
 }
@@ -77,53 +74,67 @@ func TestAttrValue(t *testing.T) {
 }
 
 // TestRenderAndParseRsyslogDropInRoundTrip writes renderRsyslogDropIn's
-// output to a temp file and checks parseRsyslogDropInAt recovers the same
-// target/protocol — the two halves of the "gravinet only ever needs to
-// understand its own previously written output" contract the package
-// comment describes.
+// output (multiple targets, mixed enabled/disabled) to a temp file and
+// checks parseRsyslogDropInAt recovers exactly the same set, in order —
+// the two halves of the "gravinet only ever needs to understand its own
+// previously written output" contract the package comment describes.
 func TestRenderAndParseRsyslogDropInRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "gravinet-syslog-forward.conf")
-	content := renderRsyslogDropIn("10.0.0.1", "514", "udp")
+	want := []SyslogTarget{
+		{Remote: "10.0.0.1", Port: 514, Protocol: "udp"},
+		{Remote: "log.example.com", Port: 6514, Protocol: "tcp", Disabled: true},
+	}
+	content := renderRsyslogDropIn(want)
 	if !strings.Contains(content, "Local logging is untouched") {
 		t.Error("renderRsyslogDropIn's output doesn't document that local logging is untouched")
 	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	target, proto, ok := parseRsyslogDropInAt(path)
+	got, ok := parseRsyslogDropInAt(path)
 	if !ok {
 		t.Fatal("parseRsyslogDropInAt: expected ok=true reading back a file this package just wrote")
 	}
-	if target != "10.0.0.1:514" || proto != "udp" {
-		t.Errorf("parseRsyslogDropInAt = (%q, %q), want (\"10.0.0.1:514\", \"udp\")", target, proto)
+	if len(got) != len(want) {
+		t.Fatalf("parseRsyslogDropInAt: got %d targets, want %d: %+v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("target %d = %+v, want %+v", i, got[i], want[i])
+		}
 	}
 }
 
 func TestParseRsyslogDropInAtMissingFile(t *testing.T) {
-	if _, _, ok := parseRsyslogDropInAt(filepath.Join(t.TempDir(), "does-not-exist.conf")); ok {
+	if _, ok := parseRsyslogDropInAt(filepath.Join(t.TempDir(), "does-not-exist.conf")); ok {
 		t.Error("parseRsyslogDropInAt: expected ok=false for a missing file")
 	}
 }
 
 // TestRenderAndParseBSDSyslogBlockRoundTrip checks both protocols map to
-// the classic BSD syslogd "@"/"@@" forward syntax and back.
+// the classic BSD syslogd "@"/"@@" forward syntax and back, across
+// multiple targets including a disabled one.
 func TestRenderAndParseBSDSyslogBlockRoundTrip(t *testing.T) {
-	cases := []struct{ target, protocol string }{
-		{"10.0.0.1:514", "udp"},
-		{"log.example.com:601", "tcp"},
+	want := []SyslogTarget{
+		{Remote: "10.0.0.1", Port: 514, Protocol: "udp"},
+		{Remote: "log.example.com", Port: 601, Protocol: "tcp"},
+		{Remote: "192.168.1.1", Port: 514, Protocol: "udp", Disabled: true},
 	}
-	for _, c := range cases {
-		path := filepath.Join(t.TempDir(), "syslog.conf")
-		block := renderBSDSyslogBlock(c.target, c.protocol)
-		if err := os.WriteFile(path, []byte(block), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		target, proto, ok := parseBSDSyslogBlock(path)
-		if !ok {
-			t.Fatalf("parseBSDSyslogBlock: expected ok=true for %+v", c)
-		}
-		if target != c.target || proto != c.protocol {
-			t.Errorf("parseBSDSyslogBlock = (%q, %q), want (%q, %q)", target, proto, c.target, c.protocol)
+	path := filepath.Join(t.TempDir(), "syslog.conf")
+	block := renderBSDSyslogBlock(want)
+	if err := os.WriteFile(path, []byte(block), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := parseBSDSyslogBlock(path)
+	if !ok {
+		t.Fatalf("parseBSDSyslogBlock: expected ok=true for %+v", want)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("parseBSDSyslogBlock: got %d targets, want %d: %+v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("target %d = %+v, want %+v", i, got[i], want[i])
 		}
 	}
 }
@@ -132,7 +143,8 @@ func TestRenderAndParseBSDSyslogBlockRoundTrip(t *testing.T) {
 // matters most: it checks setSyslogManagedBlock never touches a line it
 // didn't write itself — the "still also log locally" requirement this
 // whole feature exists to satisfy. Pre-existing default local-logging
-// rules must survive being written around, repeatedly, verbatim.
+// rules must survive being written around, repeatedly, verbatim, and the
+// managed block itself must carry more than one target across a save.
 func TestSetSyslogManagedBlockPreservesExistingContent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "syslog.conf")
 	original := "# default local logging, not gravinet's\n" +
@@ -143,10 +155,13 @@ func TestSetSyslogManagedBlockPreservesExistingContent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Enable forwarding: every original line must survive, plus the new
-	// managed block appended.
-	block := renderBSDSyslogBlock("10.0.0.1:514", "udp")
-	if err := setSyslogManagedBlock(path, block); err != nil {
+	// Enable forwarding with two targets: every original line must
+	// survive, plus the new managed block appended.
+	targets := []SyslogTarget{
+		{Remote: "10.0.0.1", Port: 514, Protocol: "udp"},
+		{Remote: "192.168.1.1", Port: 601, Protocol: "tcp"},
+	}
+	if err := setSyslogManagedBlock(path, renderBSDSyslogBlock(targets)); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(path)
@@ -158,14 +173,15 @@ func TestSetSyslogManagedBlockPreservesExistingContent(t *testing.T) {
 			t.Errorf("original local-logging line dropped: %q\nfull file:\n%s", line, got)
 		}
 	}
-	if target, proto, ok := parseBSDSyslogBlock(path); !ok || target != "10.0.0.1:514" || proto != "udp" {
-		t.Errorf("managed block not recovered after enabling: (%q, %q, %v)", target, proto, ok)
+	parsed, ok := parseBSDSyslogBlock(path)
+	if !ok || len(parsed) != 2 {
+		t.Fatalf("managed block not recovered after enabling: ok=%v parsed=%+v", ok, parsed)
 	}
 
-	// Change the target: original content must still survive, and the
-	// block must be replaced (not duplicated).
-	block2 := renderBSDSyslogBlock("192.168.1.1:601", "tcp")
-	if err := setSyslogManagedBlock(path, block2); err != nil {
+	// Replace with a single target: original content must still survive,
+	// and the block must be replaced (not duplicated), not merged.
+	targets2 := []SyslogTarget{{Remote: "192.168.1.1", Port: 601, Protocol: "tcp"}}
+	if err := setSyslogManagedBlock(path, renderBSDSyslogBlock(targets2)); err != nil {
 		t.Fatal(err)
 	}
 	got2, _ := os.ReadFile(path)
@@ -177,11 +193,13 @@ func TestSetSyslogManagedBlockPreservesExistingContent(t *testing.T) {
 	if strings.Count(string(got2), "BEGIN gravinet syslog-forward") != 1 {
 		t.Errorf("expected exactly one managed block after replacing it, file:\n%s", got2)
 	}
-	if target, proto, ok := parseBSDSyslogBlock(path); !ok || target != "192.168.1.1:601" || proto != "tcp" {
-		t.Errorf("managed block not updated: (%q, %q, %v)", target, proto, ok)
+	parsed2, ok := parseBSDSyslogBlock(path)
+	if !ok || len(parsed2) != 1 || parsed2[0] != targets2[0] {
+		t.Errorf("managed block not updated: ok=%v parsed=%+v", ok, parsed2)
 	}
 
-	// Disable: original content must still survive, managed block gone.
+	// Disable entirely: original content must still survive, managed
+	// block gone.
 	if err := setSyslogManagedBlock(path, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -194,8 +212,30 @@ func TestSetSyslogManagedBlockPreservesExistingContent(t *testing.T) {
 	if strings.Contains(string(got3), "BEGIN gravinet syslog-forward") {
 		t.Errorf("managed block still present after disabling, file:\n%s", got3)
 	}
-	if _, _, ok := parseBSDSyslogBlock(path); ok {
+	if _, ok := parseBSDSyslogBlock(path); ok {
 		t.Error("parseBSDSyslogBlock: expected ok=false after disabling")
+	}
+}
+
+// TestBSDSyslogBlockDisabledTargetRoundTripsAndStaysInert checks the
+// specific behavior a per-row "state" toggle depends on: a disabled target
+// survives being written and re-read (so unchecking it in the web admin
+// and coming back later still shows the row, unchecked) while its line is
+// a comment as far as syslogd would parse the file (so it never actually
+// forwards).
+func TestBSDSyslogBlockDisabledTargetRoundTripsAndStaysInert(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "syslog.conf")
+	targets := []SyslogTarget{{Remote: "10.0.0.1", Port: 514, Protocol: "udp", Disabled: true}}
+	if err := os.WriteFile(path, []byte(renderBSDSyslogBlock(targets)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(path)
+	if !strings.Contains(string(raw), rsyslogDisabledPrefix) {
+		t.Fatalf("disabled target wasn't written with the disabled marker:\n%s", raw)
+	}
+	got, ok := parseBSDSyslogBlock(path)
+	if !ok || len(got) != 1 || !got[0].Disabled {
+		t.Errorf("disabled target didn't round-trip: ok=%v got=%+v", ok, got)
 	}
 }
 
@@ -212,8 +252,8 @@ func TestSyslogSupportedAndHostSyslogAreSafeToCall(t *testing.T) {
 	if info.CanSyslog != ok {
 		t.Errorf("HostSyslog().CanSyslog = %v, want it to match SyslogSupported() = %v", info.CanSyslog, ok)
 	}
-	if !info.CanSyslog && info.Enabled {
-		t.Error("HostSyslog: Enabled true while CanSyslog is false — nothing should be reported configured on an unsupported host")
+	if !info.CanSyslog && len(info.Targets) != 0 {
+		t.Error("HostSyslog: targets reported while CanSyslog is false — nothing should be reported configured on an unsupported host")
 	}
 }
 
@@ -221,15 +261,26 @@ func TestSyslogSupportedAndHostSyslogAreSafeToCall(t *testing.T) {
 // validation failure never reaches a real file write or exec.Command —
 // safe to run unconditionally on the machine running this test suite,
 // regardless of whether rsyslog/syslogd actually happen to be installed
-// there (mirrors TestSetHostTimezoneRejectsBadInputBeforeExec).
+// there (mirrors TestSetHostTimezoneRejectsBadInputBeforeExec). Also
+// checks that one bad entry among several rejects the whole batch rather
+// than partially applying it.
 func TestSetHostSyslogRejectsBadInputBeforeTouchingTheSystem(t *testing.T) {
-	if ok, hint := SetHostSyslog(true, "", "udp"); ok || hint == "" {
-		t.Errorf(`SetHostSyslog(true, "", "udp") = (%v, %q), want a refusal with a reason`, ok, hint)
+	cases := []struct {
+		name    string
+		targets []SyslogTarget
+	}{
+		{"empty remote", []SyslogTarget{{Remote: "", Port: 514, Protocol: "udp"}}},
+		{"bad protocol", []SyslogTarget{{Remote: "log.example.com", Port: 514, Protocol: "quic"}}},
+		{"unparseable host", []SyslogTarget{{Remote: "not a valid host", Port: 514, Protocol: "udp"}}},
+		{"port out of range", []SyslogTarget{{Remote: "log.example.com", Port: 0, Protocol: "udp"}}},
+		{"one bad entry among good ones", []SyslogTarget{
+			{Remote: "log.example.com", Port: 514, Protocol: "udp"},
+			{Remote: "log2.example.com", Port: 99999, Protocol: "udp"},
+		}},
 	}
-	if ok, hint := SetHostSyslog(true, "log.example.com:514", "quic"); ok || hint == "" {
-		t.Errorf("SetHostSyslog with a bogus protocol = (%v, %q), want a refusal", ok, hint)
-	}
-	if ok, hint := SetHostSyslog(true, "not a valid target", "udp"); ok || hint == "" {
-		t.Errorf("SetHostSyslog with an unparseable target = (%v, %q), want a refusal", ok, hint)
+	for _, c := range cases {
+		if ok, hint := SetHostSyslog(c.targets); ok || hint == "" {
+			t.Errorf("%s: SetHostSyslog(%+v) = (%v, %q), want a refusal with a reason", c.name, c.targets, ok, hint)
+		}
 	}
 }

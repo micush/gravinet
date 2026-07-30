@@ -2,6 +2,68 @@
 
 ---
 
+## v735 — 2026-07-30
+
+**System > Syslog is now a manageable table (state, remote, port,
+protocol) supporting multiple remote syslog servers, replacing the old
+single-target form.**
+
+Previously this page could point this host's syslog daemon at exactly one
+remote collector (a combined "host:port" field, a protocol dropdown, and
+an enabled/disabled pill next to the page title). Operators who need to
+fan logs out to more than one collector — a local aggregator and an
+off-site one, for example — had no way to do that from here.
+
+**Backend (`internal/service/hostsyslog.go`):** `SyslogInfo`/`SetHostSyslog`
+now carry a `[]SyslogTarget` (`Remote`, `Port`, `Protocol`, `Disabled`)
+instead of a single `Target`/`Protocol`/`Enabled`. Nothing here is stored
+in gravinet's own config.json — the host's own syslog daemon config stays
+the source of truth, same as before — so both platform backends had to
+grow from rendering/parsing one line to rendering/parsing a list:
+
+- Linux (rsyslog drop-in): one `action()` line per enabled target.
+- FreeBSD/OpenBSD (`syslog.conf` managed block): one `@host:port` /
+  `@@host:port` line per enabled target.
+
+A disabled target is written as a `# gravinet-disabled: ...` comment
+line rather than omitted outright — inert as far as the daemon parses the
+file (it's a comment), but still recoverable on the next read. Without
+this, unchecking a row in the table and coming back later would have
+made it vanish instead of showing up unchecked, since the host file is
+the only thing gravinet reads back from. `SetHostSyslog` validates every
+target before writing anything, so one bad entry in a batch save rejects
+the whole request rather than partially applying it.
+
+**API (`internal/webadmin/edit.go`):** `handleSystemSyslog` moved from
+`{enabled, target, protocol}` to `{targets: [...]}` — add, edit, remove,
+and toggle-state in the table all reduce to "save the list as it now
+stands," the same one-mutator shape `handleExempt` already uses for the
+Firewall Allow List table.
+
+**UI (`internal/webadmin/ui.go`):** `secSyslog` rebuilt as an actual
+table using the same building blocks as the Allow List
+(`secAlwaysAllowed`/`exemptReload`/`exemptSave`): a checkbox column, a
+double-click-to-toggle state tag, double-click-to-edit remote/port cells,
+double-click-to-flip protocol (only two legal values, so a toggle rather
+than a free-text editor), an inline add-row, and a remove-checked button.
+Also wired into `buildSearchIndex` the same way the allow list is, so a
+configured target is findable from the top search box once the page has
+been opened this session.
+
+Tests rewritten for the new shape (`hostsyslog_test.go`,
+`systemsyslog_handler_test.go`), with new coverage added: multi-target
+round-trip on both platform backends, the disabled-target round-trip
+(written as a comment, parsed back as disabled, confirmed inert), one bad
+target among good ones rejecting the whole batch, and a check that the
+page actually renders a table (state/remote/port/protocol columns,
+`_rowAdd`/`_rowRemove`) rather than the old single-target form.
+
+Verified with go1.22.2: `go build ./...`, `go vet ./...` clean (CGO
+disabled). Full `internal/service` and `internal/webadmin` suites pass.
+Embedded `<script>` block extracted and `node --check`'d clean.
+
+---
+
 ## v734 — 2026-07-30
 
 **Removed a seventh "Applied immediately; no restart." note that v733
