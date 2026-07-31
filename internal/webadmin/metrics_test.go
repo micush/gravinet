@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -69,9 +70,91 @@ func TestMetricsCollectorSample(t *testing.T) {
 func TestMetricsWindowClamp(t *testing.T) {
 	mc := newMetricsCollector(&stubBackend{}, logx.Default())
 	mc.sample()
-	// snapshot() should accept any window; the handler clamps 1..60.
+	// snapshot() should accept any window; the handler clamps 1..1440.
 	if got := mc.snapshot(1); got["sample_interval"].(int) != 2 {
 		t.Fatalf("sample_interval = %v, want 2", got["sample_interval"])
+	}
+}
+
+// TestMetricsRetentionAllows24h pins metricRetention at its new 24-hour
+// value (raised from 60m to back the Metrics tab's new 4/8/12/24hr range
+// buttons): a point just inside the window must survive a sample pass, one
+// just outside it must be trimmed. Same shape as latencyhist_test.go's
+// TestLatencyCollectorRetention, exercised directly against sample()'s trim
+// path rather than waiting on the real ticker.
+func TestMetricsRetentionAllows24h(t *testing.T) {
+	mc := newMetricsCollector(&stubBackend{}, logx.Default())
+	now := time.Now().Unix()
+	// appendTrim's prefix-scan assumes ascending time order, same as real
+	// history — oldest point first.
+	mc.mem = []metricPoint{
+		{T: now - int64(25*time.Hour/time.Second), V: 99}, // outside 24h: must be trimmed
+		{T: now - int64(23*time.Hour/time.Second), V: 10}, // inside 24h: must survive
+	}
+	// Deliberately mem, not cpu: cpu's rate needs a delta between two
+	// calls with real elapsed wall time (see TestMetricsCollectorSample's
+	// own comment, and why that test never asserts cpu has any points at
+	// all) — mem is appended unconditionally on every successful sample(),
+	// so one call is enough to exercise the trim deterministically.
+	mc.sample()
+
+	for _, p := range mc.mem {
+		if p.V == 99 {
+			t.Fatalf("the 25h-old point should have been trimmed by a 24h retention window, but it's still present: %+v", mc.mem)
+		}
+	}
+	found23h := false
+	for _, p := range mc.mem {
+		if p.V == 10 {
+			found23h = true
+		}
+	}
+	if !found23h {
+		t.Errorf("the 23h-old point should have survived a 24h retention window, got %+v", mc.mem)
+	}
+}
+
+// TestHandleMetricsClampAllows24h locks in /api/metrics' minutes clamp at
+// 1440 (24h) rather than the old 60 (1h) ceiling — matching the frontend's
+// new longest range button. Seeds a point old enough to fall inside the new
+// ceiling but outside the old one, and confirms a request for the new range
+// actually surfaces it, not just that the endpoint returns 200.
+func TestHandleMetricsClampAllows24h(t *testing.T) {
+	cred, _ := GenerateCredential("admin", "pw", 10000)
+	wcfg := config.WebAdmin{AuthMode: "local", Users: []config.AdminUser{cred},
+		LoginBan: config.BanPolicy{MaxFailures: 3, WindowSeconds: 60, BanSeconds: 900}}
+	srv := New(wcfg, &stubBackend{}, logx.Default())
+	srv.metrics = newMetricsCollector(srv.be, srv.log)
+	now := time.Now().Unix()
+	srv.metrics.cpu = []metricPoint{{T: now - int64(20*time.Hour/time.Second), V: 42}}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+	c := sessionFor(t, ts)
+
+	cpuHist := func(minutes int) []metricPoint {
+		req, _ := http.NewRequest("GET", ts.URL+"/api/metrics?minutes="+strconv.Itoa(minutes), nil)
+		req.AddCookie(c)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var body struct {
+			CPU []metricPoint `json:"cpu"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		return body.CPU
+	}
+
+	if h := cpuHist(60); len(h) != 0 {
+		t.Errorf("a 60-minute request should not see a 20h-old point, got %+v", h)
+	}
+	// Past the old 60-minute ceiling, within the new 1440-minute one — and
+	// a request past 1440 should clamp there, not reject.
+	if h := cpuHist(100000); len(h) != 1 {
+		t.Errorf("expected the 20h-old point within the new 24h ceiling, got %d points: %+v", len(h), h)
 	}
 }
 

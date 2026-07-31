@@ -2,6 +2,22 @@
 
 ---
 
+## v749 — 2026-07-30
+
+**Metrics: added 4hr, 8hr, 12hr, and 24hr range buttons to Info > Metrics (CPU/memory/disk/interface throughput), previously capped at 60 min. Same shape as v748's Latency history extension.**
+
+Same three pieces moved together: `metricRetention` (`internal/webadmin/metrics.go`) raised from 60m to 24h, so the collector actually keeps samples that far back; `handleMetrics`'s own `minutes` clamp raised from 60 to 1440 to match (leaving it at 60 would have silently truncated a 24hr request, same failure shape v748 called out for latency); and `infoMetrics`'s range buttons (`ui.go`) gained `[240,'4 hr']`, `[480,'8 hr']`, `[720,'12 hr']`, `[1440,'24 hr']` alongside the existing five. `fmtWinLabel` (added in v748) already handles the hours-scale x-axis label correctly here without changes — it was written generic over both callers from the start.
+
+Checked the memory cost rather than assuming it's fine: at 2s sampling, 24h is ~43,200 points per series (~691KB) — but unlike Latency's history, which is one series *per peer*, Metrics keeps a small, fixed set of series (cpu/mem/disk) plus two per *live interface* (rx/tx), not per-peer. So even a mesh with several dozen networks stays a modest, bounded cost — the fan-out that would matter (peer count) doesn't apply here the way it does for Latency.
+
+**Caught during test-writing, not shipped:** the first draft of the new retention test seeded history onto `cpu` and called `sample()` once — CPU's rate needs a delta against a previous reading, so the very first `sample()` after seeding only primes `lastCPUTotal` and never touches `cpu` at all (see `TestMetricsCollectorSample`'s own comment on why *that* test never asserts CPU has any points either). Calling `sample()` twice didn't reliably fix it either: two calls with no real elapsed time between them can land on the same jiffy tick, so the "total > last total" check can still be false. Switched the test to `mem` instead — appended unconditionally on every successful sample(), no delta or priming needed — making the trim path exercised deterministically rather than dependent on real wall-clock time passing between two calls.
+
+Added `TestMetricsRetentionAllows24h` and `TestHandleMetricsClampAllows24h` (`internal/webadmin/metrics_test.go`), and fixed a stale doc comment in the existing `TestMetricsWindowClamp` that still said "the handler clamps 1..60". Confirmed both new tests fail against the pre-fix 60m/60-minute behavior and pass against the fix.
+
+Verified: `go build ./...` and `go vet ./...` clean, `gofmt` clean, embedded `<script>` block `node --check`'d clean. Full `internal/webadmin` suite passes.
+
+---
+
 ## v748 — 2026-07-30
 
 **Latency history: added 8hr, 12hr, and 24hr range buttons to Monitor > Latency's expanded chart, previously capped at 4hr.**

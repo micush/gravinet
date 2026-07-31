@@ -7960,7 +7960,7 @@ function infoMetrics(c){
   if (metricsTimer){ clearInterval(metricsTimer); metricsTimer = null; }
   metricsHover = false;
   const durBar = $('<div class="seg" style="margin-bottom:14px"></div>');
-  for (const [m,lbl] of [[1,'1 min'],[5,'5 min'],[15,'15 min'],[30,'30 min'],[60,'60 min']]){
+  for (const [m,lbl] of [[1,'1 min'],[5,'5 min'],[15,'15 min'],[30,'30 min'],[60,'60 min'],[240,'4 hr'],[480,'8 hr'],[720,'12 hr'],[1440,'24 hr']]){
     const b = $('<button class="seg-btn'+(metricsMinutes===m?' active':'')+'">'+lbl+'</button>');
     b.onclick = () => {
       metricsMinutes = m;

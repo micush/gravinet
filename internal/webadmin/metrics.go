@@ -13,10 +13,13 @@ import (
 )
 
 // Sampling cadence and retention for the Info -> Metrics graphs. 2s sampling
-// over 60 minutes is ~1800 points per series — light to collect and to plot.
+// over 24h is ~43,200 points per series — per host-level series (cpu/mem/
+// disk) plus two per live interface (rx/tx), not per-peer the way the
+// Latency page's history is, so even a mesh with several dozen networks
+// stays a modest, bounded in-memory cost.
 const (
 	metricSampleInterval = 2 * time.Second
-	metricRetention      = 60 * time.Minute
+	metricRetention      = 24 * time.Hour
 )
 
 // metricPoint is one timestamped sample (unix seconds, value).
@@ -331,8 +334,8 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if minutes < 1 {
 		minutes = 1
 	}
-	if minutes > 60 {
-		minutes = 60
+	if minutes > 1440 {
+		minutes = 1440
 	}
 	writeJSON(w, http.StatusOK, s.metrics.snapshot(minutes))
 }
