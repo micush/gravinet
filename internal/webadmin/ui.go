@@ -8195,6 +8195,19 @@ function clockOf(t){ const d=new Date(t*1000); const p=n=>String(n).padStart(2,'
 // chartLayers builds the grid (axes/labels) and data (line paths) layers for a
 // chart, separately so the data can be redrawn in place without disturbing the
 // hover overlay.
+// fmtWinLabel formats a chart window length (win, in seconds) for the
+// left-edge axis label. Used by both the Metrics tab (max 60m) and the
+// Latency history modal (now up to 24h) — past an hour, showing minutes
+// (e.g. \"1440m\") is technically correct but unreadable, so this switches to
+// hours once win reaches 3600s. Every current caller passes an exact
+// multiple of 60 (and, above an hour, an exact multiple of 3600), so integer
+// division here never needs rounding.
+function fmtWinLabel(win){
+  if (win < 60) return win+'s';
+  if (win < 3600) return (win/60)+'m';
+  return (win/3600)+'h';
+}
+
 function chartLayers(series, yMax, win, fmtY, nowRef){
   const W=CH.W, H=CH.H, padL=CH.padL, padR=CH.padR, padT=CH.padT, padB=CH.padB;
   const now=nowRef, t0=now-win;
@@ -8206,7 +8219,7 @@ function chartLayers(series, yMax, win, fmtY, nowRef){
     grid += '<line x1="'+padL+'" y1="'+yy.toFixed(1)+'" x2="'+(W-padR)+'" y2="'+yy.toFixed(1)+'" stroke="var(--line)" stroke-width="1"/>';
     grid += '<text x="'+(padL-8)+'" y="'+(yy+3).toFixed(1)+'" text-anchor="end" font-size="10" fill="var(--mut)">'+esc(fmtY(yMax*f))+'</text>';
   }
-  grid += '<text x="'+padL+'" y="'+(H-6)+'" font-size="10" fill="var(--mut)">-'+(win>=60?(win/60+'m'):(win+'s'))+'</text>';
+  grid += '<text x="'+padL+'" y="'+(H-6)+'" font-size="10" fill="var(--mut)">-'+fmtWinLabel(win)+'</text>';
   grid += '<text x="'+(W-padR)+'" y="'+(H-6)+'" text-anchor="end" font-size="10" fill="var(--mut)">now</text>';
   let data='';
   for (const s of series){
@@ -9701,7 +9714,7 @@ async function showLatencyHistoryModal(netName, nodeId, label, overlay){
       chartBox.appendChild(card);
     }
   };
-  for (const [m,lbl] of [[5,'5 min'],[15,'15 min'],[30,'30 min'],[60,'60 min'],[240,'4 hr']]){
+  for (const [m,lbl] of [[5,'5 min'],[15,'15 min'],[30,'30 min'],[60,'60 min'],[240,'4 hr'],[480,'8 hr'],[720,'12 hr'],[1440,'24 hr']]){
     const b = $('<button class="seg-btn'+(minutes===m?' active':'')+'">'+lbl+'</button>');
     b.onclick = () => {
       minutes = m;

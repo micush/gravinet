@@ -2,6 +2,24 @@
 
 ---
 
+## v748 — 2026-07-30
+
+**Latency history: added 8hr, 12hr, and 24hr range buttons to Monitor > Latency's expanded chart, previously capped at 4hr.**
+
+Three places had to move together, all bounded by the same number: `latencyRetention` (`internal/webadmin/latencyhist.go`) is how far back the passive RTT collector keeps samples at all — raised from 4h to 24h, so the new longest range has something to actually show. `handleLatencyHistory`'s own `minutes` clamp was raised from 240 to 1440 to match; leaving it at 240 would have quietly truncated a 24hr request back down to 4hr with no error, the fetch just serving less than the button promised. And the modal's own range buttons (`showLatencyHistoryModal`, `ui.go`) gained `[480,'8 hr']`, `[720,'12 hr']`, `[1440,'24 hr']` alongside the existing five.
+
+At 10s sampling, 24h is ~8,640 points per peer (~140KB) — checked, not just assumed: light enough that even a few hundred peers stays a modest, bounded cost, no new eviction policy needed beyond `appendTrim`'s existing per-sample trim.
+
+**Caught and fixed during implementation, not shipped:** the chart's x-axis left-edge label (`chartLayers`) computed `win/60 + 'm'` for anything at least a minute, so 24h would have rendered as "-1440m" — technically correct, unreadable, and the same code path the existing 4hr button already quietly lived with as "-240m." Added `fmtWinLabel`, switching to hours once the window reaches 3600s; shared with the Metrics tab's own charts (unaffected in practice, since nothing there exceeds 60m).
+
+Also found and fixed two bugs in the tests written for this change, not in the fix itself: the first draft of `TestLatencyCollectorRetention` seeded its two history points out of chronological order, which `appendTrim`'s prefix-scan silently mis-trimmed since it assumes ascending time (real history is always append-only in time order, so this ordering bug could never occur outside a test); and `TestLatencyHistoryClampAllows24h` initially assumed `newTestServer`'s `Server` has a live `latencyHist` the way a real one does, but `newTestServer` drives the handler via `httptest` directly rather than through `Start()` — the only place that field is actually constructed — so it was nil, and the test panicked until it built one explicitly.
+
+Added `TestLatencyCollectorRetention` and `TestLatencyHistoryClampAllows24h` (`internal/webadmin/latencyhist_test.go`, a new file — there was no existing test coverage for this collector at all). Confirmed both fail against the pre-fix 4h/240-minute behavior and pass against the fix, not just written and assumed correct.
+
+Verified: `go build ./...` and `go vet ./...` clean, `gofmt` clean, embedded `<script>` block `node --check`'d clean. Full `internal/webadmin` suite passes.
+
+---
+
 ## v747 — 2026-07-30
 
 **Fix: the header node picker ("choose which node this GUI configures") no longer lists peers that are structurally unreachable for management on a partial-mesh network.**

@@ -36,7 +36,12 @@ import (
 
 const (
 	latencySampleInterval = 10 * time.Second
-	latencyRetention      = 4 * time.Hour
+	// latencyRetention bounds how far back the Latency page's expanded chart
+	// can go. 10s sampling over 24h is ~8,640 points per peer (~140KB) —
+	// light enough per peer that even a few hundred peers stays a modest,
+	// bounded in-memory cost, not something that needed its own eviction
+	// policy beyond appendTrim's existing per-sample trim.
+	latencyRetention = 24 * time.Hour
 )
 
 // latencyPeerHistory is one peer's RTT history within one network.
@@ -54,9 +59,9 @@ type latencyCollector struct {
 	be  Backend
 	log *logx.Logger // may be nil in tests; always nil-checked before use
 
-	mu    sync.Mutex
-	nets  map[string]map[string]*latencyPeerHistory // network name -> node id -> history
-	stop  chan struct{}
+	mu   sync.Mutex
+	nets map[string]map[string]*latencyPeerHistory // network name -> node id -> history
+	stop chan struct{}
 }
 
 func newLatencyCollector(be Backend, log *logx.Logger) *latencyCollector {
@@ -153,8 +158,8 @@ func (s *Server) handleLatencyHistory(w http.ResponseWriter, r *http.Request) {
 	if minutes < 1 {
 		minutes = 1
 	}
-	if minutes > 240 {
-		minutes = 240
+	if minutes > 1440 {
+		minutes = 1440
 	}
 	writeJSON(w, http.StatusOK, s.latencyHist.snapshot(minutes))
 }
