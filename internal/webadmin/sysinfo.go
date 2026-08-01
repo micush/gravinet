@@ -80,9 +80,15 @@ func (s *Server) handleLocalDNS(w http.ResponseWriter, r *http.Request) {
 
 // latencyPeer is one peer's ping result, for the Info → Latency tab.
 type latencyPeer struct {
-	NodeID   string  `json:"node_id"`
-	Hostname string  `json:"hostname"`
-	Overlay  string  `json:"overlay"` // address actually pinged (v4 preferred, v6 fallback)
+	NodeID   string `json:"node_id"`
+	Hostname string `json:"hostname"`
+	Overlay  string `json:"overlay"` // address actually pinged (v4 preferred, v6 fallback)
+	// Overlay4/Overlay6 are both addresses, independent of which one Overlay
+	// above chose to ping — purely for display, so a dual-stack peer shows
+	// both here the same way Monitor > mesh peers does (overlayCellHTML),
+	// instead of silently hiding whichever family isn't being pinged.
+	Overlay4 string  `json:"overlay4,omitempty"`
+	Overlay6 string  `json:"overlay6,omitempty"`
 	RTTMs    float64 `json:"rtt_ms,omitempty"`
 	OK       bool    `json:"ok"`
 	Error    string  `json:"error,omitempty"`
@@ -110,7 +116,7 @@ func (s *Server) handleLocalLatency(w http.ResponseWriter, r *http.Request) {
 			if addr == "" {
 				addr = p.Overlay6
 			}
-			results[i] = latencyPeer{NodeID: p.NodeID, Hostname: p.Hostname, Overlay: addr}
+			results[i] = latencyPeer{NodeID: p.NodeID, Hostname: p.Hostname, Overlay: addr, Overlay4: p.Overlay4, Overlay6: p.Overlay6}
 			if addr == "" {
 				results[i].Error = "no overlay address yet"
 				continue

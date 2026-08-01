@@ -9906,7 +9906,7 @@ function infoLatency(c){
         const nameCell = netId
           ? '<span class="peer-link" data-node="'+esc(p.node_id)+'" title="'+(nameTitle||'show this peer in Monitor \u2192 mesh peers')+'">'+nameLabel+'</span>'
           : (nameTitle ? '<span title="'+nameTitle+'">'+nameLabel+'</span>' : nameLabel);
-        h += '<tr'+rowClass+'><td>'+nameCell+'</td><td>'+esc(p.overlay||'\u2013')+'</td><td>'+rtt+'</td><td>'+trend+'</td></tr>';
+        h += '<tr'+rowClass+'><td>'+nameCell+'</td><td>'+overlayCellHTML(p)+'</td><td>'+rtt+'</td><td>'+trend+'</td></tr>';
       }
       sub.innerHTML += h+'</table>';
       body.appendChild(sub);
@@ -9929,7 +9929,10 @@ function infoLatency(c){
         el.onclick = () => {
           const clicked = sorted.find(x => x.node_id === el.dataset.node);
           const label = (clicked && clicked.hostname) || el.dataset.node.slice(0,8);
-          const overlay = (clicked && clicked.overlay) || '';
+          // Both addresses when dual-stack, same source data the table's
+          // overlayCellHTML cell just showed — a simple join reads fine on
+          // this single hint line, unlike the table cell's stacked <br>.
+          const overlay = clicked ? [clicked.overlay4, clicked.overlay6].filter(Boolean).join(' \u00b7 ') : '';
           showLatencyHistoryModal(n.name, el.dataset.node, label, overlay);
         };
       });

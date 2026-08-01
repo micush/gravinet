@@ -2,6 +2,20 @@
 
 ---
 
+## v755 — 2026-08-01
+
+**Monitor > Latency now shows both overlay addresses for a dual-stack peer, matching Monitor > mesh peers, instead of only the one address actually pinged.**
+
+`handleLocalLatency` (`internal/webadmin/sysinfo.go`) picks a single address to ping — v4 preferred, v6 fallback — and `latencyPeer.Overlay` carried only that one, so a dual-stack peer's v6 address never appeared anywhere on the page even though it exists. Added `Overlay4`/`Overlay6` fields alongside the existing `Overlay`, populated from both regardless of which one gets pinged; `Overlay` itself is untouched and still drives the actual ping target, since that selection logic wasn't what was asked for.
+
+On the frontend, `infoLatency`'s table cell now calls `overlayCellHTML` — the same helper Mesh > peers and Monitor > mesh peers already share for exactly this (stacks v4 above v6 when a peer has both, shows whichever one it has otherwise) — rather than hand-rolling its own single-address cell. The history modal's hint line gets both too, joined with " · " for that single-line context rather than the table cell's stacked `<br>`.
+
+Added `TestHandleLocalLatencyIncludesOverlay6` (`internal/webadmin/sysinfo_test.go`), pinning that a dual-stack peer's response carries both `overlay4` and `overlay6` independent of which one `overlay` (the actual ping target) chose — the existing `TestHandleLocalLatency` only ever exercised a v4-only fixture, so it wouldn't have caught this either way.
+
+Verified: embedded `<script>` block `node --check`'d clean; `overlayCellHTML`'s three shapes (dual-stack, single-family, neither) and the modal's join logic smoke-tested standalone in `node` against sample peer objects. `go build ./...`/`go vet ./...`/`gofmt` and the full `internal/webadmin` suite clean, including the new test and the pre-existing `TestHandleLocalLatency` (unaffected — its v4-only fixture still gets a v4-only response, just now also carrying `overlay4` alongside the same `overlay` value it already checked).
+
+---
+
 ## v754 — 2026-08-01
 
 **Fix: a node no longer accepts (or re-floods) host, DNS, or route gossip whose origin it currently has no live session to — closes a black hole where gossip kept a hosts-file entry, DNS forward, or kernel route looking valid long after this node's own path to deliver to it was gone.**

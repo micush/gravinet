@@ -12,6 +12,7 @@ import (
 
 	"gravinet/internal/config"
 	"gravinet/internal/logx"
+	"gravinet/internal/mesh"
 )
 
 func TestParseProcRoutes4(t *testing.T) {
@@ -219,6 +220,50 @@ func TestHandleLocalLatency(t *testing.T) {
 		if rtt, ok := p["rtt_ms"].(float64); !ok || rtt <= 0 {
 			t.Fatalf("an ok result must carry a positive rtt_ms: %+v", p)
 		}
+	}
+}
+
+// TestHandleLocalLatencyIncludesOverlay6 pins that overlay4 and overlay6
+// both ride along in the response even though only one of them is what
+// actually gets pinged (Overlay: v4 preferred, v6 fallback — see
+// latencyPeer's own doc comment). Monitor > Latency's table needs both to
+// show a dual-stack peer the same way Monitor > mesh peers does
+// (overlayCellHTML), instead of only ever showing whichever family Overlay
+// happened to pick.
+func TestHandleLocalLatencyIncludesOverlay6(t *testing.T) {
+	_, be, ts := newTestServer(t)
+	c := sessionFor(t, ts)
+	be.peersByNet = map[uint64][]mesh.PeerInfo{
+		0x1234: {{NodeID: "peerX", Hostname: "hostx", Overlay4: "10.0.0.9", Overlay6: "fd00::9"}},
+	}
+	req, _ := http.NewRequest("GET", ts.URL+"/api/latency", nil)
+	req.AddCookie(c)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var body struct {
+		Networks []struct {
+			Peers []struct {
+				Overlay  string `json:"overlay"`
+				Overlay4 string `json:"overlay4"`
+				Overlay6 string `json:"overlay6"`
+			} `json:"peers"`
+		} `json:"networks"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Networks) != 1 || len(body.Networks[0].Peers) != 1 {
+		t.Fatalf("expected 1 network with 1 peer, got %+v", body)
+	}
+	p2 := body.Networks[0].Peers[0]
+	if p2.Overlay4 != "10.0.0.9" || p2.Overlay6 != "fd00::9" {
+		t.Fatalf("expected both overlay4 and overlay6 in the response, got overlay4=%q overlay6=%q", p2.Overlay4, p2.Overlay6)
+	}
+	if p2.Overlay != "10.0.0.9" {
+		t.Fatalf("Overlay (the actual ping target) should still prefer v4, got %q", p2.Overlay)
 	}
 }
 
