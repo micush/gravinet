@@ -48,7 +48,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "761"
+	version = "762"
 	commit  = "none"
 )
 
@@ -903,6 +903,35 @@ func cmdRun(args []string) {
 			}
 		}
 
+		// Turn off host acceptance (and, where the platform exposes it,
+		// sending) of ICMP IPv4/IPv6 redirects — an unauthenticated redirect
+		// can rewrite this host's route table, which matters more here than
+		// on an ordinary host precisely because ForwardingEnabled above may
+		// have this node routing real traffic for other peers. Default on
+		// (redirects disabled); opt out with "disable_redirects": false. The
+		// prior values are restored on clean shutdown, same shape as
+		// forwarding above.
+		var redirState ipfwd.RedirectState
+		if cfg.RedirectsDisabled() {
+			redirState = ipfwd.DisableRedirects(true, true)
+			switch {
+			case redirState.V4Missing():
+				logx.Infof("IPv4 redirects: knob absent on host; skipped")
+			case redirState.V4Failed:
+				logx.Warnf("IPv4 redirects: could not disable (need root/CAP_NET_ADMIN?)")
+			default:
+				logx.Infof("IPv4 redirects disabled")
+			}
+			switch {
+			case redirState.V6Missing():
+				logx.Infof("IPv6 redirects: IPv6 disabled on host; skipped")
+			case redirState.V6Failed:
+				logx.Warnf("IPv6 redirects: could not disable")
+			default:
+				logx.Infof("IPv6 redirects disabled")
+			}
+		}
+
 		// Kernel NAT: masquerade/SNAT/DNAT for forwarded gateway traffic must be done
 		// by the host's conntrack-backed netfilter — the userspace overlay NAT can't
 		// reverse-translate replies the kernel delivers to our own interface. Program
@@ -1670,6 +1699,9 @@ func cmdRun(args []string) {
 			}
 			if cfg.ForwardingEnabled() {
 				ipfwd.Restore(fwdState)
+			}
+			if cfg.RedirectsDisabled() {
+				ipfwd.RestoreRedirects(redirState)
 			}
 			natMu.Lock()
 			mgr := nfMgr

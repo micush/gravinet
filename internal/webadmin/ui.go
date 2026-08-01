@@ -1010,6 +1010,7 @@ async function load() {
   state.geoipLookup = !!(c.body && c.body.geoip_lookup);
   state.enableUpnp = !!(c.body && c.body.enable_upnp);
   state.ipForwarding = c.body ? (c.body.ip_forwarding !== false) : true;
+  state.disableRedirects = c.body ? (c.body.disable_redirects !== false) : true;
   state.workerThreads = (c.body && c.body.worker_threads) || 0;
   state.tunQueues = (c.body && c.body.tun_queues) || 0;
   state.tunQueuesSupported = c.body ? !!c.body.tun_queues_supported : true;
@@ -1122,6 +1123,7 @@ function buildSearchIndex(){
     ['tcpport-row', 'TCP port', 'The TCP port(s) this node listens on for the TLS fallback; comma-separated for more than one.', 'network'],
     ['natstate-row', 'NAT state timeout', 'How long an idle translated NAT connection is remembered before its mapping is reclaimed.', 'network'],
     ['ip-forwarding-row', 'IP forwarding', 'Whether this node turns on host IPv4/IPv6 forwarding at startup \u2014 the on-ramp for redistributed routes and NAT. On by default; needs a restart to take effect.', 'network'],
+    ['ip-redirects-row', 'IP redirects', 'Whether this node turns off host acceptance and sending of ICMP IPv4/IPv6 redirects at startup. On by default (redirects disabled); needs a restart to take effect. icmp redirect', 'network'],
     ['upnp-row', 'UPnP', 'Ask the LAN router to forward every port this node listens on \u2014 UDP, TCP fallback, and any extra ports \u2014 from its WAN side to this host automatically, so peers can reach it without a manual port forward. Off by default. upnp port forwarding nat traversal', 'network'],
     ['worker-threads-row', 'Worker threads', 'How many goroutines process outbound TUN traffic and inbound UDP traffic.', 'performance'],
     ['tun-queues-row', 'TUN queues', 'How many independent read queues to open on each overlay interface.', 'performance'],
@@ -3182,6 +3184,20 @@ function secSettingsNetwork(c) {
   };
   ipf.appendChild(ipfLabel); ipf.appendChild(ipfSw);
   card.appendChild(ipf);
+
+  const ipr = $('<div class="settings-row" id="ip-redirects-row"></div>');
+  const iprLabel = $('<div><div class="settings-label">IP redirects</div><div class="settings-desc">Whether this node turns off host acceptance (and, where the platform supports it, sending) of ICMP IPv4/IPv6 redirects at startup \u2014 an unauthenticated redirect can otherwise rewrite this host\u2019s route table. On by default (redirects disabled). Needs a restart to take effect.</div></div>');
+  const iprSw = $('<label class="sw"><input type="checkbox" id="ip-redirects-toggle-cb"><span class="sw-slider"></span></label>');
+  const iprCb = iprSw.querySelector('input');
+  iprCb.checked = state.disableRedirects;
+  iprCb.onchange = async () => {
+    const want = iprCb.checked;
+    const ok = await edit('/api/redirects', { on: want }, true); // needs a restart once saved
+    if (ok) { state.disableRedirects = want; }
+    else { iprCb.checked = !want; }
+  };
+  ipr.appendChild(iprLabel); ipr.appendChild(iprSw);
+  card.appendChild(ipr);
 
   c.appendChild(card);
 }

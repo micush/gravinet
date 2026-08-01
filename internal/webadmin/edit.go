@@ -800,6 +800,26 @@ func (s *Server) handleIPForwardingSetting(w http.ResponseWriter, r *http.Reques
 	s.editResult(w, err, true) // needs a restart — see doc comment above
 }
 
+// handleRedirectsSetting toggles whether the daemon turns off host
+// acceptance/sending of ICMP IPv4/IPv6 redirects at startup
+// (config.Config.DisableRedirects's doc comment has the full behavior — on
+// by default, i.e. redirects are disabled). Same restart-required shape as
+// handleIPForwardingSetting just above, for the same reason: the redirect
+// sysctls are only ever flipped once, at startup, so a save here takes
+// effect on the next restart, not immediately.
+func (s *Server) handleRedirectsSetting(w http.ResponseWriter, r *http.Request) {
+	var req struct{ On bool }
+	if !decode(w, r, &req) {
+		return
+	}
+	err := s.mutateConfig(r, func(cfg *config.Config) error {
+		on := req.On
+		cfg.DisableRedirects = &on
+		return nil
+	})
+	s.editResult(w, err, true) // needs a restart — see doc comment above
+}
+
 // handleUPnPSetting toggles gravinet's own best-effort UPnP IGD port-
 // mapping helper (config.Config.EnableUPnP's doc comment has the full
 // picture) — off by default. This needs a restart to take effect for a

@@ -153,6 +153,18 @@ type Config struct {
 	// The prior value is restored on a clean shutdown.
 	IPForwarding *bool `json:"ip_forwarding,omitempty"`
 
+	// DisableRedirects controls whether the daemon turns off host acceptance
+	// and (where the platform exposes it) sending of ICMP IPv4/IPv6 redirects
+	// at startup. An unauthenticated ICMP redirect can rewrite a host's route
+	// table — see internal/ipfwd's DisableRedirects doc comment for the actual
+	// per-platform knobs — which matters more for gravinet than for an
+	// ordinary host precisely because IPForwarding above may have this node
+	// routing real traffic for other peers. nil means the default, which is
+	// disabled (i.e. redirects are turned off); set to false to leave the
+	// host's redirect settings untouched. The prior values are restored on a
+	// clean shutdown, same shape as IPForwarding.
+	DisableRedirects *bool `json:"disable_redirects,omitempty"`
+
 	// RouteAdvInterval is how often (seconds) this node re-advertises its own
 	// redistributed routes to the mesh. Re-advertising heals advertisements lost
 	// to packet drops, lets a peer that joined or lifted a reject pick the route
@@ -2262,6 +2274,16 @@ func (c *Config) Clone() (*Config, error) {
 // at startup. Defaults to true when unset (nil); an explicit false opts out.
 func (c *Config) ForwardingEnabled() bool {
 	return c.IPForwarding == nil || *c.IPForwarding
+}
+
+// RedirectsDisabled reports whether the daemon should turn off host
+// acceptance/sending of ICMP redirects at startup. Defaults to true when
+// unset (nil) — unlike ForwardingEnabled, the safer default here is "on"
+// (redirects off), since accepting them is rarely needed and is a known
+// route-table-spoofing vector; an explicit false leaves the host's redirect
+// settings untouched.
+func (c *Config) RedirectsDisabled() bool {
+	return c.DisableRedirects == nil || *c.DisableRedirects
 }
 
 // GeoIPEnabled reports whether the peer/seed info panel should attempt a

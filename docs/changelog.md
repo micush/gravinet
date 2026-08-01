@@ -2,6 +2,20 @@
 
 ---
 
+## v762 — 2026-08-01
+
+**New: gravinet now turns off host acceptance (and, where the platform exposes it, sending) of ICMP IPv4/IPv6 redirects at startup, on by default — a new Settings › Network › "IP redirects" toggle controls it.**
+
+An unauthenticated ICMP redirect can rewrite a host's route table, and that matters more for gravinet than for an ordinary host: the existing `ip_forwarding` toggle may already have this node routing real traffic for other peers, which is exactly the kind of box a redirect-based route-table attack targets. There was previously no code anywhere touching these knobs — the host's stock defaults (usually "accept them") were left as-is.
+
+New `ipfwd.DisableRedirects`/`RestoreRedirects`, one implementation per platform, same shape and same "only touch what was actually read, restore exactly that" contract as the existing `ipfwd.Enable`/`Restore` (forwarding) pair: Linux flips `net.ipv4.conf.all.{accept,send}_redirects` and `net.ipv6.conf.all.accept_redirects` directly via procfs; Darwin and FreeBSD shell out to `sysctl` for `net.inet.ip.redirect` (v4 send) and the *inverted* `net.inet.icmp.drop_redirect` (v4 accept — writing "1" disables acceptance) plus the v6 equivalents; OpenBSD gets its own file rather than sharing FreeBSD's, because OpenBSD's accept knob (`net.inet.icmp.rediraccept`) is a different name *and* isn't inverted (1 = accepted, the ordinary sense) — reusing one file for both BSDs the way `ipfwd_bsd.go` does for forwarding would have gotten one of the two backwards; Windows uses `netsh interface {ipv4,ipv6} set global icmpredirects=disabled` (untested on this build host, same caveat as the existing Windows forwarding code). Wired into `cmd/gravinet/main.go` right next to the forwarding block: disabled at startup, restored to whatever was there before on clean shutdown.
+
+New `config.Config.DisableRedirects` (`disable_redirects` in the JSON config), same pointer-for-nil-means-default shape as `IPForwarding`, but defaulting the other direction: nil means *disabled* (redirects off), matching the toggle's own on-by-default state — set to `false` to leave the host's redirect settings untouched. Settings › Network gained an "IP redirects" row directly under "IP forwarding," same restart-required styling and `/api/redirects` endpoint pattern as that toggle.
+
+Verified: `go build ./...` and `go vet ./...` clean on linux, and cross-compiled clean for darwin/freebsd/openbsd/windows (`GOOS=... go build ./...`) — the four platforms `internal/ipfwd` actually branches on. `gofmt` clean on every changed file. New `TestRedirectsDisabledDefault` (config) and `TestDisableRedirects{FromOn,PreservesAlreadyOff,V6MissingNotFatal}` (linux ipfwd, mirroring the existing forwarding tests) pass, along with the full `internal/ipfwd`, `internal/config`, `internal/webadmin`, and `cmd/gravinet` suites. Embedded `<script>` block `node --check`'d clean. `internal/mesh`'s suite is unaffected by this change (no code here touches it) and wasn't rerun in full — it's the ~750s suite noted in v761's own entry above.
+
+---
+
 ## v761 — 2026-08-01
 
 **New: continuous per-family (v4/v6) overlay liveness tracking, closing the black hole where a redistributed ::/0 with every peer's v6 broken kept routing traffic into the mesh anyway — reported live: "I'm getting an ipv6 default route over gossip and all the peers are failing latency pings, so I'm getting black holed out to the internet."**
