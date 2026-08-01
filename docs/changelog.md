@@ -2,6 +2,22 @@
 
 ---
 
+## v750 — 2026-07-31
+
+**Latency history modal: added a small download-icon button, right-justified on the range-button row, that exports the currently-shown chart as CSV.**
+
+`showLatencyHistoryModal`'s duration-button row (`durBar`, a `.seg` pill) got wrapped in a new flex row (`durRow`, `justify-content:space-between`) holding the existing pill on the left and the new icon button on the right, rather than adding the icon as another `.seg-btn` inside the pill itself — it isn't a range option, so it shouldn't look like one.
+
+The button downloads exactly what's currently plotted: `load()` now also stashes its `points` into an outer `currentPoints` variable (mirroring how `card`/`minutes` already track "what's currently shown" across range switches and the 10s auto-refresh), and the click handler reads that plus the live `minutes` value — so a click always matches the chart on screen, including immediately after switching ranges, without a second fetch. Three columns: `unix_seconds`, `timestamp_utc` (ISO 8601), `rtt_ms` — the former for scripts, the latter for opening straight in a spreadsheet without a conversion step. Filename is `gravinet-latency-<peer-label, sanitized>-<minutes>m.csv`.
+
+This is this codebase's first icon-only download button — the existing ones (config snapshots, logs, tshoot bundles) are all labeled `ghost` buttons. Added `DOWNLOAD_ICON_SVG`, a small inline stroke-based glyph using `currentColor` so it themes the same way the button's own text would.
+
+No backend or data-shape changes — this reads the same `/api/latency/history` response the chart itself already renders, so v748's 24h retention/clamp work applies here for free: downloading the 24hr range genuinely gets 24hrs of rows, not silently truncated.
+
+Verified: embedded `<script>` block `node --check`'d clean; the CSV row-building and filename-sanitizing logic smoke-tested standalone in `node` against sample points (correct ISO timestamps, and a messy label like `"gn-ionos1 (LA, vps)"` sanitizes to a clean `gn-ionos1-LA-vps` rather than breaking the filename or silently dropping to the `'peer'` fallback). No Go changes in this one — pure frontend — but `go build ./...`/`go vet ./...`/`gofmt` and the full `internal/webadmin` suite were still run clean, since ui.go's script is embedded in a Go raw string and a stray quote there breaks compilation, not just the page.
+
+---
+
 ## v749 — 2026-07-30
 
 **Metrics: added 4hr, 8hr, 12hr, and 24hr range buttons to Info > Metrics (CPU/memory/disk/interface throughput), previously capped at 60 min. Same shape as v748's Latency history extension.**

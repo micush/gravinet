@@ -9672,6 +9672,31 @@ function latencySparkline(hist){
 // latencyMsFmt formats a Y-axis tick for the expanded latency chart.
 function latencyMsFmt(v){ return (v||0).toFixed(0)+' ms'; }
 
+// DOWNLOAD_ICON_SVG is a small inline download glyph (arrow into a tray)
+// for icon-only buttons, sized/stroked to sit inline with text at 12.5px —
+// this codebase's other downloads (config snapshots, logs, tshoot bundles)
+// are all labeled buttons; this is the first icon-only one.
+const DOWNLOAD_ICON_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>';
+
+// downloadLatencyCsv exports exactly what's currently plotted in the
+// history modal — the same points array the chart was built from, not a
+// fresh fetch — so what downloads always matches what's on screen even if
+// the range selection has since changed underneath. unix_seconds rides
+// alongside the ISO timestamp so the file is equally usable as raw input to
+// a script (a spreadsheet will prefer the ISO column instead).
+function downloadLatencyCsv(points, label, minutes){
+  if (!points || !points.length){ alert('No history loaded yet for this range.'); return; }
+  const rows = ['unix_seconds,timestamp_utc,rtt_ms'];
+  for (const p of points) rows.push(p.t+','+new Date(p.t*1000).toISOString()+','+p.v);
+  const blob = new Blob([rows.join('\n')+'\n'], { type:'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const safeLabel = String(label||'peer').replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'peer';
+  const a = document.createElement('a');
+  a.href = url; a.download = 'gravinet-latency-'+safeLabel+'-'+minutes+'m.csv';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 // showLatencyHistoryModal is the "bigger, longer trend" view a trend
 // sparkline click opens: same graphCard renderer the Metrics tab's own
 // CPU/memory/disk/bandwidth graphs use, over the passive RTT history
@@ -9685,20 +9710,26 @@ function latencyMsFmt(v){ return (v||0).toFixed(0)+' ms'; }
 async function showLatencyHistoryModal(netName, nodeId, label, overlay){
   const body = $('<div></div>');
   if (overlay) body.appendChild($('<div class="hint" style="margin:-4px 0 10px">'+esc(overlay)+'</div>'));
-  const durBar = $('<div class="seg" style="margin-bottom:14px"></div>');
+  const durRow = $('<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:14px"></div>');
+  const durBar = $('<div class="seg"></div>');
+  const dlBtn = $('<button class="ghost sm" style="padding:5px 7px;display:inline-flex;align-items:center;flex:none" title="download CSV of the currently shown range" aria-label="download CSV of the currently shown range">'+DOWNLOAD_ICON_SVG+'</button>');
+  durRow.appendChild(durBar);
+  durRow.appendChild(dlBtn);
   const chartBox = $('<div></div>');
   chartBox.innerHTML = '<div class="hint">loading\u2026</div>';
-  body.appendChild(durBar);
+  body.appendChild(durRow);
   body.appendChild(chartBox);
 
   let minutes = 60;
   let card = null; // the live graphCard element, once built; redrawn in place on refresh so the chart doesn't flash blank every tick
+  let currentPoints = []; // whatever's plotted right now, for dlBtn — kept in lockstep with card so a download always matches what's on screen, not a stale range
   const load = async () => {
     const r = await api('/api/latency/history?minutes='+minutes);
-    if (!r.ok || !r.body){ card = null; chartBox.innerHTML = '<div class="hint">could not load latency history.</div>'; return; }
+    if (!r.ok || !r.body){ card = null; currentPoints = []; chartBox.innerHTML = '<div class="hint">could not load latency history.</div>'; return; }
     const net = (r.body.networks||{})[netName];
     const peer = net && net[nodeId];
     const points = (peer && peer.hist) || [];
+    currentPoints = points;
     if (!points.length){
       card = null;
       chartBox.innerHTML = '<div class="hint">no history yet for this peer \u2014 give it a little time; it fills in as the mesh\u2019s own keepalive traffic to it completes. If this node was recently restarted, history resets to empty and needs a few sample intervals to refill \u2014 it isn\u2019t saved across restarts.</div>';
@@ -9714,6 +9745,7 @@ async function showLatencyHistoryModal(netName, nodeId, label, overlay){
       chartBox.appendChild(card);
     }
   };
+  dlBtn.onclick = () => downloadLatencyCsv(currentPoints, label, minutes);
   for (const [m,lbl] of [[5,'5 min'],[15,'15 min'],[30,'30 min'],[60,'60 min'],[240,'4 hr'],[480,'8 hr'],[720,'12 hr'],[1440,'24 hr']]){
     const b = $('<button class="seg-btn'+(minutes===m?' active':'')+'">'+lbl+'</button>');
     b.onclick = () => {
