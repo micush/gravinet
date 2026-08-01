@@ -7959,7 +7959,11 @@ const CH = {W:640,H:150,padL:76,padR:10,padT:8,padB:20};
 function infoMetrics(c){
   if (metricsTimer){ clearInterval(metricsTimer); metricsTimer = null; }
   metricsHover = false;
-  const durBar = $('<div class="seg" style="margin-bottom:14px"></div>');
+  const durRow = $('<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:14px"></div>');
+  const durBar = $('<div class="seg"></div>');
+  const dlBtn = $('<button class="ghost sm" style="padding:5px 7px;display:inline-flex;align-items:center;flex:none" title="download CSV of the currently shown range" aria-label="download CSV of the currently shown range">'+DOWNLOAD_ICON_SVG+'</button>');
+  durRow.appendChild(durBar);
+  durRow.appendChild(dlBtn);
   for (const [m,lbl] of [[1,'1 min'],[5,'5 min'],[15,'15 min'],[30,'30 min'],[60,'60 min'],[240,'4 hr'],[480,'8 hr'],[720,'12 hr'],[1440,'24 hr']]){
     const b = $('<button class="seg-btn'+(metricsMinutes===m?' active':'')+'">'+lbl+'</button>');
     b.onclick = () => {
@@ -7970,18 +7974,97 @@ function infoMetrics(c){
     };
     durBar.appendChild(b);
   }
-  c.appendChild(durBar);
+  c.appendChild(durRow);
   const body = $('<div></div>'); body.innerHTML = '<div class="hint">loading\u2026</div>'; c.appendChild(body);
 
+  // Whose metrics this is: local session, or the proxied peer if one's
+  // selected in the header picker — same pattern Power's own nodeLabel
+  // uses, for the same reason (/api/metrics rides the proxy like most
+  // endpoints, so this tab can be showing a remote node's readings).
+  const nodeLabel = () => {
+    if (!state.target) return 'this node';
+    const p = (state.cluster || []).find(x => x.node_id === state.target);
+    return p ? (p.hostname || p.node_id.slice(0,8)) : state.target.slice(0,8);
+  };
+
+  let currentMetricsData = null; // whatever's plotted right now, for dlBtn
   const load = async () => {
     if (state.section!=='metrics'){ if(metricsTimer){clearInterval(metricsTimer); metricsTimer=null;} return; }
     const r = await api('/api/metrics?minutes='+metricsMinutes);
-    if (!r.ok || !r.body){ body.innerHTML = '<div class="hint">could not load metrics.</div>'; return; }
-    if (!r.body.available){ body.innerHTML = '<div class="hint">live metrics aren\u2019t available on this host; the CPU/memory/disk/network readers here couldn\u2019t read anything usable.</div>'; return; }
+    if (!r.ok || !r.body){ currentMetricsData = null; body.innerHTML = '<div class="hint">could not load metrics.</div>'; return; }
+    if (!r.body.available){ currentMetricsData = null; body.innerHTML = '<div class="hint">live metrics aren\u2019t available on this host; the CPU/memory/disk/network readers here couldn\u2019t read anything usable.</div>'; return; }
+    currentMetricsData = r.body;
     renderMetricGraphs(body, r.body, metricsMinutes);
   };
+  dlBtn.onclick = () => downloadMetricsCsv(currentMetricsData, metricsMinutes, nodeLabel());
   load();
   metricsTimer = setInterval(load, 3000);
+}
+
+// csvCell quotes a CSV field only when it needs it (contains a comma,
+// quote, or newline). The metrics CSV's column headers can carry a
+// user-chosen network or interface name — the numeric row values never
+// need quoting, but a header built from one of those names might.
+function csvCell(s){
+  s = String(s);
+  return /[",\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s;
+}
+
+// downloadMetricsCsv exports every series currently plotted on the Metrics
+// tab — cpu/mem/disk plus each live interface's rx/tx — as one wide CSV,
+// one row per distinct sample timestamp across all of them. Series don't
+// necessarily share every timestamp (CPU's very first-ever sample is
+// skipped entirely — see sample()'s own comment on why — and a newly-up
+// interface only starts partway through the window), so a cell is left
+// blank rather than 0 or interpolated wherever a series has no reading at
+// that instant; 0 would misrepresent "no data yet" as "measured zero."
+//
+// Interface rx/tx is stored as raw bytes/sec but converted to Mbps here, to
+// match what the charts themselves show (rateFmt: bytes/sec * 8, then an
+// adaptive bps/Kbps/Mbps/Gbps pick per value for compact display) — using
+// one fixed unit for the whole column rather than rateFmt's own per-value
+// unit switching, since a CSV column a spreadsheet or script treats as one
+// consistent unit throughout is exactly the case rateFmt's adaptive scaling
+// would silently get wrong.
+function downloadMetricsCsv(data, minutes, label){
+  if (!data || !data.available){ alert('No metrics loaded yet for this range.'); return; }
+  const cols = [];
+  if (data.cpu && data.cpu.length) cols.push({label:'cpu_pct', points:data.cpu});
+  if (data.mem && data.mem.length) cols.push({label:'mem_pct', points:data.mem});
+  if (data.disk && data.disk.length) cols.push({label:'disk_pct', points:data.disk});
+  // Same network-then-interface, numeric-aware ordering metricSpecs uses
+  // for the charts themselves, so the CSV's column order matches the page.
+  const ifaces = (data.ifaces||[]).slice().sort((a,b)=>{
+    const an=(a.network||'')+' \u00b7 '+a.iface, bn=(b.network||'')+' \u00b7 '+b.iface;
+    return an.localeCompare(bn, undefined, {numeric:true, sensitivity:'base'});
+  });
+  const bytesToMbps = v => (v*8/1e6).toFixed(6);
+  for (const ifc of ifaces){
+    const tag = (ifc.network||'(unnamed)')+' \u00b7 '+ifc.iface;
+    if (ifc.rx && ifc.rx.length) cols.push({label:tag+' rx_mbps', points:ifc.rx, conv:bytesToMbps});
+    if (ifc.tx && ifc.tx.length) cols.push({label:tag+' tx_mbps', points:ifc.tx, conv:bytesToMbps});
+  }
+  if (!cols.length){ alert('No history loaded yet for this range.'); return; }
+  const allT = new Set();
+  const maps = cols.map(c => {
+    const m = new Map();
+    for (const p of c.points){ m.set(p.t, c.conv ? c.conv(p.v) : p.v); allT.add(p.t); }
+    return m;
+  });
+  const times = Array.from(allT).sort((a,b)=>a-b);
+  const rows = [['timestamp_utc', ...cols.map(c => csvCell(c.label))].join(',')];
+  for (const t of times){
+    const row = [new Date(t*1000).toISOString()];
+    for (const m of maps) row.push(m.has(t) ? m.get(t) : '');
+    rows.push(row.join(','));
+  }
+  const blob = new Blob([rows.join('\n')+'\n'], { type:'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const safeLabel = String(label||'node').replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'node';
+  const a = document.createElement('a');
+  a.href = url; a.download = 'gravinet-metrics-'+safeLabel+'-'+minutes+'m.csv';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 // metricSpecs turns a metrics payload into one card-spec per graph. The key is
@@ -9681,13 +9764,11 @@ const DOWNLOAD_ICON_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill=
 // downloadLatencyCsv exports exactly what's currently plotted in the
 // history modal — the same points array the chart was built from, not a
 // fresh fetch — so what downloads always matches what's on screen even if
-// the range selection has since changed underneath. unix_seconds rides
-// alongside the ISO timestamp so the file is equally usable as raw input to
-// a script (a spreadsheet will prefer the ISO column instead).
+// the range selection has since changed underneath.
 function downloadLatencyCsv(points, label, minutes){
   if (!points || !points.length){ alert('No history loaded yet for this range.'); return; }
-  const rows = ['unix_seconds,timestamp_utc,rtt_ms'];
-  for (const p of points) rows.push(p.t+','+new Date(p.t*1000).toISOString()+','+p.v);
+  const rows = ['timestamp_utc,rtt_ms'];
+  for (const p of points) rows.push(new Date(p.t*1000).toISOString()+','+p.v);
   const blob = new Blob([rows.join('\n')+'\n'], { type:'text/csv' });
   const url = URL.createObjectURL(blob);
   const safeLabel = String(label||'peer').replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'peer';

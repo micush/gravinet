@@ -2,6 +2,38 @@
 
 ---
 
+## v753 — 2026-07-31
+
+**Metrics CSV (v752): interface rx/tx now exports as Mbps, matching the charts, instead of the raw bytes/sec the collector stores internally.**
+
+The charts show throughput via `rateFmt`: bytes/sec converted to bits/sec, then adaptively picking bps/Kbps/Mbps/Gbps per value for compact display. v752's CSV skipped the bytes→bits conversion entirely and wrote the raw stored bytes/sec verbatim — an 8x unit mismatch on top of not matching what's on screen at all. Fixed by converting the same way (`v*8/1e6`) but pinned to one fixed unit (Mbps) for the whole column, rather than porting `rateFmt`'s per-value unit switching — a CSV column a spreadsheet or script treats as one consistent unit throughout is exactly the case adaptive scaling would get wrong (a column silently mixing "0.5" meaning Kbps in one row and "50" meaning Mbps in another). Columns renamed `rx_bytes_sec`/`tx_bytes_sec` → `rx_mbps`/`tx_mbps` to match. `cpu_pct`/`mem_pct`/`disk_pct` were already unit-correct (percentages, same in the collector and the chart) and are unchanged.
+
+Verified: embedded `<script>` block `node --check`'d clean. Cross-checked the new conversion against the chart's own `rateFmt` across five magnitudes (64 B/s through 1.25 GB/s) in `node` — same underlying bytes→bits math at every point, e.g. 12,500,000 B/s reads "100.0 Mbps" on the chart and lands as `100.000000` in the CSV. `go build ./...`/`go vet ./...`/`gofmt` and the full `internal/webadmin` suite clean (no Go changes — pure frontend, same as v750–v752).
+
+---
+
+## v752 — 2026-07-31
+
+**Metrics tab: same download-icon button as v750's Latency history modal, right-justified on the range-button row, exporting the currently-shown CPU/memory/disk/interface graphs as one CSV.**
+
+`infoMetrics`'s duration row got the same `durBar` (`.seg` pill) → `durRow` (flex, `justify-content:space-between`) wrap the Latency modal got in v750, holding the range buttons on the left and the icon button (reusing v750's `DOWNLOAD_ICON_SVG`) on the right. `load()` now stashes its response into an outer `currentMetricsData`, mirroring how the Latency modal tracks `currentPoints` — so a click always matches what's currently plotted, no second fetch.
+
+Unlike Latency's export (one series), Metrics has several — CPU, memory, disk, plus rx/tx per live interface — so this is a wider CSV than a straight port of `downloadLatencyCsv` would give: `downloadMetricsCsv` builds one column per series (`cpu_pct`, `mem_pct`, `disk_pct`, `<network> · <iface> rx_bytes_sec`/`tx_bytes_sec`, interfaces ordered the same network-then-interface way `metricSpecs` already sorts them for the charts) and one row per distinct sample timestamp across *all* of them. Series don't necessarily share every timestamp — CPU's very first-ever sample is skipped entirely (needs a prior reading to diff against; see `sample()`'s own comment), and a newly-up interface only starts partway through the window — so a cell is left blank rather than 0 or interpolated wherever a given series has no reading at that instant; 0 would misrepresent "no data yet" as "measured zero." Column headers are properly CSV-quoted (`csvCell`, new) since a network or interface name is user-chosen text that could itself contain a comma.
+
+`/api/metrics` rides the proxy like most endpoints, so this tab — and now its export — can be showing a remote managed peer's readings, not just this node's. Added a `nodeLabel()` closure to resolve that (self vs. `state.cluster`-looked-up peer hostname) for the filename, the same pattern already used for Power's own confirmation dialogs; filename is `gravinet-metrics-<node>-<minutes>m.csv`.
+
+Verified: embedded `<script>` block `node --check`'d clean. The wide-CSV union/sparse-column logic was smoke-tested standalone in `node` against a deliberately awkward case — cpu missing its very first tick while mem/disk have it, an interface that only starts partway through the window, and a network name containing a comma (`"lan, home"`) — confirming blanks land in the right cells (not 0s) and the comma-bearing header gets properly quoted rather than corrupting the CSV's column count. No Go changes (pure frontend, same as v750/v751), but `go build ./...`/`go vet ./...`/`gofmt` and the full `internal/webadmin` suite were still run clean.
+
+---
+
+## v751 — 2026-07-31
+
+**Latency CSV export (v750): dropped the `unix_seconds` column — redundant alongside `timestamp_utc`, since it's the same instant in two encodings for no reader that needs both.** `downloadLatencyCsv` now writes just `timestamp_utc,rtt_ms`.
+
+Verified: embedded `<script>` block `node --check`'d clean; the two-column row output smoke-tested standalone in `node` against sample points. `go build ./...`/`go vet ./...`/`gofmt` and the full `internal/webadmin` suite clean (no Go changes in this one either — same reasoning as v750 on why they're still run).
+
+---
+
 ## v750 — 2026-07-31
 
 **Latency history modal: added a small download-icon button, right-justified on the range-button row, that exports the currently-shown chart as CSV.**
