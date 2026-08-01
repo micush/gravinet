@@ -3938,11 +3938,63 @@ function peerRowsForNet(n) {
 // is purely the read side, shared by every place a peer row's overlay
 // column is actually drawn (Mesh > peers' non-editable cells, and Monitor
 // > Mesh peers, which has no editing at all) so a dual-stack peer's second
-// address isn't silently dropped from either.
+// address isn't silently dropped from either. Monitor > Latency uses its
+// own latencyOverlayCellHTML instead, not this one — it needs to color each
+// address by *this row's* ping result, which is meaningless context for
+// every other caller here.
 function overlayCellHTML(p) {
   const v4 = p.overlay4 || '', v6 = p.overlay6 || '';
   if (v4 && v6) return esc(v4) + '<br><span class="hint">' + esc(v6) + '</span>';
   return esc(v4 || v6 || '');
+}
+
+// latencyColorSpan wraps text in the color matching this exact reading's own
+// marker on latencySparkline/latencyDualSparkline: var(--danger) red for a
+// miss (the same full-strength red as a sparkline's miss dot, regardless of
+// family — a miss isn't muted down there and shouldn't be here either),
+// var(--mut) for a healthy *secondary* trace (a dual-stack peer's v6,
+// dashed and muted on the sparkline), var(--acc) blue for everything else
+// healthy — a single-stack peer's only trace, or a dual-stack peer's
+// primary v4 one, both of which the sparkline always draws as a plain solid
+// blue line/bar regardless of whether the peer turns out to be dual-stack.
+function latencyColorSpan(text, ok, secondary){
+  const color = !ok ? 'var(--danger)' : (secondary ? 'var(--mut)' : 'var(--acc)');
+  return '<span style="color:'+color+'">'+text+'</span>';
+}
+
+// latencyOverlayCellHTML mirrors overlayCellHTML's v4-over-v6 stacking but
+// colors each address by this row's own ping result via latencyColorSpan,
+// matching the sparkline and rttCellHTML right next to it in the same row —
+// a distinction overlayCellHTML itself has no business making, since every
+// other page that shares it has no ping result to color by. A peer with
+// only a v6 address (no v4 at all) still gets the primary blue treatment
+// for it, not muted — dual-stack is what makes a trace "secondary," not the
+// address family by itself; see latencySparkline vs. latencyDualSparkline's
+// own split on exactly that. sep defaults to '<br>' for the table cell;
+// showLatencyHistoryModal passes ' \u00b7 ' instead for its single-line
+// hint, reusing this rather than re-deriving the same dual/primary/
+// secondary logic a second time and risking the two drifting apart.
+function latencyOverlayCellHTML(p, sep){
+  sep = sep || '<br>';
+  const dual = !!(p.overlay4 && p.overlay6);
+  if (!p.overlay4 && !p.overlay6) return '';
+  if (!dual) return latencyColorSpan(esc(p.overlay4 || p.overlay6), p.ok, false);
+  return latencyColorSpan(esc(p.overlay4), p.ok, false) + sep + latencyColorSpan(esc(p.overlay6), p.ok6, true);
+}
+
+// rttCellHTML renders Monitor > Latency's rtt cell: both families' results
+// stacked when the peer is dual-stack (handleLocalLatency pings v6
+// independently in that case rather than leaving it untested behind a
+// healthy v4 — see its own doc comment), just the one result otherwise.
+// Same v4-over-v6 stacking as latencyOverlayCellHTML, which sits right next
+// to this cell in the same row, and the same latencyColorSpan coloring, so
+// the pair reads as one v4/v6 line without needing a "v4:"/"v6:" label.
+function rttCellHTML(p) {
+  const dual = !!(p.overlay4 && p.overlay6);
+  const one = (ok, ms, err) => ok ? (Math.round(ms*10)/10)+' ms' : esc(err||'unreachable');
+  const v4 = latencyColorSpan(one(p.ok, p.rtt_ms, p.error), p.ok, false);
+  if (!dual) return v4;
+  return v4 + '<br>' + latencyColorSpan(one(p.ok6, p.rtt6_ms, p.error6), p.ok6, true);
 }
 
 // openPeerShellFromSel opens a shell on the single ticked row of a peers table,
@@ -9720,7 +9772,10 @@ const LATENCY_HIST_LEN = Math.round(LATENCY_WINDOW_MS / LATENCY_POLL_MS);
 // variation hard to read at a glance. A miss renders as a full-height red
 // bar rather than a small glyph mixed in with the others, since a down
 // reading isn't "a low value"; it's a different kind of thing, and it
-// needs to be impossible to miss without reading anything.
+// needs to be impossible to miss without reading anything. Used for a
+// single-family trend; a dual-stack peer's v4+v6 trend is
+// latencyDualSparkline instead (stacking two of these turned out to be the
+// wrong call — see its own doc comment).
 // PX_PER_SLOT sets a fixed per-bar allotment (bar + its gap) rather than a
 // fixed total chart width, so latencySparkline's bars stay a legible,
 // comfortably hoverable width even if LATENCY_HIST_LEN changes later; a
@@ -9750,6 +9805,66 @@ function latencySparkline(hist){
     bars += '<rect x="'+(cx-barW/2).toFixed(1)+'" y="'+(h-barH).toFixed(1)+'" width="'+barW.toFixed(1)+'" height="'+barH.toFixed(1)+'" rx="1" fill="var(--acc)"><title>'+(Math.round(x.rtt*10)/10)+' ms</title></rect>';
   });
   return '<svg width="'+w+'" height="'+h+'" viewBox="0 0 '+w+' '+h+'" style="display:block">'+bars+'</svg>';
+}
+
+// latencyDualSparkline renders a dual-stack peer's v4 and v6 trends as two
+// overlaid line traces sharing one scale, in the same 32px-tall footprint
+// latencySparkline already uses — replacing an earlier version of this
+// feature that stacked two full bar-chart sparklines instead, one per
+// family. That looked cluttered, doubled the row's height for every
+// dual-stack peer, and — the actual functional loss, not just a look —
+// gave the two families separate scales, so you couldn't tell whether v6
+// running higher than v4 was a real gap or just two independent charts
+// autoscaling differently. One shared scale here fixes that: both lines
+// stretch across the same combined min/max, so a real divergence between
+// the two actually looks like one.
+//
+// v4 is a solid var(--acc) line, v6 is a dashed var(--mut) one — dashing,
+// not just color, so the two are still distinguishable without relying on
+// color vision. Each ok reading gets a small dot (matching the bar
+// sparkline's convention of a hoverable element per reading, with the same
+// "N.N ms" tooltip); a miss breaks that line's segment rather than
+// interpolating a fake connection across it, marked with a small
+// var(--danger) dot at the baseline instead of a bar, since there's no bar
+// to be full-height here the way latencySparkline's miss marker is.
+function latencyDualSparkline(hist4, hist6){
+  const n = hist4.length, w = Math.round(n * PX_PER_SLOT), h = 32, pad = 3;
+  const slot = n ? (w - pad*2) / n : 0;
+  const okVals = hist4.concat(hist6).filter(x => x.ok && x.rtt!=null).map(x => x.rtt);
+  const max = okVals.length ? Math.max(...okVals) : 0;
+  const min = okVals.length ? Math.min(...okVals) : 0;
+  const range = max - min;
+  const topPad = 3, botPad = 3; // keep dots off the very top/bottom edge
+  const yOf = (rtt) => {
+    const frac = range > 0 ? (rtt - min) / range : 0.5;
+    return h - botPad - frac*(h - topPad - botPad);
+  };
+  const xOf = (i) => pad + slot*i + slot/2;
+
+  function renderOne(hist, color, dashed){
+    const segs = []; let cur = [];
+    let dots = '', misses = '';
+    hist.forEach((x, i) => {
+      const cx = xOf(i);
+      if (x.ok && x.rtt != null){
+        const cy = yOf(x.rtt);
+        cur.push(cx.toFixed(1)+','+cy.toFixed(1));
+        dots += '<circle cx="'+cx.toFixed(1)+'" cy="'+cy.toFixed(1)+'" r="1.6" fill="'+color+'"><title>'+(Math.round(x.rtt*10)/10)+' ms</title></circle>';
+      } else {
+        if (cur.length) { segs.push(cur); cur = []; }
+        misses += '<circle cx="'+cx.toFixed(1)+'" cy="'+(h-botPad).toFixed(1)+'" r="2" fill="var(--danger)"><title>unreachable</title></circle>';
+      }
+    });
+    if (cur.length) segs.push(cur);
+    const dash = dashed ? ' stroke-dasharray="3,2"' : '';
+    const lines = segs.filter(s => s.length > 1)
+      .map(s => '<polyline points="'+s.join(' ')+'" fill="none" stroke="'+color+'" stroke-width="1.5"'+dash+'/>').join('');
+    return lines + dots + misses;
+  }
+
+  const v4 = renderOne(hist4, 'var(--acc)', false);
+  const v6 = renderOne(hist6, 'var(--mut)', true);
+  return '<svg width="'+w+'" height="'+h+'" viewBox="0 0 '+w+' '+h+'" style="display:block">'+v4+v6+'</svg>';
 }
 
 // latencyMsFmt formats a Y-axis tick for the expanded latency chart.
@@ -9788,9 +9903,17 @@ function downloadLatencyCsv(points, label, minutes){
 // regardless of whether this modal is open, so closing and reopening it
 // (or just picking a range again) always shows the current state; not
 // worth the added complexity of wiring a cleanup-on-close for a timer here.
+// showLatencyHistoryModal opens the click-through chart for a peer's passive
+// keepalive RTT (history.go's collector — a single per-session number, not
+// per-address-family; see rttCellHTML's doc comment on why that's correct
+// rather than a gap to fix). overlay is pre-built HTML, not plain text — its
+// one caller passes both addresses already run through latencyColorSpan, so
+// the hint line here matches the color-coding the table row it was opened
+// from just showed, instead of falling back to one flat, uncolored muted
+// line the way esc()-ing it here would.
 async function showLatencyHistoryModal(netName, nodeId, label, overlay){
   const body = $('<div></div>');
-  if (overlay) body.appendChild($('<div class="hint" style="margin:-4px 0 10px">'+esc(overlay)+'</div>'));
+  if (overlay) body.appendChild($('<div class="hint" style="margin:-4px 0 10px">'+overlay+'</div>'));
   const durRow = $('<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:14px"></div>');
   const durBar = $('<div class="seg"></div>');
   const dlBtn = $('<button class="ghost sm" style="padding:5px 7px;display:inline-flex;align-items:center;flex:none" title="download CSV of the currently shown range" aria-label="download CSV of the currently shown range">'+DOWNLOAD_ICON_SVG+'</button>');
@@ -9890,23 +10013,53 @@ function infoLatency(c){
         const key = n.name+'|'+p.node_id;
         let e = latencyHistory[key];
         const prevOk = e ? e.sinceOk : null;
-        if (!e) e = latencyHistory[key] = { hist: [] };
+        if (!e) e = latencyHistory[key] = { hist: [], hist6: [] };
         const changed = prevOk !== null && prevOk !== p.ok;
         if (changed || prevOk === null) e.since = Date.now();
         e.sinceOk = p.ok;
         e.hist.push({ ok: p.ok, rtt: p.ok ? p.rtt_ms : null });
         if (e.hist.length > LATENCY_HIST_LEN) e.hist.shift();
 
-        const rtt = p.ok ? (Math.round(p.rtt_ms*10)/10)+' ms' : '<span class="hint">'+esc(p.error||'unreachable')+'</span>';
+        // Dual-stack: track v6's own history alongside v4's rather than
+        // only ever trending the primary result — same reasoning as
+        // rttCellHTML testing v6 at all (see handleLocalLatency's doc
+        // comment): a peer whose v6 path is flapping while v4 stays solid
+        // should be visible here, not invisible behind a healthy v4 trend.
+        const dual = !!(p.overlay4 && p.overlay6);
+        let changed6 = false;
+        if (dual) {
+          const prevOk6 = e.sinceOk6 !== undefined ? e.sinceOk6 : null;
+          changed6 = prevOk6 !== null && prevOk6 !== p.ok6;
+          if (changed6 || prevOk6 === null) e.since6 = Date.now();
+          e.sinceOk6 = p.ok6;
+          e.hist6.push({ ok: p.ok6, rtt: p.ok6 ? p.rtt6_ms : null });
+          if (e.hist6.length > LATENCY_HIST_LEN) e.hist6.shift();
+        }
+
+        const rtt = rttCellHTML(p);
         const streak = fmtElapsed(e.since*1e6);
-        const trend = '<div class="lat-trend" data-node="'+esc(p.node_id)+'" title="'+(p.ok?'up ':'down ')+streak+' \u2014 click for a longer trend">'+latencySparkline(e.hist)+'</div>';
-        const rowClass = changed ? (' class="'+(p.ok?'lat-flash-up':'lat-flash-down')+'"') : '';
+        let trendTitle, trendSvg;
+        if (dual) {
+          const streak6 = fmtElapsed(e.since6*1e6);
+          trendTitle = 'v4 '+(p.ok?'up ':'down ')+streak+', v6 '+(p.ok6?'up ':'down ')+streak6+' \u2014 click for a longer trend';
+          trendSvg = latencyDualSparkline(e.hist, e.hist6);
+        } else {
+          trendTitle = (p.ok?'up ':'down ')+streak+' \u2014 click for a longer trend';
+          trendSvg = latencySparkline(e.hist);
+        }
+        const trend = '<div class="lat-trend" data-node="'+esc(p.node_id)+'" title="'+trendTitle+'">'+trendSvg+'</div>';
+        // Flash on either family changing state; if both flipped in the
+        // same tick and disagree, "down" wins the color — a regression is
+        // worth flagging over an improvement happening at the same instant.
+        const anyChanged = changed || changed6;
+        const wentDown = (changed && !p.ok) || (changed6 && !p.ok6);
+        const rowClass = anyChanged ? (' class="'+(wentDown?'lat-flash-down':'lat-flash-up')+'"') : '';
         const nameLabel = esc(p.hostname||p.node_id.slice(0,8));
         const nameTitle = notesTitleForNetName(n.name, p.node_id);
         const nameCell = netId
           ? '<span class="peer-link" data-node="'+esc(p.node_id)+'" title="'+(nameTitle||'show this peer in Monitor \u2192 mesh peers')+'">'+nameLabel+'</span>'
           : (nameTitle ? '<span title="'+nameTitle+'">'+nameLabel+'</span>' : nameLabel);
-        h += '<tr'+rowClass+'><td>'+nameCell+'</td><td>'+overlayCellHTML(p)+'</td><td>'+rtt+'</td><td>'+trend+'</td></tr>';
+        h += '<tr'+rowClass+'><td>'+nameCell+'</td><td>'+latencyOverlayCellHTML(p)+'</td><td>'+rtt+'</td><td>'+trend+'</td></tr>';
       }
       sub.innerHTML += h+'</table>';
       body.appendChild(sub);
@@ -9929,10 +10082,12 @@ function infoLatency(c){
         el.onclick = () => {
           const clicked = sorted.find(x => x.node_id === el.dataset.node);
           const label = (clicked && clicked.hostname) || el.dataset.node.slice(0,8);
-          // Both addresses when dual-stack, same source data the table's
-          // overlayCellHTML cell just showed — a simple join reads fine on
-          // this single hint line, unlike the table cell's stacked <br>.
-          const overlay = clicked ? [clicked.overlay4, clicked.overlay6].filter(Boolean).join(' \u00b7 ') : '';
+          // Same coloring the table row's own cells just showed
+          // (latencyColorSpan via latencyOverlayCellHTML), reused here with
+          // a middle-dot separator instead of the table cell's <br> — a
+          // plain join would've meant the modal's hint line went back to
+          // one flat muted color the moment you left the table row behind.
+          const overlay = clicked ? latencyOverlayCellHTML(clicked, ' \u00b7 ') : '';
           showLatencyHistoryModal(n.name, el.dataset.node, label, overlay);
         };
       });

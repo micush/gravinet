@@ -2,6 +2,94 @@
 
 ---
 
+## v761 — 2026-08-01
+
+**New: continuous per-family (v4/v6) overlay liveness tracking, closing the black hole where a redistributed ::/0 with every peer's v6 broken kept routing traffic into the mesh anyway — reported live: "I'm getting an ipv6 default route over gossip and all the peers are failing latency pings, so I'm getting black holed out to the internet."**
+
+v754 fixed gossip acceptance on session existence (`ns.byNode[origin] != nil`) — necessary, but not sufficient: a session is one tunnel carrying both overlay families, with one liveness signal (`lastRx`, no v4/v6 split), so an origin can be fully connected while one specific family is silently undeliverable once packets reach its own OS. Nothing anywhere tracked that distinction continuously — the only place it existed at all was the webadmin's on-demand active ping (v756), which has no connection back into the engine and only runs when someone has the Latency page open.
+
+New `internal/mesh/familyprobe.go`: `sendFamilyProbes` injects a real ICMP(v6) echo request per configured peer address, through `processOutbound` — the same pipeline a real locally-originated ping takes (egress firewall, NAT-bypass-for-self, all of it), so the probe is honest about what this node's own current configuration actually allows. The peer's real OS answers automatically, standard ICMP behavior, no protocol changes needed on their end. `deliverInner` (`engine.go`) is hooked, right after the anti-spoof check and before NAT can rewrite the source, to recognize the reply on the way back in and mark that family good — trusting it without identifier/sequence matching, since a packet that already decrypted under the peer's session key and passed source-ownership verification can only have come from that peer. `peerSession` gained four `atomic.Int64` fields (`familyProbeSent4/6`, `familyGood4/6`); `familyLive4`/`familyLive6` are optimistic until a family has been probed and gotten nothing back for `familyDeadAfter` (3× the 15s probe interval) — mirroring `hostsync.go`'s existing "show up immediately" philosophy rather than introducing a new warm-up delay.
+
+Wired into the two places that actually matter: `routes.go`'s `bestRedistOrigins` now excludes an origin whose family (matching the destination's) is confirmed dead — this is the actual fix for the reported black hole. `hostsync.go`'s `syncHosts` withholds just the dead family from a peer's automatic hosts entry instead of either publishing an unreachable address or dropping the entry over one broken family. Explicitly out of scope, not silently skipped: `learnedHosts`/`learnedDNS` (custom gossip records pointing at arbitrary IPs, not necessarily the peer's own address) aren't covered — correctly gating those would mean probing arbitrary advertised targets, a different feature.
+
+Found and fixed one real regression before shipping: firing the first probe immediately on a network's very first maintenance tick (mirroring how `lastKeepalive`/`lastGossip` intentionally fire fast) meant every test spinning up a real engine got unexpected ICMP probe traffic interleaved with whatever packets it was actually asserting on — broke `TestRelayedConnectionUpgradesToDirect` and `TestRelay`, both of which check a specific packet arrives next and got a stray probe (visible in the diff by its own `0x9a7a` identifier) instead. Fixed by initializing `netState.lastFamilyProbe` to `time.Now()` at construction, deferring the first real probe by a full interval — there's no equivalent urgency to a keepalive's need to establish NAT mappings fast, so nothing is lost deferring it.
+
+Also found and fixed a bug in the *test* written for this, not the shipped code: the first draft of the real two-engine round-trip test mutually seeded both nodes toward each other (matching `routes_livereload_test.go`'s existing pattern) and intermittently found `ns.byNode`'s peerSession object didn't match the one `deliverInner` was actually operating on — two nodes racing to connect to each other simultaneously can leave a second, transient session reachable via the transport's own inbound dispatch even after `ns.byNode` has moved on (same territory `directupgrade_test.go` exercises on purpose), which the test was misreading as "no reply ever recorded." Switched to one-directional seeding (also the more common real topology — a leaf dialing a known peer), which resolved it outright rather than working around it.
+
+Added: 9 pure unit tests (ICMP(v4/v6) packet construction/parsing, the `familyLive` optimistic-then-dead-after-grace decision logic), `TestBestRedistOriginsExcludesConfirmedDeadFamily`/`RestoresFamilyOnRecentReply` (reproduces the exact reported scenario), `TestSyncHostsWithholdsOnlyDeadFamily`, and `TestFamilyProbeRealRoundTrip` — two real engines, real UDP transport, real encryption, a genuinely constructed reply flipped from a captured request and sent back through the real return path, confirming the whole mechanism works on actual wire traffic rather than only against hand-built packets in isolation.
+
+Verified: `go build ./...`, `go vet ./...` (whole repo), `gofmt` all clean. New tests pass consistently across repeated runs and under `-race` (the v4/v6 probe goroutines write disjoint atomic fields with no shared mutable state). Ran the full `internal/mesh` package suite to completion twice — the first run caught the two regressions above, the second (after both fixes) came back clean: 468 tests, 0 failures, ~756s. `internal/webadmin` suite unaffected, still green.
+
+---
+
+## v760 — 2026-08-01
+
+**The click-through history modal's address hint line now carries the same v4/v6 coloring as the table row it was opened from, instead of falling back to one flat muted line the moment you left the row.**
+
+`showLatencyHistoryModal`'s `overlay` param used to be plain text, `esc()`-escaped on the way into a `<div class="hint">` — so both addresses always rendered in that div's inherited muted color, with no reachability or primary/secondary distinction at all, unlike the row it was opened from. Fixed by changing `overlay`'s contract to pre-built HTML (documented in the function's own doc comment, since silently accepting raw HTML from a param that used to be treated as text is exactly the kind of thing a future caller could get wrong without a clear note) and having the one call site build it with the same coloring the table row just used.
+
+Rather than re-deriving that coloring a second time at the call site — which is exactly how a first draft of this nearly reintroduced the v6-only-peer bug fixed under v759 (treating a v6-only peer's address as "secondary/muted" instead of "primary/blue" because there's no v4 to compare against) — `latencyOverlayCellHTML` gained an optional `sep` param (`'<br>'` by default for the table cell, `' · '` passed by the modal), so both places share the exact same dual/primary/secondary logic instead of two copies that could drift apart.
+
+Verified: embedded `<script>` block `node --check`'d clean. Smoke-tested `latencyOverlayCellHTML` with both separators side by side — same peer, same tick, table cell and modal output are colored identically, differing only in `<br>` vs `·`; the v6-only edge case (the one a first draft got wrong) confirmed blue for both callers, not muted. `go build ./...`/`go vet ./...`/`gofmt` and the full `internal/webadmin` suite clean. No Go changes — pure frontend, same as the rest of this feature's history.
+
+---
+
+## v759 — 2026-08-01
+
+**Monitor > Latency: the overlay address and rtt cells now color each family to match its own marker on the sparkline right next to them — blue for a healthy primary trace, muted for a healthy dual-stack v6, red for a miss — instead of both cells rendering in the page's plain default text color regardless of what the sparkline was showing.**
+
+Added `latencyColorSpan(text, ok, secondary)`: red (`var(--danger)`) for a miss regardless of family — matching `latencyDualSparkline`'s miss dots, which aren't muted down either, a miss is a miss — `var(--mut)` for a healthy *secondary* trace (a dual-stack peer's v6, dashed and muted on the sparkline), `var(--acc)` blue for everything else healthy. "Everything else" specifically includes a v6-only peer's fallback address: dual-stack is what makes a trace secondary, not the address family by itself, and a v6-only peer's sparkline is the plain, undashed `latencySparkline`, not the muted half of a dual one — so its address and rtt get the same primary blue treatment its own sparkline gets, not muted just because the address happens to be v6.
+
+`rttCellHTML` now routes both its lines through this. The overlay column needed a new `latencyOverlayCellHTML` rather than reusing the existing `overlayCellHTML`, though — that one's shared with Mesh > peers' and Monitor > mesh peers' overlay cells, neither of which has a ping result to color by, so ping-outcome coloring doesn't belong in a function they also call. `overlayCellHTML` itself is untouched; `infoLatency`'s row loop just points at the new function instead.
+
+Verified: embedded `<script>` block `node --check`'d clean. Smoke-tested every combination standalone in `node` — single-stack healthy and miss, the v6-only-fallback case specifically (confirming it gets blue, not muted), and all four dual-stack ok/miss combinations for v4 and v6 independently — output matched the intended color in every case, including the "no overlay address yet" case correctly falling through to an empty string rather than an empty colored span. `go build ./...`/`go vet ./...`/`gofmt` and the full `internal/webadmin` suite clean. No Go changes — pure frontend, same as the rest of this feature's history.
+
+---
+
+## v758 — 2026-08-01
+
+**Monitor > Latency: replaced v757's stacked dual bar-chart sparkline with a single dual-line one, sharing one scale — not just a cleanup, an actual fix for a real loss the stacked version had.**
+
+The stacked version (two `latencySparkline` calls, one muted) doubled the row height for every dual-stack peer and, worse than the look of it, gave v4 and v6 *independent* autoscaled ranges — each sparkline stretched to fill its own min/max, so a peer whose v6 path ran consistently and meaningfully higher than its v4 path would show two normal-looking, similarly-shaped charts with no visible sign anything was different between them. Two peer families with fundamentally different latency, rendered as "looks the same twice."
+
+New `latencyDualSparkline(hist4, hist6)` replaces it: both lines plotted against one combined min/max, back down to the original single-sparkline's 32px-tall footprint. v4 is solid `var(--acc)`, v6 is dashed `var(--mut)` — dashed, not just a different color, so the two are still distinguishable without relying on color vision. A miss breaks that line's segment (no interpolated fake connection across it) and gets a small `var(--danger)` dot at the baseline instead; each ok reading keeps a hoverable dot with the same "N.N ms" tooltip the bar version had per-bar. `latencySparkline` itself reverts to its pre-v757 single-purpose form (the `muted` param it grew for the stacking approach is gone — dead weight once nothing calls it with `true` anymore) and stays exactly what it always was for a single-stack peer's trend.
+
+Verified: embedded `<script>` block `node --check`'d clean. Smoke-tested `latencyDualSparkline` standalone in `node` against a history with a miss in the middle of v4's run and two trailing misses on v6's — confirmed v4's line correctly splits into two separate segments around its gap (2+2 points) rather than drawing through it, v6 renders as one unbroken segment before its misses, and — the point of the whole redesign — a synthetic case with v6 running ~2x v4's raw RTT visibly draws v6's line near the top of the shared scale and v4's near the bottom, which the old independently-scaled stacked bars would have rendered as two ordinary-looking, similarly-proportioned charts. `go build ./...`/`go vet ./...`/`gofmt` and the full `internal/webadmin` suite clean. No Go changes — pure frontend, same as the rest of this feature's history (v750–v753, v755, v757).
+
+---
+
+## v757 — 2026-08-01
+
+**Monitor > Latency: the trend sparkline and row-flash-on-change now track a dual-stack peer's v6 result independently too, closing the two gaps v756 deliberately left open.**
+
+v756 fixed what gets *tested* and what the *rtt cell* shows; this pass extends the other two places that same active-ping result feeds. Both were client-side, keyed off the same per-poll `p.ok`/`p.rtt_ms` (now also `p.ok6`/`p.rtt6_ms`) this page already receives — no backend change needed.
+
+`latencyHistory[key]` gained a parallel `hist6`/`since6`/`sinceOk6` alongside the existing `hist`/`since`/`sinceOk`, populated only when the peer is dual-stack. `latencySparkline` gained an optional `muted` param (swaps its ok-bar fill from `--acc` to `--mut`) so a dual-stack peer's trend cell now stacks two sparklines — v4 on top in the usual color, v6 below in a dimmer one, same primary/secondary visual convention `overlayCellHTML` and `rttCellHTML` already use for their own stacked cells in the same row. The `title` tooltip splits into "v4 up 12s, v6 down 4s" when they differ, rather than describing only v4 while a stacked-but-unlabeled v6 sparkline sits below it with no text explanation.
+
+Row-flash now fires if *either* family's state changed, not just v4's — the scenario this exists for: v4 solid, v6 flaps, and the row visibly flashes even though the primary result never moved. When both flip in the same tick and disagree, "down" wins the flash color over "up" — a regression is worth flagging over a simultaneous improvement.
+
+Verified: embedded `<script>` block `node --check`'d clean. Smoke-tested the full poll-over-time sequence standalone in `node` (four successive polls plus a single-stack control) rather than just the single-call shapes v756's tests covered — confirmed first-sighting doesn't flash, v6-only-changing flashes down independent of v4, v6 recovering flashes up without disturbing v4's own `since` timestamp, a fully-quiet poll flashes nothing, and a single-stack peer's `hist6` stays empty/untouched throughout. No Go changes (pure frontend, same as v750–v753, v755) — `go build ./...`/`go vet ./...`/`gofmt` and the full `internal/webadmin` suite still run clean.
+
+---
+
+## v756 — 2026-08-01
+
+**Monitor > Latency's live ping now independently tests v6 on a dual-stack peer, instead of only ever pinging v4 and never finding out whether v6 even works.**
+
+v755 fixed the *display* side of a v4-only bias — the table only ever showed the single address `handleLocalLatency` happened to ping. This is the same bias one layer deeper, in what actually gets *tested*: `addr := p.Overlay4; if addr == "" { addr = p.Overlay6 }` picks one address per peer and pings only that — v6 fallback only ever triggers for a v6-only peer, so a dual-stack peer's v6 path was never independently checked at all. A healthy v4 ping would report the peer as fully reachable even with v6 completely broken.
+
+Checked whether the *other* RTT source on this page has the same gap before assuming it needed the same fix: the trend sparkline's bigger click-through chart is backed by the mesh's own passive keepalive RTT (`internal/mesh/ban.go`'s `PeerInfo.RTTMs`), which is a single number per **session**, not per address family — one tunnel carries both v4 and v6 overlay traffic, so there's nothing there to independently test per family the way an active ping to a specific address is. That one was correct as-is; the bug was specific to the active ping's address selection.
+
+Fixed by pinging both concurrently when a peer has both addresses: `latencyPeer` gained `RTT6Ms`/`OK6`/`Error6`, populated by a second goroutine that only fires when `Overlay4 != "" && Overlay6 != ""` — a v6-only peer is untouched, its result still lands in the original `RTTMs`/`OK`/`Error` fields via the existing fallback. On the frontend, `rttCellHTML` (paired with v755's `overlayCellHTML`, same file, same stacking convention) shows both results stacked v4-over-v6 when dual-stack, so a peer with healthy v4 and broken v6 now visibly shows both instead of reading as fully healthy.
+
+**Deliberately not extended in this pass:** the trend sparkline (fed by this same active-ping poll, client-side, distinct from the passive-RTT click-through chart mentioned above) still tracks only the primary/v4 result, and the row-flash-on-state-change logic likewise only fires on the primary result changing. Doubling either to track v6 independently is a real follow-up if wanted, but wasn't part of what was asked — this pass covers the numeric result being visible at all, which was the actual gap.
+
+Verified concurrency safety, not just assumed it: the v4 and v6 ping goroutines write disjoint fields (`OK`/`RTTMs`/`Error` vs `OK6`/`RTT6Ms`/`Error6`) of the same `results[i]` struct with no shared mutable state between them, and `go test -race` on the latency handlers confirms no data race. Added `TestHandleLocalLatencyPingsBothFamiliesIndependently`, tolerant of whether the sandbox's ping actually succeeds (same tolerance the pre-existing `TestHandleLocalLatency` already had for the v4 case) but strict that a v6 attempt happened and reported *something* — not v6's fields sitting at their zero values as if untouched.
+
+Verified: embedded `<script>` block `node --check`'d clean; `rttCellHTML` smoke-tested standalone in `node` across all-healthy, v4-up/v6-down, v4-only, and v6-only-fallback cases — the v4-up/v6-down case in particular is exactly the scenario this fix exists for, and it renders correctly rather than silently reading as fully healthy. `go build ./...`/`go vet ./...`/`gofmt` and the full `internal/webadmin` suite (including `-race` on the latency-specific tests) clean.
+
+---
+
 ## v755 — 2026-08-01
 
 **Monitor > Latency now shows both overlay addresses for a dual-stack peer, matching Monitor > mesh peers, instead of only the one address actually pinged.**

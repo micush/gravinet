@@ -14,7 +14,10 @@ import (
 // a per-network managed block. It debounces by content signature so the file is
 // only rewritten when the set of host→address mappings actually changes. A peer
 // that goes silent is pruned from the session table, so it naturally falls out
-// of the hosts file (TTL-by-liveness).
+// of the hosts file (TTL-by-liveness). A peer whose session is fine but one
+// overlay family isn't currently deliverable (see familyprobe.go) has that
+// family's record withheld specifically, rather than either publishing an
+// address nothing can reach or dropping the whole peer over one broken family.
 func (e *Engine) syncHosts(ns *netState, now time.Time) {
 	if !ns.spec.HostsSync {
 		return
@@ -30,10 +33,17 @@ func (e *Engine) syncHosts(ns *netState, now time.Time) {
 		if ps.hostname == "" {
 			continue
 		}
-		if !ps.overlay4.IsValid() && !ps.overlay6.IsValid() {
+		v4, v6 := ps.overlay4, ps.overlay6
+		if v4.IsValid() && !familyLive4(ps, now) {
+			v4 = netip.Addr{}
+		}
+		if v6.IsValid() && !familyLive6(ps, now) {
+			v6 = netip.Addr{}
+		}
+		if !v4.IsValid() && !v6.IsValid() {
 			continue
 		}
-		entries = append(entries, hosts.Entry{Hostname: ps.hostname, V4: ps.overlay4, V6: ps.overlay6})
+		entries = append(entries, hosts.Entry{Hostname: ps.hostname, V4: v4, V6: v6})
 	}
 	// Custom records learned from peers (name -> arbitrary IP), minus any whose
 	// hostname this node rejects (a local filter; mirrors route-reject).

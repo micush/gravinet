@@ -75,6 +75,7 @@ func (ns *netState) bestRedistOrigins(dst netip.Addr) ([]string, *fwdSnap) {
 	if snap == nil {
 		return nil, nil
 	}
+	now := time.Now()
 	bestBits := -1
 	bestMetric := 0
 	var origins []string
@@ -82,8 +83,23 @@ func (ns *netState) bestRedistOrigins(dst netip.Addr) ([]string, *fwdSnap) {
 		if !re.prefix.Contains(dst) {
 			continue
 		}
-		if snap.byNode[re.origin] == nil {
+		ps := snap.byNode[re.origin]
+		if ps == nil {
 			continue // origin has no live session; not a usable next hop
+		}
+		// Session-level liveness alone isn't enough: one session carries
+		// both overlay families, so an origin can be fully connected while
+		// the specific family dst belongs to is silently undeliverable
+		// once packets reach that origin's own OS — see familyprobe.go's
+		// own doc comment for the black hole this closes (a redistributed
+		// ::/0 with every peer's v6 broken is exactly this, one hop before
+		// the traffic vanishes into a peer that can't actually forward it).
+		if dst.Is4() {
+			if !familyLive4(ps, now) {
+				continue
+			}
+		} else if !familyLive6(ps, now) {
+			continue
 		}
 		bits := re.prefix.Bits()
 		switch {

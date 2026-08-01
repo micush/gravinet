@@ -82,7 +82,7 @@ func (s *Server) handleLocalDNS(w http.ResponseWriter, r *http.Request) {
 type latencyPeer struct {
 	NodeID   string `json:"node_id"`
 	Hostname string `json:"hostname"`
-	Overlay  string `json:"overlay"` // address actually pinged (v4 preferred, v6 fallback)
+	Overlay  string `json:"overlay"` // primary address pinged (v4 preferred; v6 fallback only when the peer has no v4 at all)
 	// Overlay4/Overlay6 are both addresses, independent of which one Overlay
 	// above chose to ping — purely for display, so a dual-stack peer shows
 	// both here the same way Monitor > mesh peers does (overlayCellHTML),
@@ -92,6 +92,16 @@ type latencyPeer struct {
 	RTTMs    float64 `json:"rtt_ms,omitempty"`
 	OK       bool    `json:"ok"`
 	Error    string  `json:"error,omitempty"`
+	// RTT6Ms/OK6/Error6 hold a dual-stack peer's *independent* v6 result —
+	// populated only when the peer has both Overlay4 and Overlay6, so a
+	// broken v6 path can't hide behind a healthy v4 one (or vice versa) the
+	// way it used to when Overlay above just picked one and never tested
+	// the other. A v6-only peer's result still lives in the fields above
+	// instead (Overlay already falls back to Overlay6 for it), so this
+	// triple is specifically the "also has v6" case, not "is v6."
+	RTT6Ms float64 `json:"rtt6_ms,omitempty"`
+	OK6    bool    `json:"ok6,omitempty"`
+	Error6 string  `json:"error6,omitempty"`
 }
 
 type latencyNet struct {
@@ -104,7 +114,9 @@ type latencyNet struct {
 // the response time is bounded by one ping timeout rather than the sum of all
 // of them. A peer with no overlay address assigned yet (still handshaking) is
 // reported as not-ok rather than silently skipped, so the peer is still
-// visible in the list.
+// visible in the list. A dual-stack peer gets both families pinged
+// independently (see latencyPeer's RTT6Ms doc comment) rather than only
+// ever testing whichever one Overlay prefers.
 func (s *Server) handleLocalLatency(w http.ResponseWriter, r *http.Request) {
 	var out []latencyNet
 	for _, ifc := range s.be.Interfaces() {
@@ -132,6 +144,25 @@ func (s *Server) handleLocalLatency(w http.ResponseWriter, r *http.Request) {
 				results[i].OK = true
 				results[i].RTTMs = ms
 			}(i, addr)
+
+			// Dual-stack: addr above is p.Overlay4 (v4-preferred), so v6 has
+			// not been tested at all yet. Ping it independently rather than
+			// letting a broken v6 path hide behind a healthy v4 one — see
+			// latencyPeer.RTT6Ms's doc comment. A v6-only peer needs nothing
+			// extra here: addr already fell back to Overlay6 for it above.
+			if p.Overlay4 != "" && p.Overlay6 != "" {
+				wg.Add(1)
+				go func(i int, addr6 string) {
+					defer wg.Done()
+					ms, err := PingRTT(addr6)
+					if err != nil {
+						results[i].Error6 = err.Error()
+						return
+					}
+					results[i].OK6 = true
+					results[i].RTT6Ms = ms
+				}(i, p.Overlay6)
+			}
 		}
 		wg.Wait()
 		out = append(out, latencyNet{Name: ifc.Name, Peers: results})

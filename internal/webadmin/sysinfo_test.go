@@ -267,6 +267,52 @@ func TestHandleLocalLatencyIncludesOverlay6(t *testing.T) {
 	}
 }
 
+// TestHandleLocalLatencyPingsBothFamiliesIndependently pins the actual fix:
+// a dual-stack peer gets v6 pinged on its own, not left untested just
+// because v4 already answered. Tolerant of whether ping succeeds in this
+// environment (either result is fine, mirroring TestHandleLocalLatency's own
+// tolerance for the v4 case) — what matters is that a v6 attempt happened at
+// all and reported something, rather than ok6/rtt6_ms/error6 all sitting at
+// their zero values as if v6 was never touched.
+func TestHandleLocalLatencyPingsBothFamiliesIndependently(t *testing.T) {
+	_, be, ts := newTestServer(t)
+	c := sessionFor(t, ts)
+	be.peersByNet = map[uint64][]mesh.PeerInfo{
+		0x1234: {{NodeID: "peerX", Hostname: "hostx", Overlay4: "10.0.0.9", Overlay6: "fd00::9"}},
+	}
+	req, _ := http.NewRequest("GET", ts.URL+"/api/latency", nil)
+	req.AddCookie(c)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var body struct {
+		Networks []struct {
+			Peers []struct {
+				OK6    bool    `json:"ok6"`
+				RTT6Ms float64 `json:"rtt6_ms"`
+				Error6 string  `json:"error6"`
+			} `json:"peers"`
+		} `json:"networks"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Networks) != 1 || len(body.Networks[0].Peers) != 1 {
+		t.Fatalf("expected 1 network with 1 peer, got %+v", body)
+	}
+	p3 := body.Networks[0].Peers[0]
+	if !p3.OK6 && p3.Error6 == "" {
+		t.Fatalf("a not-ok6 result must explain why (v6 should have been attempted): %+v", p3)
+	}
+	if p3.OK6 {
+		if p3.RTT6Ms <= 0 {
+			t.Fatalf("an ok6 result must carry a positive rtt6_ms: %+v", p3)
+		}
+	}
+}
+
 // TestPingRTT checks the parser directly against a peer address that cannot
 // possibly reply (TEST-NET-1, RFC 5737) — this should reliably produce a
 // clean not-ok result (either "no reply" or a could-not-run error) rather

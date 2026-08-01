@@ -817,10 +817,11 @@ type netState struct {
 	relayRefusedLog  map[string]time.Time
 	relayDeclinedLog map[string]time.Time
 
-	lastGossip     time.Time
-	lastGossipSig  string    // content signature of the last full peer-list broadcast (see peerListSig)
-	lastGossipFull time.Time // when that broadcast happened, regardless of whether content changed
-	lastKeepalive  time.Time
+	lastGossip      time.Time
+	lastGossipSig   string    // content signature of the last full peer-list broadcast (see peerListSig)
+	lastGossipFull  time.Time // when that broadcast happened, regardless of whether content changed
+	lastKeepalive   time.Time
+	lastFamilyProbe time.Time // last sendFamilyProbes tick — see familyprobe.go
 
 	// pendingPeerAdds tracks in-flight redundant retransmission of single-peer
 	// ctrlPeerAdd announcements: nodeID -> remaining resend attempts. See
@@ -1167,6 +1168,23 @@ type peerSession struct {
 	reasmOK      atomic.Uint64 // overlay packets fully reassembled and delivered
 	reasmDrop    atomic.Uint64 // reassembly groups dropped incomplete (evicted, expired, inconsistent)
 	spoofDrop    atomic.Uint64 // inbound packets dropped: source address not owned by this peer (anti-spoofing)
+
+	// familyProbeSent4/6 mark (as UnixNano) when this session first started
+	// ICMP-probing each configured overlay family — 0 means that family has
+	// either never been probed yet (brand new session) or has no address to
+	// probe at all. familyGood4/6 mark the last time an echo reply for that
+	// family actually came back. See familyprobe.go for why session
+	// liveness (lastRx above) isn't enough on its own: one session carries
+	// both families, so a session can be fully healthy while one family is
+	// silently undeliverable once packets reach the peer's own OS — the
+	// same gap Info -> Latency's on-demand ping already catches per-poll
+	// (rttCellHTML et al.), now tracked continuously here instead so
+	// hostsync.go's automatic entries can stop advertising a family that's
+	// actually down.
+	familyProbeSent4 atomic.Int64
+	familyProbeSent6 atomic.Int64
+	familyGood4      atomic.Int64
+	familyGood6      atomic.Int64
 
 	// replayDrop counts inbound datagrams this peer's session rejected as
 	// replayed or stale — crypto.ErrReplay out of Session.Open, i.e. a
@@ -1526,6 +1544,16 @@ func (e *Engine) newNetState(spec NetSpec) *netState {
 		pendingPeerAdds:        make(map[string]int),
 		done:                   make(chan struct{}),
 		dpGenCh:                make(chan struct{}),
+		// Deliberately not left at the zero value the way lastKeepalive and
+		// lastGossip are: those two intentionally fire on the very first
+		// maintLoop tick (a keepalive needs to establish NAT mappings fast,
+		// and gossip needs to advertise this node promptly), but there's no
+		// equivalent urgency for family probing, and firing immediately
+		// means every test spinning up a real engine gets unexpected ICMP
+		// probe traffic interleaved with whatever packets it's actually
+		// asserting on — exactly what broke TestRelayedConnectionUpgradesToDirect
+		// and TestRelay before this line was added. See familyprobe.go.
+		lastFamilyProbe: time.Now(),
 	}
 	if spec.Dev != nil {
 		ns.setDev(spec.Dev) // seed the live-device holder; swapped later by a rebuild
@@ -2174,6 +2202,11 @@ func (e *Engine) deliverInner(ps *peerSession, ip []byte, outerLen int) {
 		ps.spoofDrop.Add(1)
 		return
 	}
+	// Must run before translateIn below can rewrite the source address —
+	// see recordFamilyProbeReply's own doc comment on why it's safe to
+	// trust ip's source here (this exact anti-spoof check having just
+	// passed is what makes it safe).
+	recordFamilyProbeReply(ps, ip)
 	if nat := ps.net.nat.Load(); nat != nil {
 		nat.translateIn(ip) // reverse-SNAT / DNAT
 	}

@@ -594,6 +594,10 @@ func (e *Engine) maintLoop(ns *netState) {
 			e.sendKeepalive(ns)
 			ns.lastKeepalive = now
 		}
+		if now.Sub(ns.lastFamilyProbe) >= familyProbeInterval {
+			e.sendFamilyProbes(ns)
+			ns.lastFamilyProbe = now
+		}
 		ns.mu.Lock()
 		readv := ns.shouldReadvertise(now, e.routeAdvInterval())
 		hadv := ns.shouldReadvertiseHosts(now, e.routeAdvInterval())
