@@ -74,6 +74,12 @@ func TestReadvertiseRefreshesRoute(t *testing.T) {
 	ps := &peerSession{net: ns, nodeID: "peer"}
 	p := netip.MustParsePrefix("10.7.0.0/24")
 	body := encodeRouteAdd("origin", p, 5)[1:] // strip the leading ctrl byte
+	// onRouteAdd now requires a live session to the route's origin (see its
+	// own doc comment) — origin here is "origin", not ps's own "peer" (ps is
+	// just the immediate sender; this deliberately exercises the
+	// origin-vs-sender distinction, as a relayed advertisement would), so
+	// register the session under that key.
+	ns.byNode["origin"] = ps
 
 	e.onRouteAdd(ps, body) // learn
 	// Age it as though the origin had gone quiet.

@@ -11,6 +11,11 @@ func TestHostAdvDecodeAndLearn(t *testing.T) {
 	}}})
 	ns := e.netSnapshot()[1]
 	ps := &peerSession{net: ns, nodeID: "peer1"}
+	// onHostAdd now requires a live session to the advertising origin (see
+	// its own doc comment) before it'll accept a record — register one so
+	// this test exercises the normal connected-and-reachable path, same as
+	// every other *_test.go file that constructs a peerSession by hand.
+	ns.byNode["peer1"] = ps
 
 	// codec round-trip
 	o, n, ip, ok := decodeHostAdd(encodeHostAdd("peer1", "web.local", netip.MustParseAddr("192.168.5.5"))[1:])

@@ -2,6 +2,22 @@
 
 ---
 
+## v754 — 2026-08-01
+
+**Fix: a node no longer accepts (or re-floods) host, DNS, or route gossip whose origin it currently has no live session to — closes a black hole where gossip kept a hosts-file entry, DNS forward, or kernel route looking valid long after this node's own path to deliver to it was gone.**
+
+Flooded gossip in a mesh propagates independent of any one node's own connectivity to the record's origin, by design — that's what lets a record survive a single broken hop as long as some other neighbor keeps relaying it. But `onHostAdd` (`internal/mesh/hostadv.go`), `onDNSAdd` (`internal/mesh/dnsadv.go`), and `onRouteAdd` (`internal/mesh/routes.go`) were accepting and re-flooding a record purely on that basis, with no check that *this* node specifically could do anything with it. The three consumers downstream then trusted it at face value: `syncHosts` wrote a hostname → overlay-IP entry into the OS hosts file, `syncDNS` pointed a conditional forward at a server IP, and — the sharpest-edged case — `onRouteAdd` called `syncRoute` to program a real kernel route via `ip route`, so the OS itself believed it had somewhere to send that traffic. `bestRedistOrigins` already refuses to forward a packet through a dead origin at the point of use, which is correct but not sufficient on its own: the kernel had already handed the packet to the TUN believing the route was live, so it vanished inside the daemon with nothing telling the sender otherwise — the same silent black hole as a stale hosts or DNS entry, just one layer further down.
+
+Fixed at the one point common to all three: acceptance. Each handler now checks `ns.byNode[origin] != nil` (a live session — direct or relayed — to the origin) immediately after acquiring the lock, before storing or re-flooding anything. No session, no acceptance — the record isn't stored, isn't refreshed, and isn't relayed onward from this node. An already-known record simply stops being refreshed the moment its origin's connectivity drops, and ages out through the existing TTL sweep (`sweepStaleHosts`/`sweepStaleDNS`/`sweepStaleRoutes`, ~20s via `routeTTL()`) exactly as it always has — no new expiry mechanism needed, this just makes sure the sweep actually gets a chance to run instead of the record being kept perpetually fresh by flooding it can't use.
+
+**Known tradeoff, not a bug:** rejecting acceptance also means this node won't re-flood a record for an origin it can't itself reach, even to other neighbors who might be able to reach it. In this mesh's seed-hub topology that's expected to self-resolve — seeds appear to hold sessions with essentially everything they'd have gossip to relay about, since partial mesh always permits a seed to dial anyone it's learned of — but that's not something this change verified end to end, and there's no existing test coverage (before or after this fix) for the specific shape of "a relay has no connectivity to an origin but a node downstream of it does."
+
+Three test fixtures needed updating, not because they were wrong but because they predated the precondition: `hostadv_test.go`, `hostreject_test.go`, `dnsadv_test.go` (two call sites), and `routestale_test.go` all constructed a synthetic `peerSession` by hand without registering it in `ns.byNode`, which the old code never required. `routestale_test.go`'s `TestReadvertiseRefreshesRoute` in particular was already testing the right shape for this — its advertised route's origin ("origin") deliberately differs from the immediate sender's node ID ("peer"), the exact origin-vs-sender distinction this fix cares about — it just needed the session registered under the right key.
+
+Verified: `go build ./...` and `go vet ./...` clean, `gofmt` clean. Ran the full `internal/mesh` package suite to completion this time (455 tests, 0 failures, ~755s) rather than a filtered subset — the first attempt hit go test's default 10-minute timeout partway through an unrelated test and looked like a failure until re-run with `-timeout 20m` made clear it was just slow, not broken. `internal/webadmin` suite unaffected, still green.
+
+---
+
 ## v753 — 2026-07-31
 
 **Metrics CSV (v752): interface rx/tx now exports as Mbps, matching the charts, instead of the raw bytes/sec the collector stores internally.**

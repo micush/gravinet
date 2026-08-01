@@ -24,6 +24,11 @@ func TestHostRejectFiltersLearned(t *testing.T) {
 	}}})
 	ns := e.netSnapshot()[1]
 	ps := &peerSession{net: ns, nodeID: "peer1"}
+	// onHostAdd now requires a live session to the advertising origin (see
+	// its own doc comment) — register one so this test's records are
+	// accepted at all, leaving the reject filter as the only thing under
+	// test here.
+	ns.byNode["peer1"] = ps
 
 	// Predicate is case-insensitive.
 	if !ns.hostRejected("blocked.local") || !ns.hostRejected("BLOCKED.LOCAL") {

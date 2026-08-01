@@ -167,6 +167,15 @@ func (e *Engine) onDNSAdd(ps *peerSession, body []byte) {
 	key := dnsKey(origin, domain)
 	now := time.Now()
 	ns.mu.Lock()
+	if ns.byNode[origin] == nil {
+		// See onHostAdd's doc comment (hostadv.go) — same reasoning, same
+		// black hole, same fix: no live session to the origin means this
+		// node can't actually reach the forward's server(s) either, so
+		// don't accept or re-flood a record that would just sit in the
+		// resolver looking valid while undeliverable.
+		ns.mu.Unlock()
+		return
+	}
 	cur, known := ns.learnedDNS[key]
 	changed := !known || !sameAddrs(cur.servers, servers)
 	if known {

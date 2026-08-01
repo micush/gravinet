@@ -429,6 +429,22 @@ func (e *Engine) onRouteAdd(ps *peerSession, body []byte) {
 	key := origin + "|" + prefix.String()
 	now := time.Now()
 	ns.mu.Lock()
+	if ns.byNode[origin] == nil {
+		// See onHostAdd's doc comment (hostadv.go) — same reasoning, same
+		// fix, but the sharpest-edged version of this black hole: syncRoute
+		// below programs a real kernel route for prefix, so the OS itself
+		// believes it has somewhere to send this traffic. bestRedistOrigins
+		// already refuses to forward a packet through a dead origin (see
+		// its own doc comment), which is correct but not sufficient on its
+		// own — the kernel still handed the packet to the TUN believing the
+		// route was live, so it vanishes inside the daemon with nothing to
+		// tell the sender otherwise, same silent black hole as a hosts-file
+		// or DNS entry pointing nowhere. Refuse to accept or re-flood the
+		// route at all while origin is unreachable, so no kernel route
+		// promising it ever gets programmed in the first place.
+		ns.mu.Unlock()
+		return
+	}
 	if ns.knownRoute[key] {
 		// Already known — refresh its freshness so it isn't swept as stale, and
 		// pick up any metric change.

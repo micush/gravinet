@@ -76,6 +76,11 @@ func TestDNSRejectFiltersButStillLearns(t *testing.T) {
 	}}})
 	ns := e.netSnapshot()[1]
 	ps := &peerSession{net: ns, nodeID: "peer1"}
+	// onDNSAdd now requires a live session to the advertising origin (see
+	// onHostAdd's doc comment, same discipline) — register one so this
+	// test's forwards are accepted at all, leaving the reject filter as the
+	// only thing under test here.
+	ns.byNode["peer1"] = ps
 
 	if !ns.dnsRejected("blocked.internal") || !ns.dnsRejected("BLOCKED.INTERNAL") {
 		t.Error("reject match should be case-insensitive")
@@ -251,6 +256,9 @@ func TestSearchLearnedPromotesGossipedForward(t *testing.T) {
 	}}})
 	ns := e.netSnapshot()[1]
 	ps := &peerSession{net: ns, nodeID: "peer1"}
+	// onDNSAdd now requires a live session to the advertising origin — see
+	// onHostAdd's doc comment.
+	ns.byNode["peer1"] = ps
 
 	servers := []netip.Addr{netip.MustParseAddr("192.168.168.168")}
 	e.onDNSAdd(ps, encodeDNSAdd("peer1", "cush.local", servers)[1:])

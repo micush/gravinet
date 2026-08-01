@@ -112,6 +112,23 @@ func (e *Engine) onHostAdd(ps *peerSession, body []byte) {
 	key := hostKey(origin, name)
 	now := time.Now()
 	ns.mu.Lock()
+	if ns.byNode[origin] == nil {
+		// No live session — direct or relayed — to the advertising origin.
+		// Gossip keeps flooding through the mesh long after this node's own
+		// path to that origin is gone, as long as some other neighbor is
+		// still relaying it (that's the whole point of a flood), so
+		// liveness of the *sender* (ps, which we obviously have — that's
+		// how this arrived) says nothing about reachability of the
+		// *origin*. Accepting it anyway would let it sit in the hosts file
+		// looking perfectly valid while nothing this node has can actually
+		// deliver to it — a black hole indistinguishable from a real
+		// outage until something times out. Refuse to store or re-flood
+		// it; an already-known entry simply stops being refreshed here and
+		// ages out through sweepStaleHosts's existing TTL once this stays
+		// true, the same ~20s-class signal routeTTL already gives routes.
+		ns.mu.Unlock()
+		return
+	}
 	cur, known := ns.learnedHosts[key]
 	changed := !known || cur.ip != ip
 	if known {
