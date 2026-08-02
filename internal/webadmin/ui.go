@@ -518,7 +518,11 @@ const LOCAL_API = ['/api/proxy','/api/cluster','/api/managed','/api/manager','/a
   // the peer's own fleet while the operator believed they were driving it
   // from here — the same "two managers, two peer lists" trap the upgrade
   // rollout comment above describes, just for capture instead of a rollout.
-  '/api/capture/mesh/start','/api/capture/mesh/status','/api/capture/mesh/download'];
+  '/api/capture/mesh/start','/api/capture/mesh/status','/api/capture/mesh/download',
+  // Same reasoning, same trap, applied to the mesh-wide tshoot bundle: it
+  // fans out from this node's own managed-peer list, so it stays local-only
+  // rather than following whichever peer happens to be selected above.
+  '/api/tshoot/mesh'];
 async function api(path, opts={}, target) {
   let url = path;
   const t = target !== undefined ? target : state.target;
@@ -10601,6 +10605,100 @@ async function chConfirmRestore(id){
   };
 }
 
+// downloadTshoot fetches a tshoot bundle — single-node or mesh-wide,
+// whichever url points at — and saves it as a .tgz. Built by hand rather
+// than via api(): the response is a raw binary attachment, not JSON, so
+// api()'s fetch-then-json() wrapper can't carry it (see LOCAL_API's comment
+// for the general proxy rule this endpoint already follows on the server
+// side). Kept as fetch+blob rather than a simpler window.location
+// navigation specifically so a failed build can still show an alert()
+// instead of just navigating to an error page. Shared by both buttons in
+// openTshootModal below so there is one download implementation, not two
+// that could quietly drift apart. Returns whether it succeeded, so a caller
+// can decide whether to close its modal or leave it open to retry.
+async function downloadTshoot(url, filenamePrefix){
+  const r = await fetch(url, { credentials:'same-origin' });
+  if (!r.ok) {
+    let msg = 'HTTP '+r.status;
+    try { const j = await r.json(); if (j && j.error) msg = j.error; } catch(e){}
+    alert('could not build the bundle ('+msg+')');
+    return false;
+  }
+  // blob(), not text(): the response is gzipped binary, and text() would
+  // UTF-8-decode it, corrupting every byte that isn't valid UTF-8 —
+  // silently producing an unopenable .tgz.
+  const blob = await r.blob();
+  const blobUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = blobUrl;
+  // toISOString() looks like "2026-08-02T00:39:59.123Z"; stripping
+  // '-'/':'/'T' leaves "20260802003959.123Z" — slice(0,14) stops right at
+  // the 14 date/time digits, before the "." that starts the milliseconds.
+  // slice(0,15) grabs that "." too, producing a double dot before ".tgz".
+  const stamp = new Date().toISOString().replace(/[-:T]/g,'').slice(0,14);
+  a.download = filenamePrefix+stamp+'.tgz';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+  return true;
+}
+
+// openTshootModal is the tshoot button's onclick: asks whether to download
+// just the currently-viewed node's bundle (unchanged single-node behavior,
+// state.target-aware like every other proxied action) or fan out and
+// collect every reachable managed peer's bundle in one .tgz
+// (/api/tshoot/mesh — LOCAL_API, so it always runs on the node you're
+// logged into). The mesh option mirrors infoCaptureMesh's own guard for the
+// exact same reason: while a remote peer is selected above, fanning out
+// would otherwise silently collect from *that peer's* managed-peer list,
+// not the one the operator is looking at, so it's disabled with an inline
+// explanation instead — "select This node to use it" — rather than either
+// silently doing the surprising thing or just refusing with no explanation.
+function openTshootModal(){
+  const nodeLabel = () => {
+    if (!state.target) return 'this node';
+    const p = (state.cluster || []).find(x => x.node_id === state.target);
+    return p ? (p.hostname || p.node_id.slice(0,8)) : state.target.slice(0,8);
+  };
+  const remote = !!state.target;
+
+  const body = $('<div></div>');
+  body.innerHTML = '<div class="hint" style="margin:0 0 14px">Download a bundle for just the node you\u2019re currently viewing, or fan out and collect one from every reachable managed peer at once.</div>';
+
+  const row = $('<div style="display:flex;flex-direction:column;gap:8px"></div>');
+  const oneBtn = $('<button class="sm">Just '+esc(nodeLabel())+'</button>');
+  const allBtn = $('<button class="sm">All mesh peers</button>');
+  row.appendChild(oneBtn);
+  row.appendChild(allBtn);
+  body.appendChild(row);
+
+  if (remote){
+    allBtn.disabled = true;
+    allBtn.classList.add('local-only-disabled');
+    body.appendChild($('<div class="hint" style="margin:8px 0 0">\u2018All mesh peers\u2019 always fans out from the node you\u2019re logged into, never from \u2018'+esc(nodeLabel())+'\u2019 selected above \u2014 disabled here so it can\u2019t look like it\u2019s collecting that peer\u2019s fleet when it isn\u2019t. Select \u201cThis node\u201d above to use it.</div>'));
+  }
+
+  const m = showModal('download tshoot bundle', body);
+
+  oneBtn.onclick = async () => {
+    oneBtn.disabled = true; allBtn.disabled = true;
+    const tshootUrl = state.target
+      ? '/api/proxy?node='+encodeURIComponent(state.target)+'&path='+encodeURIComponent('/api/tshoot')
+      : '/api/tshoot';
+    const ok = await downloadTshoot(tshootUrl, 'gravinet-tshoot-');
+    if (ok) { m.close(); return; }
+    oneBtn.disabled = false; allBtn.disabled = remote;
+  };
+  allBtn.onclick = async () => {
+    if (allBtn.disabled) return;
+    oneBtn.disabled = true; allBtn.disabled = true;
+    const prevText = allBtn.textContent;
+    allBtn.textContent = 'Gathering\u2026';
+    const ok = await downloadTshoot('/api/tshoot/mesh', 'gravinet-tshoot-mesh-');
+    if (ok) { m.close(); return; }
+    oneBtn.disabled = false; allBtn.disabled = remote; allBtn.textContent = prevText;
+  };
+}
+
 function secLogs(c){
   secHint(c, 'Everything the daemon logs, newest first. Filter narrows by text across all columns (try a network id, <b>ERROR</b>, or <b>mesh</b>). Refresh reloads the tail of the log file.');
   const card = $('<div class="card"></div>');
@@ -10618,40 +10716,7 @@ function secLogs(c){
         const a = document.createElement('a'); a.href = url; a.download = 'gravinet.log'; a.click();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
       } },
-    { label:'tshoot', cls:'ghost', title:'download one file with everything needed to troubleshoot this node: every peer on every network with reach, relay, session age, path MTU, fragment and drop counters; routes; bans; disabled peers; firewall rules and exemptions; NAT status; interfaces; the config with secrets redacted; and the tail of the log. Collect it from both ends of any peer problem \u2014 the two nodes can legitimately disagree, and the disagreement is often the diagnosis.', onclick: async () => {
-        // Built by hand rather than via api(): the response is a raw binary
-        // (.tgz) attachment, not JSON, so api()'s fetch-then-json() wrapper
-        // can't carry it. That means /api/tshoot needs the same manual
-        // proxy-URL treatment as the pcap download in infoCapture —
-        // otherwise this always lands on the node you're logged into,
-        // silently ignoring whichever peer is selected in the header (see
-        // LOCAL_API's comment for the general rule this is an instance of).
-        // Kept as fetch+blob rather than pcap's simpler window.location
-        // navigation specifically so a failed build can still show an
-        // alert() instead of just navigating to an error page.
-        const tshootUrl = state.target
-          ? '/api/proxy?node='+encodeURIComponent(state.target)+'&path='+encodeURIComponent('/api/tshoot')
-          : '/api/tshoot';
-        const r = await fetch(tshootUrl, { credentials:'same-origin' });
-        if (!r.ok) { alert('could not build the bundle (HTTP '+r.status+')'); return; }
-        // blob(), not text(): the response is gzipped binary now, and
-        // text() would UTF-8-decode it, corrupting every byte that isn't
-        // valid UTF-8 — silently producing an unopenable .tgz.
-        const blob = await r.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        // toISOString() looks like "2026-08-02T00:39:59.123Z"; stripping
-        // '-'/':'/'T' leaves "20260802003959.123Z" — slice(0,14) stops right
-        // at the 14 date/time digits, before the "." that starts the
-        // milliseconds. slice(0,15) (the original cut here) grabbed that
-        // "." too, producing "...003959." + ".tgz" = a double dot in the
-        // downloaded filename.
-        const stamp = new Date().toISOString().replace(/[-:T]/g,'').slice(0,14);
-        a.download = 'gravinet-tshoot-'+stamp+'.tgz';
-        a.click();
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
-      } },
+    { label:'tshoot', cls:'ghost', title:'download a troubleshooting bundle: every peer on every network with reach, relay, session age, path MTU, fragment and drop counters; routes; bans; disabled peers; firewall rules and exemptions; NAT status; interfaces; the config with secrets redacted; and the tail of the log. Asks whether to collect just the current node or every reachable mesh peer at once \u2014 collecting from both ends of any peer problem is often the diagnosis.', onclick: () => openTshootModal() },
     { label:'Clear', cls:'ghost', title:'clear the log file', onclick: async () => {
         if (!confirm('Clear the log file? This cannot be undone.')) return;
         const r = await api('/api/logs/clear', { method:'POST' });

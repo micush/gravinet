@@ -178,12 +178,13 @@ func startCapture(ifaceName string, snaplen int, onPacket func(time.Time, []byte
 // bpfWordAlign is OpenBSD's BPF_ALIGNMENT: sizeof(u_int32_t), always 4 bytes
 // — NOT sizeof(long) (8 bytes on 64-bit), which is what capture_freebsd.go
 // uses. See the file header comment for why getting this wrong wouldn't
-// fail loudly.
+// fail loudly, and capture_bpfbatch.go's doc comment for the real report
+// that turned up exactly this mistake on capture_darwin.go's own,
+// previously-separate copy of this same walk.
 const bpfWordAlign = 4
 
-// loop reads batches of BPF-framed packets and unpacks each one using
-// parseBPFHdr. Every read can return multiple packets back-to-back, each
-// prefixed by a bpf_hdr.
+// loop reads batches of BPF-framed packets and hands each one to
+// parseBPFBatch (capture_bpfbatch.go), which reads them via parseBPFHdr.
 func (h *openbsdCapture) loop(bufLen int, onPacket func(time.Time, []byte)) {
 	buf := make([]byte, bufLen)
 	for {
@@ -201,23 +202,7 @@ func (h *openbsdCapture) loop(bufLen int, onPacket func(time.Time, []byte)) {
 		if n <= 0 {
 			continue
 		}
-		p := 0
-		for p+18 <= n {
-			sec, usec, caplen, hdrlen, ok := parseBPFHdr(buf[p:n])
-			if !ok {
-				break
-			}
-			start := p + int(hdrlen)
-			end := start + int(caplen)
-			if hdrlen == 0 || end > n || end <= start {
-				break // malformed/short trailing record; stop this batch
-			}
-			pkt := make([]byte, caplen)
-			copy(pkt, buf[start:end])
-			onPacket(time.Unix(sec, usec*1000), pkt)
-			slot := int(hdrlen) + int(caplen)
-			p += (slot + bpfWordAlign - 1) &^ (bpfWordAlign - 1)
-		}
+		parseBPFBatch(buf, n, bpfWordAlign, onPacket)
 		if h.stopped.Load() {
 			return
 		}

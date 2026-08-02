@@ -3,7 +3,6 @@
 package webadmin
 
 import (
-	"encoding/binary"
 	"fmt"
 	"sync/atomic"
 	"syscall"
@@ -140,10 +139,9 @@ func startCapture(ifaceName string, snaplen int, onPacket func(time.Time, []byte
 	return h, linktype, nil
 }
 
-// loop reads batches of BPF-framed packets and unpacks each one. Every read
-// can return multiple packets back-to-back, each prefixed by a bpf_hdr whose
-// fields are read directly at their documented byte offsets (rather than
-// overlaying a Go struct) to sidestep any Go/C struct-padding mismatch:
+// loop reads batches of BPF-framed packets and hands each one to
+// parseBPFBatch (capture_bpfbatch.go), which reads bh_tstamp/bh_caplen/
+// bh_hdrlen via parseBPFHdr at their documented byte offsets:
 //
 //	offset 0:  bh_tstamp.tv_sec  (int32, the BSD-stable 32-bit BPF_TIMEVAL)
 //	offset 4:  bh_tstamp.tv_usec (int32)
@@ -151,10 +149,13 @@ func startCapture(ifaceName string, snaplen int, onPacket func(time.Time, []byte
 //	offset 12: bh_datalen        (uint32)
 //	offset 16: bh_hdrlen         (uint16)
 //
-// Each packet's slot (header+data) is padded up to a multiple of the machine
-// word size (8 bytes on 64-bit) before the next header begins.
-const bpfWordAlign = 8
-
+// and advances to the next record on a 4-byte boundary: Darwin's
+// BPF_ALIGNMENT is sizeof(int32_t), not sizeof(long) — see
+// capture_bpfbatch.go's doc comment for how getting this specific value
+// wrong on a previous version of this file (8, not 4) produced exactly the
+// "every other record decodes to a plausible-but-wrong timestamp over a
+// garbage payload" shape a real capture bundle turned up, rather than a
+// clean failure.
 func (h *darwinCapture) loop(bufLen int, onPacket func(time.Time, []byte)) {
 	buf := make([]byte, bufLen)
 	for {
@@ -172,23 +173,7 @@ func (h *darwinCapture) loop(bufLen int, onPacket func(time.Time, []byte)) {
 		if n <= 0 {
 			continue
 		}
-		p := 0
-		for p+18 <= n {
-			sec := int32(binary.LittleEndian.Uint32(buf[p : p+4]))
-			usec := int32(binary.LittleEndian.Uint32(buf[p+4 : p+8]))
-			caplen := binary.LittleEndian.Uint32(buf[p+8 : p+12])
-			hdrlen := binary.LittleEndian.Uint16(buf[p+16 : p+18])
-			start := p + int(hdrlen)
-			end := start + int(caplen)
-			if hdrlen == 0 || end > n || end <= start {
-				break // malformed/short trailing record; stop this batch
-			}
-			pkt := make([]byte, caplen)
-			copy(pkt, buf[start:end])
-			onPacket(time.Unix(int64(sec), int64(usec)*1000), pkt)
-			slot := int(hdrlen) + int(caplen)
-			p += (slot + bpfWordAlign - 1) &^ (bpfWordAlign - 1)
-		}
+		parseBPFBatch(buf, n, 4, onPacket)
 		if h.stopped.Load() {
 			return
 		}

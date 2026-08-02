@@ -69,7 +69,16 @@ var extraGlobalICMPSysctls = []string{
 	"/proc/sys/net/ipv4/icmp_ratelimit",
 }
 
-func (s *Server) handleTshoot(w http.ResponseWriter, r *http.Request) {
+// buildTshootText assembles this node's troubleshooting bundle as plain
+// text, and returns the moment it was generated (so a caller building a
+// filename from it — handleTshoot's single-node download, and
+// handleMeshTshoot's fan-out in meshtshoot.go — uses that exact timestamp
+// rather than calling time.Now() again afterward). Split out from
+// handleTshoot specifically so the two callers share one implementation of
+// what goes into a bundle, not two that could quietly drift apart — the
+// same reasoning PingArgsForOS's doc comment (sysinfo.go) gives for its own
+// split.
+func (s *Server) buildTshootText() (string, time.Time) {
 	var b strings.Builder
 	now := time.Now()
 
@@ -330,6 +339,15 @@ func (s *Server) handleTshoot(w http.ResponseWriter, r *http.Request) {
 
 	b.WriteString("\n\n========== END ==========\n")
 
+	return b.String(), now
+}
+
+// handleTshoot serves this node's own troubleshooting bundle as a .tgz
+// download (Monitor -> Logs -> tshoot). See buildTshootText for what goes
+// into it; this handler is just the HTTP/archiving wrapper around that.
+func (s *Server) handleTshoot(w http.ResponseWriter, r *http.Request) {
+	txt, now := s.buildTshootText()
+
 	// Packaged as a .tgz rather than served raw: the bundle is plain text and
 	// compresses hard (long repeated log/JSON structure), and a single
 	// familiar archive format is easier to attach to a support ticket or
@@ -339,7 +357,6 @@ func (s *Server) handleTshoot(w http.ResponseWriter, r *http.Request) {
 	// editors, `tar tOf`, GitHub's own viewer) without renaming it first.
 	txtName := fmt.Sprintf("gravinet-tshoot-%s.txt", now.Format("20060102-150405"))
 	tgzName := fmt.Sprintf("gravinet-tshoot-%s.tgz", now.Format("20060102-150405"))
-	txt := b.String()
 
 	archived, err := packTshootTgz(txtName, txt, now)
 	if err != nil {

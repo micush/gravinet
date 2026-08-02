@@ -550,7 +550,8 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/exempt", s.authed(s.handleExempt))
 	mux.HandleFunc("/api/logs", s.authed(s.handleLogs))
 	mux.HandleFunc("/api/logs/clear", s.authed(s.handleLogsClear))
-	mux.HandleFunc("/api/tshoot", s.authed(s.handleTshoot)) // one-file diagnostic bundle (Monitor -> Logs -> tshoot)
+	mux.HandleFunc("/api/tshoot", s.authed(s.handleTshoot))          // one-file diagnostic bundle (Monitor -> Logs -> tshoot)
+	mux.HandleFunc("/api/tshoot/mesh", s.authed(s.handleMeshTshoot)) // fan-out sibling: every reachable managed peer's bundle in one download
 	mux.HandleFunc("/api/readme", s.authed(s.handleReadme))
 	mux.HandleFunc("/api/license", s.authed(s.handleLicense))
 	mux.HandleFunc("/api/getting-started", s.authed(s.handleGettingStarted))
