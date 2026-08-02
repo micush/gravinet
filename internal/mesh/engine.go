@@ -1085,6 +1085,33 @@ type nodeInfo struct {
 	// deliberately includes gossip-only nodes).
 	version  string
 	lastSeen time.Time
+	// lastLinkCap is the largest outer datagram the local link has been
+	// observed to accept toward this peer, learned from EMSGSIZE on some
+	// prior session (see pmtu.go's pmtuState.linkCap, which this mirrors).
+	// nodeInfo, unlike peerSession, survives the individual sessions that
+	// come and go, so this is what lets a fresh session start its PMTU
+	// search already bounded to the known-safe region instead of
+	// re-climbing the identical rejected ladder from the full ceiling every
+	// single reconnect. Without it, a peer on a genuinely MTU-constrained
+	// path (real field case: a NAT/tunnel hop reducing the usable size)
+	// never gets to keep what discovery just spent probes learning — each
+	// reconnect wipes it, discovery has to re-earn it, and if the path is
+	// also otherwise flaky enough that sessions don't survive long, the
+	// peer can end up permanently re-discovering the same constraint
+	// instead of ever operating inside it. Zero means no constraint is
+	// known yet, not that one was found and it's zero.
+	//
+	// lastLinkCapAt records when it was learned, because a seeded linkCap
+	// is sticky for a session's entire life (see seedLinkCap/tooBig — once
+	// set it only ever tightens, nothing ever raises it back up within a
+	// session), so without an expiry a real, temporary constraint would
+	// cap every future session forever even after the underlying path
+	// genuinely improved — install() only trusts this within
+	// linkCapMemoryTTL of being recorded, so a peer that goes on to
+	// reconnect just once well after that window gets a real, unconstrained
+	// search rather than an indefinitely inherited guess.
+	lastLinkCap   int
+	lastLinkCapAt time.Time
 }
 
 type peerSession struct {
@@ -1513,7 +1540,7 @@ func (e *Engine) newNetState(spec NetSpec) *netState {
 		seedOwner:              make(map[netip.AddrPort]string),
 		configuredSeedOwnerUDP: make(map[netip.AddrPort]string),
 		configuredSeedOwnerTCP: make(map[netip.AddrPort]string),
-		explicitSeed:           explicitSeedSet(spec.Seeds),
+		explicitSeed:           explicitSeedSet(spec.Seeds, spec.TCPSeeds),
 		explicitSeedNode:       make(map[string]bool),
 		hostCand:               make(map[netip.AddrPort]bool),
 		hostCandDead:           make(map[netip.AddrPort]bool),
@@ -1833,11 +1860,25 @@ func (e *Engine) isOverlayAddr(addr netip.Addr) bool {
 }
 
 // explicitSeedSet builds the initial explicitSeed map from a network's
-// configured seed list, for newNetState — see explicitSeed's own doc comment.
-func explicitSeedSet(seeds []netip.AddrPort) map[netip.AddrPort]bool {
-	m := make(map[netip.AddrPort]bool, len(seeds))
-	for _, s := range seeds {
-		m[s] = true
+// configured seed lists, for newNetState — see explicitSeed's own doc comment.
+//
+// Takes every configured list, not just the UDP one. A "tcp://" seed is an
+// operator-authored config entry in exactly the same sense a bare one is; the
+// scheme picks which transport dials it, not how deliberate the address is.
+// Covering only spec.Seeds left every configured TCP seed unmarked, which
+// install()'s stale-seed pruning then treated as a dynamically-learned guess
+// and deleted — owner and all — on every re-handshake, while primeTCPSeeds
+// re-added it (unowned, via AddSeed) on the very next tick. See v780.
+func explicitSeedSet(lists ...[]netip.AddrPort) map[netip.AddrPort]bool {
+	n := 0
+	for _, l := range lists {
+		n += len(l)
+	}
+	m := make(map[netip.AddrPort]bool, n)
+	for _, l := range lists {
+		for _, s := range l {
+			m[s] = true
+		}
 	}
 	return m
 }

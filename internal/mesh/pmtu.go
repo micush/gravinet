@@ -31,6 +31,17 @@ const (
 	pmtuMaxTries     = 2                      // resends of a candidate before it's declared failed
 	pmtuRevalidate   = 2 * time.Minute        // once settled, recheck/grow this often
 	pmtuProbeHdrLen  = 4 + 2                  // [probe_id:4][size:2] inside the sealed body
+	// linkCapMemoryTTL bounds how long nodeInfo.lastLinkCap (a link
+	// constraint remembered across a session's death, see its own doc
+	// comment) is trusted before install() stops seeding a fresh session
+	// with it. Long enough to survive the reconnect-storm case this exists
+	// for — a peer failing and retrying every few seconds needs the memory
+	// to still be there seconds or minutes later, not gone — but short
+	// enough that a peer which goes on to reconnect just once well outside
+	// this window (implying whatever was flapping has been stable since)
+	// gets a genuinely fresh, unconstrained search rather than inheriting
+	// a guess indefinitely.
+	linkCapMemoryTTL = 15 * time.Minute
 )
 
 type pmtuPhase uint8
@@ -323,6 +334,59 @@ func (ps *peerSession) initPMTU(floor, ceil int) {
 	ps.pmtu = newPMTUState(floor, ceil, time.Now())
 	ps.pmtuMu.Unlock()
 	ps.setEff(floor)
+}
+
+// seedLinkCap primes a freshly-created discovery state with a previously
+// learned link cap for this peer (nodeInfo.lastLinkCap — see its own doc
+// comment) so a reconnecting peer's search starts already bounded to the
+// known-safe region instead of re-climbing the same rejected ladder from
+// the full ceiling every single reconnect. Applies exactly the same
+// linkCap-clamping tooBig() already does for a live EMSGSIZE (ceil/high
+// shrink the same way, and outrank anything set from elsewhere the same
+// way) — but leaves eff and the search phase alone, since this isn't a
+// live rejection needing an immediate fallback; eff already starts safely
+// at floor regardless via newPMTUState.
+//
+// cap below the floor is ignored rather than applied: tooBig() itself
+// never records a linkCap at or below floor in the first place (that's
+// the "operator's configured underlay_mtu is wrong for this path" case,
+// which this state machine can't fix either way — see tooBig's own early
+// return), so a value that low here would only be possible if the
+// configured floor grew since it was recorded, in which case the stale
+// value is no longer meaningful and is better left unapplied than
+// clamping a healthy path down to a size nothing actually refused.
+func (ps *peerSession) seedLinkCap(cap int) {
+	if cap <= 0 {
+		return
+	}
+	ps.pmtuMu.Lock()
+	defer ps.pmtuMu.Unlock()
+	if ps.pmtu == nil || cap < ps.pmtu.floor {
+		return
+	}
+	p := ps.pmtu
+	p.linkCap = cap
+	if p.ceil > cap {
+		p.ceil = cap
+	}
+	if p.high > cap {
+		p.high = cap
+	}
+}
+
+// currentLinkCap reports this session's currently-discovered link cap (see
+// pmtuState.linkCap), or 0 if none has been learned this session. Read-only,
+// safe to call from anywhere — used to snapshot a value to remember in
+// nodeInfo.lastLinkCap before a session is torn down, without needing to
+// hold pmtuMu at the same time as ns.mu (see install()'s own comment on why
+// nothing in this package does that).
+func (ps *peerSession) currentLinkCap() int {
+	ps.pmtuMu.Lock()
+	defer ps.pmtuMu.Unlock()
+	if ps.pmtu == nil {
+		return 0
+	}
+	return ps.pmtu.linkCap
 }
 
 // resetPMTU re-runs path-MTU discovery for this peer, immediately dropping the

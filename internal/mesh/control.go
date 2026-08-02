@@ -934,6 +934,13 @@ func (e *Engine) teardownSessions(ns *netState, dead []*peerSession, reason stri
 		return
 	}
 	now := time.Now()
+	// Snapshot each session's discovered link cap before taking ns.mu below —
+	// currentLinkCap takes pmtuMu, and nothing in this package holds pmtuMu
+	// and ns.mu at once (see install()'s own comment on the same discipline).
+	linkCaps := make(map[*peerSession]int, len(dead))
+	for _, ps := range dead {
+		linkCaps[ps] = ps.currentLinkCap()
+	}
 	ns.mu.Lock()
 	var goneNodes []string
 	for _, ps := range dead {
@@ -953,6 +960,22 @@ func (e *Engine) teardownSessions(ns *netState, dead []*peerSession, reason stri
 				ni.reconnects++
 				ni.lastReconnectReason = reason
 				ni.lastReconnectAt = now
+				// Remember whatever this session's own discovery learned
+				// about the link — see nodeInfo.lastLinkCap's doc comment
+				// for why a session dying is exactly when this needs to be
+				// preserved somewhere, not discarded along with everything
+				// else the dying peerSession owned. A session that never
+				// triggered EMSGSIZE reports 0 here (currentLinkCap's own
+				// contract), which deliberately leaves any existing
+				// remembered value alone rather than clearing it — no new
+				// rejection isn't evidence an old, real constraint went
+				// away, especially when that old value is likely exactly
+				// why this session never got probed high enough to
+				// re-trigger it.
+				if lc := linkCaps[ps]; lc > 0 {
+					ni.lastLinkCap = lc
+					ni.lastLinkCapAt = now
+				}
 			}
 		}
 		if ps.overlay4.IsValid() && ns.routes4[ps.overlay4] == ps {

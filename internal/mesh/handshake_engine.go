@@ -28,6 +28,31 @@ func transcript(initEph, respEph []byte, network uint64) []byte {
 // so dropping an inbound index here would blackhole the peer's traffic. Demux
 // is O(1) by index, so keeping a couple of extra inbound sessions is cheap.
 // (Stale-session reaping arrives with rekeying in a later step.)
+// seedPeerPMTUFromHistory applies ps's node's remembered link cap (nodeInfo.
+// lastLinkCap — see its own doc comment) to a freshly-initialized session,
+// if one is on record and still within linkCapMemoryTTL. Split out from
+// install() itself so this specific piece — the actual fix for the
+// reconnect-storm case documented on lastLinkCap — is directly testable
+// without needing a fully-established crypto session the way exercising
+// all of install() does.
+//
+// Reads ni.lastLinkCap under ns.mu, then releases it before calling
+// seedLinkCap: noteTooLong (engine.go) already releases ns.mu before ever
+// touching a session's pmtuMu, and pmtu.go's own comment on relayMTUCap
+// explains why — nothing in this package holds pmtuMu while also holding
+// ns.mu, so this doesn't start doing that either.
+func (e *Engine) seedPeerPMTUFromHistory(ns *netState, ps *peerSession) {
+	ns.mu.Lock()
+	seedCap := 0
+	if ni := ns.nodes[ps.nodeID]; ni != nil && time.Since(ni.lastLinkCapAt) < linkCapMemoryTTL {
+		seedCap = ni.lastLinkCap
+	}
+	ns.mu.Unlock()
+	if seedCap > 0 {
+		ps.seedLinkCap(seedCap)
+	}
+}
+
 func (e *Engine) install(ns *netState, ps *peerSession) {
 	if ps.nodeID == e.nodeID {
 		// Belt-and-suspenders: onHSInit/onHSResp already reject a handshake
@@ -41,6 +66,7 @@ func (e *Engine) install(ns *netState, ps *peerSession) {
 		return
 	}
 	ps.initPMTU(e.pmtuFloor, e.pmtuCeil)
+	e.seedPeerPMTUFromHistory(ns, ps)
 	ns.mu.Lock()
 	// A re-handshake for a peer we're already connected to (e.g. its endpoint
 	// roamed off the configured seed, so initLoop re-dialed it, or the peer
@@ -1164,20 +1190,33 @@ func (e *Engine) primeTCPSeeds(ns *netState) {
 
 // addTCPSeed merges a TCP/TLS seed into the live set (de-duplicated), so one added
 // at runtime is primed on the next init tick.
+//
+// Also marks the address explicit, the same way newNetState's explicitSeedSet
+// does for the seeds present at construction and AddExplicitSeed does for the
+// UDP half of ReloadRuntime's merge. Its only caller is that merge, so every
+// address reaching here came from the operator's config file; without the mark,
+// whether a configured TCP seed was prune-exempt would depend on whether the
+// daemon had been reloaded since it started.
 func (e *Engine) addTCPSeed(networkID uint64, seed netip.AddrPort) {
 	ns := e.network(networkID)
 	if ns == nil || !seed.Addr().IsValid() {
 		return
 	}
 	ns.mu.Lock()
+	defer ns.mu.Unlock()
+	ns.explicitSeed[seed] = true
+	if owner, known := ns.seedOwner[seed]; known && owner != "" {
+		// Owner already known from an earlier connection — promote now
+		// rather than waiting for a future attribution, matching addSeed's
+		// own handling of the same case.
+		ns.explicitSeedNode[owner] = true
+	}
 	for _, s := range ns.tcpSeeds {
 		if s == seed {
-			ns.mu.Unlock()
 			return
 		}
 	}
 	ns.tcpSeeds = append(ns.tcpSeeds, seed)
-	ns.mu.Unlock()
 }
 
 // ensureFallback opens a TCP/TLS fallback connection to a peer when UDP to it has
@@ -1324,6 +1363,23 @@ func (e *Engine) dialFallbackCandidate(ns *netState, tr Sender, seed netip.AddrP
 	if !ok || fd.HasFallback(fb) {
 		release()
 		return // transport has no fallback, or a connection is already up
+	}
+	if ns.fallbackInBackoff(fb) {
+		release()
+		// Connected before without ever handshaking; still cooling down.
+		//
+		// watchFallbackHandshake has recorded an escalating backoff against fb
+		// (noteFallbackFailure) and logged "not retrying for <wait>" since
+		// v713, but nothing on this path ever read it back: the only caller of
+		// fallbackInBackoff was primeTCPSeeds' explicit-TCP-seed loop, keyed on
+		// the seed, while the address watchFallbackHandshake actually penalizes
+		// is fb — the derived candidate port, which for any advertised extra
+		// port isn't the seed at all. So the ladder climbed 30s → 10m entirely
+		// for the log's benefit while fallbackDialCooldown's flat 30s remained
+		// the real pace, and the warning stated a suppression window that was
+		// off by more than an order of magnitude at the top of the ladder. See
+		// v780.
+		return
 	}
 	netID := ns.spec.ID
 	go func() {
