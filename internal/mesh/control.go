@@ -563,6 +563,7 @@ func (e *Engine) maintLoop(ns *netState) {
 		e.pruneDead(ns, now)
 		e.sweepStuckKeepalive(ns, now)
 		e.sweepStaleRoutes(ns, now)
+		e.sweepDeadFamilyRoutes(ns, now)
 		e.sweepStaleHosts(ns, now)
 		e.sweepStaleDNS(ns, now)
 		e.sweepDeadSeeds(ns, now)

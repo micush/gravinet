@@ -445,7 +445,8 @@ func (e *Engine) onRouteAdd(ps *peerSession, body []byte) {
 	key := origin + "|" + prefix.String()
 	now := time.Now()
 	ns.mu.Lock()
-	if ns.byNode[origin] == nil {
+	originPS := ns.byNode[origin]
+	if originPS == nil {
 		// See onHostAdd's doc comment (hostadv.go) — same reasoning, same
 		// fix, but the sharpest-edged version of this black hole: syncRoute
 		// below programs a real kernel route for prefix, so the OS itself
@@ -458,6 +459,26 @@ func (e *Engine) onRouteAdd(ps *peerSession, body []byte) {
 		// or DNS entry pointing nowhere. Refuse to accept or re-flood the
 		// route at all while origin is unreachable, so no kernel route
 		// promising it ever gets programmed in the first place.
+		ns.mu.Unlock()
+		return
+	}
+	// Same black hole, one layer more specific: a session existing at all
+	// only proves the underlay control channel is up (see familyprobe.go's
+	// doc comment — ctrlPing/ctrlPong never touches either side's overlay
+	// routing table), not that *this prefix's* address family is currently
+	// deliverable to origin. A dual-stack origin whose v6 path has gone bad
+	// but whose session is otherwise perfectly healthy would sail through
+	// the byNode check above and get a real kernel route programmed for a
+	// v6 prefix nothing can actually reach — exactly the gap
+	// sweepDeadFamilyRoutes exists to close for routes already accepted;
+	// this is its counterpart on the acceptance side, so a route whose
+	// family is already known dead is never let in in the first place
+	// rather than accepted and withdrawn moments later.
+	live := familyLive4(originPS, now)
+	if prefix.Addr().Is6() {
+		live = familyLive6(originPS, now)
+	}
+	if !live {
 		ns.mu.Unlock()
 		return
 	}
@@ -974,6 +995,73 @@ func (e *Engine) sweepStaleRoutes(ns *netState, now time.Time) {
 		e.syncRoute(ns, p)
 	}
 	e.log.Infof("mesh: withdrew %d stale route(s) on net %x (origin silent > %s)", len(gone), ns.spec.ID, ttl)
+}
+
+// sweepDeadFamilyRoutes withdraws redistributed routes whose specific
+// address family has gone undeliverable to their origin — the counterpart
+// to onRouteAdd's matching acceptance-side check, for routes that were
+// accepted before the family went bad rather than advertised after.
+//
+// This is deliberately a separate signal from sweepStaleRoutes just above,
+// not a variant of it: that one catches an origin that stopped
+// re-advertising (it's gone offline, or gossip to it has broken), which
+// says nothing about a peer that's advertising the same routes as
+// energetically as ever while one address family silently stops arriving —
+// exactly the shape familyprobe.go's own doc comment describes, and the
+// shape a real six-node mesh capture bundle turned up as a routing
+// misconfiguration outside gravinet's own control (see overlayguard.go):
+// the peer's session stays healthy (ctrlPing/ctrlPong never touch the
+// overlay routing table at all), so neither this function's own dead-
+// session cousin (dropNodeRoutes, via pruneDead/sweepStuckKeepalive) nor
+// sweepStaleRoutes' re-advertisement check ever fires. Only an actual,
+// continuing echo test of that specific family — familyLive4/familyLive6,
+// fed by the real ICMP probes sendFamilyProbes already sends through the
+// tunnel every familyProbeInterval — can tell the two apart.
+//
+// Independent per family, matching familyprobe.go and hostsync.go: a peer
+// whose v6 path has gone bad doesn't lose its still-good v4 routes over it,
+// any more than hostsync.go drops a peer's hosts-file entry entirely just
+// because one family stopped answering.
+func (e *Engine) sweepDeadFamilyRoutes(ns *netState, now time.Time) {
+	ns.mu.Lock()
+	if len(ns.redist) == 0 {
+		ns.mu.Unlock()
+		return
+	}
+	var gone []netip.Prefix
+	kept := ns.redist[:0]
+	for _, re := range ns.redist {
+		ps := ns.byNode[re.origin]
+		if ps == nil {
+			// No live session at all: dropNodeRoutes (via teardownSessions)
+			// already owns this case. Leave the entry as-is here so there is
+			// exactly one place that reacts to a session actually dying,
+			// rather than this sweep racing it to the same conclusion by a
+			// different path.
+			kept = append(kept, re)
+			continue
+		}
+		live := familyLive4(ps, now)
+		if re.prefix.Addr().Is6() {
+			live = familyLive6(ps, now)
+		}
+		if !live {
+			delete(ns.knownRoute, re.origin+"|"+re.prefix.String())
+			gone = append(gone, re.prefix)
+			continue
+		}
+		kept = append(kept, re)
+	}
+	ns.redist = kept
+	ns.publishFwd()
+	ns.mu.Unlock()
+	if len(gone) == 0 {
+		return
+	}
+	for _, p := range gone {
+		e.syncRoute(ns, p)
+	}
+	e.log.Infof("mesh: withdrew %d route(s) on net %x whose origin's address family stopped answering overlay pings", len(gone), ns.spec.ID)
 }
 
 // Routes returns the redistributed routes known on a network (control API).

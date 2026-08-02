@@ -633,7 +633,7 @@ func (s *Server) Start() error {
 	}
 	s.metrics = newMetricsCollector(s.be, s.log)
 	go s.metrics.run()
-	s.latencyHist = newLatencyCollector(s.be, s.log)
+	s.latencyHist = newLatencyCollector(s.be, s.log, latencyHistoryPath(s.configPath))
 	go s.latencyHist.run()
 	s.bgpRedis = newBGPMeshRedistributor(s)
 	go s.bgpRedis.run()

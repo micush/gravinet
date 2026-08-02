@@ -22,7 +22,7 @@ func TestLatencyCollectorRetention(t *testing.T) {
 			0x1234: {{NodeID: "peerX", Hostname: "hostx", Overlay4: "10.0.0.9", RTTMs: 12.5}},
 		},
 	}
-	lc := newLatencyCollector(be, nil)
+	lc := newLatencyCollector(be, nil, "")
 	now := time.Now().Unix()
 	// appendTrim's prefix-scan assumes ascending time order, same as real
 	// history (points are always appended as they're sampled) — oldest
@@ -67,7 +67,7 @@ func TestLatencyHistoryClampAllows24h(t *testing.T) {
 	// through Start() (the only place a real server constructs
 	// s.latencyHist), so it's nil here by default — build one explicitly
 	// and seed it directly rather than starting its background ticker.
-	srv.latencyHist = newLatencyCollector(be, nil)
+	srv.latencyHist = newLatencyCollector(be, nil, "")
 	c := sessionFor(t, ts)
 
 	now := time.Now().Unix()
