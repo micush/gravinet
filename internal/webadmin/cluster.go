@@ -313,6 +313,14 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": "rollouts are driven from the node you are logged in to, not through a peer"})
 		return
 	}
+	// Same trap as the rollout guard above, for the mesh-wide capture job:
+	// proxying this would fan out across the *selected peer's* managed-peer
+	// list, not the operator's own, and hand back that peer's job/download
+	// instead of the one the UI thinks it started.
+	if pathBase == "/api/capture/mesh/start" || pathBase == "/api/capture/mesh/status" || pathBase == "/api/capture/mesh/download" {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "mesh-wide capture is driven from the node you are logged in to, not through a peer"})
+		return
+	}
 	if pathBase == "/api/managed" || pathBase == "/api/manager" || pathBase == "/api/shell/setting" || pathBase == "/api/upgrade/accept-manager" {
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": "this setting is local-only and cannot be changed on a remote peer"})
 		return

@@ -270,6 +270,21 @@ func startCapture(ifaceName string, snaplen int, onPacket func(time.Time, []byte
 		linktype = linktypeEthernet
 	case 0: // DLT_NULL
 		linktype = linktypeNull
+	case 12:
+		// Confirmed empirically, not from Npcap's own documentation (which
+		// doesn't cover what a WinTun-backed adapter's pcap_datalink()
+		// actually returns): two independent real captures of gravinet's own
+		// WinTun-based TUN adapter (see this file's top comment) both
+		// reported 12 here, and both were genuinely bare, unprefixed IP —
+		// every packet started right at the IP header, byte 0. That's
+		// exactly what LINKTYPE_RAW describes, so that's the mapping,
+		// regardless of which internal DLT numbering Npcap is drawing 12
+		// from (WinPcap/Npcap's headers are known to reuse legacy BSD-style
+		// DLT_* numbers rather than the portable pcap-file LINKTYPE_* ones —
+		// see capture_openbsd.go's dltLoop comment for the general shape of
+		// that problem). A real physical NIC never hits this: those report
+		// DLT_EN10MB (1, handled above), not 12.
+		linktype = linktypeRaw
 	default:
 		linktype = int(int32(dlt))
 	}

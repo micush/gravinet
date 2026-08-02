@@ -510,7 +510,15 @@ const LOCAL_API = ['/api/proxy','/api/cluster','/api/managed','/api/manager','/a
   // remote peer. push is the manager-side fleet action, driven from the node
   // you are on. remote-apply is deliberately NOT here — it is the single
   // peer-facing upgrade endpoint, reached by a Manager over the overlay.
-  '/api/upgrade/accept-manager','/api/upgrade/push'];
+  '/api/upgrade/accept-manager','/api/upgrade/push',
+  // The mesh-wide "capture all peers" job is driven from — and its result
+  // downloaded from — the node you are logged into: it fans out to *that*
+  // node's own view of its managed peers, not the selected peer's. Proxying
+  // /api/capture/mesh/start to a selected peer would start a capture across
+  // the peer's own fleet while the operator believed they were driving it
+  // from here — the same "two managers, two peer lists" trap the upgrade
+  // rollout comment above describes, just for capture instead of a rollout.
+  '/api/capture/mesh/start','/api/capture/mesh/status','/api/capture/mesh/download'];
 async function api(path, opts={}, target) {
   let url = path;
   const t = target !== undefined ? target : state.target;
@@ -1123,7 +1131,7 @@ function buildSearchIndex(){
     ['tcpport-row', 'TCP port', 'The TCP port(s) this node listens on for the TLS fallback; comma-separated for more than one.', 'network'],
     ['natstate-row', 'NAT state timeout', 'How long an idle translated NAT connection is remembered before its mapping is reclaimed.', 'network'],
     ['ip-forwarding-row', 'IP forwarding', 'Whether this node turns on host IPv4/IPv6 forwarding at startup \u2014 the on-ramp for redistributed routes and NAT. On by default; needs a restart to take effect.', 'network'],
-    ['ip-redirects-row', 'IP redirects', 'Whether this node turns off host acceptance and sending of ICMP IPv4/IPv6 redirects at startup. On by default (redirects disabled); needs a restart to take effect. icmp redirect', 'network'],
+    ['ip-redirects-row', 'Disable ICMP redirects', 'Turn off host acceptance and sending of ICMP IPv4/IPv6 redirects at startup. On by default. icmp redirect', 'network'],
     ['upnp-row', 'UPnP', 'Ask the LAN router to forward every port this node listens on \u2014 UDP, TCP fallback, and any extra ports \u2014 from its WAN side to this host automatically, so peers can reach it without a manual port forward. Off by default. upnp port forwarding nat traversal', 'network'],
     ['worker-threads-row', 'Worker threads', 'How many goroutines process outbound TUN traffic and inbound UDP traffic.', 'performance'],
     ['tun-queues-row', 'TUN queues', 'How many independent read queues to open on each overlay interface.', 'performance'],
@@ -3186,7 +3194,7 @@ function secSettingsNetwork(c) {
   card.appendChild(ipf);
 
   const ipr = $('<div class="settings-row" id="ip-redirects-row"></div>');
-  const iprLabel = $('<div><div class="settings-label">IP redirects</div><div class="settings-desc">Whether this node turns off host acceptance (and, where the platform supports it, sending) of ICMP IPv4/IPv6 redirects at startup \u2014 an unauthenticated redirect can otherwise rewrite this host\u2019s route table. On by default (redirects disabled). Needs a restart to take effect.</div></div>');
+  const iprLabel = $('<div><div class="settings-label">Disable ICMP redirects</div><div class="settings-desc">Turn off host acceptance (and, where the platform supports it, sending) of ICMP IPv4/IPv6 redirects at startup \u2014 an unauthenticated redirect can otherwise rewrite this host\u2019s route table. On by default.</div></div>');
   const iprSw = $('<label class="sw"><input type="checkbox" id="ip-redirects-toggle-cb"><span class="sw-slider"></span></label>');
   const iprCb = iprSw.querySelector('input');
   iprCb.checked = state.disableRedirects;
@@ -8878,6 +8886,133 @@ function infoCapture(c){
       if (r.body.running){ stopPoll(); captureTimer = setInterval(poll, 1000); }
     }
   })();
+
+  infoCaptureMesh(c);
+}
+
+// infoCaptureMesh is the fan-out sibling directly below the single-node
+// capture card: start a capture on the mesh interface of every reachable
+// managed peer (this node included) at once, for a fixed window, then bundle
+// each peer's .pcap into one .tgz and download it automatically — no button
+// to remember to click once the window closes. Always acts on the node this
+// session is logged into (see LOCAL_API's doc comment on the mesh/* paths)
+// regardless of which peer is selected above, since it fans out from *this*
+// node's own managed-peer list — so the card visibly disables its Start
+// control and explains why, the same way the Upgrade page does, rather than
+// silently ignoring the header selector.
+let meshCapTimer = null;
+// meshCaptureDownloadedID remembers which job's .tgz has already been pushed
+// to the browser this page load, so re-rendering the tab (switching sections
+// and back) or a resync poll landing on an already-finished job doesn't
+// trigger a second, surprise download of the same file.
+let meshCaptureDownloadedID = null;
+function infoCaptureMesh(c){
+  if (meshCapTimer){ clearInterval(meshCapTimer); meshCapTimer = null; }
+
+  const card = $('<div class="card"></div>');
+  card.appendChild($('<h3>Capture all mesh peers</h3>'));
+  card.appendChild($('<div class="hint" style="margin:0 0 10px">Starts a capture on the mesh interface of every reachable managed peer (this node included) for the chosen window, then automatically downloads one .tgz bundling each peer\u2019s .pcap as soon as it\u2019s done \u2014 handy for lining up both ends of a single exchange (e.g. a ping that replies on one node but not the other). Ending any capture already running or shown on a touched peer\u2019s own Capture tab is a side effect of this, the same as starting a fresh single-node capture there would be.</div>'));
+
+  const remote = !!state.target;
+  if (remote){
+    card.classList.add('local-only-disabled');
+    const peer = (state.cluster||[]).find(p => p.node_id === state.target);
+    const peerName = peer ? (peer.hostname || peer.node_id.slice(0,8)) : (state.target||'').slice(0,8);
+    card.appendChild($('<div class="hint" style="margin:0 0 10px; color:var(--danger,#b33); opacity:1">This always fans out from the node you\u2019re logged into, never from \u2018'+esc(peerName)+'\u2019, which is selected above. Disabled here so it can\u2019t look like it\u2019s capturing that peer\u2019s fleet when it isn\u2019t. Select \u201cThis node\u201d to use it here.</div>'));
+  }
+
+  const bar = $('<div class="tbar"></div>');
+  const durSel = $('<select style="padding:5px 9px;font-size:12px;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px"></select>');
+  for (const secs of [5,10,30,60]){
+    const o = document.createElement('option'); o.value = secs; o.textContent = secs+'s'; durSel.appendChild(o);
+  }
+  const goBtn = $('<button class="sm">Capture all peers</button>');
+  bar.appendChild(durSel); bar.appendChild(goBtn);
+  if (remote){ durSel.disabled = true; goBtn.disabled = true; }
+  card.appendChild(bar);
+
+  const statusLine = $('<div class="hint" style="margin:10px 0 6px"></div>');
+  const table = $('<table></table>');
+  card.appendChild(statusLine); card.appendChild(table);
+  c.appendChild(card);
+
+  const stBadge = (st) => {
+    if (st==='done') return '<span style="color:var(--good,#2a2)">done</span>';
+    if (st==='error') return '<span style="color:var(--danger,#b33)">error</span>';
+    return '<span style="color:var(--mut)">capturing\u2026</span>';
+  };
+  const renderPeers = (peers) => {
+    if (!peers || !peers.length){ table.innerHTML = ''; return; }
+    let h = '<tr><th>peer</th><th>iface</th><th>status</th></tr>';
+    for (const p of peers){
+      const who = p.self ? ((p.hostname||'this node') + ' (this node)') : (p.hostname || (p.node_id||'').slice(0,8) || 'peer');
+      const detail = p.error ? (' <span class="hint" style="margin:0">'+esc(p.error)+'</span>') : '';
+      h += '<tr><td>'+esc(who)+'</td><td>'+esc(p.iface||'\u2013')+'</td><td>'+stBadge(p.status)+detail+'</td></tr>';
+    }
+    table.innerHTML = h;
+  };
+  const stopPoll = () => { if (meshCapTimer){ clearInterval(meshCapTimer); meshCapTimer = null; } };
+
+  const applyDone = (b) => {
+    stopPoll();
+    goBtn.disabled = remote; goBtn.textContent = 'Capture all peers';
+    if (b.ready){
+      if (b.id != null && b.id !== meshCaptureDownloadedID){
+        meshCaptureDownloadedID = b.id;
+        statusLine.textContent = 'Done \u2014 downloading .tgz\u2026';
+        // Direct, unproxied navigation — see the function doc comment and
+        // LOCAL_API: this always means "this node's own last job", and
+        // Content-Disposition: attachment turns it into a download rather
+        // than an actual page navigation, same as the single-node capture
+        // tab's own download link.
+        window.location = '/api/capture/mesh/download';
+      } else {
+        statusLine.textContent = 'Done.';
+      }
+    } else {
+      statusLine.textContent = b.error ? ('Failed: '+b.error) : 'Failed.';
+    }
+  };
+
+  const poll = async () => {
+    if (state.section!=='capture'){ stopPoll(); return; }
+    const r = await api('/api/capture/mesh/status');
+    if (!r.ok || !r.body || !r.body.active) return;
+    renderPeers(r.body.peers);
+    if (!r.body.done){
+      const remain = Math.max(0, (r.body.duration_seconds||0) - (r.body.elapsed_seconds||0));
+      statusLine.textContent = 'Capturing\u2026 '+remain.toFixed(0)+'s left.';
+    } else {
+      applyDone(r.body);
+    }
+  };
+
+  goBtn.onclick = async () => {
+    const r = await api('/api/capture/mesh/start', {method:'POST', body: JSON.stringify({duration_seconds: Number(durSel.value)})});
+    if (!r.ok || (r.body&&r.body.error)){ alert((r.body&&r.body.error)||'could not start capture'); return; }
+    table.innerHTML = '';
+    statusLine.textContent = 'Starting\u2026';
+    goBtn.disabled = true; goBtn.textContent = 'Capturing\u2026';
+    stopPoll(); meshCapTimer = setInterval(poll, 700); poll();
+  };
+
+  // Re-sync with any job already running or finished, so switching tabs and
+  // back (or a page reload mid-capture) doesn't lose the in-flight state.
+  // A job found already done here still goes through applyDone, so a result
+  // that finished while this tab was elsewhere is still delivered — just
+  // exactly once, thanks to meshCaptureDownloadedID.
+  (async () => {
+    const r = await api('/api/capture/mesh/status');
+    if (!r.ok || !r.body || !r.body.active) return;
+    renderPeers(r.body.peers);
+    if (!r.body.done){
+      goBtn.disabled = true; goBtn.textContent = 'Capturing\u2026';
+      statusLine.textContent = 'Capturing\u2026';
+      meshCapTimer = setInterval(poll, 700);
+    } else {
+      applyDone(r.body);
+    }
+  })();
 }
 
 // infoRoutes shows the host kernel routing table, read live (not from config).
@@ -10484,25 +10619,36 @@ function secLogs(c){
         setTimeout(() => URL.revokeObjectURL(url), 1000);
       } },
     { label:'tshoot', cls:'ghost', title:'download one file with everything needed to troubleshoot this node: every peer on every network with reach, relay, session age, path MTU, fragment and drop counters; routes; bans; disabled peers; firewall rules and exemptions; NAT status; interfaces; the config with secrets redacted; and the tail of the log. Collect it from both ends of any peer problem \u2014 the two nodes can legitimately disagree, and the disagreement is often the diagnosis.', onclick: async () => {
-        // Built by hand rather than via api(): the response is a raw text/plain
-        // attachment, not JSON, so api()'s fetch-then-json() wrapper can't carry
-        // it. That means /api/tshoot needs the same manual proxy-URL treatment
-        // as the pcap download in infoCapture — otherwise this always lands on
-        // the node you're logged into, silently ignoring whichever peer is
-        // selected in the header (see LOCAL_API's comment for the general rule
-        // this is an instance of).
+        // Built by hand rather than via api(): the response is a raw binary
+        // (.tgz) attachment, not JSON, so api()'s fetch-then-json() wrapper
+        // can't carry it. That means /api/tshoot needs the same manual
+        // proxy-URL treatment as the pcap download in infoCapture —
+        // otherwise this always lands on the node you're logged into,
+        // silently ignoring whichever peer is selected in the header (see
+        // LOCAL_API's comment for the general rule this is an instance of).
+        // Kept as fetch+blob rather than pcap's simpler window.location
+        // navigation specifically so a failed build can still show an
+        // alert() instead of just navigating to an error page.
         const tshootUrl = state.target
           ? '/api/proxy?node='+encodeURIComponent(state.target)+'&path='+encodeURIComponent('/api/tshoot')
           : '/api/tshoot';
         const r = await fetch(tshootUrl, { credentials:'same-origin' });
         if (!r.ok) { alert('could not build the bundle (HTTP '+r.status+')'); return; }
-        const text = await r.text();
-        const blob = new Blob([text], { type:'text/plain' });
+        // blob(), not text(): the response is gzipped binary now, and
+        // text() would UTF-8-decode it, corrupting every byte that isn't
+        // valid UTF-8 — silently producing an unopenable .tgz.
+        const blob = await r.blob();
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        const stamp = new Date().toISOString().replace(/[-:T]/g,'').slice(0,15);
-        a.download = 'gravinet-tshoot-'+stamp+'.txt';
+        // toISOString() looks like "2026-08-02T00:39:59.123Z"; stripping
+        // '-'/':'/'T' leaves "20260802003959.123Z" — slice(0,14) stops right
+        // at the 14 date/time digits, before the "." that starts the
+        // milliseconds. slice(0,15) (the original cut here) grabbed that
+        // "." too, producing "...003959." + ".tgz" = a double dot in the
+        // downloaded filename.
+        const stamp = new Date().toISOString().replace(/[-:T]/g,'').slice(0,14);
+        a.download = 'gravinet-tshoot-'+stamp+'.tgz';
         a.click();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
       } },

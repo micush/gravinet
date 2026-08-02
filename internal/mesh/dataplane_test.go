@@ -138,3 +138,111 @@ func TestReconcileNoFactoryIsNoop(t *testing.T) {
 		t.Fatal("reconcile touched the device even though no factory is configured")
 	}
 }
+
+// TestEngineStopNeverRebuilds is the regression guard for the shutdown race
+// fixed in cmd/gravinet/main.go: main.go used to close every network's TUN
+// device itself, before calling engine.Stop(), on the theory that Stop()
+// would otherwise deadlock waiting for tunLoop's blocked Read. It doesn't —
+// Stop() already closes e.stop *before* it closes the device (see Stop's
+// body) — but the pre-close broke shuttingDown(ns)'s ability to tell "we're
+// intentionally closing this" from "the interface died," so tunLoopSerial
+// took the rebuild branch (recoverDataplane) in the middle of an ordinary
+// shutdown: a brand-new TUN device stood up, addressed, and routed, only to
+// be torn down again a moment later — slow and OS-call-heavy enough to blow
+// through the shutdown watchdog on a loaded host.
+//
+// This drives tunLoopSerial directly (not the full Start(), which would also
+// launch handshake/maintenance goroutines this test has no interest in) and
+// proves two things about the *correct* call order (Stop() alone, nothing
+// pre-closed): the device-recreation factory is never invoked, and Stop()
+// itself returns promptly rather than deadlocking — the exact hazard the
+// removed pre-close was (mistakenly) guarding against.
+func TestEngineStopNeverRebuilds(t *testing.T) {
+	dev := newFakeDev("mesh-test-stop")
+	var rebuilt bool
+	e := NewEngine(Options{NodeID: "self", Nets: []NetSpec{{
+		ID:      1,
+		Name:    "n",
+		Dev:     dev,
+		Subnet4: netip.MustParsePrefix("10.20.0.0/24"),
+		Self4:   netip.MustParseAddr("10.20.0.5"),
+		NewDevice: func() (Device, []Queue, error) {
+			rebuilt = true
+			return newFakeDev("mesh-test-stop"), nil, nil
+		},
+	}}})
+	ns := e.netSnapshot()[1]
+
+	ns.wg.Add(1)
+	go e.tunLoopSerial(ns)
+
+	done := make(chan struct{})
+	go func() {
+		e.Stop()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("engine.Stop() did not return — deadlocked waiting on the TUN read loop")
+	}
+
+	if rebuilt {
+		t.Fatal("Stop() triggered a device rebuild — the read loop mistook its own intentional close for interface loss")
+	}
+	if !isClosed(dev) {
+		t.Fatal("Stop() did not close the network's device")
+	}
+}
+
+// TestDeviceCloseBeforeStopSignalRebuilds is the inverse of
+// TestEngineStopNeverRebuilds: it documents *why* the order matters by
+// reproducing, in isolation, exactly what the removed main.go code used to
+// do — close the device directly, without going through Engine.Stop() (so
+// e.stop/ns.done are never signaled first). tunLoopSerial has no way to
+// distinguish that from a real interface loss and correctly (by its own,
+// unchanged contract) takes the rebuild branch. This isn't a bug in this
+// package — self-healing from a genuinely lost interface is the point of
+// dataplane.go — but it is exactly the trap the caller has to avoid falling
+// into, which is what made the main.go ordering bug possible in the first
+// place.
+func TestDeviceCloseBeforeStopSignalRebuilds(t *testing.T) {
+	d0 := newFakeDev("mesh-test-race")
+	d1 := newFakeDev("mesh-test-race")
+	rebuiltCh := make(chan struct{})
+	e := NewEngine(Options{NodeID: "self", Nets: []NetSpec{{
+		ID:      1,
+		Name:    "n",
+		Dev:     d0,
+		Subnet4: netip.MustParsePrefix("10.20.0.0/24"),
+		Self4:   netip.MustParseAddr("10.20.0.5"),
+		NewDevice: func() (Device, []Queue, error) {
+			close(rebuiltCh)
+			return d1, nil, nil
+		},
+	}}})
+	ns := e.netSnapshot()[1]
+
+	ns.wg.Add(1)
+	go e.tunLoopSerial(ns)
+
+	// The hazard itself: closing the device with neither e.stop nor ns.done
+	// signaled yet, exactly as the removed `for _, d := range devices { d.Close() }`
+	// loop in main.go's shutdown() did before it called engine.Stop().
+	d0.Close()
+
+	select {
+	case <-rebuiltCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected a rebuild attempt after an unsignaled device close, got none")
+	}
+
+	// Let the loop exit cleanly rather than leaking it. Closing d1 directly
+	// here (the way the first Close() above did for d0) would trigger yet
+	// another rebuild attempt for the exact same reason this test exists —
+	// e.stop/ns.done still wouldn't be signaled. Stop() signals shutdown
+	// first, then closes whatever the current live device is (d1, post-swap),
+	// so the loop takes the shuttingDown() exit instead.
+	e.Stop()
+}

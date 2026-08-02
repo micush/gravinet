@@ -265,6 +265,13 @@ func (e *Engine) reconcileDataplane(ns *netState, now time.Time) {
 	// Healthy interface with our address present. The kernel check can't see
 	// routes, so periodically re-add the base subnet route defensively (a cheap
 	// idempotent replace) to catch a route stripped while the address survived.
+	// Peer overlay guard routes (overlayguard.go) ride the same cadence and for
+	// the same reason: a /64 stripped-and-restored is visible here as a route
+	// gone missing, but a /64 that's still present and simply *shadowed* by a
+	// more-specific route elsewhere in the table looks completely healthy from
+	// every check above, address and interface state included — the periodic
+	// re-add is what keeps contesting that specific destination rather than
+	// checking once at session-install time and trusting it forever after.
 	if now.Sub(lastReassert) >= dpRouteReassertEvery {
 		if sub4.IsValid() {
 			_ = dev.AddRoute(sub4, 0)
@@ -272,6 +279,7 @@ func (e *Engine) reconcileDataplane(ns *netState, now time.Time) {
 		if sub6.IsValid() {
 			_ = dev.AddRoute(sub6, 0)
 		}
+		e.reassertOverlayGuardRoutes(ns)
 		ns.mu.Lock()
 		ns.dpLastRouteReassert = now
 		ns.mu.Unlock()

@@ -2,6 +2,182 @@
 
 ---
 
+## v773 — 2026-08-01
+
+**gravinet now defends a peer's overlay address with its own explicit host route, instead of relying solely on the network's base subnet route — closing the gap that left the six nodes from v772's investigation replying to nothing, on a network whose own routing table looked correct at every level v772's tshoot bundle could see.**
+
+The bundle v772 shipped got exactly the data it was built for: the host routing table from all six nodes (`gn-cush1`, `gn-cush2`, `gn-debian`, `gn-manjaro`, `gn-openbsd`, `gn-rocky`), pulled fresh with the new build. It showed the actual cause on every one of them — not gravinet's, and not per-node config:
+
+```
+gn-cush1/cush2/debian/manjaro/rocky (ip -6 route):
+fd00:203::5355:50c1:82f9:aca via fe80::e61f:7bff:fe3e:85c6 dev ens18   ← LAN, not mesh0
+
+gn-openbsd (netstat -rn):
+fd00:203::5355:50c1:82f9:aca  fe80::e61f:7bff:fe3e:85c7%vio0   UGHS  vio0  ← LAN, not tun0
+```
+
+`fd00:203::5355:50c1:82f9:aca` is mcfed's exact overlay address. All six nodes' `fd00:203::/64 dev mesh0` base route — installed by `assignAddr` in `addressing.go`, and genuinely present and correct on every one of them — lost to this single, more-specific host route anyway, because IPv6 (like IPv4) always forwards via the most specific matching route in the table, regardless of metric, protocol, or which route was installed first or by what. The kernel generated mcfed's reply correctly on every node; this route is what then sent it out the physical LAN interface instead of back into the tunnel, where it had nowhere to go. That's why a capture taken on the mesh interface itself never showed a reply leaving — it genuinely never went out that interface. The next-hop was the same link-local address (`fe80::...85c6` / `...85c7`) on every node, Linux and OpenBSD alike: one device on the LAN, not six independent misconfigurations.
+
+That device is not gravinet's to fix, and this release doesn't attempt to — there is no code change here that reaches into another box's routing config. What v772's own base route couldn't do, by construction, is contest a same-or-more-specific competing route on equal terms: a `/64` cannot outrank a `/128` no matter how many times it's re-asserted. A `/128` (or `/32`) to the *exact peer address*, at the lowest usable metric, can — and does, against exactly the class of route that shadowed it here, since a route arriving via RA or DHCP or an ordinary static config essentially never uses metric 0 itself. New `internal/mesh/overlayguard.go`:
+
+- `installOverlayGuardRoutes` installs a host route for both of a peer's overlay addresses via the mesh device, at metric 0, the moment a session comes up (`install()`, `handshake_engine.go`) — the mirror image of the full-tunnel bypass route `syncPeerBypassRoute` already installs right beside it: that one keeps the mesh's own tunnel from swallowing a peer's *underlay* traffic, this one keeps a foreign LAN route from swallowing a peer's *overlay* traffic.
+- `reassertOverlayGuardRoutes` re-installs every live peer's guard route on the same `dpRouteReassertEvery` (2-minute) cadence `reconcileDataplane` (`dataplane.go`) already uses to defensively re-add the base subnet route — extended, not duplicated, since a guard route that's present but has since been outranked by a later-arriving competing route looks exactly as healthy as one that was never contested, to every check that loop already runs.
+- `removeOverlayGuardRoutes` tears a peer's guard route down at every site that already removes it from `routes4`/`routes6` — `teardownSessions` (`control.go`), `applyBan` (`ban.go`), `localDisconnect` (`peerdisable.go`), and `dropRetiredKeySessions` (`reload.go`) — the same hygiene `dropNodeRoutes` already applies to a departed peer's redistributed prefixes.
+
+No new platform backend needed: this rides the same `Device.AddRoute`/`DelRoute` on-link mechanism the base subnet route already uses, already implemented on every platform gravinet ships for, OpenBSD included — the exact platform in this report that would otherwise have been the one left uncovered by a Linux-rtnetlink-only fix.
+
+Worth being precise about what this is and isn't. It is not a fix for the underlying misconfiguration — the device at `fe80::...85c6`/`...85c7` still needs to be found and have that route removed or corrected; nothing above does that, or could, from a peer's own side. It also isn't a guaranteed win: two routes at the same prefix length and the same metric is a real tie this can't break either — this closes the gap against the ordinary case (a competing route that isn't already using metric 0), which covers what actually happened on all six of these nodes, not every conceivable one. What it changes is that gravinet no longer *needs* the LAN to be free of any same-address route in order to work; it contests the one destination that matters instead of losing it by default.
+
+New tests in `internal/mesh/overlayguard_test.go`: `TestOverlayGuardRouteInstalledOnHandshake` (both directions of a two-node session each get a `/32` guard route to the other's overlay address, at metric 0), `TestOverlayGuardRouteRemovedOnBan` (guard route torn down on ban), and `TestReassertOverlayGuardRoutesSelfHeals` (deletes the installed guard route directly — standing in for it being outranked by a competing route — then calls `reassertOverlayGuardRoutes` and confirms it comes back), the last of these being the one that actually stands over the "continuous defense, not one-time install" claim above rather than just the install path.
+
+Verified: `go build ./...` and `go vet ./...` clean. `internal/mesh`'s route/install/handshake/bypass/dataplane/reconcile-tagged subset green, including all three new tests. The package's full suite is large enough that a complete run didn't finish inside this pass's time budget; nothing in the targeted subset — which covers every path this change touches — regressed. No conclusion yet on what's actually running at `fe80::...85c6`/`...85c7`; that's still open, and still needs whoever administers that segment, not a gravinet release.
+
+---
+
+## v772 — 2026-08-01
+
+**`gravinet-tshoot` now captures the four ICMP echo-suppression/rate-limit sysctls (Linux) and an anchor-recursive pf dump (OpenBSD) that a real six-node IPv6 investigation found it was missing — the tool's own comments already anticipated exactly this failure mode ("A peer stuck at InEchoReps stuck at 0... points at the kernel dropping the request before userspace ever sees it") but weren't actually collecting the one knob that answers it.**
+
+Six affected peers (`gn-cush1`, `gn-cush2`, `gn-debian`, `gn-manjaro`, `gn-openbsd`, `gn-rocky`) all showed the same live-capture signature from v770/v771's investigation: mcfed's ICMPv6 echo request reliably arrives on each peer's own mesh interface, and the peer never generates a reply — no ICMPv6 error either, a silent no-op. Six real tshoot bundles pulled from those exact nodes let the remaining possibilities actually get ruled in or out with evidence instead of guesswork:
+
+- **gravinet's own per-network firewall**: confirmed `"firewall": {"enabled": false}` in all five Linux nodes' own CONFIG dump. Not the cause — it's off.
+- **Host firewall on the five Linux nodes**: `nft list ruleset` empty on all five; `ip6tables -L`/`iptables -L` (where present) showed default-ACCEPT policies with zero rules. Not the cause — nothing there to block anything.
+- **That leaves the kernel's own `echo_ignore_all` sysctl as the single most likely remaining explanation** — and the bundle wasn't reading it. `net.ipv6.icmp.echo_ignore_all` / `net.ipv4.icmp_echo_ignore_all` (confirmed against the 2018 upstream kernel patch that added the IPv6 knob — note the path shapes are genuinely asymmetric, IPv6's nested under `icmp/`, IPv4's not, not a typo to "fix") plus both families' `ratelimit` knobs (prompted by a `Icmp6OutRateLimitHost` counter that turned up while reading these bundles) are now collected alongside the existing per-interface redirect/DAD sysctls.
+- **OpenBSD (`gn-openbsd`) told a different story**: `pfctl -sr` showed a bare `block return all` base policy with no `pass` rule for ICMPv6 (or ICMP) anywhere — but IPv4 ping demonstrably works on that same box, which a literal "blocks everything, no exceptions" ruleset can't explain. The likely resolution is a named anchor `pfctl -sr` doesn't expand, so the bundle now also runs `pfctl -a '*' -sr` (confirmed exact syntax against OpenBSD's own `pfctl(8)`: `'*'` as the anchor name recursively prints every anchor alongside the main ruleset) — the previous plain dump stays too, since the two aren't redundant on every pfctl version.
+
+New `extraGlobalICMPSysctls` (`tshoot.go`) is a package-level var rather than an inline literal specifically so its exact paths — including the asymmetry — are directly assertable. `TestExtraGlobalICMPSysctlsPaths` pins all four paths and separately asserts the IPv4 path is *not* nested under `icmp/`, so a future "cleanup" that tries to make the two look more parallel fails loudly instead of quietly reading `(absent)` from every bundle forever.
+
+No conclusion yet on which of the six nodes' actual sysctl is set, or what OpenBSD's anchor contains — that needs a fresh bundle pulled with this build, which nobody has done yet. This entry is the tooling catching up to where the investigation already was, not the investigation's ending.
+
+Verified: `go build ./...`/`go vet ./...`/`gofmt` clean, cross-compiled clean for darwin (amd64+arm64), freebsd, openbsd, windows, linux/arm64. New `TestExtraGlobalICMPSysctlsPaths` passes; manually confirmed the four paths read cleanly (or degrade to the existing `(absent)` fallback, exercised live on this build machine's own IPv6-less sandbox netns — a real, if incidental, test of that fallback path) rather than erroring. Full `internal/webadmin` suite green under `-race`.
+
+---
+
+## v771 — 2026-08-01
+
+**Fixed FreeBSD, macOS, OpenBSD, and Windows all writing mislabeled `.pcap` files from Monitor > Packet Capture (both the single-node tab and v768's mesh-wide capture) — found while diagnosing a user's real "why is IPv6 failing" report, where the diagnosis itself needed three of these exact files and two came back unreadable.**
+
+Root cause, per platform, each confirmed against the user's own real captures (not guessed) and cross-checked against each OS's actual kernel source / the tcpdump.org LINKTYPE registry / a real Wireshark bug report describing the identical problem on OpenBSD:
+
+- **FreeBSD & macOS**: BIOCGDLT reports `DLT_EN10MB` (Ethernet) for gravinet's own TUN interface, but every packet in both of the user's real captures was actually the classic 4-byte host-byte-order address-family header, consistently 4 bytes short under the reported framing. New `reconcileLinktype` (`capture.go`) refuses to trust an Ethernet report for an interface with no genuine 6-byte hardware address — which a TUN device structurally can never have — and corrects it to `linktypeNull` instead; a real NIC's real Ethernet report is untouched, since the condition simply doesn't apply to it.
+- **OpenBSD**: BIOCGDLT correctly identifies the encapsulation but reports OpenBSD's own native `DLT_LOOP` value (12) verbatim; the portable pcap-file value for that same encapsulation is `LINKTYPE_LOOP` (108) — 12 collides with unrelated link types on other OSes, which is the entire reason the portable numbering exists. `capture_openbsd.go` now translates it. Also confirmed OpenBSD's family field is network (big-endian) byte order, not host order like FreeBSD/macOS's — a real, load-bearing difference despite both looking like "the same 4-byte-prefix trick": `summarizePacket` (capture.go) gained a genuinely separate `linktypeLoop` branch rather than treating it as `linktypeNull` with a different endianness flag bolted on.
+- **AF_INET6's actual numeric value**, checked against each OS's own current `sys/socket.h`: OpenBSD 24, FreeBSD 28, macOS/Darwin 30. The old code only recognized 30, so even a correctly-Null-framed FreeBSD packet's IPv6 traffic was silently invisible — the exact bug that made the user's own diagnosis initially show 0 IPv6 packets on `gn-freebsd`/`gn-macos` despite their pings actually succeeding. All three are now accepted, since a saved file may legitimately be read on a different machine than captured it.
+- **Windows**: Npcap's `pcap_datalink()` reports `12` for the WinTun-backed adapter, confirmed against two independent real captures (`gn-win10`, `gn-win11`) both showing genuinely bare, unprefixed IP — no Ethernet header, no family-header prefix, packets start right at the IP version nibble. Mapped to `linktypeRaw`. Noted honestly in the code that this is empirical, not from Npcap's own documentation, which doesn't cover what a WinTun adapter's datalink type actually is.
+
+Fixing this surfaced one more, adjacent bug: `writePcap`'s existing `if linktype == 0 { linktype = linktypeEthernet }` fallback — meant only for a captureState that never had a capture started on it at all — was one line away from silently re-breaking every fix above the moment `linktypeNull` (also numerically 0) became a real, reachable value. Replaced with an explicit "was a capture ever started" check (`iface == ""`, which `begin()` only ever leaves empty on a fresh, untouched `captureState`) instead of overloading the linktype's own zero value.
+
+`handleCaptureStart` (capture.go) and `captureOnePeer`'s self leg (meshcapture.go) both now route the platform-reported linktype through `reconcileLinktype` instead of trusting it unconditionally — one shared correction, not two copies of the same judgment call.
+
+Verified: `go build ./...`/`go vet ./...`/`gofmt` clean, cross-compiled clean for darwin (amd64+arm64), freebsd, openbsd, windows, linux/arm64. New tests: `TestSummarizeNullAllBSDIPv6Values`, `TestSummarizeLoopBigEndian` (including a check that the same bytes read under the *wrong* endianness correctly fail to decode — proving endianness itself matters, not just the value set), `TestReconcileLinktype` (TUN-misreported-as-Ethernet correction, real-NIC-report-preserved, both linktypeNull/linktypeLoop left alone when already correct, and the `lt<0` fallback), `TestWritePcapPreservesLinktypeNull`, and `TestWritePcapNeverStartedDefaultsToEthernet`. Manually reverted each of the two riskiest fixes (the writePcap zero-value collision, and the reconcileLinktype correction itself) one at a time and confirmed their tests fail without the fix before restoring it, the same discipline v770 used. Full `internal/webadmin` suite green under `-race`.
+
+Also ran `go vet` per-platform (beyond this project's usual single-platform check) while verifying this: found a pre-existing `unsafe.Pointer` vet warning in `capture_windows.go` and a pre-existing openbsd-only test signature mismatch in `auth_bsdauth_test.go`. Confirmed both already exist verbatim in the untouched v767 tarball — not introduced here, left alone as out of scope for this fix.
+
+---
+
+## v770 — 2026-08-01
+
+**Fixed the mesh-wide capture card (v768) showing "iface: –" for every peer for the entire capture window instead of the real interface name — reported directly off a screenshot of a live 60s run where all 14 peers sat at "–" with 43s still left on the clock.**
+
+`meshCaptureJob.run` only ever wrote a peer's `Iface` field from `captureOnePeer`'s return value, and `captureOnePeer` doesn't return until *after* it has slept all the way to the shared deadline — so the name it discovers in its very first HTTP round trip (a few tens of milliseconds in) sat unpublished for the entire rest of the window, only reaching the status JSON, and so the UI, once the capture was already over. Not a discovery bug — the interface name was correct the moment `done`/`error` landed — purely a "known early, shown late" one.
+
+Fix: `captureOnePeer` now takes a `setIface func(string)` callback and calls it the instant the name is known (right after the self-node's `Backend.Interfaces()` lookup, or right after a remote peer's `/api/capture/mesh-iface` response), instead of only handing it back at the end alongside the finished pcap. `run`'s per-peer goroutine wraps it to lock `j.mu` and update the shared `meshCapturePeerResult` immediately, so the next 700ms status poll picks it up — the iface column now fills in within about a second of starting, same as the status column already did, rather than staying blank until `done`.
+
+New `TestCaptureOnePeerReportsIfaceBeforeDeadline` (`meshcapture_roundtrip_test.go`) is a real regression test, not just a smoke test: it fakes peer B's four capture endpoints with a bare `httptest` mux, times when `setIface` fires against when `/api/capture/stop` actually gets called over a 2s window, and asserts the former lands in the first half-second while the latter lands near the full 2s — i.e. specifically that the name shows up while still capturing, not only once the window closes. Manually reverted the fix and confirmed this test fails with `setIface was never called` before restoring it, so it's known to actually catch the reported bug rather than just exercising the changed lines.
+
+Verified: `go build ./...`/`go vet ./...`/`gofmt` clean, cross-compiled clean for darwin (amd64+arm64), freebsd, openbsd, windows, linux/arm64. Full `internal/webadmin` suite green under `-race`, including the new test. Did not add coverage for the self-node (this-node) leg specifically — that path needs a real raw-socket-capable interface, which this sandbox doesn't have; the remote-peer leg exercised here shares the same `setIface`-before-`captureOnePeer`-returns structure, so the fix covers both, but only one side has a test standing over it.
+
+---
+
+## v769 — 2026-08-01
+
+**The mesh-wide capture card (v768) now downloads its .tgz automatically the moment the window closes — the "Download .tgz" button is gone.**
+
+`applyDone` in `ui.go`'s `infoCaptureMesh` triggers the same `window.location = '/api/capture/mesh/download'` navigation the removed button used to, as soon as a job reports `ready`. Guarded by a new page-load-scoped `meshCaptureDownloadedID`, keyed on the job's `id` (already returned by `/api/capture/mesh/start` and echoed in `/status`) — without it, every re-render of the Capture tab (switching sections and back, the resync poll on tab-open) would re-trigger `applyDone` on the same already-finished job and silently kick off another download each time. With it, a given job's result is delivered exactly once per page load: the live completion during an active poll, or once on resync if the job finished while the tab was elsewhere, whichever comes first — not both, and not again after that.
+
+No backend change: `/api/capture/mesh/download` already served the finished bundle on demand, this just calls it automatically instead of waiting for a click. No new failure mode either — a failed job still shows "Failed: …" inline exactly as before, just with no button that would have stayed disabled.
+
+Verified: `go build ./...`/`go vet ./...`/`gofmt` clean. Embedded `<script>` block `node --check`'d clean. Full `internal/webadmin` suite green under `-race` (no Go logic changed by this one, so no new Go tests — the change is confined to `ui.go`'s embedded JS, which this codebase doesn't unit-test beyond the syntax check).
+
+---
+
+## v768 — 2026-08-01
+
+**Monitor > Packet Capture can now capture the mesh interface of every reachable managed peer — this node included — at the same time, for a fixed 5/10/30/60s window, and download the results as one .tgz (one .pcap per peer).**
+
+Requested directly off the back of v767's own changelog entry, which flagged that chasing a paired-node IPv6 problem meant visiting each node's Capture tab by hand and hoping the timing lined up. New `internal/webadmin/meshcapture.go`: a `meshCaptureJob` fans out one goroutine per reachable managed peer (from the same reachability test `handleCluster` uses for `Manageable` — a live session or a seed, not just a gossiped address), plus this node itself, each of which starts a capture, sleeps *until a shared deadline* (not a fixed span from whenever its own start call happened to land, so a slow overlay hop to one peer doesn't skew that peer's window relative to the others), stops, and pulls the resulting pcap back — over the same overlay dial `handleProxy` already uses for the browser's per-peer proxying, just made directly from Go instead of round-tripping through the browser.
+
+A peer's real mesh interface name is never guessed: it's asked of the peer itself via a new `/api/capture/mesh-iface` endpoint, backed by `Backend.Interfaces()` (the mesh engine's own record of which kernel device backs which network) — the same authoritative source `sysinfo.go`'s DNS/latency tabs already use, rather than a naming convention that doesn't actually hold (`mesh0`-ish on Linux, `utunN` on macOS, a driver-assigned name on Windows, and not even consistent node to node on the same OS). One peer failing (unreachable, capture unsupported on its platform, no overlay interface configured yet) doesn't fail the job — it's recorded per-peer, everyone else's capture still runs, and the failures ride along as an `errors.txt` inside the .tgz rather than vanishing, since the browser only sees the bundle once, not a running log.
+
+`/api/capture/mesh/start`, `/status`, and `/download` are local-only outright, both client-side (added to `LOCAL_API` in `ui.go`) and server-side (`handleProxy` now refuses to proxy them, same as the upgrade-rollout endpoints) — proxying any of them to a selected peer would fan out across *that peer's* managed-peer list while the operator believed they were driving their own, the exact "two managers, two peer lists" trap the rollout guard already exists to prevent. The new card in the Capture tab dims itself and explains why whenever a remote peer is selected in the header, the same pattern the Upgrade page uses for the same reason.
+
+Reuses `capture.go`'s existing single-capture-per-node slot on every node it touches (including this one) rather than introducing per-node concurrency this codebase doesn't have anywhere else — so a mesh-wide job ends whatever single-node capture was already running or displayed on any touched node's own Capture tab, and only ever captures one interface per node (the first network `Backend.Interfaces()` lists) even on a node configured with several. Both are documented trade-offs, not oversights, and match constraints the single-node Capture tab already lives with.
+
+Verified: `go build ./...`/`go vet ./...`/`gofmt` clean, cross-compiled clean for darwin (amd64+arm64), freebsd, openbsd, windows, and linux/arm64. Embedded `<script>` block `node --check`'d clean. New `TestMeshCaptureBundleRoundTrips`, `TestMeshCaptureBundlePartialFailure`, `TestMeshCaptureBundleAllFail`, `TestMeshCaptureBundleNameCollision`, and `TestSleepUntilReturnsImmediatelyForPastDeadline` cover the bundling/naming logic and the past-deadline edge case directly; the full `internal/webadmin` suite (including these) is green under `-race`. Did not add an end-to-end test that actually drives two real nodes through a live capture — the package has no existing harness for a second live webadmin instance to proxy against, and building one is a bigger undertaking than this change; the per-piece coverage above is what exists today.
+
+---
+
+## v767 — 2026-08-01
+
+**Fixed the shutdown race responsible for most of the "graceful shutdown exceeded 5s — forcing exit" restarts across the fleet — found by reading troubleshooting bundles from seven hosts and noticing six of them were hitting a forced kill on nearly every restart, not just one flaky laptop.**
+
+`cmd/gravinet/main.go`'s `shutdown()` closed every network's TUN device directly, *before* calling `engine.Stop()` — on the theory (stated right in the removed comment) that `Stop()` would otherwise deadlock waiting on TUN read loops that only unblock once their device is closed. That's not actually true: `Engine.Stop()` (`internal/mesh/engine.go`) already closes `e.stop` *before* it closes each network's device, which is exactly what `tunLoopSerial`/`tunLoopPooled`'s `shuttingDown(ns)` check needs to tell "this Read failed because we're intentionally closing it" apart from "the interface died out from under us." main.go's pre-close broke that ordering: it unblocked the read loop's `Read()` while `e.stop` was still open, so `shuttingDown(ns)` read false, and the loop took the self-healing "overlay interface lost; rebuilding" branch (`recoverDataplane`) in the middle of an ordinary, intentional shutdown — standing up a brand-new TUN device, re-addressing it, re-routing it, only for `engine.Stop()` to close that one too a moment later. That extra round trip, repeating on every single restart, was slow and OS-call-heavy enough to blow through the 5s shutdown watchdog on a loaded host — which is what "graceful shutdown exceeded" actually was on the affected nodes, not a genuinely hung step.
+
+Fix is a deletion: the premature `for _, d := range devices { d.Close() }` loop is gone; `shutdown()` now just calls `engine.Stop()`, which was already correctly ordered and non-deadlocking on its own.
+
+New tests in `internal/mesh/dataplane_test.go`, added specifically because this bug has no easy unit-test seam inside `main()` itself: `TestEngineStopNeverRebuilds` drives `tunLoopSerial` directly, calls `Engine.Stop()` (the *correct* order this fix restores), and asserts both that the device-recreation factory is never invoked and that `Stop()` returns within 2s rather than deadlocking — the exact hazard the removed pre-close was (mistakenly) guarding against. `TestDeviceCloseBeforeStopSignalRebuilds` is the documented inverse: it reproduces the removed main.go pattern in isolation (closing the device with neither `e.stop` nor `ns.done` signaled) and confirms the read loop *does* take the rebuild branch — not a bug in `internal/mesh` (self-healing from a genuinely lost interface is the whole point of `dataplane.go`), but proof of exactly the trap the old main.go ordering fell into.
+
+Verified: `go build ./...`/`go vet ./...`/`gofmt` clean, cross-compiled clean for darwin/freebsd/openbsd/windows. Both new tests pass, including 5 repeated runs under `-race`. Full `cmd/gravinet` suite green (11s, includes the shutdown-watchdog tests). `internal/mesh`'s full suite (~756s per v761's own entry) wasn't rerun in full for time; ran the dataplane/rebuild/reconcile-focused subset plus the two new tests instead.
+
+**Not a fix for IPv6-specific "no reply" during an otherwise-stable mesh** — flagged explicitly because it would be easy to mistake this for one. Reviewed `processOutbound`, `deliverInner`, `sourceAllowedFrom` (anti-spoof), `firewall.allow()`, and `nat.go`'s IPv4-only translation path for a v4/v6 asymmetry that could explain a real, stable-state "v4 replies, v6 never does" pattern; found all of them symmetric or safely no-op for v6. No code fix for that yet — next step is a live paired packet capture (webadmin's existing Capture page, filtered to `icmp6` on `mesh0`, on both the pinging and pinged node during a single test) to find which hop actually drops it, since static log/code review has run out of runway here.
+
+---
+
+## v766 — 2026-08-01
+
+**Fixed a double dot in the tshoot download's filename: `gravinet-tshoot-20260802003959..tgz` instead of `...003959.tgz`.**
+
+`toISOString()` looks like `2026-08-02T00:39:59.123Z`; stripping `-`/`:`/`T` leaves `20260802003959.123Z`, and the timestamp's own `slice(0,15)` grabbed one character too many — the 14 date/time digits *plus* the `.` that starts the milliseconds — before `'.tgz'` (or, before v765, `'.txt'`) got appended after it. Pre-existing (the same off-by-one was already there in v761 producing `....txt`), just far more visible now that it lands right in front of a real extension instead of blending into a run of digits. Changed to `slice(0,14)`, which stops exactly at the digits.
+
+Verified: embedded `<script>` block `node --check`'d clean, confirmed the corrected slice standalone in `node` against the exact timestamp from the report. `go build ./...`/`go vet ./...`/`gofmt` and the full `internal/webadmin` suite clean. No Go changes — pure frontend, one-character fix.
+
+---
+
+## v765 — 2026-08-01
+
+**The tshoot download is now a .tgz (the bundle gzip-compressed inside a tar, member kept as the familiar .txt name) instead of a raw .txt — easier to attach to a ticket or chat, and it compresses hard given how repetitive a busy mesh's log tail actually is.**
+
+New `packTshootTgz(memberName, txt, modTime)` in `internal/webadmin/tshoot.go`, split out from `handleTshoot` specifically so the archiving step has something to unit-test independent of gathering the bundle's actual content. `handleTshoot` now serves it as `application/gzip` with a `.tgz` filename; if archiving an in-memory buffer somehow fails (essentially can't, but checked anyway) it falls back to the old plain-text response rather than a 500, so a live troubleshooting session still gets *something*.
+
+Fixed a real bug on the way: the download button's existing JS read the response with `r.text()`, which UTF-8-decodes the body — fine for the old plain-text response, silently corrupting binary gzip data now that the response actually is binary. Every byte that wasn't valid UTF-8 would have come out mangled, replaced, or dropped, producing a `.tgz` that just wouldn't open. Switched to `r.blob()`, which preserves the bytes exactly; kept the existing fetch-based approach (rather than the simpler `window.location` navigation the pcap download next to it uses) specifically because it's the only way to check `r.ok` and `alert()` on a failed build instead of silently navigating to an error page.
+
+Verified: `go build ./...`/`go vet ./...`/`gofmt` clean, cross-compiled clean for darwin/freebsd/openbsd/windows. Embedded `<script>` block `node --check`'d clean. New `TestPackTshootTgzRoundTrips` (gzips+tars a known string, then actually gunzips+untars it back and checks the member name and content match exactly — not just "didn't error") and `TestPackTshootTgzActuallyCompresses` (a highly repetitive 5000-line input has to come out well under half its original size, to catch e.g. an accidentally-skipped `gzw.Close()` that would still "work" on tiny inputs while silently producing an effectively-uncompressed stream). Full `internal/webadmin` suite green.
+
+---
+
+## v764 — 2026-08-01
+
+**New: the troubleshooting bundle now captures four things it didn't before — host interface/address state (including IPv6 Duplicate Address Detection status), the host OS's own firewall ruleset, live IPv6/redirect sysctls per overlay interface, and kernel ICMP counters — closing the gap that made a real "peer replies on v4, never on v6" symptom indistinguishable from ordinary session churn using the bundle alone.**
+
+Working an actual case: multiple observers independently and consistently saw one peer answer ICMPv4 pings but never ICMPv6, across its entire visible history — not the shifting, timing-dependent pattern session churn produces. Two of the leading explanations for that shape of symptom (the peer's overlay6 address stuck `tentative`/`dadfailed` at the kernel level after DAD, or a host firewall permitting ICMPv4 but not ICMPv6) are both invisible to the existing bundle: it had routes but not address state, gravinet's own overlay ACL but not the host's real nftables/iptables/pf ruleset, and nothing on live sysctls or ICMP-level counters at all.
+
+`internal/webadmin/tshoot.go` gains four sections, in the same style as the existing HOST ROUTING TABLE section (a list of candidate commands, tried in order via the existing `runDiag`, silently skipped when the tool isn't present on that platform — nothing new to reason about there): **HOST INTERFACE ADDRESSES** (`ip addr show` / `ifconfig -a` / `netsh interface {ipv4,ipv6} show address`, which surface DAD state inline per address); **HOST FIREWALL** (`nft list ruleset` / `ip6tables -L -n -v` / `iptables -L -n -v` / `pfctl -sr` / `netsh advfirewall show allprofiles`, explicitly labeled as distinct from gravinet's own per-network overlay ACL already dumped above it); **IPv6 / REDIRECT SYSCTLS** (Linux: direct procfs reads of `accept_redirects`/`send_redirects`/`accept_dad`/`dad_transmits`/`disable_ipv6`/`forwarding` for every overlay interface plus `all`/`default`, using `s.be.Interfaces()` so it covers however many networks are actually configured rather than a hardcoded `mesh0`; other platforms: the sysctl(8)/netsh equivalents, best-effort since naming varies by BSD flavor); and **ICMP STATISTICS** (`/proc/net/snmp6`+`/proc/net/snmp`'s `Icmp*` lines on Linux, `netstat -s` elsewhere) — whether echo requests/replies are moving at the kernel level at all, independent of any one ping attempt.
+
+Deliberately reads live state rather than trusting what gravinet logged at startup (`IPv4/IPv6 redirects disabled`, etc.) — a later NetworkManager/systemd-networkd profile, a manual sysctl, or a per-interface default set at interface-creation time can all diverge from that after the fact, and the whole point here is not having to take gravinet's word for it.
+
+Verified: `go build ./...`/`go vet ./...`/`gofmt` clean, and cross-compiled clean for darwin/freebsd/openbsd/windows (this file has no build tags — every new command list has to degrade gracefully on every platform, not just the one it's aimed at). Smoke-tested the procfs/runDiag logic standalone against this build host directly (no `ip`, `ifconfig`, `nft`, or `iptables` installed here, and IPv6 disabled entirely — no `/proc/sys/net/ipv6/*`, no `/proc/net/snmp6`): every lookup degraded to a clean "(absent)" or a skipped command, nothing panicked or errored the bundle. Full `internal/webadmin` suite (unaffected — no existing tests exercise `handleTshoot` itself, only the pure `redactConfig` helper) still green.
+
+---
+
+## v763 — 2026-08-01
+
+**Fixed: the new Settings › Network toggle from v762 was labeled "IP redirects" with the switch shown *on* — read on its own, that says redirects are on, when checked has always meant the opposite (they're being turned off). Renamed to "Disable ICMP redirects" so the label and the switch state agree, and dropped the "Needs a restart to take effect" line, which was just misleading: the save already fires a silent `quietRestart()` (same as GeoIP/UPnP/remote shell) — there was never anything for the user to go do.**
+
+Both fixes are copy-only, in `secSettingsNetwork`'s `iprLabel` and the matching global-search row: title → "Disable ICMP redirects", description trimmed to what the toggle does and that it's on by default, restart sentence removed. No behavior changed — `handleRedirectsSetting`/`/api/redirects` already replies `{restart: true}` and the row's `onchange` already passes `edit(..., true)`, which is what triggers the silent restart; the old text just described that as something the user needed to do themselves instead of something that already happens for them.
+
+Verified: embedded `<script>` block `node --check`'d clean. `go build ./...`/`go vet ./...`/`gofmt` and the full `internal/webadmin` suite clean. No Go changes — pure frontend.
+
+---
+
 ## v762 — 2026-08-01
 
 **New: gravinet now turns off host acceptance (and, where the platform exposes it, sending) of ICMP IPv4/IPv6 redirects at startup, on by default — a new Settings › Network › "IP redirects" toggle controls it.**

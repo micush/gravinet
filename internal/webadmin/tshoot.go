@@ -1,6 +1,9 @@
 package webadmin
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -41,6 +44,30 @@ const tshootMaxLogBytes = 4 << 20 // tail of the log; enough for hours of contex
 // Deliberately broad: a false positive costs a redacted line in a diagnostic,
 // a false negative leaks a private key.
 var secretish = regexp.MustCompile(`(?i)(key|secret|password|passwd|token|credential|psk|private|seed_?phrase|hash|salt)`)
+
+// extraGlobalICMPSysctls are the echo-suppression and rate-limit knobs that
+// don't fit handleTshoot's per-scope conf/<scope>/ collection loop below
+// (Linux has no per-interface variant of either — both are process-wide).
+// Kept as a package-level var, not inlined into that loop, specifically so
+// TestExtraGlobalICMPSysctlsPaths can assert the exact paths directly:
+// diagnosing a real "peer receives mcfed's ICMPv6 echo request on its own
+// mesh interface — confirmed via a live packet capture — and never replies"
+// report, with the host firewall (nft/ip6tables, confirmed empty) and
+// gravinet's own per-network firewall (confirmed disabled in the CONFIG
+// section) both cleanly ruled out by the rest of a real tshoot bundle,
+// echo_ignore_all was the one remaining explanation this tool couldn't
+// actually confirm or rule out, because it wasn't being collected at all.
+// The two echo_ignore_all paths are NOT symmetric in shape — IPv6's is
+// nested under an icmp/ subdirectory, IPv4's isn't — confirmed against the
+// kernel patch that introduced the IPv6 knob (it didn't exist before 2018,
+// added specifically because no IPv6 equivalent of the long-standing IPv4
+// one did) rather than assumed from the IPv4 name with a substitution.
+var extraGlobalICMPSysctls = []string{
+	"/proc/sys/net/ipv6/icmp/echo_ignore_all",
+	"/proc/sys/net/ipv4/icmp_echo_ignore_all",
+	"/proc/sys/net/ipv6/icmp/ratelimit",
+	"/proc/sys/net/ipv4/icmp_ratelimit",
+}
 
 func (s *Server) handleTshoot(w http.ResponseWriter, r *http.Request) {
 	var b strings.Builder
@@ -124,6 +151,159 @@ func (s *Server) handleTshoot(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(&b, "\n--- %s ---\n%s\n", strings.Join(c, " "), out)
 	}
 
+	// Address state, not just routes. The routing table above answers "where
+	// does a packet go"; this answers "is the address it's addressed to even
+	// usable yet" — a peer's overlay6 address can be gossiped, listed, and
+	// look perfectly normal everywhere in gravinet's own view while sitting
+	// tentative (still running Duplicate Address Detection) or dadfailed at
+	// the kernel level, in which case the kernel silently drops real traffic
+	// to it — indistinguishable from a firewall drop or a dead session from
+	// gravinet's side alone. `ip`/`ifconfig`/`netsh` all print that state
+	// inline per address (Linux: "tentative"/"dadfailed" flags; Windows:
+	// State: Tentative/Duplicate via the verbose form), which is the whole
+	// reason this is its own section instead of folded into routing above.
+	sec("HOST INTERFACE ADDRESSES")
+	for _, c := range [][]string{
+		{"ip", "addr", "show"},
+		{"ifconfig", "-a"}, // BSD/macOS, and Linux hosts that still have net-tools
+		{"netsh", "interface", "ipv4", "show", "address"},
+		{"netsh", "interface", "ipv6", "show", "address", "level=verbose"},
+	} {
+		out, err := runDiag(c[0], c[1:]...)
+		if err != nil {
+			continue // not this platform's tool
+		}
+		fmt.Fprintf(&b, "\n--- %s ---\n%s\n", strings.Join(c, " "), out)
+	}
+
+	// The host OS's own firewall — distinct from gravinet's own per-network
+	// overlay ACL dumped above (that's gravinet's mesh-level allow/deny list;
+	// this is whatever nftables/iptables/pf/Windows Firewall is doing to the
+	// same host underneath it, including rules gravinet didn't put there).
+	// A peer whose distro ships a default-deny IPv6 INPUT policy, or a rule
+	// that happens to permit ICMPv4 but not ICMPv6 specifically, produces
+	// exactly a "v4 replies, v6 never does" symptom that looks identical to
+	// a broken tunnel from every other section in this bundle.
+	sec("HOST FIREWALL (OS-level, not gravinet's overlay ACL above)")
+	for _, c := range [][]string{
+		{"nft", "list", "ruleset"},
+		{"ip6tables", "-L", "-n", "-v"},
+		{"iptables", "-L", "-n", "-v"},
+		{"pfctl", "-sr"},
+		// pfctl -sr alone only shows the main ruleset — a rule living inside a
+		// named anchor (pass/block added by a hardening script, authpf,
+		// another tool, or by hand) stays invisible to it. '*' as the anchor
+		// name is pfctl's own documented way to print every anchor
+		// recursively alongside the main ruleset (see pfctl(8)); worth the
+		// extra command specifically because a real diagnosis got stuck here
+		// — a box's main ruleset showed no ICMPv6 pass rule at all under a
+		// default-block base policy, which should in principle have meant
+		// IPv4 was blocked too, and it visibly wasn't, so something pfctl -sr
+		// alone wasn't showing had to be the explanation.
+		{"pfctl", "-a", "*", "-sr"},
+		{"netsh", "advfirewall", "show", "allprofiles"},
+	} {
+		out, err := runDiag(c[0], c[1:]...)
+		if err != nil {
+			continue // not this platform's tool
+		}
+		fmt.Fprintf(&b, "\n--- %s ---\n%s\n", strings.Join(c, " "), out)
+	}
+
+	// Live IPv6 DAD and redirect-related sysctls, per overlay interface —
+	// not just what gravinet logged applying at startup (see "IPv4/IPv6
+	// redirects disabled" in the log tail below), because a later profile
+	// change (NetworkManager/systemd-networkd), a manual sysctl, or a
+	// per-interface default set at interface-creation time can all diverge
+	// from that. Read directly from procfs on Linux — the same values
+	// internal/ipfwd reads and writes — so this reports the kernel's actual
+	// current state rather than gravinet's belief about it.
+	sec("IPv6 / REDIRECT SYSCTLS")
+	if runtime.GOOS == "linux" {
+		readSysctl := func(path string) string {
+			v, err := os.ReadFile(path)
+			if err != nil {
+				return "(absent)"
+			}
+			return strings.TrimSpace(string(v))
+		}
+		type sysctlRow struct{ Path, Value string }
+		var rows []sysctlRow
+		add := func(scope, family, knob string) {
+			path := fmt.Sprintf("/proc/sys/net/%s/conf/%s/%s", family, scope, knob)
+			rows = append(rows, sysctlRow{Path: path, Value: readSysctl(path)})
+		}
+		scopes := []string{"all", "default"}
+		for _, ifc := range s.be.Interfaces() {
+			if ifc.Iface != "" {
+				scopes = append(scopes, ifc.Iface)
+			}
+		}
+		for _, sc := range scopes {
+			add(sc, "ipv4", "forwarding")
+			add(sc, "ipv4", "accept_redirects")
+			add(sc, "ipv4", "send_redirects")
+			add(sc, "ipv6", "forwarding")
+			add(sc, "ipv6", "accept_redirects")
+			add(sc, "ipv6", "accept_dad")
+			add(sc, "ipv6", "dad_transmits")
+			add(sc, "ipv6", "disable_ipv6")
+		}
+		// See extraGlobalICMPSysctls' own doc comment for why these two
+		// knobs (echo suppression + rate limiting) live outside the
+		// conf/<scope>/ loop above instead of being folded into add().
+		for _, path := range extraGlobalICMPSysctls {
+			rows = append(rows, sysctlRow{Path: path, Value: readSysctl(path)})
+		}
+		dump("procfs (linux, live)", rows)
+	}
+	for _, c := range [][]string{
+		{"sysctl", "net.inet.ip.forwarding", "net.inet.ip.redirect", "net.inet.icmp.drop_redirect",
+			"net.inet.icmp.rediraccept", "net.inet6.ip6.forwarding", "net.inet6.ip6.redirect",
+			"net.inet6.icmp6.rediraccept", "net.inet6.ip6.dad_count"}, // darwin/freebsd/openbsd naming varies; unknown names are skipped by sysctl itself with the rest still printed
+		{"netsh", "interface", "ipv4", "show", "global"},
+		{"netsh", "interface", "ipv6", "show", "global"},
+	} {
+		out, err := runDiag(c[0], c[1:]...)
+		if err != nil {
+			continue
+		}
+		fmt.Fprintf(&b, "\n--- %s ---\n%s\n", strings.Join(c, " "), out)
+	}
+
+	// Kernel-level ICMP counters: whether echo requests/replies are even
+	// reaching/leaving the IP stack at all, independent of what any single
+	// ping attempt observed. A peer stuck at InEchoReps stuck at 0 across an
+	// entire bundle, despite peers reporting they're pinging it, points at
+	// the kernel dropping the request before userspace ever sees it (DAD,
+	// firewall) rather than gravinet's overlay losing the packet in transit.
+	sec("ICMP STATISTICS")
+	if runtime.GOOS == "linux" {
+		for _, path := range []string{"/proc/net/snmp6", "/proc/net/snmp"} {
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			fmt.Fprintf(&b, "\n--- %s (Icmp lines) ---\n", path)
+			for _, ln := range strings.Split(string(raw), "\n") {
+				if strings.HasPrefix(ln, "Icmp") {
+					b.WriteString(ln)
+					b.WriteByte('\n')
+				}
+			}
+		}
+	}
+	for _, c := range [][]string{
+		{"netstat", "-s", "-p", "icmpv6"}, // windows, and some *nix netstat builds
+		{"netstat", "-s"},                 // macOS/general; includes an Icmp6 section
+	} {
+		out, err := runDiag(c[0], c[1:]...)
+		if err != nil {
+			continue
+		}
+		fmt.Fprintf(&b, "\n--- %s ---\n%s\n", strings.Join(c, " "), out)
+	}
+
 	sec("CONFIG (secrets redacted)")
 	if s.configPath == "" {
 		b.WriteString("(config view not enabled on this node)\n")
@@ -150,12 +330,64 @@ func (s *Server) handleTshoot(w http.ResponseWriter, r *http.Request) {
 
 	b.WriteString("\n\n========== END ==========\n")
 
-	name := fmt.Sprintf("gravinet-tshoot-%s.txt", now.Format("20060102-150405"))
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Header().Set("Content-Disposition", "attachment; filename=\""+name+"\"")
+	// Packaged as a .tgz rather than served raw: the bundle is plain text and
+	// compresses hard (long repeated log/JSON structure), and a single
+	// familiar archive format is easier to attach to a support ticket or
+	// chat than a multi-megabyte .txt. The inner member keeps the .txt name
+	// and extension so it's still directly readable once extracted, or
+	// openable in-place by anything that peeks inside an archive (most
+	// editors, `tar tOf`, GitHub's own viewer) without renaming it first.
+	txtName := fmt.Sprintf("gravinet-tshoot-%s.txt", now.Format("20060102-150405"))
+	tgzName := fmt.Sprintf("gravinet-tshoot-%s.tgz", now.Format("20060102-150405"))
+	txt := b.String()
+
+	archived, err := packTshootTgz(txtName, txt, now)
+	if err != nil {
+		// Archiving an in-memory buffer essentially can't fail, but if it
+		// somehow does, hand back the plain bundle rather than a 500 — a
+		// person troubleshooting a live problem still gets what they asked
+		// for, just not gzipped.
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Content-Disposition", "attachment; filename=\""+txtName+"\"")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(txt))
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/gzip")
+	w.Header().Set("Content-Disposition", "attachment; filename=\""+tgzName+"\"")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(b.String()))
+	_, _ = w.Write(archived)
+}
+
+// packTshootTgz wraps txt as a single-member gzip-compressed tar archive
+// named memberName, for handleTshoot's response body. Split out from
+// handleTshoot so the archiving itself — independent of gathering the
+// bundle's actual content — has something to test directly.
+func packTshootTgz(memberName, txt string, modTime time.Time) ([]byte, error) {
+	var out bytes.Buffer
+	gzw := gzip.NewWriter(&out)
+	tw := tar.NewWriter(gzw)
+	if err := tw.WriteHeader(&tar.Header{
+		Name:    memberName,
+		Mode:    0o644,
+		Size:    int64(len(txt)),
+		ModTime: modTime,
+	}); err != nil {
+		return nil, err
+	}
+	if _, err := tw.Write([]byte(txt)); err != nil {
+		return nil, err
+	}
+	if err := tw.Close(); err != nil {
+		return nil, err
+	}
+	if err := gzw.Close(); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
 }
 
 // redactConfig blanks the value of any line whose key looks secret, for both

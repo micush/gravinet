@@ -53,6 +53,7 @@ func (e *Engine) localDisconnect(ns *netState, target string) {
 		}
 		e.mu.Unlock()
 		e.removePeerBypassRoute(ns, victim)
+		e.removeOverlayGuardRoutes(ns, victim)
 	}
 	// Drop routes learned from a peer we just disabled; re-learned on re-enable.
 	e.dropNodeRoutes(ns, target)

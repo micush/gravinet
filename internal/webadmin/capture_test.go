@@ -3,6 +3,7 @@ package webadmin
 import (
 	"bytes"
 	"encoding/binary"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -138,5 +139,146 @@ func TestCaptureEpochDropsStalePackets(t *testing.T) {
 	cs.mu.Unlock()
 	if n != 0 {
 		t.Fatalf("stale-epoch packet was not dropped: len=%d", n)
+	}
+}
+
+// nullFramedIPv4 builds linktypeNull's framing (4-byte AF_INET, host/little-
+// endian order) around a minimal IPv4/UDP packet.
+func nullFramedLE(af uint32, ipAndUp []byte) []byte {
+	pkt := make([]byte, 4+len(ipAndUp))
+	binary.LittleEndian.PutUint32(pkt[0:4], af)
+	copy(pkt[4:], ipAndUp)
+	return pkt
+}
+
+func loopFramedBE(af uint32, ipAndUp []byte) []byte {
+	pkt := make([]byte, 4+len(ipAndUp))
+	binary.BigEndian.PutUint32(pkt[0:4], af)
+	copy(pkt[4:], ipAndUp)
+	return pkt
+}
+
+func minimalIPv4UDP() []byte {
+	ip := make([]byte, 20+8)
+	ip[0] = 0x45
+	ip[9] = 17 // UDP
+	copy(ip[12:16], []byte{192, 168, 1, 5})
+	copy(ip[16:20], []byte{8, 8, 8, 8})
+	binary.BigEndian.PutUint16(ip[20:], 5353)
+	binary.BigEndian.PutUint16(ip[22:], 53)
+	return ip
+}
+
+func minimalIPv6UDP() []byte {
+	ip := make([]byte, 40+8)
+	ip[0] = 0x60 // version 6
+	ip[6] = 17   // next header: UDP
+	copy(ip[8:24], []byte{0xfd, 0, 0x02, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1})
+	copy(ip[24:40], []byte{0xfd, 0, 0x02, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2})
+	binary.BigEndian.PutUint16(ip[40:], 5353)
+	binary.BigEndian.PutUint16(ip[42:], 53)
+	return ip
+}
+
+// TestSummarizeNullAllBSDIPv6Values is the regression test for the "gn-
+// freebsd/gn-macos captures show icmp6=0" finding: linktypeNull's AF_INET6
+// value differs by BSD (24 OpenBSD, 28 FreeBSD, 30 macOS/Darwin — confirmed
+// against each OS's own current sys/socket.h), and a saved file may be read
+// on a different machine than captured it, so all three must decode as IPv6,
+// not just whichever one the code happened to special-case first.
+func TestSummarizeNullAllBSDIPv6Values(t *testing.T) {
+	for _, af := range []uint32{24, 28, 30} {
+		got := summarizePacket(linktypeNull, nullFramedLE(af, minimalIPv6UDP()))
+		if !strings.Contains(got, "UDP") || !strings.Contains(got, "fd00:203::1.5353") {
+			t.Errorf("AF_INET6=%d: unexpected summary: %q", af, got)
+		}
+	}
+	got := summarizePacket(linktypeNull, nullFramedLE(2, minimalIPv4UDP()))
+	if !strings.Contains(got, "UDP 192.168.1.5.5353") {
+		t.Errorf("AF_INET (null): unexpected summary: %q", got)
+	}
+}
+
+// TestSummarizeLoopBigEndian is the regression test for the gn-openbsd.pcap
+// finding: OpenBSD's DLT_LOOP framing is network (big-endian) byte order,
+// NOT host order like linktypeNull — parsing it with the wrong endianness
+// turns AF_INET (2) into 0x02000000 and misses every packet.
+func TestSummarizeLoopBigEndian(t *testing.T) {
+	got := summarizePacket(linktypeLoop, loopFramedBE(2, minimalIPv4UDP()))
+	if !strings.Contains(got, "UDP 192.168.1.5.5353") {
+		t.Fatalf("AF_INET (loop, be): unexpected summary: %q", got)
+	}
+	for _, af := range []uint32{24, 28, 30} {
+		got := summarizePacket(linktypeLoop, loopFramedBE(af, minimalIPv6UDP()))
+		if !strings.Contains(got, "UDP") || !strings.Contains(got, "fd00:203::1.5353") {
+			t.Errorf("AF_INET6=%d (loop, be): unexpected summary: %q", af, got)
+		}
+	}
+	// Same bytes read as host/little-endian (i.e. what the pre-fix code did
+	// by treating this framing as plain linktypeNull) must NOT decode —
+	// proving endianness, not just the value set, actually matters here.
+	if got := summarizePacket(linktypeNull, loopFramedBE(2, minimalIPv4UDP())); strings.Contains(got, "UDP") {
+		t.Errorf("big-endian AF_INET bytes decoded as IP under host-order parsing (should not have): %q", got)
+	}
+}
+
+// TestReconcileLinktype covers the correction at the heart of the FreeBSD/
+// macOS fix: BIOCGDLT reporting Ethernet for gravinet's own TUN interface
+// (confirmed against two real captures, both mislabeled linktype=1 with
+// every packet actually 4-byte-AF-prefixed) gets corrected to linktypeNull,
+// but only when the interface has no genuine 6-byte hardware address — a
+// real NIC's real Ethernet report must survive untouched.
+func TestReconcileLinktype(t *testing.T) {
+	tunIface := &net.Interface{Name: "mesh0"} // no HardwareAddr: exactly what a TUN device looks like
+	nicIface := &net.Interface{Name: "em0", HardwareAddr: net.HardwareAddr{0x02, 0x11, 0x22, 0x33, 0x44, 0x55}}
+
+	cases := []struct {
+		name     string
+		ifi      *net.Interface
+		reported int
+		want     int
+	}{
+		{"TUN misreported as Ethernet -> corrected to Null", tunIface, linktypeEthernet, linktypeNull},
+		{"TUN correctly reported as Null -> unchanged", tunIface, linktypeNull, linktypeNull},
+		{"TUN correctly reported as Loop -> unchanged", tunIface, linktypeLoop, linktypeLoop},
+		{"TUN with no platform report (-1) -> falls back to guess (Raw)", tunIface, -1, linktypeRaw},
+		{"real NIC reported as Ethernet -> trusted as-is", nicIface, linktypeEthernet, linktypeEthernet},
+		{"real NIC with no platform report (-1) -> falls back to guess (Ethernet)", nicIface, -1, linktypeEthernet},
+	}
+	for _, c := range cases {
+		if got := reconcileLinktype(c.ifi, c.reported); got != c.want {
+			t.Errorf("%s: reconcileLinktype = %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+// TestWritePcapPreservesLinktypeNull is the regression test for the
+// ambiguity writePcap's old "if linktype == 0" fallback created the moment
+// linktypeNull (also numerically 0) became a real, reachable value: a
+// genuine BSD/macOS Null-framed capture must be written with linktype 0 in
+// the file, not silently promoted to Ethernet. A captureState that never had
+// begin() called on it at all — the actual "nothing set yet" case the
+// fallback exists for — must still default sanely.
+func TestWritePcapPreservesLinktypeNull(t *testing.T) {
+	cs := newCaptureState()
+	ep, _ := cs.begin("utun3", linktypeRaw) // pre-capture guess
+	cs.setLinktype(ep, linktypeNull)        // platform backend's (corrected) report
+	cs.addEpoch(ep, time.Now(), nullFramedLE(2, minimalIPv4UDP()))
+
+	var buf bytes.Buffer
+	cs.writePcap(&buf)
+	gotLinktype := binary.LittleEndian.Uint32(buf.Bytes()[20:24])
+	if gotLinktype != linktypeNull {
+		t.Errorf("pcap header linktype = %d, want %d (linktypeNull) — a real Null capture must not be coerced to Ethernet", gotLinktype, linktypeNull)
+	}
+}
+
+func TestWritePcapNeverStartedDefaultsToEthernet(t *testing.T) {
+	cs := newCaptureState() // begin() never called
+	var buf bytes.Buffer
+	cs.writePcap(&buf)
+	gotLinktype := binary.LittleEndian.Uint32(buf.Bytes()[20:24])
+	if gotLinktype != linktypeEthernet {
+		t.Errorf("pcap header linktype = %d, want %d (linktypeEthernet default for a never-started capture)", gotLinktype, linktypeEthernet)
 	}
 }

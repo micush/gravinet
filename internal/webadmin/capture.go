@@ -28,7 +28,21 @@ const (
 
 	linktypeEthernet = 1   // LINKTYPE_ETHERNET
 	linktypeRaw      = 101 // LINKTYPE_RAW (bare IPv4/IPv6, e.g. TUN)
-	linktypeNull     = 0   // LINKTYPE_NULL (4-byte address-family header; BSD loopback/utun)
+	linktypeNull     = 0   // LINKTYPE_NULL (4-byte address-family header, host byte order; BSD loopback/utun)
+	// linktypeLoop is OpenBSD's own loopback/tun encapsulation — the same
+	// 4-byte-address-family-header idea as linktypeNull, but NOT
+	// interchangeable with it: the field is in network (big-endian) byte
+	// order here, not host order, and OpenBSD's BPF reports it as DLT_LOOP
+	// (numeric value 12 in OpenBSD's own <net/bpf.h>) rather than DLT_NULL.
+	// 12 is *not* portable, though — it collides with unrelated link types
+	// on other OSes (confirmed against a real Wireshark bug report: OpenBSD
+	// should write 108 into a pcap file's linktype field, not its own raw
+	// DLT_LOOP=12, precisely so a reader doesn't have to know which OS wrote
+	// the file to interpret it) — 108 is the portable LINKTYPE_LOOP value
+	// tcpdump.org's own registry assigns for exactly this encapsulation, so
+	// that's what capture_openbsd.go translates DLT_LOOP into before it ever
+	// reaches a pcap file.
+	linktypeLoop = 108 // LINKTYPE_LOOP
 )
 
 // capHandle is the platform capture loop; stop() ends it and frees the socket.
@@ -173,10 +187,22 @@ func (cs *captureState) since(after int64, max int) (pkts []capPacket, cursor in
 func (cs *captureState) writePcap(w io.Writer) {
 	cs.mu.Lock()
 	linktype := cs.linktype
+	iface := cs.iface
 	pkts := make([]capPacket, len(cs.buf))
 	copy(pkts, cs.buf)
 	cs.mu.Unlock()
-	if linktype == 0 {
+	if iface == "" {
+		// begin() always sets iface at the same time as linktype, so an empty
+		// iface here means a capture was never started on this captureState
+		// at all — cs.linktype is still its Go zero value, which is NOT a
+		// meaningful "no framing" answer (that would be linktypeRaw, 101).
+		// Ethernet is a harmless default for what's an empty file either way.
+		// Deliberately NOT "if linktype == 0": 0 is also linktypeNull's real,
+		// legitimate value once a capture has actually run (see
+		// reconcileLinktype) — collapsing that into this same Ethernet
+		// fallback would silently corrupt every genuine BSD/macOS TUN
+		// capture's exported .pcap right back into the mislabeling
+		// reconcileLinktype exists to fix.
 		linktype = linktypeEthernet
 	}
 	w.Write(pcapGlobalHeader(capSnaplen, linktype))
@@ -193,6 +219,38 @@ func linktypeForIface(ifi *net.Interface) int {
 		return linktypeEthernet
 	}
 	return linktypeRaw
+}
+
+// reconcileLinktype is the final word on which linktype actually gets written
+// to a capture's pcap file, weighing what the platform backend reported
+// (reported, or -1 if it has none to offer — true on Linux, where AF_PACKET's
+// framing already matches whatever linktypeForIface guessed) against what the
+// interface's own properties already establish.
+//
+// The one correction this makes: a platform backend's Ethernet(1) report is
+// NOT trusted for an interface with no 6-byte hardware address. Confirmed
+// against real FreeBSD and macOS captures of gravinet's own TUN interface —
+// both backends' BIOCGDLT call reported DLT_EN10MB (Ethernet), but every
+// packet those captures actually contained was the classic 4-byte
+// host-byte-order address-family header (linktypeNull's own framing) rather
+// than a genuine 14-byte Ethernet header; opened under the reported linktype,
+// every single packet was misparsed, consistently off by exactly 4 bytes. A
+// point-to-point TUN/utun device — which is definitionally what a hardware
+// address-less interface is — cannot carry genuine Ethernet frames, so
+// whatever DLT a BSD's BPF layer reports for one, it isn't really Ethernet;
+// what's observed to actually be there is linktypeNull's framing, so that's
+// the correction, not the pre-capture guess (which would land on linktypeRaw
+// — no framing at all — still wrong by the same 4 bytes, just wrong
+// differently). A real NIC's report is never touched: it has a genuine
+// 6-byte hardware address, so the condition below simply doesn't apply to it.
+func reconcileLinktype(ifi *net.Interface, reported int) int {
+	if reported < 0 {
+		return linktypeForIface(ifi)
+	}
+	if reported == linktypeEthernet && len(ifi.HardwareAddr) != 6 {
+		return linktypeNull
+	}
+	return reported
 }
 
 // ---- pcap format (classic libpcap, microsecond, little-endian) --------------
@@ -233,17 +291,32 @@ func summarizePacket(linktype int, data []byte) string {
 			etype = int(binary.BigEndian.Uint16(data[16:18]))
 			off = 18
 		}
-	} else if linktype == linktypeNull {
-		// BSD loopback/utun framing: a 4-byte address family in host byte
-		// order precedes the raw IP packet. macOS/BSD are little-endian on
-		// every currently-shipping architecture (Intel and Apple Silicon).
+	} else if linktype == linktypeNull || linktype == linktypeLoop {
+		// BSD loopback/utun framing: a 4-byte address family precedes the raw
+		// IP packet. linktypeNull's field is in the byte order of whatever
+		// machine did the capturing (host order — little-endian on every
+		// currently-shipping architecture, Intel and Apple Silicon alike);
+		// linktypeLoop's is always network byte order (big-endian) — see
+		// linktypeLoop's own doc comment for why these two, despite looking
+		// almost identical, are not interchangeable. AF_INET is 2 on every
+		// BSD; AF_INET6 is NOT — it's 24, 28, or 30 depending on which BSD
+		// wrote the file (OpenBSD, FreeBSD, and macOS respectively), and per
+		// tcpdump.org's own LINKTYPE_LOOP definition a reader has to accept
+		// all three rather than assume one, since a saved file may end up
+		// read on a different OS than the one that captured it.
 		if len(data) < 4 {
 			return fmt.Sprintf("short frame (%d bytes)", len(data))
 		}
-		switch binary.LittleEndian.Uint32(data[0:4]) {
+		var fam uint32
+		if linktype == linktypeLoop {
+			fam = binary.BigEndian.Uint32(data[0:4])
+		} else {
+			fam = binary.LittleEndian.Uint32(data[0:4])
+		}
+		switch fam {
 		case 2: // AF_INET
 			etype = 0x0800
-		case 30: // AF_INET6 (macOS/BSD value; differs from Linux's 10)
+		case 24, 28, 30: // AF_INET6 (OpenBSD, FreeBSD, macOS respectively)
 			etype = 0x86DD
 		default:
 			return fmt.Sprintf("non-IP (%d bytes)", len(data))
@@ -382,9 +455,7 @@ func (s *Server) handleCaptureStart(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"error": err.Error()})
 		return
 	}
-	if lt >= 0 { // a platform backend may report the linktype it actually found
-		s.capture.setLinktype(ep, lt)
-	}
+	s.capture.setLinktype(ep, reconcileLinktype(ifi, lt)) // lt<0 (e.g. Linux) is a no-op: reconcileLinktype falls back to the guess already in effect
 	s.capture.setHandle(ep, h)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "iface": ifi.Name})
 }

@@ -164,11 +164,12 @@ type Server struct {
 	version string // gravinet build version (for the About tab); set via SetVersion
 	commit  string // gravinet build commit
 
-	metrics  *metricsCollector     // CPU/mem/interface time series for the Metrics tab
-	latencyHist *latencyCollector  // passive per-peer RTT history for the Latency tab's expanded chart
-	capture  *captureState         // live packet capture for the Capture tab
-	bgpRedis *bgpMeshRedistributor // polls FRR's RIB, pushes BGP routes into the mesh (config.Network.RedistributeBGPRoutes)
-	autoBGP  *autoBGPReconciler    // derives ASN/router-id and maintains one Neighbor per online mesh peer (config.BGPConfig.AutoBGP)
+	metrics     *metricsCollector     // CPU/mem/interface time series for the Metrics tab
+	latencyHist *latencyCollector     // passive per-peer RTT history for the Latency tab's expanded chart
+	capture     *captureState         // live packet capture for the Capture tab
+	meshCapture *meshCaptureManager   // fan-out "capture all mesh peers at once" job, same tab
+	bgpRedis    *bgpMeshRedistributor // polls FRR's RIB, pushes BGP routes into the mesh (config.Network.RedistributeBGPRoutes)
+	autoBGP     *autoBGPReconciler    // derives ASN/router-id and maintains one Neighbor per online mesh peer (config.BGPConfig.AutoBGP)
 }
 
 // SetVersion records the build version/commit for the Info → About tab.
@@ -391,14 +392,15 @@ func New(cfg config.WebAdmin, be Backend, log *logx.Logger) *Server {
 	}
 	ban := time.Duration(lb.EffectiveBanSeconds()) * time.Second
 	return &Server{
-		cfg:      cfg,
-		be:       be,
-		log:      log,
-		auth:     auth,
-		noAuth:   noAuth,
-		throttle: ratelimit.New(maxF, win, ban, lb.Coalesce()),
-		bootID:   randomBootID(),
-		capture:  newCaptureState(),
+		cfg:         cfg,
+		be:          be,
+		log:         log,
+		auth:        auth,
+		noAuth:      noAuth,
+		throttle:    ratelimit.New(maxF, win, ban, lb.Coalesce()),
+		bootID:      randomBootID(),
+		capture:     newCaptureState(),
+		meshCapture: newMeshCaptureManager(),
 	}
 }
 
@@ -548,7 +550,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/exempt", s.authed(s.handleExempt))
 	mux.HandleFunc("/api/logs", s.authed(s.handleLogs))
 	mux.HandleFunc("/api/logs/clear", s.authed(s.handleLogsClear))
-	mux.HandleFunc("/api/tshoot", s.authed(s.handleTshoot))                     // one-file diagnostic bundle (Monitor -> Logs -> tshoot)
+	mux.HandleFunc("/api/tshoot", s.authed(s.handleTshoot)) // one-file diagnostic bundle (Monitor -> Logs -> tshoot)
 	mux.HandleFunc("/api/readme", s.authed(s.handleReadme))
 	mux.HandleFunc("/api/license", s.authed(s.handleLicense))
 	mux.HandleFunc("/api/getting-started", s.authed(s.handleGettingStarted))
@@ -561,6 +563,10 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/capture/clear", s.authed(s.handleCaptureClear))
 	mux.HandleFunc("/api/capture/packets", s.authed(s.handleCapturePackets))
 	mux.HandleFunc("/api/capture/pcap", s.authed(s.handleCapturePcap))
+	mux.HandleFunc("/api/capture/mesh-iface", s.authed(s.handleCaptureMeshIface))
+	mux.HandleFunc("/api/capture/mesh/start", s.authed(s.handleCaptureMeshStart))
+	mux.HandleFunc("/api/capture/mesh/status", s.authed(s.handleCaptureMeshStatus))
+	mux.HandleFunc("/api/capture/mesh/download", s.authed(s.handleCaptureMeshDownload))
 	mux.HandleFunc("/api/speedtest/source", s.authed(s.handleSpeedtestSource))
 	mux.HandleFunc("/api/speedtest/sink", s.authed(s.handleSpeedtestSink))
 	mux.HandleFunc("/api/speedtest/run", s.authed(s.handleSpeedtestRun))

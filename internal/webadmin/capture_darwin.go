@@ -76,8 +76,8 @@ func openBPF() (int, error) {
 // LINKTYPE registry was defined to mirror libpcap's original BSD DLT_*
 // numbering — so no translation table is needed for the cases we handle.
 const (
-	dltNull    = 0
-	dltEn10mb  = 1
+	dltNull   = 0
+	dltEn10mb = 1
 )
 
 type darwinCapture struct {

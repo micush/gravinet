@@ -965,6 +965,7 @@ func (e *Engine) teardownSessions(ns *netState, dead []*peerSession, reason stri
 	ns.mu.Unlock()
 	for _, ps := range dead {
 		e.removePeerBypassRoute(ns, ps)
+		e.removeOverlayGuardRoutes(ns, ps)
 		// A relay that is going away leaves every peer behind it pointing at
 		// a session that no longer exists; clear those rather than let them
 		// keep sealing traffic to a discarded index.

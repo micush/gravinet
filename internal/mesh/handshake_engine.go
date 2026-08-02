@@ -199,6 +199,14 @@ func (e *Engine) install(ns *netState, ps *peerSession) {
 	}
 	e.syncPeerBypassRoute(ns, ps)
 
+	// Guard this peer's overlay address(es) with an explicit host route via
+	// the mesh device — see overlayguard.go for the shadowing bug this
+	// defends against. Mirror-image of syncPeerBypassRoute just above: that
+	// one protects the peer's underlay endpoint from the mesh's own tunnel,
+	// this one protects the peer's overlay address from a foreign, more (or
+	// equally) specific route on the physical LAN.
+	e.installOverlayGuardRoutes(ns, ps)
+
 	// Push our redistributed routes to the (possibly new) peer right away —
 	// both config Advertise routes (advRoutes) and anything currently
 	// redistributed from BGP (bgpRoutes, see bgpRedistSet's doc comment):

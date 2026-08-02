@@ -248,6 +248,7 @@ func (e *Engine) dropRetiredKeySessions(ns *netState) {
 	ns.publishFwd()
 	ns.mu.Unlock()
 	for _, ps := range dead {
+		e.removeOverlayGuardRoutes(ns, ps)
 		e.log.Infof("mesh: dropped session to %q on net %x (its key was retired); re-handshaking with a current key", ps.nodeID, ns.spec.ID)
 	}
 

@@ -98,9 +98,19 @@ func openBPF() (int, error) {
 // share numeric values with LINKTYPE_ETHERNET/LINKTYPE_NULL, since the pcap
 // LINKTYPE registry was defined to mirror libpcap's original BSD DLT_*
 // numbering — so no translation table is needed for the cases we handle.
+//
+// dltLoop is the one case here that DOES need translating: OpenBSD's own
+// <net/bpf.h> defines DLT_LOOP as 12, but the portable pcap-file value for
+// that same encapsulation is LINKTYPE_LOOP = 108 (12 collides with other,
+// unrelated link types on other OSes — precisely the reason the portable
+// LINKTYPE_ numbering exists at all; see linktypeLoop's own doc comment in
+// capture.go). Passing 12 straight through would write a file that says
+// "OpenBSD's raw DLT_LOOP number" rather than what a pcap reader elsewhere
+// actually needs to see.
 const (
 	dltNull   = 0
 	dltEn10mb = 1
+	dltLoop   = 12
 )
 
 type openbsdCapture struct {
@@ -152,6 +162,8 @@ func startCapture(ifaceName string, snaplen int, onPacket func(time.Time, []byte
 			linktype = linktypeEthernet
 		case dltNull:
 			linktype = linktypeNull
+		case dltLoop:
+			linktype = linktypeLoop
 		default:
 			linktype = int(dlt) // best effort passthrough for anything else
 		}

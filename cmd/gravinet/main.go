@@ -48,7 +48,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "762"
+	version = "773"
 	commit  = "none"
 )
 
@@ -1686,10 +1686,31 @@ func cmdRun(args []string) {
 			if ctlSrv != nil {
 				ctlSrv.Close()
 			}
-			// engine.Stop blocks on the TUN read loops, so close interfaces first.
-			for _, d := range devices {
-				d.Close()
-			}
+			// engine.Stop() already closes each network's live TUN device —
+			// but only *after* it closes e.stop first (see
+			// internal/mesh/engine.go's Stop), which is what lets
+			// tunLoopSerial/tunLoopPooled's shuttingDown(ns) check recognize
+			// "this Read failed because we're intentionally closing it," not
+			// "the interface died out from under us; rebuild it."
+			//
+			// This used to pre-close `devices` here, before calling
+			// engine.Stop(), on the theory that Stop() would otherwise
+			// deadlock waiting on TUN read loops that only unblock once
+			// their device is closed. That's not actually true — Stop()
+			// closes e.stop, then the devices, then waits — but the
+			// pre-close broke the exact signal shuttingDown() depends on:
+			// dev.Close() here unblocked the read loop's Read() while
+			// e.stop was still open, so shuttingDown(ns) read false, and
+			// the loop took the "overlay interface lost; rebuilding" branch
+			// (recoverDataplane) in the middle of an intentional shutdown —
+			// standing up a brand-new TUN device, with its own routes and
+			// addressing, only to have engine.Stop() close that one too a
+			// moment later. That extra round trip was slow and OS-call-heavy
+			// enough to blow through shutdownGrace on its own on a loaded
+			// host, which is what a "graceful shutdown exceeded" forced exit
+			// actually was on affected nodes: not a hung step, but this
+			// spurious rebuild-then-immediately-close cycle repeating on
+			// every single restart.
 			engine.Stop()
 			if t := getTr(); t != nil {
 				t.Close()

@@ -1203,6 +1203,7 @@ func (e *Engine) applyBan(ns *netState, target string) {
 			}
 		}
 		e.mu.Unlock()
+		e.removeOverlayGuardRoutes(ns, victim)
 	}
 	// A banned node's redistributed routes must go too — it can't carry traffic.
 	e.dropNodeRoutes(ns, target)
