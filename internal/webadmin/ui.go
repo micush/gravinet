@@ -10132,6 +10132,100 @@ async function showLatencyHistoryModal(netName, nodeId, label, overlay){
   load();
 }
 
+// seedLatencyHistoryFromBackend pre-fills latencyHistory's sparkline window
+// from the persisted RTT history (/api/latency/history, latencyhist.go)
+// before the live poll loop's own first request lands — so the trend
+// doesn't render blank the moment the page is opened, including right
+// after a restart, even though the live poll's own in-memory state
+// necessarily starts fresh every time regardless. Runs once, at
+// infoLatency's startup; load()'s own "if (latencyHistory[key]) continue"
+// -shaped guard below means once a key has anything in it — seeded or
+// live-polled — this never touches it again, so re-opening the Latency tab
+// later in the same page session doesn't re-seed over real live data.
+//
+// A backend gap is rendered as a miss (ok:false, matching a real down
+// reading's shape exactly), not left blank or shown as if it were fine —
+// the sparkline's whole point is an unmissable red bar for down time, and
+// treating "no sample here" as "presumably fine" would defeat that. Worth
+// being precise about what the gap actually proves, though: the backend
+// collector doesn't sample while the daemon itself is stopped, so the
+// exact window gravinet was down produces the identical gap for every
+// peer at once, not just ones that were genuinely unreachable during it.
+// Right after a restart, expect every peer's seeded sparkline to show that
+// same stretch as down — an honest "no evidence either way", rendered the
+// same way a real miss is, not a claim that peer specifically failed.
+//
+// Only ever seeds e.hist, never e.hist6: latencyhist.go's collector keeps
+// one RTT series per peer (preferring v4, falling back to v6 only if a
+// peer has no v4 address at all — see its own sample()), not independent
+// v4 and v6 series the way this page's live poll does. There is no backend
+// v6 signal to seed hist6 from without guessing, and presenting seeded v4
+// data as if it were a real v6 reading would be actively misleading rather
+// than merely incomplete — the same reasoning this codebase holds to
+// everywhere else a family's health must never stand in for the other's.
+// A dual-stack peer's v6 trend still starts blank and fills in from live
+// polls only, exactly as before this existed.
+async function seedLatencyHistoryFromBackend(){
+  let data;
+  try {
+    const minutes = Math.max(1, Math.ceil(LATENCY_WINDOW_MS/60000));
+    const r = await fetch('/api/latency/history?minutes='+minutes, { credentials:'same-origin' });
+    if (!r.ok) return;
+    data = await r.json();
+  } catch(e) { return; }
+  const nets = (data && data.networks) || {};
+  const now = Date.now();
+  for (const netName in nets){
+    const peers = nets[netName];
+    for (const nodeID in peers){
+      const key = netName+'|'+nodeID;
+      if (latencyHistory[key]) continue; // a live poll already got here first
+      const points = (peers[nodeID].hist || []).slice().sort((a,b) => a.t - b.t);
+      const slots = bucketLatencyHistoryIntoSlots(points, now);
+      const e = { hist: slots, hist6: [] };
+      seedLatencySinceFromSlots(e, slots, false);
+      latencyHistory[key] = e;
+    }
+  }
+}
+
+// bucketLatencyHistoryIntoSlots re-buckets a sparse backend {t,v} series
+// (unix seconds, sampled at latencyhist.go's latencySampleInterval — 10s,
+// currently the same cadence LATENCY_POLL_MS uses, which is what makes
+// lining the two up this directly possible) into LATENCY_HIST_LEN
+// fixed-width slots ending at now, matching the {ok, rtt} shape a live
+// poll result already arrives in. A slot with no backend point in its
+// window becomes a miss — see seedLatencyHistoryFromBackend's own doc
+// comment for why that's the deliberate choice, not an omission.
+function bucketLatencyHistoryIntoSlots(points, now){
+  const slots = [];
+  for (let i = LATENCY_HIST_LEN - 1; i >= 0; i--){
+    const slotStart = now - (i+1)*LATENCY_POLL_MS;
+    const slotEnd = now - i*LATENCY_POLL_MS;
+    const pt = points.find(p => p.t*1000 >= slotStart && p.t*1000 < slotEnd);
+    slots.push(pt ? { ok:true, rtt: pt.v } : { ok:false, rtt:null });
+  }
+  return slots;
+}
+
+// seedLatencySinceFromSlots initializes e.sinceOk[6]/e.since[6] from a
+// freshly-seeded slot array's tail state, walking backward to find how
+// long the current (last-slot) state has actually held within the seeded
+// window. Without this, load()'s first live poll after seeding would
+// compare p.ok against an undefined prior state and misfire a spurious
+// "just changed" flash even though nothing did — undefined !== true and
+// undefined !== false are both true — and the streak tooltip would claim
+// "up 0s" right next to a chart visibly showing several minutes of it.
+function seedLatencySinceFromSlots(e, slots, isV6){
+  if (!slots.length) return;
+  const tailOk = slots[slots.length-1].ok;
+  let sinceIdx = slots.length - 1;
+  while (sinceIdx > 0 && slots[sinceIdx-1].ok === tailOk) sinceIdx--;
+  const since = Date.now() - (slots.length - sinceIdx) * LATENCY_POLL_MS;
+  if (isV6){ e.sinceOk6 = tailOk; e.since6 = since; }
+  else { e.sinceOk = tailOk; e.since = since; }
+}
+
 function infoLatency(c){
   if (latencyTimer){ clearInterval(latencyTimer); latencyTimer = null; }
   secHint(c, 'Round-trip time from this host to every other peer on each up network, pinged over the overlay (so it reflects the mesh path, not just the underlay). A couple of probes per peer, run concurrently; this can take a few seconds. Refreshes automatically every '+(LATENCY_POLL_MS/1000)+'s; <b>trend</b> covers the last '+(LATENCY_WINDOW_MS/1000)+'s; blue bars scale to that peer\u2019s own range, red is a miss; hover a bar for the exact reading, or the chart for how long it\u2019s held its current state. Click a trend for a bigger chart over a longer window \u2014 that one comes from the mesh\u2019s own passive keepalive RTT, sampled continuously in the background, rather than this page\u2019s live ping.');
@@ -10248,8 +10342,11 @@ function infoLatency(c){
       });
     }
   };
-  load();
-  latencyTimer = setInterval(load, LATENCY_POLL_MS);
+  (async () => {
+    await seedLatencyHistoryFromBackend();
+    load();
+    latencyTimer = setInterval(load, LATENCY_POLL_MS);
+  })();
 }
 
 // infoAbout shows build and host identity.
