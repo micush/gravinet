@@ -356,6 +356,9 @@ type Engine struct {
 	// delete a route another network's peer still depends on.
 	bypassMu   sync.Mutex
 	bypassRefs map[netip.Addr]bypassRef
+	// orphanWarned throttles noteOrphanedOverlayBypass per address. Guarded
+	// by bypassMu, since it is only touched on that same path.
+	orphanWarned map[netip.Addr]time.Time
 	// provenBypassTried rate-limits the loop-guard-driven bypass path
 	// (acquireProvenBypassRoute); its trigger is per-packet.
 	provenBypassTried map[netip.Addr]time.Time
@@ -1195,6 +1198,13 @@ type peerSession struct {
 	reasmOK      atomic.Uint64 // overlay packets fully reassembled and delivered
 	reasmDrop    atomic.Uint64 // reassembly groups dropped incomplete (evicted, expired, inconsistent)
 	spoofDrop    atomic.Uint64 // inbound packets dropped: source address not owned by this peer (anti-spoofing)
+	// overlayRoamRefused counts inbound datagrams whose observed source was
+	// one of this node's own overlay addresses, which touch declines to roam
+	// onto. Non-zero means the far side's underlay traffic is being captured
+	// by a route into its own tunnel — see touch's doc comment. Counted
+	// rather than logged because the trigger is per-packet, and surfaced on
+	// the peer record because there is otherwise no way to see it happening.
+	overlayRoamRefused atomic.Uint64
 
 	// familyProbeSent4/6 mark (as UnixNano) when this session first started
 	// ICMP-probing each configured overlay family — 0 means that family has
@@ -2205,7 +2215,7 @@ func (e *Engine) onData(payload []byte, from netip.AddrPort, via *peerSession) {
 	}
 	ps.rxBytes.Add(uint64(len(payload)))
 	ps.rxPkts.Add(1)
-	if roamed := ps.touch(from, via); roamed {
+	if roamed := ps.touch(e, from, via); roamed {
 		e.syncPeerBypassRoute(ps.net, ps)
 	}
 	if len(pt) == 0 {
@@ -2315,7 +2325,38 @@ func (e *Engine) sourceAllowedFrom(ps *peerSession, ip []byte) bool {
 	return true
 }
 
-func (ps *peerSession) touch(from netip.AddrPort, via *peerSession) (roamed bool) {
+// touch records liveness and, for a directly-reached peer, follows the
+// observed source address so a NAT rebind or a genuine network move doesn't
+// strand the session on a dead endpoint.
+//
+// It will not roam onto one of this node's own overlay addresses. Every other
+// path that learns an endpoint already refuses those — addSeed, the peer cache
+// in ban.go, local candidate collection — and this was the gap they were
+// working around rather than closing: the peer-cache filter's own comment says
+// it exists partly to catch "a session that roamed onto an overlay source",
+// which concedes the roam happens and only stops it being written to disk. The
+// live endpoint stayed poisoned in memory, which is the copy that matters.
+//
+// It happens when the far side's underlay datagram is itself captured by a
+// route into its tunnel: the packet egresses over the overlay and arrives here
+// carrying that peer's *overlay* address as its source. Following it points
+// every subsequent underlay send at a mesh address, which this node's own
+// routes hand straight back into the tunnel — and the loop guard, seeing
+// proof of a loop, then installs a bypass route pinning that mesh address to
+// the physical gateway, silently blackholing the peer's return traffic.
+//
+// Declining the roam costs nothing when the source is genuine: a real
+// endpoint change never presents an overlay address, so this only ever
+// rejects a path that could not have carried traffic anyway. The session keeps
+// the endpoint it had, which is by construction the last one that worked.
+func (ps *peerSession) touch(e *Engine, from netip.AddrPort, via *peerSession) (roamed bool) {
+	if via == nil && from.IsValid() && e.isOverlayAddr(from.Addr()) {
+		ps.mu.Lock()
+		ps.lastRx = time.Now()
+		ps.mu.Unlock()
+		ps.overlayRoamRefused.Add(1)
+		return false
+	}
 	ps.mu.Lock()
 	ps.lastRx = time.Now()
 	if via != nil {

@@ -126,6 +126,14 @@ type PeerInfo struct {
 	ReasmDrop    uint64 `json:"reasm_drop"`     // incomplete reassemblies dropped (lost fragments)
 	SpoofDrop    uint64 `json:"spoof_drop"`     // inbound packets dropped: source not owned by this peer (anti-spoofing)
 
+	// OverlayRoamRefused counts inbound datagrams whose observed source was
+	// one of this node's own overlay addresses. touch declines to roam onto
+	// those; non-zero here means this peer's underlay traffic is being
+	// captured by a route into its own tunnel, so its packets are arriving
+	// over the mesh carrying a mesh source address. Surfaced because the
+	// condition is otherwise invisible: the session stays up and healthy.
+	OverlayRoamRefused uint64 `json:"overlay_roam_refused,omitempty"`
+
 	// ReplayDrop/AuthDrop split the session's decrypt failures by cause —
 	// see peerSession.replayDrop for why the distinction is the whole point.
 	// ReplayDrop is a packet whose counter fell outside (or behind) the
@@ -996,29 +1004,30 @@ func (e *Engine) ListPeers(networkID uint64) []PeerInfo {
 			transport = "tcp"
 		}
 		pi := PeerInfo{NodeID: ps.nodeID, Hostname: ps.hostname, Endpoint: ps.ep().String(), Relayed: ps.getRelay() != nil,
-			Transport:     transport,
-			EstablishedAt: ps.established.UnixNano(),
-			KeyLabel:      ns.keyLabelFor(ps.keyID),
-			Notes:         ns.peerNotes[ps.nodeID],
-			PathMTU:       int(ps.effMTU.Load()),
-			FragsSent:     ps.fragsSent.Load(),
-			FragSendDrop:  ps.fragSendDrop.Load(),
-			FragsRcvd:     ps.fragsRcvd.Load(),
-			ReasmOK:       ps.reasmOK.Load(),
-			ReasmDrop:     ps.reasmDrop.Load(),
-			SpoofDrop:     ps.spoofDrop.Load(),
-			ReplayDrop:    ps.replayDrop.Load(),
-			AuthDrop:      ps.authDrop.Load(),
-			FwInDrop:      ps.fwInDrop.Load(),
-			PoliceDrop:    ps.policeDrop.Load(),
-			TunWriteDrop:  ps.tunWriteDrop.Load(),
-			EgressQDrop:   ps.egressQDrop.Load(),
-			TxBytes:       ps.txBytes.Load(),
-			RxBytes:       ps.rxBytes.Load(),
-			TxPackets:     ps.txPkts.Load(),
-			RxPackets:     ps.rxPkts.Load(),
-			BGPASN:        ps.bgpASN,
-			Version:       ps.version,
+			Transport:          transport,
+			EstablishedAt:      ps.established.UnixNano(),
+			KeyLabel:           ns.keyLabelFor(ps.keyID),
+			Notes:              ns.peerNotes[ps.nodeID],
+			PathMTU:            int(ps.effMTU.Load()),
+			FragsSent:          ps.fragsSent.Load(),
+			FragSendDrop:       ps.fragSendDrop.Load(),
+			FragsRcvd:          ps.fragsRcvd.Load(),
+			ReasmOK:            ps.reasmOK.Load(),
+			ReasmDrop:          ps.reasmDrop.Load(),
+			SpoofDrop:          ps.spoofDrop.Load(),
+			OverlayRoamRefused: ps.overlayRoamRefused.Load(),
+			ReplayDrop:         ps.replayDrop.Load(),
+			AuthDrop:           ps.authDrop.Load(),
+			FwInDrop:           ps.fwInDrop.Load(),
+			PoliceDrop:         ps.policeDrop.Load(),
+			TunWriteDrop:       ps.tunWriteDrop.Load(),
+			EgressQDrop:        ps.egressQDrop.Load(),
+			TxBytes:            ps.txBytes.Load(),
+			RxBytes:            ps.rxBytes.Load(),
+			TxPackets:          ps.txPkts.Load(),
+			RxPackets:          ps.rxPkts.Load(),
+			BGPASN:             ps.bgpASN,
+			Version:            ps.version,
 		}
 		if r := ps.getRelay(); r != nil {
 			if r.hostname != "" {

@@ -42,7 +42,7 @@ func TestRoamResetsPMTU(t *testing.T) {
 		t.Fatal("setup: eff should be 1450")
 	}
 	// Packet arrives from a new source -> roam.
-	ps.touch(netip.MustParseAddrPort("198.51.100.9:65432"), nil)
+	ps.touch(&Engine{}, netip.MustParseAddrPort("198.51.100.9:65432"), nil)
 	if ps.effMTU.Load() != 1280 {
 		t.Errorf("after roam effMTU=%d, want floor 1280 (re-discovery)", ps.effMTU.Load())
 	}
@@ -63,7 +63,7 @@ func TestNoRoamKeepsPMTU(t *testing.T) {
 	ps.pmtu.eff, ps.pmtu.phase = 1450, phaseSettled
 	ps.pmtuMu.Unlock()
 	ps.setEff(1450)
-	ps.touch(ep, nil) // same source -> no roam
+	ps.touch(&Engine{}, ep, nil) // same source -> no roam
 	if ps.effMTU.Load() != 1450 {
 		t.Errorf("no-roam touch changed effMTU to %d; should stay 1450", ps.effMTU.Load())
 	}

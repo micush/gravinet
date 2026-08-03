@@ -124,6 +124,16 @@ func (e *Engine) acquireBypassRoute(ns *netState, addr netip.Addr) {
 	if !addr.IsValid() {
 		return
 	}
+	// Same rule as acquireProvenBypassRoute and addSeed: an address inside one
+	// of this node's own overlay subnets is a mesh address, never an underlay
+	// endpoint, and must not be steered out the physical gateway. This path
+	// takes its addresses from peer endpoints and seeds, both of which are
+	// already filtered — so reaching here means a filter was bypassed, and
+	// declining is strictly better than installing a silent blackhole.
+	if e.isOverlayAddr(addr.Unmap()) {
+		e.log.Debugf("mesh: declining bypass route for %s on net %x — overlay (mesh) address, not a reachable underlay endpoint", addr, ns.spec.ID)
+		return
+	}
 	if !ns.fullTunnel.Load() && !ns.meshRouteCovers(addr) {
 		return
 	}
@@ -557,11 +567,118 @@ func (e *Engine) restorePhysicalDefaultRoute(ns *netState, p netip.Prefix) {
 //
 // Rate-limited per address: the trigger is per-packet, and a failed install
 // would otherwise be retried on every looped datagram.
+// dropOverlayBypassRoutes withdraws any bypass route this process is holding
+// for one of its own overlay addresses. Such a route should no longer be
+// installable at all (acquireBypassRoute and acquireProvenBypassRoute both
+// refuse them now), but a node upgrading into that fix can still be holding
+// one acquired by the previous build, and the damage it does — a peer's mesh
+// address pinned to the physical gateway, silently blackholed — is exactly
+// the kind that no counter reports. Cheap enough to run on every initLoop
+// tick: bypassRefs holds one entry per bypassed endpoint, single digits in
+// normal operation, and the loop body only runs for entries that are wrong.
+//
+// Only routes THIS process installed can be withdrawn here, because
+// bypassRefs is in-memory and carries the gateway and ifIndex the route was
+// created with — deleting with those is exact. A route left behind by an
+// earlier process is invisible to this one: there is no route-query primitive
+// in internal/tun to enumerate by prefix, and deleting by prefix alone is not
+// safe on the BSD route(4) backends, where RTM_DELETE matches on destination
+// and would just as happily remove the legitimate tunnel route for the same
+// /32. Those are reported instead — see noteOrphanedOverlayBypass.
+func (e *Engine) dropOverlayBypassRoutes(ns *netState) {
+	if !gatewaySupported {
+		return
+	}
+	type stale struct {
+		addr netip.Addr
+		ref  bypassRef
+	}
+	var drop []stale
+	e.bypassMu.Lock()
+	for addr, ref := range e.bypassRefs {
+		if e.isOverlayAddr(addr) {
+			drop = append(drop, stale{addr, ref})
+		}
+	}
+	for _, s := range drop {
+		delete(e.bypassRefs, s.addr)
+	}
+	e.bypassMu.Unlock()
+
+	// Deleting outside the lock, matching releaseBypassRoute: the route
+	// syscall can block, and nothing else may acquire these addresses now
+	// that both acquire paths refuse them.
+	for _, s := range drop {
+		p := netip.PrefixFrom(s.addr, s.addr.BitLen())
+		if err := delGatewayRouteFn(p, s.ref.gateway, s.ref.ifIndex, bypassMetric); err != nil {
+			e.log.Warnf("mesh: removing stale bypass route %s via %s on net %x (an overlay address should never have had one): %v — this peer stays unreachable over %s until that route is gone", p, s.ref.gateway, ns.spec.ID, err, s.addr)
+			continue
+		}
+		e.log.Warnf("mesh: removed bypass route %s via %s on net %x — it pinned one of this node's own overlay addresses to the physical gateway, which silently blackholes that peer's return traffic", p, s.ref.gateway, ns.spec.ID)
+	}
+}
+
+// noteOrphanedOverlayBypass reports the one case dropOverlayBypassRoutes
+// cannot repair: a bypass route for an overlay address installed by an
+// *earlier* gravinet process, which this one has no record of and no way to
+// enumerate. It is detected from the dataplane instead — the loop guard firing
+// for an address that is one of our own overlay addresses means a route is
+// still steering that mesh address at the physical gateway, and since this
+// build never installs such a route, a previous one must have.
+//
+// Throttled per address to once every 5 minutes. The condition is permanent
+// until an operator acts, so repeating it at line rate would bury the one
+// message that says what to do.
+func (e *Engine) noteOrphanedOverlayBypass(ns *netState, addr netip.Addr) {
+	e.bypassMu.Lock()
+	if e.orphanWarned == nil {
+		e.orphanWarned = map[netip.Addr]time.Time{}
+	}
+	now := time.Now()
+	if last, ok := e.orphanWarned[addr]; ok && now.Sub(last) < 5*time.Minute {
+		e.bypassMu.Unlock()
+		return
+	}
+	e.orphanWarned[addr] = now
+	e.bypassMu.Unlock()
+
+	e.log.Warnf("mesh: %s is one of this node's overlay addresses but underlay traffic to it is being steered outside the tunnel on net %x — a bypass route installed by an earlier gravinet build is still in the kernel. This node will accept that peer's packets and send its replies out the wrong interface, so the peer appears up while every reply is lost. Remove the route by hand: `ip route del %s/%d` on Linux, `route -n delete -host %s <gateway>` on macOS/BSD, `route delete %s` on Windows. This build no longer installs such routes.",
+		addr, ns.spec.ID, addr, addr.BitLen(), addr, addr)
+}
+
 func (e *Engine) acquireProvenBypassRoute(ns *netState, addr netip.Addr) {
 	if !addr.IsValid() || !gatewaySupported {
 		return
 	}
 	addr = addr.Unmap()
+	// A looped datagram proves a route on this host is capturing traffic for
+	// addr. It does not prove addr is an underlay endpoint, and those are two
+	// different questions — this path deliberately skips meshRouteCovers (see
+	// noteUnderlayLoop) precisely because the kernel's answer to the *first*
+	// one can't be stale, but nothing there speaks to the second.
+	//
+	// Bypassing an overlay address is the one case where being wrong is worse
+	// than doing nothing. A bypass for a genuine underlay endpoint that didn't
+	// need one merely routes around the tunnel; a bypass for a mesh address
+	// pins that peer's overlay address to the physical gateway, where it is
+	// blackholed — and blackholed *silently*, because every mesh-level
+	// indicator stays healthy. The session stays up, the counters stay clean,
+	// inbound packets still arrive; only the replies leave by the wrong
+	// interface. Nothing withdraws the route afterwards either, since
+	// bypassRefs holds it at one reference indefinitely.
+	//
+	// Observed in the field: a node whose mesh address had been bypassed this
+	// way answered 0 of 16 echo requests from one peer while replying to all
+	// twelve others, and its own log showed addSeed correctly refusing the
+	// same address as an endpoint 69 seconds before this path installed a
+	// route for it. isOverlayAddr's own contract says such an address must
+	// never be dialed as a bootstrap target or cached as a peer endpoint;
+	// steering it out the physical gateway is the same mistake with a longer
+	// half-life.
+	if e.isOverlayAddr(addr) {
+		e.noteOrphanedOverlayBypass(ns, addr)
+		return
+	}
 
 	e.bypassMu.Lock()
 	if _, held := e.bypassRefs[addr]; held {

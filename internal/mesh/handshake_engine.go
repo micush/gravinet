@@ -702,6 +702,12 @@ func (e *Engine) initLoop(ns *netState) {
 			return
 		case <-t.C:
 		}
+		// Before reconciling seed bypasses, withdraw any bypass route held for
+		// one of our own overlay addresses. Ordering matters only in that this
+		// runs first: a node upgrading into the overlay guard can be holding
+		// such a route from the previous build, and it silently blackholes
+		// that peer's return traffic until it's gone.
+		e.dropOverlayBypassRoutes(ns)
 		e.syncSeedBypassRoutes(ns)
 		e.primeTCPSeeds(ns) // dial/redial any explicit TCP/TLS seeds
 		ns.mu.RLock()

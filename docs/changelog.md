@@ -2,6 +2,57 @@
 
 ---
 
+## v786 — 2026-08-03
+
+**A peer's own overlay address could end up as its session endpoint, and from there as a kernel route pinning that mesh address to the physical gateway. The peer then looked perfectly healthy — session up, counters clean, inbound packets arriving — while every reply left by the wrong interface and was lost. Three fixes: the roam that starts it, the bypass route that makes it permanent, and a sweep for nodes already holding one.**
+
+Found from a capture. A macOS node answered **0 of 16** echo requests from one peer while replying to all twelve others, and held two host routes for that peer's overlay address:
+
+```
+192.168.203.111      192.168.193.1   UGHS   en1      <- wins
+192.168.203.111/32   utun0           USc    utun0
+```
+
+Inbound was fine; the return path went to the LAN gateway, which has no idea what a `192.168.203.0/24` address is. Nothing in the mesh layer reports this, because as far as the mesh is concerned nothing is wrong.
+
+### The cause: `touch` had no overlay filter
+
+`touch` follows the observed source of an inbound datagram so a NAT rebind doesn't strand a session on a dead endpoint. It would follow the source onto one of this node's *own overlay addresses*.
+
+That arises when the far side's underlay datagram is itself captured by a route into its tunnel: the packet egresses over the overlay and arrives here carrying that peer's mesh address as its source. Following it points every later underlay send at a mesh address, which this node's routes hand straight back into its own tunnel.
+
+Every other endpoint-learning path already refused these — `addSeed`, the peer cache in `ban.go`, local candidate collection. The codebase knew about this one and worked around it instead of closing it: the peer-cache filter's own comment says it exists partly to catch *"a session that roamed onto an overlay source"*. That kept the poisoned endpoint off disk and left the live one in memory, which is the copy `isUnderlayLoop` reads.
+
+`touch` now declines such a roam and keeps the endpoint it had — by construction the last one that worked. Liveness is still recorded, since the packet authenticated and the peer is demonstrably alive; treating the refusal as silence would expire a healthy session. A genuine roam onto an underlay address is unaffected, and rejecting an overlay source costs nothing, because a real endpoint change never presents one.
+
+New per-peer counter `overlay_roam_refused` (omitted when zero) on the peer record. Non-zero means that peer's underlay traffic is being captured by a route into its own tunnel — otherwise invisible, which is how this went unnoticed.
+
+### The amplifier: the loop guard installed a bypass without checking
+
+`acquireProvenBypassRoute` deliberately skips `meshRouteCovers` — see v711 and `noteUnderlayLoop`, where a stale record left five peers permanently unreachable. That reasoning is sound: the looped packet is the kernel's own answer and can't be stale. But *"a route is capturing traffic for this address"* and *"this address is a legitimate bypass target"* are two different questions, and only the first was being asked.
+
+The asymmetry was visible in the field log — `addSeed` refusing the address as an endpoint at 05:13:07, and this path installing a route for it at 05:14:16, 69 seconds later.
+
+Both acquire paths now consult `isOverlayAddr`, whose own doc comment already stated the rule. Being wrong here is uniquely bad: a needless bypass for a real underlay endpoint merely routes around the tunnel, while one for a mesh address blackholes a peer at the routing layer and nothing ever withdraws it, since `bypassRefs` holds it at one reference indefinitely.
+
+### Recovery, and what it can't reach
+
+`dropOverlayBypassRoutes` runs each `initLoop` tick and withdraws any bypass route this process holds for one of its own overlay addresses — the case of a node upgrading while holding one from the previous build.
+
+**It cannot remove a route left by an *earlier process*, and that is the state deployed nodes are in.** `bypassRefs` is in-memory, so upgrading orphans the kernel route. Automatic removal was considered and rejected: there is no route-query primitive in `internal/tun` to enumerate by prefix, and deleting by prefix alone is unsafe on the BSD `route(4)` backends, where `RTM_DELETE` matches on destination and would just as happily remove the legitimate tunnel route for the same /32. Orphans are reported instead — `noteOrphanedOverlayBypass` fires when the loop guard sees the condition for an address that is one of ours (which can only mean an earlier build installed it) and logs the per-platform removal command, throttled per address to once per 5 minutes.
+
+Existing nodes still need the route removed by hand, e.g. `route -n delete -host 192.168.203.111 192.168.193.1` on macOS.
+
+### Tests
+
+Eleven new in `internal/mesh/overlaybypass_test.go`. The two that matter most guard against over-correcting: `TestProvenBypassStillWorksForUnderlayAddress` proves the v711 mechanism still installs its route for a genuine underlay endpoint swallowed by a redistributed prefix, and `TestTouchStillRoamsOntoUnderlaySource` proves a legitimate NAT rebind is still followed. Also covered: refusal on v4 and v6, the ordinary `acquireBypassRoute` path, liveness surviving a refused roam, relayed packets being a separate case, the sweep taking the overlay reference while leaving a legitimate underlay one, the sweep being a no-op when clean, and the orphan warning's throttle.
+
+`touch` takes an `*Engine` now so it can reach `isOverlayAddr`; one caller and two test call sites updated.
+
+Verified: `go build ./...` clean, `gofmt -l` clean on files touched. `cmd/gravinet` (11s) and `internal/webadmin` (53s) pass in full. In `internal/mesh`, the Bypass/Touch/Roam/Overlay/PMTU tests pass (20s) — the full mesh package again did not finish in the time available, and since this change is *in* that package, that gap matters more here than it did in v784 or v785. Cross-compilation and the `CGO_ENABLED=0` PAM caveat are unchanged from v785.
+
+---
+
 ## v785 — 2026-08-03
 
 **`resolveManagedTarget` read a peer's `Overlay4` and consulted `Overlay6` only when `Overlay4` was *absent* — never when it was merely unreachable. It is the single chokepoint for every management hop to a peer, so on a dual-stack node whose v4 overlay path was broken, peer management, remote shell, fan-out capture, fan-out tshoot and upgrade push all failed at once, each burning its full timeout on an address that was never going to answer, with a working v6 address sitting in the same advertisement.**
