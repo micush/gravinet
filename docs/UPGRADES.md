@@ -30,14 +30,20 @@ confirmation, one click, no staging step in between.
 **CLI:**
 
 ```sh
-gravinet upgrade apply -src ./gravinet-src.tgz
-gravinet upgrade apply -src ./gravinet-src.tgz -dry-run   # build + preflight, no swap
+gravinet upgrade ./gravinet-src.tgz
+gravinet upgrade ./gravinet-src.tgz -dry-run   # build + preflight, no swap
 gravinet upgrade status
 gravinet upgrade rollback
 ```
 
 The build runs inside the daemon in both cases, so the terminal and the browser
 drive one implementation rather than two that can drift.
+
+The archive is the argument — there is only one thing an upgrade takes, so
+there is no verb and no flag in front of it. The older spelling,
+`gravinet upgrade apply -src ARCHIVE`, still parses for the sake of existing
+runbooks, but it is no longer shown anywhere and shouldn't be written into new
+ones.
 
 ### What the node needs
 

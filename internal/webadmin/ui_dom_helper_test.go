@@ -69,10 +69,25 @@ func TestDualStackOverlayAddressNotCollapsedToOneFamily(t *testing.T) {
 	if !strings.Contains(indexHTML, "function overlayCellHTML(p)") {
 		t.Fatal("overlayCellHTML helper is missing from indexHTML — the shared renderer for a peer's overlay address(es)")
 	}
-	if n := strings.Count(indexHTML, "overlayCellHTML(p)"); n < 4 {
-		t.Errorf("overlayCellHTML(p) appears %d times in indexHTML, want at least 4 (its own definition, "+
-			"Mesh > peers' editable and non-editable overlay cells, and Monitor > mesh peers' overlay cell) "+
+	// Three, not the four this wanted before v782: Mesh > peers' *editable*
+	// cell moved to overlayEditCellHTML, which renders the same two stacked
+	// families but tags each one so a double-click can target the family under
+	// the cursor. That was its own instance of this same bug — the cell showed
+	// both addresses while the editor behind it could only ever load
+	// p.overlay, so a dual-stack peer's v6 address was visible and not
+	// editable. What this test actually guards is "no render site collapsed
+	// back to one family," so the editable site is still checked, just against
+	// the helper it now uses.
+	if n := strings.Count(indexHTML, "overlayCellHTML(p)"); n < 3 {
+		t.Errorf("overlayCellHTML(p) appears %d times in indexHTML, want at least 3 (its own definition, "+
+			"Mesh > peers' non-editable overlay cell, and Monitor > mesh peers' overlay cell) "+
 			"— a render site may have regressed back to esc(p.overlay), which only ever shows one address family", n)
+	}
+	if !strings.Contains(indexHTML, "function overlayEditCellHTML(p)") {
+		t.Fatal("overlayEditCellHTML helper is missing from indexHTML — Mesh > peers' editable overlay cell has no renderer")
+	}
+	if !strings.Contains(indexHTML, "overlayEditCellHTML(p)+'</td>'") {
+		t.Error("Mesh > peers' editable overlay cell no longer calls overlayEditCellHTML — if it fell back to esc(p.overlay) a dual-stack peer's v6 address is gone from the one table that can edit it")
 	}
 	if !strings.Contains(indexHTML, "overlay4:ov4, overlay6:ov6") {
 		t.Error("peerRowsForNet no longer carries overlay4/overlay6 on a peer row — overlayCellHTML would have nothing to render for a dual-stack peer's second address")

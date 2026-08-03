@@ -3976,6 +3976,33 @@ function overlayCellHTML(p) {
   return esc(v4 || v6 || '');
 }
 
+// overlayEditCellHTML is overlayCellHTML's editable twin, for Mesh > peers.
+// Same two-line v4-over-v6 layout, but each family sits in its own span
+// tagged with which family it is, so a double-click can target the address
+// actually under the cursor.
+//
+// This exists because the read-only version renders both addresses while
+// peerOverlayEdit only ever loaded one: p.overlay, which is v4-preferred
+// (overlay4 || overlay6). On a dual-stack peer that meant the cell showed two
+// addresses, the editor opened pre-filled with the v4 one, and there was no
+// way to reach the v6 one — you could technically clear the box and type a v6
+// address, since commit sniffs the family off the notation, but nothing in the
+// UI said so and the pre-filled v4 said the opposite. A v6-only peer was fine
+// (the fallback picked its v6 address) and so was a v4-only one, which is why
+// this only ever bit dual-stack peers.
+//
+// A family with no address gets a muted placeholder slot rather than being
+// omitted, so the missing half of a single-stack peer can be added instead of
+// being unreachable for the same reason the v6 half used to be.
+function overlayEditCellHTML(p) {
+  const slot = (fam, val) => {
+    const cls = 'ov-fam' + (fam === '6' ? ' hint' : '');
+    const body = val ? esc(val) : '<span class="mut">\u2013 add v' + fam + '</span>';
+    return '<span class="' + cls + '" data-ov-fam="' + fam + '" title="double-click to edit this peer\'s IPv' + fam + ' overlay address on its own node">' + body + '</span>';
+  };
+  return slot('4', p.overlay4 || '') + '<br>' + slot('6', p.overlay6 || '');
+}
+
 // latencyColorSpan wraps text in the color matching this exact reading's own
 // marker on latencySparkline/latencyDualSparkline: var(--danger) red for a
 // miss (the same full-strength red as a sparkline's miss dot, regardless of
@@ -4091,7 +4118,7 @@ function secPeers(c) {
       // offered as editable in this table regardless of Manager mode.
       const canEditOv = !p.self && !p.disabled && !p.pending && p.overlay && state.manager && (state.cluster||[]).some(cp => cp.node_id===p.id && cp.manageable);
       const ovCell = canEditOv
-        ? '<td class="ov-cell peer-ov" data-peer-ov="'+esc(p.id)+'" style="cursor:pointer" title="double-click to edit this peer\'s overlay address on its own node">'+overlayCellHTML(p)+'</td>'
+        ? '<td class="ov-cell peer-ov" data-peer-ov="'+esc(p.id)+'" style="cursor:pointer">'+overlayEditCellHTML(p)+'</td>'
         : '<td class="ov-cell"'+(p.overlay?' title="'+(p.self?'this node\'s own overlay address':'overlay address is set by the peer itself — change it on that node')+'"':'')+'>'+overlayCellHTML(p)+'</td>';
       // The self row IS selectable — ticking it and using 🛈 or the shell
       // button both work (see peerInfoRow and the shell button below); it's
@@ -4114,9 +4141,15 @@ function secPeers(c) {
     // address genuinely lives in that peer's own config, not this node's, so
     // the save still has to reach its node — but only the save is proxied
     // there now (see peerOverlayEdit); the admin session itself stays put.
+    // Per family, not per cell: the cell renders v4 and v6 as separate slots
+    // (see overlayEditCellHTML) and each one edits its own address, so
+    // double-clicking the v6 line edits v6 rather than opening the v4 editor.
     t.querySelectorAll('[data-peer-ov]').forEach(td => {
       const p = rows.find(x => x.id === td.dataset.peerOv);
-      if (p) td.ondblclick = () => peerOverlayEdit(td, n, p);
+      if (!p) return;
+      td.querySelectorAll('[data-ov-fam]').forEach(slot => {
+        slot.ondblclick = e => { e.stopPropagation(); peerOverlayEdit(td, n, p, slot.dataset.ovFam); };
+      });
     });
 
     // Double-click a peer's notes to edit them — unlike the overlay address,
@@ -4184,10 +4217,56 @@ function secPeers(c) {
 // *on* (state.target), and saving here doesn't change that — the restart
 // this needs has to happen on the peer's node, so it's called out in an
 // alert instead of a banner that would restart the wrong node if clicked.
-function peerOverlayEdit(td, n, p){
+// overlayPrefixLen is the prefix length every overlay address on this network
+// must carry, read off the network's own subnet — '' when that isn't known.
+//
+// NetworkSetAddress doesn't merely accept a CIDR, it requires this exact
+// length: "address4 %q must use subnet4's own prefix length /%d ... a shorter
+// or /32-style length here breaks this node's route to the rest of the
+// overlay". So there is only ever one correct answer, which is what makes
+// filling it in here safe rather than a guess — there's no alternative the
+// operator might have wanted instead.
+//
+// Read from *this* node's config for that network (cfgOf), not the peer's,
+// because the peer's config isn't loaded here. A subnet is a property of the
+// network rather than of a node, so the two agree in any working mesh; where
+// they somehow don't, the peer's own NetworkSetAddress rejects the write with
+// the length it actually wants, which is a clearer outcome than this
+// second-guessing it.
+function overlayPrefixLen(netID, v6){
+  const c = cfgOf(netID);
+  const sub = (v6 ? c.subnet6 : c.subnet4) || '';
+  const i = sub.lastIndexOf('/');
+  return i < 0 ? '' : sub.slice(i + 1);
+}
+
+// overlayWithPrefix appends len to a bare address. A value that already has a
+// prefix is returned untouched — whatever the operator typed wins, including a
+// length that will be rejected, because silently rewriting it would hide the
+// rejection that explains why.
+function overlayWithPrefix(addr, len){
+  if (!addr || !len || addr.indexOf('/') >= 0) return addr;
+  return addr + '/' + len;
+}
+
+// peerOverlayEdit edits one family of one peer's overlay address. fam is '4'
+// or '6' — the family of the slot that was double-clicked (see
+// overlayEditCellHTML); it is no longer inferred from the value, which is what
+// made the v6 half of a dual-stack peer uneditable.
+function peerOverlayEdit(td, n, p, fam){
   if (td.querySelector('input')) return;
-  const cur = p.overlay || '';
-  const inp = $('<input class="cell-edit" type="text" spellcheck="false" autocapitalize="off" placeholder="address, or &quot;none&quot; to clear">');
+  const v6 = fam === '6';
+  // The peers table shows a bare address — Overlay4/Overlay6 come off the live
+  // mesh session, which has no prefix to report — while NetworkSetAddress
+  // accepts only a CIDR at the network's own prefix length. Seeding the editor
+  // with the bare value therefore handed the operator a string that could not
+  // be saved as-is, and nothing on screen said what length to add. Show the
+  // address the way the field needs it instead.
+  const plen = overlayPrefixLen(n.id, v6);
+  const bare = (v6 ? p.overlay6 : p.overlay4) || '';
+  const cur = overlayWithPrefix(bare, plen);
+  const hint = plen ? (v6 ? 'fd00:42::5/' : '10.42.0.5/') + plen : (v6 ? 'fd00:42::5/64' : '10.42.0.5/16');
+  const inp = $('<input class="cell-edit" type="text" spellcheck="false" autocapitalize="off" placeholder="'+esc(hint)+', or &quot;none&quot; to clear">');
   inp.value = cur;
   td.classList.add('editing'); td.innerHTML = ''; td.appendChild(inp);
   inp.focus(); inp.select();
@@ -4195,21 +4274,35 @@ function peerOverlayEdit(td, n, p){
   const restore = () => { if (done) return; done = true; refresh(); };
   const commit = async () => {
     if (done) return; done = true;
-    const v = inp.value.trim();
+    // Accept a bare address too, and add the prefix on the way out. The field
+    // opens pre-filled with one, so a bare value here means the operator
+    // deleted it — deliberately or by retyping the whole cell — and the only
+    // length that would have been accepted is the one being added back.
+    const typed = inp.value.trim();
+    const clearing = typed === '' || typed.toLowerCase() === 'none';
+    const v = clearing ? typed : overlayWithPrefix(typed, plen);
     if (v === cur){ refresh(); return; }
     const who = p.host || p.id.slice(0,8);
-    if (!confirm('Change '+who+'\'s overlay address for "'+nameOf(n.id)+'"?\n\nThis saves on '+who+'\'s own node now but takes effect on its next restart, not this node\'s.')){ refresh(); return; }
-    // Which family to submit under: a typed address's own notation is
-    // unambiguous (contains ':' => v6). "none" (clearing) carries no family
-    // of its own, so that targets whichever family the value being cleared
-    // (cur) actually was — sending it as address4 unconditionally used to
-    // mean clearing a v6-only peer's address silently did nothing (address6
-    // was never sent, so NetworkSetAddress left it untouched) while
-    // pointlessly clearing a v4 address that was never set in the first
-    // place.
-    const targetsV6 = v.toLowerCase() === 'none' ? cur.includes(':') : v.includes(':');
+    if (!confirm('Change '+who+'\'s IPv'+(v6?'6':'4')+' overlay address for "'+nameOf(n.id)+'"?\n\nThis saves on '+who+'\'s own node now but takes effect on its next restart, not this node\'s.')){ refresh(); return; }
+    // The family comes from which slot was double-clicked, not from sniffing
+    // the typed value's notation. Sniffing was what let a dual-stack peer's v6
+    // address be edited at all before there were per-family slots, and it is
+    // the wrong rule now that there are: typing a v6 address into the v4 slot
+    // is a mistake to report, not an instruction to retarget the write. "none"
+    // (clearing) needs no special case any more either — it clears the family
+    // whose slot you opened, which is what it looked like it would do.
+    if (!clearing) {
+      // Test the typed value, not v: v now carries an appended "/NN", and on
+      // a v4 network that adds no colon — but checking the wrong string here
+      // would be a trap waiting for the first time it did.
+      const looksV6 = typed.includes(':');
+      if (looksV6 !== v6) {
+        alert('That looks like an IPv'+(looksV6?'6':'4')+' address, but you are editing the IPv'+(v6?'6':'4')+' slot.\n\nDouble-click the other line to edit that family.');
+        refresh(); return;
+      }
+    }
     const body = { op:'address', net:n.id };
-    if (targetsV6) body.address6 = v; else body.address4 = v;
+    if (v6) body.address6 = v; else body.address4 = v;
     const r = await api('/api/network', { method:'POST', body: JSON.stringify(body) }, p.id);
     if (!r.ok){ alert((r.body && r.body.error) || 'save failed'); refresh(); return; }
     alert('Saved; takes effect next time '+who+' restarts.');

@@ -192,7 +192,7 @@ Go to **Mesh → Keys**. Each network gets its own table, one row per slot:
 - **Disable** a slot to stop it authenticating new joins without deleting it — useful while you're still confirming a rotation reached everyone. **Delete** it once you're sure nothing still depends on it.
 - Double-click **expires** to set a date/time after which a key stops authenticating on its own; anything still using it re-handshakes on a remaining key rather than dropping.
 
-The CLI has the same operations — `gravinet key list|generate|show|set|enable|disable|delete|distribute -net NAME -slot N` — useful for scripting a rotation across many networks at once. One guardrail applies everywhere, GUI or CLI: you can't disable or delete the _last_ enabled key on a network, since that would lock everyone out, yourself included.
+The CLI has the same operations — `gravinet key list|generate|show SLOT|set SLOT KEY|notes SLOT TEXT|enable SLOT|disable SLOT|delete SLOT|distribute KEY [-net NAME]` — useful for scripting a rotation across many networks at once. The slot is an argument, not a `-slot` flag; `-net` stays a flag because a single-network node never needs it. One guardrail applies everywhere, GUI or CLI: you can't disable or delete the _last_ enabled key on a network, since that would lock everyone out, yourself included.
 
 ---
 

@@ -374,10 +374,10 @@ gravinet seed list -net corp
 
 gravinet key list -net corp                        # show the 8 join-key slots
 gravinet key generate -net corp -label rot2        # mint a new key into a free slot
-gravinet key show -net corp -slot 1                # reveal a key to hand to joiners
-gravinet key set <KEY> -net corp -slot 2           # import an existing key
-gravinet key disable -net corp -slot 0             # retire an old key (rotation)
-gravinet key delete -net corp -slot 0
+gravinet key show 1 -net corp                      # reveal a key to hand to joiners
+gravinet key set 2 <KEY> -net corp                 # import an existing key
+gravinet key disable 0 -net corp                   # retire an old key (rotation)
+gravinet key delete 0 -net corp
 
 gravinet nat add eth0                              # masquerade overlay out eth0
 gravinet nat enable
@@ -401,7 +401,7 @@ gravinet host list -net corp
 gravinet fw add -action deny -proto tcp -dport 23  # firewall (live + saved)
 gravinet fw exempt list                            # the node-global allow list (management,
                                                     # BGP, OSPF, RIP by default — never subject
-gravinet fw exempt add -name ospf -proto tcp -port 179  # to any network's rulebase; see Firewalling
+gravinet fw exempt add ospf -proto tcp -port 179    # to any network's rulebase; see Firewalling
 gravinet fw exempt reset                           # below), or the Allow List tab in the web UI
 
 gravinet managed on                                # accept management from Manager-mode peers

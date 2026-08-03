@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gravinet/internal/config"
@@ -60,11 +61,16 @@ func cmdSelfTest(args []string) {
 func usageUpgrade() {
 	fmt.Fprint(os.Stderr, `gravinet upgrade — build a source archive and apply it to this node
 
-  gravinet upgrade apply -src ARCHIVE   build a gravinet source archive
-                                        (.tgz/.tar.gz/.zip) with this node's Go
-                                        toolchain and swap the result in
-  gravinet upgrade status               this node's upgrade state
-  gravinet upgrade rollback             back out the last applied upgrade
+  gravinet upgrade ARCHIVE   build a gravinet source archive (.tgz/.tar.gz/.zip)
+                             with this node's Go toolchain and swap the result in
+  gravinet upgrade status    this node's upgrade state
+  gravinet upgrade rollback  back out the last applied upgrade
+
+Flags for the archive form:
+  -dry-run               build and preflight the result without swapping it in
+  -allow-downgrade       permit replacing this binary with an older version
+  -allow-pam-downgrade   permit replacing a PAM build with a non-PAM one
+  -sock PATH             control socket path
 
 Upgrades are always from source: gravinet publishes no prebuilt binary for any
 platform, and building on the node that will run it is what lets one archive
@@ -78,27 +84,56 @@ System -> Upgrade page does the same thing with a file picker.
 `)
 }
 
-func cmdUpgrade(args []string) {
+// upgradeRoute decides what a "gravinet upgrade ..." invocation meant. It is
+// split out from cmdUpgrade, which can only be exercised by dialing a control
+// socket, so the one genuinely interesting decision here — verb or archive
+// path? — can be tested on its own.
+//
+// It returns the verb to run and the arguments belonging to it. The empty verb
+// means "no verb given, print usage".
+func upgradeRoute(args []string) (verb string, rest []string) {
 	if len(args) == 0 {
+		return "", nil
+	}
+	switch m := expandVerb(args[0], v("status"), v("rollback"), v("help"), v("apply")); m {
+	case "status", "rollback", "help":
+		return m, args[1:]
+	case "-h", "--help":
+		return "help", args[1:]
+	case "apply":
+		// The old spelling, "upgrade apply -src ARCHIVE", still parses. It is
+		// gone from every usage string and doc, but the install scripts and
+		// anyone's runbook are not things this can see, and swallowing a
+		// leading "apply" costs one switch arm.
+		return "apply", args[1:]
+	default:
+		// Anything else is the archive itself: "gravinet upgrade ARCHIVE".
+		// There is exactly one thing an upgrade takes, so requiring a verb and
+		// a flag to say which of the one thing it is was pure ceremony.
+		//
+		// Note args, not args[1:] — nothing was consumed, because nothing was
+		// a verb. A file whose name is a prefix of a verb resolves as the verb
+		// ("status.tgz" is fine; a file literally named "st" is not), and
+		// "./st" spells that path unambiguously. expandVerb already refuses to
+		// treat anything with a leading dash as a verb, so a bare flag lands
+		// here too and reaches the flag parser rather than being called
+		// unknown.
+		return "apply", args
+	}
+}
+
+func cmdUpgrade(args []string) {
+	verb, rest := upgradeRoute(args)
+	switch verb {
+	case "":
 		usageUpgrade()
 		os.Exit(2)
-	}
-	if len(args) > 0 {
-		args[0] = expandVerb(args[0], v("apply"), v("status"), v("rollback"), v("help"))
-	}
-	switch args[0] {
-	case "status":
-		cmdUpgradeCtl(args[1:], "status", nil)
-	case "apply":
-		cmdUpgradeApply(args[1:])
-	case "rollback":
-		cmdUpgradeCtl(args[1:], "rollback", nil)
-	case "help", "-h", "--help":
+	case "status", "rollback":
+		cmdUpgradeCtl(rest, verb, nil)
+	case "help":
 		usageUpgrade()
 	default:
-		fmt.Fprintf(os.Stderr, "unknown upgrade command %q\n\n", args[0])
-		usageUpgrade()
-		os.Exit(2)
+		cmdUpgradeApply(rest)
 	}
 }
 
@@ -110,6 +145,27 @@ func cmdUpgradeCtl(args []string, op string, body any) {
 	printUpgradeReply(op, upgradeCall(*sock, op, body))
 }
 
+// upgradeArchiveArg resolves which archive an apply was asked for, given the
+// positional arguments and whatever -src carried. Split out from
+// cmdUpgradeApply for the same reason upgradeRoute is: it is the part with a
+// rule in it, and the rest of that function is a control-socket call.
+//
+// A positional argument wins over -src. The two can only both appear if
+// someone half-converted a script, and the new spelling is the one to honour;
+// the deprecated flag losing quietly is better than a conflict error for a
+// case where both values are almost certainly the same path anyway.
+func upgradeArchiveArg(pos []string, srcFlag string) (string, error) {
+	switch {
+	case len(pos) > 1:
+		return "", fmt.Errorf("one archive at a time; got %d (%s)", len(pos), strings.Join(pos, ", "))
+	case len(pos) == 1:
+		return pos[0], nil
+	case srcFlag != "":
+		return srcFlag, nil
+	}
+	return "", fmt.Errorf("usage: gravinet upgrade ARCHIVE.tgz [-dry-run]")
+}
+
 // cmdUpgradeApply hands the daemon a path to a source archive; the daemon
 // extracts, builds, preflights and swaps. The build deliberately happens in the
 // daemon rather than here, even though this CLI is root on the same box: that
@@ -117,22 +173,28 @@ func cmdUpgradeCtl(args []string, op string, body any) {
 // socket, reached identically from the terminal and from the web admin, rather
 // than two that can drift.
 func cmdUpgradeApply(args []string) {
-	fs := flag.NewFlagSet("upgrade apply", flag.ExitOnError)
+	pos, rest := splitPositionals(args, "sock", "src")
+	fs := flag.NewFlagSet("upgrade", flag.ExitOnError)
 	sock := fs.String("sock", defaultControlSocket(), "control socket path")
-	src := fs.String("src", "", "path to a gravinet source archive (.tgz/.tar.gz/.zip)")
+	srcFlag := fs.String("src", "", "deprecated: pass the archive as an argument instead")
 	dry := fs.Bool("dry-run", false, "build and preflight the result without swapping it in")
 	down := fs.Bool("allow-downgrade", false, "permit replacing this binary with an older version")
 	pamDown := fs.Bool("allow-pam-downgrade", false, "permit replacing a PAM build with a non-PAM one")
-	fs.Parse(args)
-	if *src == "" {
-		fatal("usage: gravinet upgrade apply -src ARCHIVE.tgz [-dry-run]")
+	fs.Parse(rest)
+
+	src, err := upgradeArchiveArg(pos, *srcFlag)
+	if err != nil {
+		fatal("%v", err)
 	}
-	abs, err := filepath.Abs(*src)
+	abs, err := filepath.Abs(src)
 	if err != nil {
 		fatal("%v", err)
 	}
 	if _, err := os.Stat(abs); err != nil {
-		fatal("%v", err)
+		// The archive is now positional, so a typo'd *verb* lands here rather
+		// than in an "unknown command" arm. Say what the alternatives were, or
+		// "gravinet upgrade statsu" reports a missing file and nothing else.
+		fatal("%v\n(gravinet upgrade ARCHIVE.tgz | status | rollback)", err)
 	}
 	fmt.Printf("building %s (this runs a full 'go build'; a minute or two is normal)...\n", abs)
 	printUpgradeReply("apply", upgradeCall(*sock, "apply", map[string]any{

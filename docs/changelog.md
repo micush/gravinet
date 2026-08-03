@@ -2,6 +2,121 @@
 
 ---
 
+## v784 — 2026-08-02
+
+**Values that were mandatory but spelled as flags are now arguments. `gravinet upgrade apply -src ARCHIVE` is `gravinet upgrade ARCHIVE`; the key slot, the exemption name, the seed note and the firewall move target got the same treatment. One of them was also a live footgun: `fw move ID` with the `-to` forgotten silently moved the rule to the top of the rulebase.**
+
+`gravinet upgrade apply -src ./gravinet-src.tgz` had three tokens of ceremony around one path. There is exactly one thing an upgrade takes — a source archive — so `apply` said nothing (there was no other verb it could have been) and `-src` said nothing (there was no other value it could have been). `gravinet upgrade ./gravinet-src.tgz`.
+
+Auditing the rest of the CLI for the same shape turned up four more, using one rule: **a value that is mandatory should not be spelled as a flag.** Flags are for the optional and the defaulted; an argument the command cannot run without is the command's subject, and every other part of this CLI already treats subjects positionally — `route delete CIDR`, `nat enable-rule INDEX`, `fw exempt del IDX`, `host add NAME IP`.
+
+| was | is |
+| --- | --- |
+| `key show -net corp -slot 1` | `key show 1 [-net corp]` |
+| `key set KEY -net corp -slot 2` | `key set 2 KEY` |
+| `key notes -slot 1 -notes "text"` | `key notes 1 text...` |
+| `seed notes ADDR -notes "text"` | `seed notes ADDR text...` |
+| `fw exempt add -name ospf -proto tcp` | `fw exempt add ospf -proto tcp` |
+| `fw move 7 -to 2` | `fw move 7 2` |
+
+Two of these sat directly beside a command that already did it right, which is the clearest evidence they were accidents rather than decisions: `seed notes ADDR -notes X` next to `network notes NAME TEXT...`, the same operation on a different object with a different spelling; and `fw exempt add -name` three switch arms above `fw exempt del IDX`, which takes its subject as an argument in the same function.
+
+`-net` deliberately stays a flag everywhere. It is genuinely optional — a single-network node never needs it — and it names the *context* a command runs in rather than the object it acts on, which is the distinction the rule above turns on.
+
+**`fw move` was a bug, not just verbosity.** `-to` was declared with a default of `0` and never validated, so `gravinet fw move 7` — the flag simply forgotten — did not complain. It moved rule 7 to index 0, the top of a first-match-wins rulebase, which is the single most consequential position available and the one most likely to change what the firewall does. The target index is now the second argument, `-to` still parses, and if neither arrives the command says so instead of picking somewhere. There is no sensible default for where to move something.
+
+**Argument order on `key set`.** The slot comes first — `key set 2 KEY` — matching every other key verb, where the slot is the first argument, and matching `host add NAME IP`'s object-then-value shape. The retired `key set KEY -slot 2` still works, and the mechanism is worth stating because it is the one non-obvious piece of parsing here: `-slot` being present is exactly what marks the single positional as the *key* rather than the slot, so `keySlotArg` honours the flag and consumes nothing when it sees one. Both spellings reach the same switch arm with the same two values and neither knows about the other. A script that half-converts — passing both — gets the argument, on the reasoning that it is the newer of the two and both are almost certainly the same value anyway.
+
+**Compatibility.** Every retired spelling still parses: `upgrade apply`, `-src`, `-slot`, `-name`, `-notes`, `-to`. None appears in any usage string, help output or doc any more, and the flags that survive only for this reason are described as deprecated in their own flag help. This follows `cli_groups.go`'s existing reasoning about the flat command names — the install scripts, the upgrade preflight's own `gravinet selftest` call, and any operator runbook are all things this tree cannot see, and a silent alias costs one switch arm. Worth reconsidering later; a deprecation that is never removed is just a second spelling.
+
+**One new failure mode, handled.** With the archive positional, a mistyped *verb* is no longer an unknown command — it is a path that does not exist. `gravinet upgrade statsu` would have reported nothing but a missing file, so the stat error now carries the alternatives: `(gravinet upgrade ARCHIVE.tgz | status | rollback)`. A file whose name is an unambiguous prefix of a real verb still resolves as the verb; `./st` spells that path unambiguously, and `expandVerb` already refuses to read anything with a leading dash as a verb, so a bare flag reaches the flag parser rather than being called unknown.
+
+**`splitPositionals`, and why `splitPositional` could not be reused.** The existing helper returns the first token without a leading dash, which is correct only when every flag in play is boolean: given `-sock /run/gravinet.sock archive.tgz` it returns the socket path. That is a latent bug in `key set` and `fw move` today, both of which take value-carrying flags, and putting the headline change on top of it would have made `gravinet upgrade -sock /run/x.sock src.tgz` try to build the socket. The new helper is told which flags carry values so it can skip past them, and returns *every* positional rather than only the first — which is what lets a command take a second argument (`fw move 7 2`) that previously had to arrive as a flag because there was no way to read one. The residue comes back in order, ready for `flag.FlagSet.Parse`, which cannot do this job itself: Go's flag package stops at the first non-flag argument, so `gravinet upgrade src.tgz -dry-run` would leave `-dry-run` unparsed. `splitPositional` is untouched and still used by its existing callers.
+
+**Testability.** Three pieces were split out of the commands so the decisions in them could be tested without a control socket or a config file: `upgradeRoute` (verb or archive path?), `upgradeArchiveArg` (positional/`-src` precedence), and `keySlotArg` (which spelling is this?). This matches how `cmd/gravinet`'s existing tests work — none of them drive a `cmd*` function directly, because those call `fatal`, which exits; they test the helpers underneath. New tests in `cmd/gravinet/positional_args_test.go`: `splitPositionals` across nine argument shapes including `-sock=/path` attached values, a trailing value flag with nothing after it, and residue ordering; `upgradeRoute` across the new spelling, both retired spellings, prefix-matched verbs, a leading flag, and — the mistake this routing could most easily have made — that the default arm returns `args` and not `args[1:]`, which would drop the archive on the floor; and `keySlotArg` across both `key set` spellings, the note tail, and the no-slot verbs it must not consume from.
+
+Verified: `go build ./...` and `go vet ./...` clean, `gofmt -l` clean on the files touched (twelve files under `internal/` are unformatted in the tree already and were left alone — the same list before and after this change). The full `cmd/gravinet` suite passes, 9.6s, including the 4 new tests and their 15 subtests, and the pre-existing `navparity` tests that check the CLI groups still mirror the web admin's nav rail. `internal/config`, `internal/upgrade`, `internal/webadmin`, `internal/control` and `internal/logx` pass too.
+
+Two honest gaps in that. The build here was `CGO_ENABLED=0`, because this environment has no PAM headers, so `auth_pam.go` was not compiled — nothing in this change touches it, but the PAM build path was not exercised. Cross-compiled clean for darwin, freebsd, openbsd, windows and linux/arm64 (all `CGO_ENABLED=0`, same caveat). And `internal/mesh` did not finish inside the time available; it is untouched by this change, but it was not run to completion, which is worth saying plainly rather than rounding up to "the suite passes" — see v783's note on exactly that failure mode.
+
+Not changed, deliberately: `key generate -label L` and `seed add -notes N` are optional metadata with real defaults, so they fail the rule above and stay as flags. `fw add`'s flags are all optional criteria — a firewall rule is a bag of predicates with no single subject — and stay as they are.
+
+---
+
+## v783 — 2026-08-02
+
+**Mesh > peers: the overlay editor now opens pre-filled with the CIDR the save actually requires, and accepts a bare address back. It opened on the bare address the table displays, which `NetworkSetAddress` rejects outright — so editing either family meant typing a prefix length that was never shown anywhere. Also fixes a pre-existing test v782 broke and shipped past.**
+
+The peers table shows a bare address because that's what it has: `Overlay4`/`Overlay6` come off the live mesh session, which carries no prefix. `NetworkSetAddress` accepts only a CIDR, and not merely any CIDR — it requires the network's own subnet prefix length, rejecting anything else with "address4 %q must use subnet4's own prefix length /%d ... a shorter or /32-style length here breaks this node's route to the rest of the overlay". So there is exactly one correct value, and the editor was seeded with a string that wasn't it, with no indication of what to add.
+
+That single-correct-answer property is what makes filling it in safe rather than presumptuous: there's no alternative the operator might have wanted instead. New `overlayPrefixLen` reads the length off this network's subnet via `cfgOf` — this node's config, not the peer's, which isn't loaded here; a subnet is a property of the network rather than of a node, so the two agree in any working mesh, and where they somehow don't, the peer's own `NetworkSetAddress` rejects the write naming the length it wants, which beats this second-guessing it. New `overlayWithPrefix` appends it, and deliberately leaves an already-prefixed value alone even when that length will be rejected — silently rewriting it would hide the rejection that explains why it was wrong.
+
+Applied in both directions: the editor opens on the CIDR form, and a bare value typed back gets the prefix added on the way out. The field opens pre-filled with one, so a bare value means the operator deleted it, and the only length that would have been accepted is the one being restored. The placeholder shows the real length too (`10.42.0.5/24` on a /24 network, not a generic example) when the subnet is known.
+
+One trap avoided rather than discovered later: the family-mismatch check added in v782 tests the *typed* value, not the normalized one. Appending "/24" adds no colon on a v4 network, so checking the normalized string would pass today and mislead the first time it didn't.
+
+**The v782 regression.** `TestDualStackOverlayAddressNotCollapsedToOneFamily` counts `overlayCellHTML(p)` call sites and wants at least four; v782 replaced one of them — Mesh > peers' editable cell — with `overlayEditCellHTML(p)`, taking the count to three. v782 shipped with that test failing, and the changelog entry claiming verification said "All 3 new tests pass" because that is literally all that was run: the three new tests, not the package suite around them. The claim was true and the impression it gave was not.
+
+The test's intent survives the change — it guards "no render site collapsed back to one family," and `overlayEditCellHTML` renders both families, it just isn't named `overlayCellHTML`. So the count drops to three and the editable site is checked against the helper it now uses, with the reason recorded in the test rather than the number quietly edited. Notably this test was guarding the *previous* instance of exactly the bug v782 fixed (v6 present in the data, absent from the UI), which is a decent argument for the counting style it uses even though the count needed maintaining here.
+
+New tests in `internal/webadmin/peeroverlay_family_test.go`: `overlayPrefixLen` reads the subnet and returns empty rather than guessing when there's no prefix to read; `overlayWithPrefix` no-ops on an already-prefixed value and when no length is known; and `peerOverlayEdit` seeds from the CIDR form, normalizes a bare typed address before sending, and tests the typed value for the family mismatch.
+
+Verified: `go build ./...`/`go vet ./...`/`gofmt` clean on the files touched, the edited `<script>` region `node --check`'d clean, cross-compiled clean for darwin, freebsd, openbsd, windows, linux/arm64. All 6 overlay tests pass, and — this time actually run — the full `internal/webadmin` suite passes with zero failures.
+
+---
+
+## v782 — 2026-08-02
+
+**Mesh > peers: double-clicking a dual-stack peer's overlay cell now edits the address you clicked. It always opened the IPv4 editor, whichever of the two displayed lines you double-clicked, so the IPv6 address was shown and not editable.**
+
+The cell renders both addresses — `overlayCellHTML` stacks v4 over a muted v6 — but the editor behind it opened on `p.overlay`, a single value computed as `overlay4 || overlay6`. On a dual-stack peer that resolves to the v4 address every time, so the input came up pre-filled with v4 and there was no way to reach v6. A v4-only peer was fine, and so was a v6-only one (the `||` fallback picks its v6 address, which is why that case was already handled deliberately — see `peerRowsForNet`'s own comment on it). Only dual-stack peers were affected, which is presumably why it survived: the fallback logic looks correct in isolation and reads as covering the v6 case.
+
+The v6 address was *technically* reachable: `commit` decided which family to submit by sniffing the typed value's notation (`v.includes(':')`), so clearing the box and typing a v6 address did write `address6`. Nothing in the UI said so, and the pre-filled v4 value said the opposite. Reachable-but-undiscoverable is the same as unreachable for anyone who hasn't read the source.
+
+New `overlayEditCellHTML` — the editable twin of `overlayCellHTML`, used only by Mesh > peers, leaving every read-only caller's markup byte-identical — renders each family in its own span tagged with which family it is. `peerOverlayEdit` now takes that family as a parameter and seeds the editor from `p.overlay6`/`p.overlay4` directly rather than from `p.overlay`, and the double-click is wired to the slots rather than to the cell.
+
+Notation-sniffing is gone rather than kept as a fallback. It was load-bearing only while there was one editor for two families; with per-family slots it's the wrong rule — a v6 address typed into the v4 slot is a mistake worth reporting, not an instruction to silently retarget the write — so that now says which slot you're in and points at the other line. `"none"` likewise needs no special case any more: it clears the family whose slot you opened, which is what it always looked like it would do. Previously it had to reconstruct the intended family from `cur`, a workaround this removes the need for.
+
+A family with no address gets a muted `– add v6` (or `v4`) placeholder slot instead of being omitted. The missing half of a single-stack peer was unreachable for precisely the same reason the v6 half of a dual-stack peer was — nothing to double-click — and it would have been odd to fix one and leave the other, given they were the same bug seen from two sides.
+
+Separately noted, not fixed here: the editor is seeded with the bare address the peers table displays (`Overlay4`/`Overlay6` come off the live mesh session without a prefix), while `NetworkSetAddress` requires a CIDR and rejects anything else with "must be an IPv4 CIDR (e.g. 10.42.0.5/16)". So editing either family means typing a prefix length that was never shown. The placeholder text now shows the expected shape for the family being edited, which is a signpost rather than a fix; pre-filling the network's own prefix length would be the real one, and wants the subnet resolved from this node's config for that network — worth doing, deliberately not bundled into a fix for the family bug.
+
+New tests in `internal/webadmin/peeroverlay_family_test.go`: the editable cell emits a slot for both families unconditionally (including an empty one); `peerOverlayEdit` takes the family as a parameter, seeds from that family's own address, submits the family it was opened for, and no longer contains the `targetsV6` sniff; and Mesh > peers wires the double-click to `[data-ov-fam]` slots with the clicked family passed through, with no family-less call site left behind. Source-level assertions on ui.go, the same approach `ui_dom_helper_test.go` takes, because the regression being guarded against is in the wiring.
+
+Verified: `go build ./...`/`go vet ./...`/`gofmt` clean, the edited `<script>` region `node --check`'d clean, cross-compiled clean for darwin, freebsd, openbsd, windows, linux/arm64. All 3 new tests pass.
+
+---
+
+## v781 — 2026-08-02
+
+**The CLI's command groups now match the web admin's left rail, and a test reads the rail's own source to check it rather than a comment claiming it. The largest gap was an entire nav group: System's nine pages — upgrade, resolver, time, snmp, l2disco, syslog, users, config-history, power — were reachable only from a browser.**
+
+`cli_groups.go` opens by stating it mirrors `internal/webadmin/ui.go`'s `NAV_GROUPS` "exactly," and lists five groups. `NAV_GROUPS` has six. Diffing the two turned up five divergences, every one of them a page an operator can see in the rail and cannot reach from a shell:
+
+- the whole `system` group (9 pages) had no CLI group at all;
+- `upgrade` was still filed under `info` after the web admin moved it to System — Info is read-only reference pages and Upgrade *changes the host*, replacing the running binary and restarting the service;
+- Info's `api` page (the HTTP API reference) had no leaf;
+- Monitor's `l2-peers` page (live LLDP/CDP neighbors) had no leaf, despite being the exact read-only counterpart of `bgp-peers`, which does;
+- `settings` had drifted from covering the whole Settings page to covering 11 of its 26 rows.
+
+That last one is the instructive failure. `settingsGroup`'s doc comment read "as of v553 it carries the whole page, not just cluster mode: every row there with a config field behind it has a leaf here" — true when written, false for a long stretch afterward as the page grew. Missing: login lockout, config-history retention, accept-Manager-pushed-upgrades, keepalive interval, peer timeout, IP forwarding, ICMP redirects, worker threads, TUN queues, socket buffer, UDP GSO/GRO. `usage()` was stale in the same way from the other direction, still telling operators that "Monitor's live host-state views (metrics, capture, route-table, logs, ...) don't have a CLI path yet — use the web admin for those today" several versions after every one of them got a real leaf.
+
+This is the second time this file has gone stale about its own coverage, and its package comment already warns about it in as many words ("paragraphs go stale the moment someone lands a leaf without also updating the paragraph describing what leaves don't exist yet"). A warning is not a check. So the fix that matters here is not the leaves, it's `cmd/gravinet/navparity_test.go`, which parses `NAV_GROUPS` and `settingsRows` out of `ui.go` at test time and compares them against the CLI's own leaf tables — membership *and* order, since the menu a bare `gravinet <group>` prints is a menu, and a menu ordered differently from the rail it mirrors is its own small lie. Deliberately not a table copied into the test: a copy is the stale paragraph again with a compiler behind it, and the next page added to the rail would leave the copy and the CLI wrong together while the test passed.
+
+New `cli_system.go` implements the System group. Every leaf is host-level state rather than daemon-internal, so — like Monitor's `metrics`/`route-table`/`bgp-peers` leaves already do — these call the same exported functions the web handlers call (`service.HostResolver`/`SetHostname`/`SetHostDNS`, `HostTime`/`SetHostTimezone`/`SetHostNTP`/`SetHostClock`, `ApplySNMP`, `ApplyLLDP`, `HostSyslog`/`SetHostSyslog`, `ListSystemUsers` and friends, `HostPowerSupported`/`HostPower`/`HostPowerCancel`, and `config.List`/`Get`/`FullSummary`/`SnapshotNow` for history) rather than reimplementing anything or inventing control-socket protocol. Restart-vs-live disposition is copied from each setting's own handler, not re-decided: SNMP and L2 Disco reconcile their agent immediately after the config write exactly as `handleSystemSNMP`/`handleSystemL2Disco` do, so they commit live rather than asking for a restart.
+
+Two places the CLI deliberately behaves differently from the web page, both because the front doors aren't symmetric. `system resolver hostname` does not auto-restart the daemon the way the web handler does — it says a restart is needed for peers to see the new name and stops. A browser asked for that restart interactively, with a spinner; a command that reads like a setter firing a background service restart is a surprise a script can't defend against. And `system power` refuses to default to anything: every other leaf in the group defaults to a read when given no verb, which is right everywhere except the one page where the read-shaped mistake takes the machine down.
+
+Two Settings rows still have no CLI form, now recorded as explicit exemptions the test enforces rather than as silence: Dark mode (a per-browser preference with nothing in `config.json` behind it) and TLS certificate upload/reset (two PEM blobs, for the certificate the operator's own browser is trusting — its web handler pointedly declines to auto-restart for that reason, and a flag-driven version is a worse place to get it wrong, not a better one). Monitor's `speedtest` remains the one nav page with no CLI path, unchanged and still saying so. Adding a third exemption now requires editing a named map with a reason in it.
+
+Nothing existing moved or changed shape. Every flat command — `network`, `key`, `route`, `seed`, `nat`, `host`, `qos`, `bandwidth`/`bw`, `fw`, `ban`, `unban`, `managed`, `manager`, `upgrade`, `latency` — keeps working with identical args and flags, which matters most for `upgrade`: the install scripts and the upgrade preflight call it by name, and only the group it's *filed under* moved. `TestFlatUpgradeStillWorks` pins that.
+
+New tests in `cmd/gravinet/navparity_test.go`: CLI groups match `NAV_GROUPS` by name, membership, and order in both directions (a rail page with no leaf, and a CLI group the rail doesn't have); `upgrade` is under system and not under info; the flat `upgrade` is still dispatched and still in the prefix-expansion candidate list; every Settings row has a leaf or a named exemption; and `usage()` mentions every group. Verified against a deliberately drifted tree — `l2-peers` removed, `peer-timeout` removed, the `system` group unregistered — where each test failed with the specific missing command named ("web admin has page \"l2-peers\" with no CLI leaf (expected \"gravinet monitor l2-peers\")"), not a bare assertion failure.
+
+Verified: `go build ./...`/`go vet ./...`/`gofmt` clean, cross-compiled clean for darwin, freebsd, openbsd, windows, linux/arm64. All 5 new tests pass, and pass for the right reason (each fails against the drifted tree).
+
+---
+
 ## v780 — 2026-08-02
 
 **A `tcp://` seed in the config is now treated as an operator-authored address, the same as a bare one. It wasn't, and against a peer advertising extra listen ports that turned every configured TCP port into a fresh full handshake every second — each one displacing that peer's live session — for as long as both nodes stayed up.**

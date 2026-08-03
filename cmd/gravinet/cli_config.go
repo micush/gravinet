@@ -668,9 +668,18 @@ func cmdSeed(args []string) {
 
 	case "notes":
 		if len(rest) == 0 {
-			fatal("usage: gravinet seed notes ADDR -notes N")
+			fatal("usage: gravinet seed notes ADDR [TEXT...]  (empty TEXT clears the note)")
 		}
-		if err := cfg.SeedSetNotes(netName, rest[0], notes); err != nil {
+		// Trailing words are the note. This was "-notes TEXT", a mandatory
+		// flag sitting right next to "gravinet network notes NAME TEXT...",
+		// which has taken its text positionally all along — same operation,
+		// two spellings, for no reason anyone could have named. -notes is
+		// still accepted and still wins when both are given.
+		text := notes
+		if len(rest) > 1 {
+			text = strings.Join(rest[1:], " ")
+		}
+		if err := cfg.SeedSetNotes(netName, rest[0], text); err != nil {
 			fatal("%v", err)
 		}
 		fmt.Printf("set notes on seed %s on %s\n", rest[0], n.Name)
@@ -824,20 +833,29 @@ func cmdFWExempt(args []string) {
 		return
 
 	case "add":
+		// The name is positional: it was mandatory anyway ("exemption needs a
+		// -name"), and "fw exempt del IDX" three arms below has always taken
+		// its subject as an argument. -proto/-port/-mgmt stay flags — those
+		// have real defaults and are genuinely optional.
+		pos, rest := splitPositionals(rest, "name", "proto", "port")
 		fs := flag.NewFlagSet("fw exempt add", flag.ExitOnError)
-		name := fs.String("name", "", "label for the exemption")
+		nameFlag := fs.String("name", "", "deprecated: pass the name as an argument instead")
 		proto := fs.String("proto", "any", "tcp|udp|icmp|ospf|<number>|any")
 		port := fs.Int("port", 0, "port; matches source OR destination (0 = any/port-less)")
 		mgmt := fs.Bool("mgmt", false, "track this node's web-admin port (overrides -port)")
 		fs.Parse(rest)
-		if *name == "" {
-			fatal("exemption needs a -name")
+		name := *nameFlag
+		if len(pos) > 0 {
+			name = strings.Join(pos, " ")
 		}
-		e := config.FirewallExempt{Name: *name, Proto: *proto, Port: *port, Mgmt: *mgmt}
+		if name == "" {
+			fatal("usage: gravinet fw exempt add NAME [-proto P] [-port N] [-mgmt]")
+		}
+		e := config.FirewallExempt{Name: name, Proto: *proto, Port: *port, Mgmt: *mgmt}
 		if err := cfg.FirewallExemptAdd(e); err != nil {
 			fatal("%v", err)
 		}
-		fmt.Printf("added exemption %q\n", *name)
+		fmt.Printf("added exemption %q\n", name)
 
 	case "del", "delete", "remove":
 		if len(rest) == 0 {

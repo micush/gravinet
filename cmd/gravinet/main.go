@@ -48,7 +48,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "780"
+	version = "784"
 	commit  = "none"
 )
 
@@ -97,7 +97,7 @@ func main() {
 	// ("gravinet mon ..." => "gravinet monitor ..."); see prefix.go. The
 	// candidate list mirrors this switch's case arms — extend both together.
 	cmd := os.Args[1]
-	if m, cands := matchPrefixGroups(cmd, [][]string{{"run"}, {"genkey"}, {"genpass"}, {"quickstart"}, {"ban"}, {"unban"}, {"list"}, {"status"}, {"latency"}, {"mesh"}, {"traffic"}, {"naming"}, {"monitor"}, {"info"}, {"settings"}, {"network", "net"}, {"key"}, {"route"}, {"seed"}, {"nat"}, {"host", "hosts"}, {"qos"}, {"bandwidth", "bw"}, {"fw"}, {"managed"}, {"manager"}, {"service"}, {"upgrade"}, {"selftest"}, {"version"}, {"help"}}); m != "" {
+	if m, cands := matchPrefixGroups(cmd, [][]string{{"run"}, {"genkey"}, {"genpass"}, {"quickstart"}, {"ban"}, {"unban"}, {"list"}, {"status"}, {"latency"}, {"mesh"}, {"traffic"}, {"naming"}, {"monitor"}, {"system"}, {"info"}, {"settings"}, {"network", "net"}, {"key"}, {"route"}, {"seed"}, {"nat"}, {"host", "hosts"}, {"qos"}, {"bandwidth", "bw"}, {"fw"}, {"managed"}, {"manager"}, {"service"}, {"upgrade"}, {"selftest"}, {"version"}, {"help"}}); m != "" {
 		cmd = m
 	} else if len(cands) > 1 {
 		fmt.Fprintf(os.Stderr, "gravinet: %q is ambiguous: %s\n", cmd, strings.Join(cands, ", "))
@@ -130,6 +130,8 @@ func main() {
 		dispatchGroup("naming", namingGroup, os.Args[2:])
 	case "monitor":
 		dispatchGroup("monitor", monitorGroup, os.Args[2:])
+	case "system":
+		dispatchGroup("system", systemGroup, os.Args[2:])
 	case "info":
 		dispatchGroup("info", infoGroup, os.Args[2:])
 	case "settings":
@@ -184,22 +186,32 @@ any unambiguous prefix works at every level: "gravinet mon met" is
 "gravinet monitor metrics", "gravinet me ne" is "gravinet mesh networks".
 an ambiguous prefix lists its candidates instead of guessing.
 
-commands are grouped the same way the web admin's own left rail is:
+commands are grouped the same way the web admin's own left rail is —
+one group per NAV_GROUPS entry, one section per page, in the rail's order:
 
   mesh       networks, keys, seeds, peers, bans
   traffic    firewall, nat, qos, shaping, routes, bgp
   naming     dns, hosts
   monitor    metrics, mesh-peers, capture, speedtest, latency, route-table,
-             bgp-peers, hosts-file, dns-state, logs
-  info       upgrade, readme, getting-started, license, about
-  settings   managed, manager, shell, log-level, log-size, route-adv,
-             udp-port, tcp-port, nat-state, upnp, geoip
+             bgp-peers, l2-peers, hosts-file, dns-state, logs
+  system     upgrade, resolver, time, snmp, l2disco, syslog, users,
+             config-history, power
+  info       readme, getting-started, api, license, about
+  settings   the web admin's Settings page (the gear, not the rail):
+             managed, manager, shell, accept-mgr-upgrades, login-ban,
+             history-limit, log-level, log-size, keepalive, peer-timeout,
+             route-adv, udp-port, tcp-port, nat-state, ip-forwarding,
+             ip-redirects, upnp, geoip, worker-threads, tun-queues,
+             socket-buffer, udp-gso
 
 run "gravinet <group>" alone to list what's under it, or
-"gravinet <group> <section> -h" for that command's own flags. A few
-sections — mostly Monitor's live host-state views (metrics, capture,
-route-table, logs, ...) — don't have a CLI path yet and say so rather
-than pretending to; use the web admin for those today.
+"gravinet <group> <section> -h" for that command's own flags. Monitor's
+speedtest is the one page with no CLI path (it needs async control-socket
+protocol that doesn't exist yet) and says so rather than pretending to;
+Settings' Dark mode and TLS certificate upload have no CLI form either —
+the first is a per-browser preference with nothing in config.json behind
+it, the second wants two PEM files pasted in and is safer done where the
+browser you'd lock out is the one asking.
 
 other commands (not tied to a web admin page):
   run        run the daemon
@@ -1862,6 +1874,50 @@ func splitPositional(args []string) (positional string, rest []string) {
 	return "", args
 }
 
+// splitPositionals is splitPositional generalized two ways: it returns every
+// positional rather than only the first, and it is told which flags carry a
+// value so it can skip past those values.
+//
+// Both generalizations exist for the same reason. splitPositional treats any
+// token without a leading dash as the positional, which is right only when
+// every flag in play is boolean — given "-sock /run/gravinet.sock archive.tgz"
+// it returns "/run/gravinet.sock", the flag's value, and the real argument is
+// never seen. Naming the value-taking flags fixes that, and returning the
+// whole slice lets commands take a second argument (an index, a note) that
+// used to have to arrive as a flag because there was no way to read one.
+//
+// The residue is returned in order with the positionals removed, ready for
+// flag.FlagSet.Parse — which cannot do this job itself: Go's flag package
+// stops at the first non-flag argument, so "gravinet upgrade src.tgz -dry-run"
+// would leave -dry-run unparsed.
+func splitPositionals(args []string, valueFlags ...string) (pos []string, rest []string) {
+	carriesValue := func(a string) bool {
+		name := strings.TrimLeft(a, "-")
+		if strings.ContainsRune(name, '=') {
+			return false // "-sock=/path" carries its own value
+		}
+		for _, f := range valueFlags {
+			if name == f {
+				return true
+			}
+		}
+		return false
+	}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if strings.HasPrefix(a, "-") {
+			rest = append(rest, a)
+			if carriesValue(a) && i+1 < len(args) {
+				i++
+				rest = append(rest, args[i])
+			}
+			continue
+		}
+		pos = append(pos, a)
+	}
+	return pos, rest
+}
+
 // printPeers prints a peer table — shared by cmdList's combined view and the
 // new "gravinet mesh peers" / "gravinet monitor mesh-peers" leaves (see
 // cli_groups.go) so there's one implementation instead of several that could
@@ -2138,14 +2194,30 @@ func cmdFW(args []string) {
 		}
 		ctlResult(control.Do(*sock, control.Request{Cmd: "fw", Net: *netID, FWOp: op, FWIDs: ids}))
 	case "move":
-		id, rest2 := splitPositional(rest)
+		// "fw move ID INDEX". The destination used to be "-to N", a flag that
+		// defaulted to 0 — so "gravinet fw move 7" with the -to forgotten
+		// didn't complain, it silently moved rule 7 to the top of the
+		// rulebase, which for an ordered, first-match evaluator is about the
+		// most consequential place it could have gone. There is no sensible
+		// default for where to move something, so there is no default now.
+		pos, rest2 := splitPositionals(rest, "sock", "net", "to")
 		fs := flag.NewFlagSet("fw move", flag.ExitOnError)
 		sock := fs.String("sock", defaultControlSocket(), "control socket path")
 		netID := fs.String("net", "", "network name or hex id")
-		to := fs.Int("to", 0, "target index")
+		to := fs.Int("to", -1, "deprecated: pass the target index as an argument instead")
 		fs.Parse(rest2)
-		rid := parseUint(id)
-		ctlResult(control.Do(*sock, control.Request{Cmd: "fw", Net: *netID, FWOp: "move", FWIDs: []uint64{rid}, FWTo: *to}))
+		if len(pos) == 0 {
+			fatal("usage: gravinet fw move ID INDEX  (ids and positions from `gravinet fw list`)")
+		}
+		dest := *to
+		if len(pos) > 1 {
+			dest = int(parseUint(pos[1]))
+		}
+		if dest < 0 {
+			fatal("usage: gravinet fw move %s INDEX  (where in the rulebase to put it; positions from `gravinet fw list`)", pos[0])
+		}
+		rid := parseUint(pos[0])
+		ctlResult(control.Do(*sock, control.Request{Cmd: "fw", Net: *netID, FWOp: "move", FWIDs: []uint64{rid}, FWTo: dest}))
 	case "paste":
 		fs := flag.NewFlagSet("fw paste", flag.ExitOnError)
 		sock := fs.String("sock", defaultControlSocket(), "control socket path")

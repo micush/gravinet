@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"gravinet/internal/config"
 	"gravinet/internal/control"
@@ -11,17 +12,54 @@ import (
 
 // cmdKey manages a network's join/rotation key slots.
 //
-//	gravinet key list    -net NAME
-//	gravinet key show    -net NAME -slot N
-//	gravinet key generate -net NAME [-label L] [-notes N]
-//	gravinet key set KEY -net NAME -slot N [-label L] [-notes N]
-//	gravinet key notes   -net NAME -slot N -notes N
-//	gravinet key enable  -net NAME -slot N
-//	gravinet key disable -net NAME -slot N
-//	gravinet key delete  -net NAME -slot N
+//	gravinet key list                 [-net NAME]
+//	gravinet key show     SLOT        [-net NAME]
+//	gravinet key generate             [-net NAME] [-label L] [-notes N]
+//	gravinet key set      SLOT KEY    [-net NAME] [-label L] [-notes N]
+//	gravinet key notes    SLOT [TEXT...]  [-net NAME]
+//	gravinet key enable   SLOT        [-net NAME]
+//	gravinet key disable  SLOT        [-net NAME]
+//	gravinet key delete   SLOT        [-net NAME]
+//
+// The slot is the thing every one of those verbs acts on, and it used to be
+// mandatory *and* spelled as a flag: "gravinet key delete -net corp -slot 0".
+// Nothing else in this CLI does that — nat, fw exempt and route all take the
+// index or CIDR they operate on as an argument — so the slot is positional
+// now, and -slot is accepted silently for anything already scripted against
+// it. Note the argument order on `set`: slot first, like every other verb
+// here, then the key, matching "host add NAME IP"'s object-then-value shape.
+// The old "key set KEY -slot N" spelling still works, since -slot being
+// present is exactly what marks it.
+//
+// -net stays a flag: it is genuinely optional (a single-network node never
+// needs it), and it names the context rather than the object being acted on.
+// keySlotArg resolves which key slot a verb was pointed at, and returns the
+// arguments left over once it has been taken out of them.
+//
+// The slot comes from the first positional argument, or from -slot when that
+// is how it was written. -slot winning is what keeps the old "key set KEY
+// -slot N" spelling working: its single positional is the key, not the slot,
+// and the presence of -slot is exactly the marker saying so. Under the new
+// spelling, "key set 2 KEY", the slot is consumed here and the key is the one
+// argument that remains — so both forms reach the same switch arm with the
+// same two values, and neither needs to know about the other.
+//
+// Nothing is validated here. Resolution stays deferred to the caller's slot()
+// closure because list and generate take no slot at all, and must not fail for
+// want of one they were never going to use.
+func keySlotArg(slotFlag string, args []string) (slot string, rest []string) {
+	if slotFlag != "" {
+		return slotFlag, args
+	}
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		return args[0], args[1:]
+	}
+	return "", args
+}
+
 func cmdKey(args []string) {
 	if len(args) == 0 {
-		fatal("usage: gravinet key <list|show|generate|set|notes|enable|disable|delete|distribute> [-net NAME] [-slot N] [-label L] [-notes N]")
+		fatal("usage: gravinet key <list|show|generate|set|notes|enable|disable|delete|distribute> [SLOT] [-net NAME]")
 	}
 	if args[0] == "distribute" || args[0] == "dist" {
 		cmdKeyDistribute(args[1:])
@@ -36,13 +74,14 @@ func cmdKey(args []string) {
 	cfg, path, rest := openCfg(rest)
 	n := pickNetwork(cfg, netName)
 
+	slotStr, rest = keySlotArg(slotStr, rest)
 	slot := func() int {
 		if slotStr == "" {
-			fatal("specify -slot N (0–%d)", config.KeySlots-1)
+			fatal("which slot? give it as an argument: gravinet key %s N   (0–%d)", sub, config.KeySlots-1)
 		}
 		v, err := strconv.Atoi(slotStr)
 		if err != nil {
-			fatal("bad -slot %q", slotStr)
+			fatal("slot must be a number 0–%d, got %q", config.KeySlots-1, slotStr)
 		}
 		return v
 	}
@@ -83,7 +122,7 @@ func cmdKey(args []string) {
 	case "set", "import":
 		key, _ := splitPositional(rest)
 		if key == "" {
-			fatal("usage: gravinet key set KEY -net NAME -slot N")
+			fatal("usage: gravinet key set SLOT KEY   (slot 0–%d)", config.KeySlots-1)
 		}
 		if err := cfg.KeySet(n.Name, slot(), key, label); err != nil {
 			fatal("%v", err)
@@ -95,7 +134,14 @@ func cmdKey(args []string) {
 		}
 		fmt.Printf("set key in slot %d on %s\n", slot(), n.Name)
 	case "notes":
-		if err := cfg.KeySetNotes(n.Name, slot(), notes); err != nil {
+		// Trailing words are the note, the way "gravinet network notes NAME
+		// TEXT..." already reads; -notes still wins if it was given, and an
+		// empty tail clears the note, as it does there.
+		text := notes
+		if len(rest) > 0 {
+			text = strings.Join(rest, " ")
+		}
+		if err := cfg.KeySetNotes(n.Name, slot(), text); err != nil {
 			fatal("%v", err)
 		}
 		fmt.Printf("set notes on key slot %d on %s\n", slot(), n.Name)

@@ -16,12 +16,13 @@ import (
 	"gravinet/internal/control"
 	"gravinet/internal/hosts"
 	"gravinet/internal/resolver"
+	"gravinet/internal/service"
 	"gravinet/internal/webadmin"
 )
 
 // This file adds a second, nested way to reach every existing CLI command —
 // "gravinet <group> <section> ..." — mirroring internal/webadmin/ui.go's own
-// NAV_GROUPS exactly (mesh/traffic/naming/monitor/info), plus a "settings"
+// NAV_GROUPS exactly (mesh/traffic/naming/monitor/system/info), plus a "settings"
 // group for managed/manager mode, which the web admin also has but reaches
 // through the gear icon rather than the left rail. It is deliberately
 // additive: every flat command (network, key, route, seed, nat, host, qos,
@@ -247,17 +248,41 @@ var monitorGroup = []groupLeaf{
 	{"latency", "round-trip time from this host to every other mesh peer", cmdLatency},
 	{"route-table", "the live kernel routing table on this host", cmdMonitorRouteTable},
 	{"bgp-peers", "live BGP peer sessions reported by FRR", cmdMonitorBGPPeers},
+	{"l2-peers", "live LLDP/CDP neighbors seen on this host's interfaces", cmdMonitorL2Peers},
 	{"hosts-file", "the live contents of this host's hosts file", cmdMonitorHostsFile},
 	{"dns-state", "what's actually registered with this host's OS resolver", cmdMonitorDNSState},
 	{"logs", "the daemon's recent log output", cmdMonitorLogs},
 }
 
+// infoGroup mirrors NAV_GROUPS' info entry: read-only reference pages only.
+// Upgrade used to be listed here and is deliberately not any more — the web
+// admin moved it to System (it *changes* the host: replaces the running
+// binary and restarts the service), and this group is for pages that don't.
+// It's still reachable as the flat "gravinet upgrade", unchanged, so nothing
+// scripted against it breaks; only the group it's filed under moved.
 var infoGroup = []groupLeaf{
-	{"upgrade", "check and apply a new gravinet binary on this node; local only", cmdUpgrade},
 	{"readme", "project documentation", cmdInfoReadme},
 	{"getting-started", "the full onboarding walkthrough", cmdInfoGettingStarted},
+	{"api", "HTTP API reference", cmdInfoAPI},
 	{"license", "license information", cmdInfoLicense},
 	{"about", "build and host identity", cmdInfoAbout},
+}
+
+// systemGroup mirrors NAV_GROUPS' system entry — host-level operations on the
+// machine gravinet runs on, in the rail's own order, with Power pinned last
+// for the same reason it is there: it's the one item that takes the whole
+// host down, and it shouldn't drift into the middle of a list of routine
+// pages. Implementations are in cli_system.go.
+var systemGroup = []groupLeaf{
+	{"upgrade", "check and apply a new gravinet binary on this node; local only", cmdUpgrade},
+	{"resolver", "this host's hostname and default DNS servers", cmdSystemResolver},
+	{"time", "this host's clock, timezone, and NTP synchronization", cmdSystemTime},
+	{"snmp", "read-only SNMPv2c monitoring agent", cmdSystemSNMP},
+	{"l2disco", "link-layer discovery (LLDP/CDP) configuration", cmdSystemL2Disco},
+	{"syslog", "forward this host's syslog to a remote collector", cmdSystemSyslog},
+	{"users", "local OS accounts permitted to sign in to this console", cmdSystemUsers},
+	{"config-history", "snapshots of past configurations: list|diff|restore|snapshot", cmdSystemConfigHistory},
+	{"power", "restart or shut down this HOST (not just the gravinet service)", cmdSystemPower},
 }
 
 // settingsGroup isn't a NAV_GROUPS entry — it mirrors the web admin's
@@ -268,17 +293,28 @@ var infoGroup = []groupLeaf{
 // where it does). The one deliberate omission is Dark mode, a per-browser
 // preference stored client-side with nothing in config.json to set.
 var settingsGroup = []groupLeaf{
+	{"login-ban", "web admin login lockout policy: ATTEMPTS SECONDS; needs a restart", cmdSettingsLoginBan},
+	{"history-limit", "how many config snapshots to keep before pruning; applied live", cmdSettingsHistoryLimit},
 	{"managed", "get/set managed mode (be managed by a Manager-mode peer)", cmdManaged},
 	{"manager", "get/set manager mode (manage other nodes)", cmdManager},
 	{"shell", "allow a Manager peer to open a real OS shell here: on|off|status", cmdSettingsShell},
+	{"accept-mgr-upgrades", "let a Manager peer push a new binary to this node: on|off|status", cmdSettingsAcceptMgrUpgrades},
+	{"geoip", "approximate peer/seed locations via ipapi.co in the web admin: on|off|status", cmdSettingsGeoIP},
 	{"log-level", "how much this node logs (error|warn|info|debug); applied live", cmdSettingsLogLevel},
 	{"log-size", "log-file size cap (e.g. 200M, 1G); oldest lines drop first; applied live", cmdSettingsLogSize},
 	{"route-adv", "route re-advertisement interval in seconds (0 = default); applied live", cmdSettingsRouteAdv},
+	{"keepalive", "how often this node pings each peer, in seconds; applied live", cmdSettingsKeepalive},
+	{"peer-timeout", "how long a peer may go silent before its session drops; applied live", cmdSettingsPeerTimeout},
 	{"udp-port", "UDP listen port(s), comma-separated, first is primary; \"-\" turns UDP off", cmdSettingsUDPPort},
 	{"tcp-port", "TCP/TLS fallback port(s), comma-separated; \"-\" turns the fallback off", cmdSettingsTCPPort},
 	{"nat-state", "idle NAT connection timeout in seconds (0 = default 120s); applied live", cmdSettingsNATState},
+	{"ip-forwarding", "turn on host IPv4/IPv6 forwarding at startup: on|off|status; needs a restart", cmdSettingsIPForwarding},
+	{"ip-redirects", "suppress host ICMP redirects at startup: on|off|status; needs a restart", cmdSettingsIPRedirects},
 	{"upnp", "ask the LAN router to forward this node's ports automatically: on|off|status", cmdSettingsUPnP},
-	{"geoip", "approximate peer/seed locations via ipapi.co in the web admin: on|off|status", cmdSettingsGeoIP},
+	{"worker-threads", "outbound TUN / inbound UDP worker pool size (0 = per core); needs a restart", cmdSettingsWorkerThreads},
+	{"tun-queues", "read queues per overlay interface, Linux only; needs a restart", cmdSettingsTunQueues},
+	{"socket-buffer", "per-UDP-socket buffer in MB (0 = default); needs a restart", cmdSettingsSocketBuffer},
+	{"udp-gso", "batch packets per syscall on the underlay socket: on|off|status; needs a restart", cmdSettingsUDPGSO},
 }
 
 // cmdMeshPeers is "gravinet mesh peers" — the live peer list, the same data
@@ -637,6 +673,48 @@ func cmdInfoGettingStarted(args []string) {
 	printDocFile(args, "getting-started", (*config.Config).GettingStartedPath)
 }
 func cmdInfoLicense(args []string) { printDocFile(args, "license", (*config.Config).LicensePath) }
+
+// cmdInfoAPI is "gravinet info api" — the HTTP API reference, read fresh off
+// disk exactly as the web admin's Info > API page reads it (see
+// config.APIDocPath's doc comment on why neither embeds a copy). Markdown,
+// unrendered: a terminal is where the raw source is the more useful form, and
+// piping it to a pager or a markdown renderer of one's own choosing is one
+// character of shell.
+func cmdInfoAPI(args []string) { printDocFile(args, "api", (*config.Config).APIDocPath) }
+
+// cmdMonitorL2Peers is "gravinet monitor l2-peers" — the live LLDP/CDP
+// neighbor table, read via service.LLDPNeighbors (the same call the web
+// page's handler makes). Read-only, and the read-only half of a pair, exactly
+// like monitor bgp-peers: the editor for *which* interfaces run LLDP/CDP is
+// "gravinet system l2disco", mirroring the rail's own split.
+func cmdMonitorL2Peers(args []string) {
+	fs := flag.NewFlagSet("monitor l2-peers", flag.ExitOnError)
+	fs.Parse(args)
+	neighbors, ok, hint := service.LLDPNeighbors()
+	if !ok {
+		fatal("l2-peers: %s", hint)
+	}
+	if len(neighbors) == 0 {
+		fmt.Println("no LLDP/CDP neighbors seen")
+		if hint != "" {
+			fmt.Printf("note: %s\n", hint)
+		}
+		return
+	}
+	fmt.Printf("%-12s %-8s %-24s %-20s %s\n", "LOCAL", "PROTO", "NEIGHBOR", "PORT", "MGMT")
+	for _, n := range neighbors {
+		// Protocol is empty when lldpd omits "via"; the web page shows an
+		// en dash there rather than guessing, so do the same thing here.
+		proto := n.Protocol
+		if proto == "" {
+			proto = "-"
+		}
+		fmt.Printf("%-12s %-8s %-24s %-20s %s\n", n.LocalIface, proto, n.SystemName, n.Port, n.MgmtIP)
+	}
+	if hint != "" {
+		fmt.Printf("note: %s\n", hint)
+	}
+}
 
 // printDocFile backs "gravinet info readme/getting-started/license" — the
 // CLI equivalent of those three Info pages, which are themselves just files
