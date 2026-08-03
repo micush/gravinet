@@ -223,47 +223,186 @@ type managedTargetError struct {
 
 func (e *managedTargetError) Error() string { return e.msg }
 
+// managedDialProbeTimeout bounds one candidate probe in resolveManagedTarget.
+// It is deliberately much shorter than proxyClient's 15s budget: this is a
+// bare TCP connect to a peer's web port across an overlay whose RTTs run in
+// the single-digit-to-low-hundreds of milliseconds, so a candidate that
+// hasn't answered in two seconds is not the one to spend a management call
+// on. The cost of being wrong is bounded — if no candidate answers, the
+// preferred one is returned anyway and the caller fails exactly as it did
+// before this probing existed.
+const managedDialProbeTimeout = 2 * time.Second
+
+// managedFamilyTTL is how long a probe result is trusted. handleProxy runs on
+// essentially every peer-UI interaction, so probing per call would put a TCP
+// connect in front of each one; caching the winning address per node bounds
+// that to one probe a minute per peer. It is shorter than managedPeerTTL (90s)
+// so a cached choice can never outlive the advertisement it came from.
+const managedFamilyTTL = 60 * time.Second
+
+type managedFamilyChoice struct {
+	ip netip.Addr
+	at time.Time
+}
+
 // resolveManagedTarget resolves node to a dialable (overlay ip, web port)
 // pair, strictly from the live managed-peer set, and confirms the address is
 // a genuine overlay address (SSRF guard: a malicious peer's advertisement
 // can't aim a proxy at loopback, the LAN, or a cloud-metadata endpoint).
-// Shared by handleProxy and the shell relay (shell.go) — both hop to a
-// managed peer's web admin the same way and need the same guard.
+// Shared by handleProxy, the shell relay (shell.go), the fan-out capture
+// (meshcapture.go), the fan-out tshoot (meshtshoot.go) and the upgrade push
+// (upgrade_push.go) — everything that hops to a managed peer's web admin goes
+// through here and needs the same guard.
+//
+// A dual-stack peer advertises both Overlay4 and Overlay6, and this used to
+// take Overlay4 and consult Overlay6 only if Overlay4 was *absent* — never if
+// it was merely unreachable. On a node whose v4 overlay path is broken while
+// v6 is fine, every management call therefore burned its full timeout dialing
+// an address that was never going to answer, with a working alternative
+// sitting in the same advertisement. Since this function is the single
+// chokepoint, that one line disabled peer management, remote shell, fan-out
+// capture, fan-out tshoot and upgrade push on that peer simultaneously.
+//
+// So both families are candidates now. Each is validated independently against
+// the SSRF and local-path checks — a peer can't smuggle a bad address in via
+// the family that happens to be tried second — and the survivors are probed in
+// preference order, v4 first to keep the previous choice where it still works.
 func (s *Server) resolveManagedTarget(node string) (*clusterPeerTarget, error) {
-	var target *clusterPeerTarget
+	var cands []netip.Addr
+	var port int
+	var found bool
 	for _, m := range s.be.ManagedPeers(managedPeerTTL) {
 		if m.NodeID != node {
 			continue
 		}
-		ip := m.Overlay4
-		if !ip.IsValid() {
-			ip = m.Overlay6
+		found = true
+		port = int(m.WebPort)
+		// v4 first: it is what this resolved to before, so a working v4
+		// peer keeps behaving identically and only broken ones change path.
+		if m.Overlay4.IsValid() {
+			cands = append(cands, m.Overlay4)
 		}
-		if ip.IsValid() && m.WebPort != 0 {
-			target = &clusterPeerTarget{ip: ip, port: int(m.WebPort)}
+		if m.Overlay6.IsValid() {
+			cands = append(cands, m.Overlay6)
 		}
 		break
 	}
-	if target == nil {
+	if !found || port == 0 || len(cands) == 0 {
 		return nil, &managedTargetError{http.StatusBadGateway, "peer not reachable for management (no overlay address/port, or not heard recently)"}
 	}
-	// The target address comes from a peer's advertisement; constrain it to a
-	// real overlay address so a malicious peer can't aim the proxy at loopback,
-	// the LAN, or a cloud-metadata endpoint (SSRF).
-	if !s.be.OverlayContains(target.ip) {
+
+	// Filter to candidates this node could legitimately dial. Both checks run
+	// per candidate rather than once on a pre-picked address, because the
+	// answer genuinely differs per family: a peer may advertise a valid v6
+	// overlay address while its v4 is a spoofed non-overlay one, and this
+	// node's own tun may carry one family and not the other.
+	//
+	// The rejection reasons are kept so that when nothing survives, the error
+	// still says which of the three distinct things went wrong — the whole
+	// reason managedTargetError exists — instead of collapsing to a generic
+	// "not reachable" that hides a spoofing attempt behind a routing problem.
+	var dialable []netip.Addr
+	var spoofed bool
+	var pathReason string
+	for _, ip := range cands {
+		if !s.be.OverlayContains(ip) {
+			spoofed = true
+			continue
+		}
+		// Fail fast if THIS node's overlay data plane can't actually carry the
+		// dial. Without this, a node whose tun interface is missing/down would
+		// route the connection to the peer's overlay address out its underlay
+		// instead (the OS falling back to the default route), and the far end
+		// would reject it with a baffling "connection arrived from <underlay
+		// ip>, which isn't inside any of this node's overlay subnets".
+		// Surfacing the real, local cause here turns that multi-layer mystery
+		// into one clear message on the manager's own UI.
+		if ok, reason := s.be.OverlayPathHealthy(ip); !ok {
+			if pathReason == "" {
+				pathReason = reason
+			}
+			continue
+		}
+		dialable = append(dialable, ip)
+	}
+	switch {
+	case len(dialable) == 0 && pathReason != "":
+		return nil, &managedTargetError{http.StatusServiceUnavailable, "cannot manage peers over the mesh: " + pathReason + " on this node"}
+	case len(dialable) == 0 && spoofed:
 		return nil, &managedTargetError{http.StatusForbidden, "target is not an overlay address"}
+	case len(dialable) == 0:
+		return nil, &managedTargetError{http.StatusBadGateway, "peer not reachable for management (no overlay address/port, or not heard recently)"}
 	}
-	// Fail fast if THIS node's overlay data plane can't actually carry the dial.
-	// Without this, a node whose tun interface is missing/down would route the
-	// connection to the peer's overlay address out its underlay instead (the OS
-	// falling back to the default route), and the far end would reject it with a
-	// baffling "connection arrived from <underlay ip>, which isn't inside any of
-	// this node's overlay subnets". Surfacing the real, local cause here turns
-	// that multi-layer mystery into one clear message on the manager's own UI.
-	if ok, reason := s.be.OverlayPathHealthy(target.ip); !ok {
-		return nil, &managedTargetError{http.StatusServiceUnavailable, "cannot manage peers over the mesh: " + reason + " on this node"}
+
+	return &clusterPeerTarget{ip: s.pickManagedAddr(node, dialable, port), port: port}, nil
+}
+
+// pickManagedAddr chooses which of a peer's dialable overlay addresses to use,
+// probing them in order and remembering the winner for managedFamilyTTL.
+//
+// With a single candidate there is nothing to choose and nothing to learn, so
+// it is returned untouched — no probe, no cache entry, behaviour identical to
+// before. Probing only ever happens where there is a real alternative to fall
+// back to.
+//
+// If no candidate answers, the first is returned rather than an error. The
+// peer may be reachable for the actual request and not for a bare connect
+// (mid-restart, a slow first hop on macOS's Network-Extension utun — see
+// proxySpeedtestClient's note on exactly that), and this function's job is to
+// pick between addresses, not to decide the peer is down. The caller then
+// fails the way it always did.
+func (s *Server) pickManagedAddr(node string, dialable []netip.Addr, port int) netip.Addr {
+	if len(dialable) == 1 {
+		return dialable[0]
 	}
-	return target, nil
+	if ip, ok := s.managedFamily(node); ok {
+		for _, c := range dialable {
+			if c == ip {
+				return c
+			}
+		}
+	}
+	for _, ip := range dialable {
+		c, err := s.probeDial(net.JoinHostPort(ip.String(), strconv.Itoa(port)), managedDialProbeTimeout)
+		if err != nil {
+			continue
+		}
+		c.Close()
+		s.rememberManagedFamily(node, ip)
+		return ip
+	}
+	return dialable[0]
+}
+
+// probeDial is the connect pickManagedAddr uses to decide whether a candidate
+// address answers. It is a field rather than a direct net.DialTimeout call so
+// the dual-stack tests can exercise the v4-dead/v6-live case on machines with
+// no usable IPv6 — which includes most CI containers, exactly where this
+// fallback would otherwise go untested.
+func (s *Server) probeDial(hostport string, timeout time.Duration) (net.Conn, error) {
+	if s.dialProbe != nil {
+		return s.dialProbe(hostport, timeout)
+	}
+	return net.DialTimeout("tcp", hostport, timeout)
+}
+
+func (s *Server) managedFamily(node string) (netip.Addr, bool) {
+	s.managedFamilyMu.Lock()
+	defer s.managedFamilyMu.Unlock()
+	c, ok := s.managedFamilyCache[node]
+	if !ok || time.Since(c.at) > managedFamilyTTL {
+		return netip.Addr{}, false
+	}
+	return c.ip, true
+}
+
+func (s *Server) rememberManagedFamily(node string, ip netip.Addr) {
+	s.managedFamilyMu.Lock()
+	defer s.managedFamilyMu.Unlock()
+	if s.managedFamilyCache == nil {
+		s.managedFamilyCache = map[string]managedFamilyChoice{}
+	}
+	s.managedFamilyCache[node] = managedFamilyChoice{ip: ip, at: time.Now()}
 }
 
 // writeManagedTargetError writes err's status/message if it's a

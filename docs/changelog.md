@@ -2,6 +2,39 @@
 
 ---
 
+## v785 — 2026-08-03
+
+**`resolveManagedTarget` read a peer's `Overlay4` and consulted `Overlay6` only when `Overlay4` was *absent* — never when it was merely unreachable. It is the single chokepoint for every management hop to a peer, so on a dual-stack node whose v4 overlay path was broken, peer management, remote shell, fan-out capture, fan-out tshoot and upgrade push all failed at once, each burning its full timeout on an address that was never going to answer, with a working v6 address sitting in the same advertisement.**
+
+Found from a fan-out capture where one peer came back with `error discovering interface: Get "https://192.168.203.140:8443/api/capture/mesh-iface": context deadline exceeded` while the same node was fine over IPv6. The four lines responsible:
+
+```go
+ip := m.Overlay4
+if !ip.IsValid() {
+    ip = m.Overlay6
+}
+```
+
+`IsValid` asks whether the address *exists*, not whether it *works*. For a peer advertising both, the v6 branch was unreachable code.
+
+Both families are candidates now, v4 first so a working peer resolves exactly as it did before and only broken ones change path. `pickManagedAddr` probes the survivors with a bare TCP connect, 2s each, and returns the first that answers.
+
+**The SSRF and path-health guards moved inside the loop, and that is the part that needed care.** They ran once, on an already-chosen address. Per candidate now, because the answer genuinely differs per family: a peer can advertise a legitimate v6 overlay address next to a spoofed v4 one, and this node's own tun may carry one family and not the other. Rejection reasons are accumulated rather than discarded, so the three distinct statuses `managedTargetError` exists to carry all survive — a spoofing attempt still returns 403 and is not flattened into a generic "peer not reachable" that would hide it behind a routing problem.
+
+**Probing is bounded three ways.** A lone candidate is returned untouched with no probe at all, so single-stack peers are bit-for-bit unchanged. The winner is cached per node for 60s — `handleProxy` fires on essentially every peer-UI interaction, and probing per call would put a TCP connect in front of each one. That TTL is deliberately under `managedPeerTTL` (90s) so a cached choice can never outlive the advertisement it came from; a test asserts the inequality rather than trusting the two constants to stay in that order.
+
+**If no candidate answers, the preferred address is returned rather than an error.** A failed bare connect does not prove the peer is down — mid-restart, or the slow first hop on macOS's Network-Extension-backed utun that `proxySpeedtestClient` already carries a comment about. Choosing between addresses is this function's job; declaring a peer unreachable is the caller's, and the caller then fails exactly the way it did before any of this existed.
+
+**On the tests, and one thing worth not repeating.** The first version staged the v4-dead/v6-live case with real listeners on `::1`. Five of the ten tests then *skipped* — this build environment has no usable IPv6, which is precisely the environment where a v4/v6 fallback most needs covering, and a skip is quiet enough to be mistaken for a pass. The probe dialer is now a field on `Server` (`dialProbe`, nil in production) so the fallback is exercised deterministically anywhere. Ten tests in `internal/webadmin/cluster_dualstack_test.go`: the fallback itself, v4 preference when both answer, no probe for a single candidate, the both-dead case returning the preferred address, per-candidate SSRF including an assertion that `169.254.169.254` is never dialed at all, all-spoofed still returning 403, per-candidate path health, the local reason surviving when no family is healthy, the cache saving a probe, and the TTL ordering.
+
+`stubBackend` grew `overlayAddrs` and `overlayPathReasonFor` so a dual-stack peer can be modelled; both are additive and every existing test that sets only `overlayAddr`/`overlayPathReason` behaves as before.
+
+Verified: `go build ./...` and `go vet ./internal/webadmin/ ./cmd/...` clean, `gofmt -l` clean on the files touched (the same twelve pre-existing unformatted files under `internal/` as in v784, untouched). Full `internal/webadmin` suite passes, 54s, and `cmd/gravinet` passes. Cross-compiled clean for darwin, freebsd, openbsd, windows and linux/arm64. Same two caveats as v784: all builds `CGO_ENABLED=0`, so `auth_pam.go` was not compiled, and `internal/mesh` was again not run to completion — it is untouched by this change, but not claiming otherwise.
+
+Not fixed here: whether the macOS node's v4 overlay path is broken for an independent reason. This change makes that node manageable again over v6; it does not explain the v4 failure, and the two should not be conflated.
+
+---
+
 ## v784 — 2026-08-02
 
 **Values that were mandatory but spelled as flags are now arguments. `gravinet upgrade apply -src ARCHIVE` is `gravinet upgrade ARCHIVE`; the key slot, the exemption name, the seed note and the firewall move target got the same treatment. One of them was also a live footgun: `fw move ID` with the `-to` forgotten silently moved the rule to the top of the rulebase.**

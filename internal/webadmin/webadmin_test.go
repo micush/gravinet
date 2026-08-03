@@ -63,7 +63,9 @@ type stubBackend struct {
 	hostname                string
 	managedPeers            []mesh.ManagedPeer
 	overlayAddr             netip.Addr
-	overlayPathReason       string // non-empty makes OverlayPathHealthy fail with this reason
+	overlayAddrs            []netip.Addr      // extra addresses OverlayContains accepts (dual-stack tests)
+	overlayPathReason       string            // non-empty makes OverlayPathHealthy fail with this reason
+	overlayPathReasonFor    map[string]string // per-address OverlayPathHealthy failures, keyed by ip.String()
 	fwAddCalls              int
 	fwDelCalls              int
 	fwMoveCalls             int
@@ -241,12 +243,23 @@ func (s *stubBackend) SelfPeer(id uint64) (mesh.PeerInfo, bool) {
 	return mesh.PeerInfo{NodeID: "self-node-id", Hostname: s.hostname, Overlay4: "10.99.0.1"}, true
 }
 func (s *stubBackend) OverlayContains(ip netip.Addr) bool {
-	return s.overlayAddr.IsValid() && ip == s.overlayAddr
+	if s.overlayAddr.IsValid() && ip == s.overlayAddr {
+		return true
+	}
+	for _, a := range s.overlayAddrs {
+		if ip == a {
+			return true
+		}
+	}
+	return false
 }
 func (s *stubBackend) OverlayReachable(ip netip.Addr) bool {
 	return s.overlayAddr.IsValid() && ip == s.overlayAddr
 }
 func (s *stubBackend) OverlayPathHealthy(dst netip.Addr) (bool, string) {
+	if r, ok := s.overlayPathReasonFor[dst.String()]; ok {
+		return false, r
+	}
 	if s.overlayPathReason != "" {
 		return false, s.overlayPathReason
 	}

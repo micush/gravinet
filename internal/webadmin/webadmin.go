@@ -142,6 +142,19 @@ type Server struct {
 
 	upg *UpgradeCtl // mesh-distributed binary upgrades; nil when not configured
 
+	// managedFamilyCache remembers which of a dual-stack peer's overlay
+	// addresses last answered a connect, so resolveManagedTarget probes at
+	// most once per managedFamilyTTL per peer rather than once per
+	// management call. Keyed by node id. Its own mutex, not mu: this is on
+	// the path of every proxied peer request and has nothing to do with the
+	// session state mu guards.
+	managedFamilyMu    sync.Mutex
+	managedFamilyCache map[string]managedFamilyChoice
+
+	// dialProbe, when set, replaces net.DialTimeout in pickManagedAddr. Tests
+	// only; nil in production.
+	dialProbe func(hostport string, timeout time.Duration) (net.Conn, error)
+
 	httpSrv *http.Server
 	ln      net.Listener
 	extraLn map[string]net.Listener // additional listeners (e.g. overlay addresses), by address
