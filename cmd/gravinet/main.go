@@ -48,7 +48,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "794"
+	version = "795"
 	commit  = "none"
 )
 
@@ -580,6 +580,14 @@ func cmdRun(args []string) {
 		pktHandler := func(payload []byte, from netip.AddrPort, fam transport.Family) {
 			engine.OnPacket(payload, from, fam)
 		}
+		// The TCP/TLS underlay gets its own handler so the engine learns which
+		// transport actually delivered a packet. Everything downstream used to
+		// infer that from the address ("is there a TLS connection to this
+		// endpoint"), which two peers behind one NAT answer identically —
+		// see Engine.OnPacketTCP.
+		tlsPktHandler := func(payload []byte, from netip.AddrPort, fam transport.Family) {
+			engine.OnPacketTCP(payload, from, fam)
+		}
 		// tr is the UDP underlay. PrimaryPort == 0 means the operator turned UDP
 		// off entirely (the "-" sentinel in the web admin's UDP port field —
 		// Config.Validate refuses this unless the TCP/TLS fallback below is
@@ -626,7 +634,7 @@ func cmdRun(args []string) {
 			if tt, terr := transport.OpenTLS(transport.TLSOptions{
 				Port:       fp,
 				ExtraPorts: tcpExtras(cfg),
-				Handler:    pktHandler,
+				Handler:    tlsPktHandler,
 				Log:        logx.Default(),
 			}); terr != nil {
 				logx.Warnf("tcp/%d fallback unavailable (%v) — continuing UDP-only", fp, terr)
@@ -1332,7 +1340,7 @@ func cmdRun(args []string) {
 					if prev != nil {
 						go func(old *transport.TLSTransport) { time.Sleep(portChangeGrace); old.Close() }(prev)
 					}
-				} else if ntls, terr := transport.OpenTLS(transport.TLSOptions{Port: wantTCP, ExtraPorts: tcpExtras(newCfg), Handler: pktHandler, Log: logx.Default()}); terr != nil {
+				} else if ntls, terr := transport.OpenTLS(transport.TLSOptions{Port: wantTCP, ExtraPorts: tcpExtras(newCfg), Handler: tlsPktHandler, Log: logx.Default()}); terr != nil {
 					logx.Errorf("tcp fallback port change %d -> %d failed: %v — keeping %d", prevTCP, wantTCP, terr, prevTCP)
 				} else {
 					trMu.Lock()

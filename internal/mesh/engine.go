@@ -74,6 +74,15 @@ type Sender interface {
 // transport.Dual): it opens a TCP/TLS fallback connection to a peer when UDP
 // can't reach it. The engine type-asserts its Sender to this; a transport
 // without it (UDP-only) simply never falls back.
+// protoSender is an optional capability of the attached Sender (implemented by
+// transport.Dual): send over a named underlay instead of letting the transport
+// infer one from the destination address. The engine uses it whenever the
+// transport offers it, because the address cannot distinguish two peers behind
+// one NAT and the session can.
+type protoSender interface {
+	SendVia(to netip.AddrPort, payload []byte, p Proto) error
+}
+
 type tcpDialer interface {
 	DialTCP(to netip.AddrPort) error
 	HasTCP(to netip.AddrPort) bool
@@ -1223,6 +1232,15 @@ type peerSession struct {
 	reasmOK      atomic.Uint64 // overlay packets fully reassembled and delivered
 	reasmDrop    atomic.Uint64 // reassembly groups dropped incomplete (evicted, expired, inconsistent)
 	spoofDrop    atomic.Uint64 // inbound packets dropped: source address not owned by this peer (anti-spoofing)
+	// deliveredVia is the underlay that last carried a packet from this peer,
+	// as reported by the transport that read it. Zero (ProtoUDP) until the
+	// first packet arrives, which is the right default: a session with no
+	// traffic yet has no TCP connection to prefer either.
+	//
+	// This replaces asking "is there a TLS connection to this peer's address",
+	// which two peers sharing a NAT address answer identically and wrongly for
+	// one of them.
+	deliveredVia atomic.Uint32
 	// overlayRoamRefused counts inbound datagrams whose observed source was
 	// one of this node's own overlay addresses, which touch declines to roam
 	// onto. Non-zero means the far side's underlay traffic is being captured
@@ -2050,6 +2068,29 @@ func (e *Engine) Attach(s Sender) {
 	e.mu.Unlock()
 }
 
+// sendVia transmits over the underlay a session is actually running on, rather
+// than letting the transport pick one from the destination address.
+//
+// Two peers behind one NAT gateway — TCP forwarded to one host, UDP to another,
+// on the same external IP and port — share a destination address, so an
+// address-based pick sends one peer's traffic down the other's socket. It
+// leaves, it is counted as sent, and it arrives nowhere. The session knows
+// which underlay carried its last inbound packet; that is the fact to steer by.
+//
+// Falls back to plain send when the transport has no protocol-aware form
+// (UDP-only builds, and the test doubles).
+func (e *Engine) sendVia(to netip.AddrPort, b []byte, p Proto) error {
+	e.mu.RLock()
+	s := e.tr
+	e.mu.RUnlock()
+	if ps, ok := s.(protoSender); ok && b != nil {
+		err := ps.SendVia(to, b, p)
+		e.noteSendErr(to, b, err)
+		return err
+	}
+	return e.send(to, b)
+}
+
 // send transmits via the attached transport, tolerating the brief window before
 // Attach is called.
 func (e *Engine) send(to netip.AddrPort, b []byte) error {
@@ -2060,6 +2101,15 @@ func (e *Engine) send(to netip.AddrPort, b []byte) error {
 		return nil
 	}
 	err := s.Send(to, b)
+	e.noteSendErr(to, b, err)
+	return err
+}
+
+// noteSendErr is send's error handling, shared with sendVia so a protocol-aware
+// send gets the same PMTU feedback. Splitting it out rather than duplicating it
+// keeps the EMSGSIZE path single — that one took a node completely dark once
+// (see below) and is not worth having two copies of.
+func (e *Engine) noteSendErr(to netip.AddrPort, b []byte, err error) {
 	if err != nil {
 		// EMSGSIZE is not a transient failure — it is the kernel telling us,
 		// synchronously and for free, the exact thing PMTU discovery exists to
@@ -2076,7 +2126,6 @@ func (e *Engine) send(to netip.AddrPort, b []byte) error {
 		}
 		e.log.Debugf("mesh: send: %v", err)
 	}
-	return err
 }
 
 // isMsgTooLong reports whether err is the OS's "datagram exceeds the path MTU"
@@ -2195,12 +2244,30 @@ func (e *Engine) allocIndex() uint32 {
 // OnPacket is the transport receive handler. The payload is borrowed; we copy
 // anything we retain past this call.
 func (e *Engine) OnPacket(payload []byte, from netip.AddrPort, fam transport.Family) {
-	e.dispatch(payload, from, nil)
+	e.dispatch(payload, from, nil, ProtoUDP)
+}
+
+// OnPacketTCP is OnPacket for datagrams delivered by the TCP/TLS underlay.
+//
+// It exists because which underlay carried a packet is a fact only the
+// transport that read it knows, and everything downstream used to infer it
+// from the address instead — "is there a TLS connection to this endpoint".
+// That inference is correct only while one address means one peer, and two
+// peers behind one NAT gateway (TCP forwarded to one host, UDP to another, on
+// the same external IP and port — two ordinary forward rules) break it: the
+// TCP peer's connection made the UDP peer look like a TCP peer, so the UDP
+// peer's traffic was handed to the other peer's socket and its session was
+// reported with a transport it never used.
+//
+// Recorded per session on arrival, it is then the thing sends are steered by,
+// rather than a guess re-derived from a shared address on every packet.
+func (e *Engine) OnPacketTCP(payload []byte, from netip.AddrPort, fam transport.Family) {
+	e.dispatch(payload, from, nil, ProtoTCP)
 }
 
 // dispatch routes a packet. via is non-nil when the packet arrived wrapped
 // inside a relay session (so replies and the resulting session use that relay).
-func (e *Engine) dispatch(payload []byte, from netip.AddrPort, via *peerSession) {
+func (e *Engine) dispatch(payload []byte, from netip.AddrPort, via *peerSession, deliveredVia Proto) {
 	ty, err := protocol.PacketType(payload)
 	if err != nil {
 		if err == protocol.ErrVersion {
@@ -2220,7 +2287,7 @@ func (e *Engine) dispatch(payload []byte, from netip.AddrPort, via *peerSession)
 	}
 	switch ty {
 	case protocol.TypeData:
-		e.onData(payload, from, via)
+		e.onData(payload, from, via, deliveredVia)
 	case protocol.TypeHSInit:
 		e.onHSInit(payload, from, via)
 	case protocol.TypeHSResp:
@@ -2241,7 +2308,7 @@ const (
 
 // ---- data path ----
 
-func (e *Engine) onData(payload []byte, from netip.AddrPort, via *peerSession) {
+func (e *Engine) onData(payload []byte, from netip.AddrPort, via *peerSession, deliveredVia Proto) {
 	h, aad, ct, err := protocol.DecodeData(payload)
 	if err != nil {
 		return
@@ -2268,6 +2335,13 @@ func (e *Engine) onData(payload []byte, from netip.AddrPort, via *peerSession) {
 	}
 	ps.rxBytes.Add(uint64(len(payload)))
 	ps.rxPkts.Add(1)
+	// Record the underlay this packet actually arrived on. Direct sessions
+	// only: a relayed packet's transport describes the relay leg, not this
+	// peer's path, and stamping it here would make the relay's underlay look
+	// like the peer's.
+	if via == nil {
+		ps.deliveredVia.Store(uint32(deliveredVia))
+	}
 	if roamed := ps.touch(e, from, via); roamed {
 		e.syncPeerBypassRoute(ps.net, ps)
 	}
@@ -2428,6 +2502,10 @@ func (ps *peerSession) touch(e *Engine, from netip.AddrPort, via *peerSession) (
 	return roamed
 }
 
+// via reports the underlay this session's traffic should use: the one its last
+// inbound packet arrived on, as reported by the transport that read it.
+func (ps *peerSession) via() Proto { return Proto(ps.deliveredVia.Load()) }
+
 func (ps *peerSession) ep() netip.AddrPort {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
@@ -2502,7 +2580,7 @@ func (e *Engine) deliver(ps *peerSession, outer []byte) error {
 	}
 	ps.txBytes.Add(uint64(len(outer)))
 	ps.txPkts.Add(1)
-	return e.send(ps.ep(), outer)
+	return e.sendVia(ps.ep(), outer, ps.via())
 }
 
 // sendData encrypts and transmits an overlay IP packet to the peer. Packets that

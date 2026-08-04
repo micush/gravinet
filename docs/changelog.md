@@ -2,6 +2,48 @@
 
 ---
 
+## v795 — 2026-08-04
+
+**Which underlay carried a peer's traffic is now a fact the transport reports, not an inference from the destination address. That inference — "is there a TLS connection to this endpoint" — is correct only while one address means one peer, and two peers behind one NAT gateway make it wrong for one of them.**
+
+TCP/65432 forwarded to one host and UDP/65432 to another, on one external IP, is two independent NAT forward rules and an entirely ordinary configuration. There is nothing to work around on the operator's side, and a previous suggestion in these notes to change one peer's port was wrong.
+
+Under that topology the UDP peer has no TCP path at all. But the TCP peer's TLS connection sits at the same host:port, so `HasConn` answered true for the UDP peer's endpoint too — and three separate things went wrong from that one inference:
+
+- `Dual.Send` handed the UDP peer's datagrams to the TCP peer's socket. They left, were counted as sent, and arrived nowhere: `tx=19, rx=0`.
+- `ListPeers` reported the UDP peer's transport as `tcp`, which it never was. That field was believed during this investigation and sent a line of reasoning down the wrong path.
+- The handshake's own `viaTCP` was derived the same way, so it could not have been used to fix either.
+
+`Engine.OnPacketTCP` is the new seam. The TCP/TLS underlay gets its own handler in `cmd/gravinet`, so the engine learns which transport actually read a packet; `peerSession.deliveredVia` records it per session on arrival, and `peerSession.via()` is what sends and reporting now consult. Relayed packets do not stamp it — a relayed packet's transport describes the relay leg, not this peer's path.
+
+`Dual.SendVia(to, payload, Proto)` sends over a named underlay. `ProtoUDP` deliberately does **not** fall through to TLS: falling through is the bug, because for a UDP-path peer the TLS connection at that address belongs to somebody else, and an error the caller retries is the honest outcome. `ProtoTCP` still falls through to UDP, where an absent TLS connection means this node has no TCP path rather than that another peer's is standing in the way.
+
+The engine uses `SendVia` when the transport offers it and plain `Send` otherwise, so UDP-only builds and the test doubles are unaffected.
+
+`send`'s EMSGSIZE handling is factored into `noteSendErr` and shared, rather than duplicated into the new path. That path once took a node completely dark (v713) and is not worth having two copies of.
+
+### Sequencing
+
+v794 stopped the two connections from evicting each other, which was real and necessary — `conns` held one entry per remote host:port and registering a second closed the first. It was not sufficient: with both connections preserved, the send path still picked between them by address. This is the other half.
+
+### Tests
+
+`internal/transport/sendvia_test.go` — a UDP-path send ignores another peer's TLS connection at the same address; a TCP-path send still uses TLS and does not leak onto UDP; a UDP-path send with no UDP transport errors rather than silently borrowing the neighbour's connection.
+
+`internal/mesh/deliveredvia_test.go` — a session records the delivering underlay and follows a peer that moves back to UDP; the engine steers by it rather than by address; a transport without `SendVia` still carries traffic.
+
+Both written before the change, as reproductions.
+
+### Verified
+
+`go build ./...` and `go vet ./...` clean, `gofmt -l` clean on files touched. Full `internal/mesh` suite — 523 tests in chunks (A-H, I-P, Q-Z) plus the four multi-minute tests individually, including `TestDeadSeedWithTCPFallbackDoesNotDegrade`. `internal/transport`, `internal/webadmin`, `internal/config` and `cmd/gravinet` pass. Standing caveat unchanged: all builds `CGO_ENABLED=0`, so `auth_pam.go` was not compiled.
+
+### What is still address-derived
+
+Nothing on the send path. If two peers both reach this node over TCP at one shared host:port, `Dual` still picks between their connections newest-first, because the TLS transport has no notion of peer identity — see v794. That case did not arise here, where the two peers use different protocols, and closing it means teaching the transport node ids.
+
+---
+
 ## v794 — 2026-08-04
 
 **Two peers behind one NAT gateway, port-forwarded to the same external address, were closing each other's TCP connections in a loop. `conns` held one connection per remote host:port, and registering a second closed the first.**

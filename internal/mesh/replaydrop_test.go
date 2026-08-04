@@ -84,7 +84,7 @@ func TestOnDataCountsDuplicateAsReplay(t *testing.T) {
 	// wrong reason and make this test prove nothing.
 	dup := append([]byte(nil), pkt...)
 
-	e.onData(pkt, from, nil)
+	e.onData(pkt, from, nil, ProtoUDP)
 	select {
 	case <-dev.out:
 	case <-time.After(2 * time.Second):
@@ -94,7 +94,7 @@ func TestOnDataCountsDuplicateAsReplay(t *testing.T) {
 		t.Fatalf("replayDrop=%d after one legitimate packet, want 0", got)
 	}
 
-	e.onData(dup, from, nil)
+	e.onData(dup, from, nil, ProtoUDP)
 	if got := ps.replayDrop.Load(); got != 1 {
 		t.Fatalf("replayDrop=%d after a duplicate, want 1", got)
 	}
@@ -119,7 +119,7 @@ func TestOnDataCountsLateReorderedPacketAsReplay(t *testing.T) {
 	// deliver enough later packets to slide the window fully past it.
 	straggler := sealFor(t, send, idx, inner)
 	for i := 0; i < testReplayWindow+1; i++ {
-		e.onData(sealFor(t, send, idx, inner), from, nil)
+		e.onData(sealFor(t, send, idx, inner), from, nil, ProtoUDP)
 		select {
 		case <-dev.out:
 		case <-time.After(2 * time.Second):
@@ -130,7 +130,7 @@ func TestOnDataCountsLateReorderedPacketAsReplay(t *testing.T) {
 		t.Fatalf("replayDrop=%d before the straggler arrived, want 0", got)
 	}
 
-	e.onData(straggler, from, nil)
+	e.onData(straggler, from, nil, ProtoUDP)
 	if got := ps.replayDrop.Load(); got != 1 {
 		t.Fatalf("replayDrop=%d for a valid packet %d behind the window, want 1",
 			got, testReplayWindow+1)
@@ -161,7 +161,7 @@ func TestOnDataAcceptsReorderingInsideWindow(t *testing.T) {
 		pkts[i] = sealFor(t, send, idx, inner)
 	}
 	for i := len(pkts) - 1; i >= 0; i-- {
-		e.onData(pkts[i], from, nil)
+		e.onData(pkts[i], from, nil, ProtoUDP)
 		select {
 		case <-dev.out:
 		case <-time.After(2 * time.Second):
@@ -186,7 +186,7 @@ func TestOnDataCountsTamperedPacketAsAuthFailure(t *testing.T) {
 	pkt := sealFor(t, send, idx, ipv4From(own, netip.MustParseAddr("10.0.0.9")))
 	pkt[len(pkt)-1] ^= 0xFF // flip a bit in the GCM tag: fresh counter, bad tag
 
-	e.onData(pkt, from, nil)
+	e.onData(pkt, from, nil, ProtoUDP)
 	if got := ps.authDrop.Load(); got != 1 {
 		t.Fatalf("authDrop=%d for a tampered packet, want 1", got)
 	}

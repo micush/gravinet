@@ -990,17 +990,18 @@ func (e *Engine) ListPeers(networkID uint64) []PeerInfo {
 	if ns == nil {
 		return nil
 	}
-	// Grab the transport before locking ns: if it can fall back to TCP/TLS, a
-	// peer with a live fallback connection is currently reached over TCP.
-	e.mu.RLock()
-	fd, hasFB := e.tr.(tcpDialer)
-	e.mu.RUnlock()
 	ns.mu.RLock()
 	defer ns.mu.RUnlock()
 	out := make([]PeerInfo, 0, len(ns.byNode))
 	for _, ps := range ns.byNode {
+		// What actually carried this peer's last packet, as reported by the
+		// transport that read it — not "is there a TLS connection to this
+		// address", which two peers sharing a NAT address answer identically
+		// and wrongly for one of them. That inference reported a UDP peer as
+		// "tcp" purely because its neighbour's TLS connection sat at the same
+		// host:port.
 		transport := "udp"
-		if hasFB && fd.HasTCP(ps.ep()) {
+		if ps.via() == ProtoTCP {
 			transport = "tcp"
 		}
 		pi := PeerInfo{NodeID: ps.nodeID, Hostname: ps.hostname, Endpoint: ps.ep().String(), Relayed: ps.getRelay() != nil,

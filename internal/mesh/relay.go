@@ -59,7 +59,7 @@ func (e *Engine) onRelay(ps *peerSession, body []byte) {
 	ns := ps.net
 	if dst == e.nodeID {
 		// Destination: process the opaque packet; replies route back via ps.
-		e.dispatch(opaque, netip.AddrPort{}, ps)
+		e.dispatch(opaque, netip.AddrPort{}, ps, ProtoUDP)
 		return
 	}
 	// Intermediary.
