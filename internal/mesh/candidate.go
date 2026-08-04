@@ -277,6 +277,14 @@ func SortCandidates(in []Candidate) []Candidate {
 //
 // Only seeds are consulted. An advertised or observed endpoint shared with
 // another peer is ordinary NAT behaviour and says nothing about who answers.
+// ownerAmbiguous marks a configured seed whose owner cannot be determined
+// because the same host:port is configured for both transports — two peers
+// behind one NAT, port-forwarded on different protocols. No node ID can equal
+// it, so it never matches a real candidate's owner and therefore always
+// conflicts, which is the intended outcome: a candidate derived from one
+// protocol's seed must not be dialed at the other protocol's configured seed.
+const ownerAmbiguous = "?ambiguous"
+
 func (c Candidate) ConflictsWith(seeds []Candidate) bool {
 	if c.Owner == "" {
 		return false // nothing to contradict

@@ -584,6 +584,21 @@ func (e *Engine) onHSResp(payload []byte, from netip.AddrPort, via *peerSession)
 	// it did, which is what produced the once-a-second "tunnel up" churn for
 	// a subset of peers rather than a one-time connect.
 	ns.seedOwner[p.endpoint] = pl.NodeID
+	// The same proof, recorded per-transport. This is the general form of the
+	// bounded maps below, and unlike ns.seedOwner above it can hold two peers
+	// at one host:port split only by protocol — which is what ConflictsWith
+	// needs to see a candidate landing on a *different* peer's configured
+	// seed. viaTCP is exactly the fact that makes it knowable here.
+	{
+		hp := ProtoUDP
+		if viaTCP {
+			hp = ProtoTCP
+		}
+		if ns.seedOwnerProto == nil {
+			ns.seedOwnerProto = map[CandKey]string{}
+		}
+		ns.seedOwnerProto[CandKey{Addr: p.endpoint.Addr().Unmap(), Port: p.endpoint.Port(), Proto: hp}] = pl.NodeID
+	}
 	// Same proof, but per-transport and bounded to the operator's actually-
 	// configured seeds -- see configuredSeedOwnerUDP/TCP's doc comment on
 	// netState for why ns.seedOwner above can't serve this on its own. The
@@ -1118,6 +1133,48 @@ func (ns *netState) seedOwnerOf(seed netip.AddrPort) string {
 	return ns.seedOwner[seed]
 }
 
+// seedOwnerOfProto is seedOwnerOf for a specific transport, which is the only
+// form that can answer correctly when two peers share a host:port and differ
+// only by protocol. Falls back to the address-only map when this address is
+// unambiguous.
+func (ns *netState) seedOwnerOfProto(seed netip.AddrPort, proto Proto) string {
+	ns.mu.RLock()
+	defer ns.mu.RUnlock()
+	k := CandKey{Addr: seed.Addr().Unmap(), Port: seed.Port(), Proto: proto}
+	if o, ok := ns.seedOwnerProto[k]; ok {
+		return o
+	}
+	if ns.ambiguousSeedAddrLocked(seed) {
+		return "" // honestly unknown beats confidently wrong
+	}
+	return ns.seedOwner[seed]
+}
+
+// ambiguousSeedAddrLocked reports whether this exact host:port is configured
+// for more than one transport, which is precisely when the address-only owner
+// map cannot be trusted. Caller holds ns.mu.
+func (ns *netState) ambiguousSeedAddrLocked(seed netip.AddrPort) bool {
+	tcp := false
+	for _, t := range ns.tcpSeeds {
+		if t == seed {
+			tcp = true
+			break
+		}
+	}
+	if !tcp {
+		return false
+	}
+	// It is a TCP seed; ambiguous only if a UDP seed shares the address too.
+	for _, u := range ns.seeds {
+		if u == seed && ns.explicitSeed[u] {
+			// Present in both lists at the same host:port.
+			udpOwner, hasUDP := ns.seedOwner[seed]
+			return hasUDP && udpOwner != ""
+		}
+	}
+	return false
+}
+
 // seedCandidates is the operator-configured seed set as candidates, for
 // ConflictsWith. Only explicitly-configured seeds are included: an address
 // learned by gossip or observed behind a NAT says nothing authoritative about
@@ -1131,19 +1188,43 @@ func (ns *netState) seedCandidates() []Candidate {
 		if !ns.explicitSeed[s] {
 			continue
 		}
-		owner := ns.seedOwner[s]
-		if owner == "" {
-			continue // nothing to contradict
-		}
-		// A configured seed's protocol comes from its config entry; the store
-		// records TCP seeds explicitly (see explicitTCPSeed), and everything
-		// else is UDP.
+		// Protocol first: a configured seed's transport comes from its config
+		// entry (a "tcp://" prefix puts it in tcpSeeds), and everything else
+		// is UDP.
 		proto := ProtoUDP
 		for _, t := range ns.tcpSeeds {
 			if t == s {
 				proto = ProtoTCP
 				break
 			}
+		}
+		// Then the owner, keyed by protocol as well as address. Falling back
+		// to the address-only map is what made ConflictsWith useless for two
+		// peers at one host:port split by protocol: both seeds reported the
+		// same owner, so the guard compared a candidate against its own owner
+		// and passed. Only consult seedOwner when the protocol-aware map has
+		// nothing, and never when another protocol at this address is known to
+		// belong to someone else.
+		k := CandKey{Addr: s.Addr().Unmap(), Port: s.Port(), Proto: proto}
+		owner, known := ns.seedOwnerProto[k]
+		if !known {
+			if ns.ambiguousSeedAddrLocked(s) {
+				// This exact host:port is configured for both transports, so
+				// it is two peers, and the address-only map cannot say which
+				// is which. Emit the seed anyway, marked unattributable:
+				// dropping it would leave nothing for ConflictsWith to check
+				// against, which is how the guard silently passed the one case
+				// it exists for. An unattributable seed must block, not abstain
+				// — a configured seed is authoritative for its key, and a
+				// candidate derived from the *other* protocol at that key has
+				// no claim to it.
+				owner = ownerAmbiguous
+			} else {
+				owner = ns.seedOwner[s]
+			}
+		}
+		if owner == "" {
+			continue // nothing to contradict
 		}
 		out = append(out, Candidate{Addr: s.Addr().Unmap(), Port: s.Port(), Proto: proto, Src: SrcSeed, Owner: owner})
 	}
@@ -1503,7 +1584,7 @@ func (e *Engine) dialCandidate(ns *netState, tr Sender, seed netip.AddrPort, por
 	// let concurrent callers slip past a due-check before the first dial had
 	// updated anything — the claim is atomic, so only one caller proceeds.
 	k := CandKey{Addr: fb.Addr().Unmap(), Port: fb.Port(), Proto: ProtoTCP}
-	ns.cands.Add(Candidate{Addr: k.Addr, Port: k.Port, Proto: ProtoTCP, Src: SrcSeed, Owner: ns.seedOwnerOf(seed)})
+	ns.cands.Add(Candidate{Addr: k.Addr, Port: k.Port, Proto: ProtoTCP, Src: SrcSeed, Owner: ns.seedOwnerOfProto(seed, ProtoTCP)})
 	if !ns.cands.Claim(k, time.Now()) {
 		return // another call has this candidate in flight, or it is cooling down
 	}
@@ -1555,7 +1636,7 @@ func (e *Engine) dialCandidate(ns *netState, tr Sender, seed netip.AddrPort, por
 			owner := ns.seedOwner[seed]
 			ns.mu.RUnlock()
 			if owner != "" {
-				e.AddSeedFor(netID, fb, owner)
+				e.AddSeedForProto(netID, fb, owner, ProtoTCP) // this connection is TCP; say so, don't let it be inferred
 			} else {
 				e.AddSeed(netID, fb)
 			}

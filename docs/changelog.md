@@ -2,6 +2,51 @@
 
 ---
 
+## v792 — 2026-08-04
+
+**The originally reported failure still reproduced. Seed ownership was keyed by address alone, so of two peers configured at one host:port and split only by protocol, whichever registered last owned both — and the guard meant to catch a cross-peer dial compared a candidate against its own owner and passed.**
+
+v788 through v791 removed the port derivation, the config shape, the naming and the pacing maps that made this class of bug possible. None of them removed the bug. It was only found by reproducing the operator's actual seed list end to end rather than reasoning that the mechanism was gone:
+
+```
+tcp://174.64.247.165:65432   "cox gn-cush1 nat phoenix"
+     174.64.247.165:65432    "cox-gn-cush2 nat phoenix"
+```
+
+`ns.seedOwner` is a `map[netip.AddrPort]string`. Both entries share one key. cush1's TCP seed therefore reported as belonging to **cush2**, so when `ConflictsWith` asked "does this candidate land on a *different* peer's configured seed?", it saw `owner == owner` and declined to flag it. The guard silently passed the single case it was written for, and the dial went to cush1's listener — `tx=28, rx=0`, flapping every fifteen seconds, exactly as reported.
+
+`seedOwnerProto`, keyed by `CandKey` (address, protocol, port), is the fix. It wins wherever it has an entry, and `AddSeedForProto`/`seedOwnerOfProto` are the forms callers use when the transport is knowable — a `tcp://` config entry, a handshake that completed over TLS (`viaTCP` already tells `onHSResp` exactly this), or a candidate registered after a successful `DialTCP`.
+
+`configuredSeedOwnerUDP`/`configuredSeedOwnerTCP` already split by transport for `ManagedPeers.IsSeed`, with a comment naming this exact topology — "two peers behind one NAT gateway, port-forwarded to the same external address on different protocols". The problem was known, fixed for one caller, and written around everywhere else. This is the general form; the bounded maps stay as they are.
+
+### Two wrong turns, both caught by the test
+
+**Inferring the protocol instead of passing it.** The first version derived a seed's transport from `tcpSeeds` membership. Membership is a property of the *address*, so with both a TCP and a UDP seed at one host:port every registration looks like TCP and the second overwrites the first — wrong in precisely the case it was written for. `addSeed` takes the protocol explicitly now; a caller that cannot know it passes nil and falls back to address-only attribution, which is correct whenever the address is unambiguous.
+
+**Abstaining instead of blocking.** When ownership could not be attributed, the first version dropped the seed from the conflict set. That left nothing to check against, which is how the guard failed originally — a strictly worse outcome than before. An unattributable configured seed is emitted marked `ownerAmbiguous` and therefore always conflicts: a configured seed is authoritative for its key, and a candidate derived from the other protocol at that key has no claim to it.
+
+The second is the more instructive one. "Honestly unknown" is the right instinct for a *candidate* — refusing to dial is worse than a wrong guess, since no answer means no connectivity — but for a *seed in the conflict set* it inverts into silence, and silence is what the bug was made of.
+
+### Tests
+
+`internal/mesh/natcrossdial_test.go`, driven through the real registration path rather than by poking maps:
+
+- `TestTwoPeersOneNATDoNotCrossDial` — the operator's seed list verbatim; the derived TCP candidate for cush2 must not be dialable.
+- `TestSinglePeerBehindNATStillDialable` — the guard must not become a blanket refusal. One peer behind a NAT is the ordinary case and its own seed stays dialable.
+- `TestSeedOwnerIsPerProtocol` — attribution survives a second registration at the same host:port.
+
+The middle one matters as much as the first. A guard that blocks everything would also make the reproduction pass.
+
+### Verified
+
+`go build ./...` and `go vet ./...` clean, `gofmt -l` clean on files touched. The full `internal/mesh` suite passes — all 523 tests in chunks (A–H, I–P, Q–Z) plus the four multi-minute tests that skip under `-short` run individually. `internal/config`, `internal/transport`, `internal/webadmin` and `cmd/gravinet` pass. Standing caveat unchanged: all builds `CGO_ENABLED=0`, so `auth_pam.go` was not compiled.
+
+### On the four releases before this one
+
+They were not wasted — `ConflictsWith` could not have existed without the flat candidate model, and the port derivation would have produced this failure by a second route regardless. But the reported bug survived all of them, and it survived because "the mechanism that caused it is gone" was treated as equivalent to "the reported failure cannot happen". It is not. The reproduction should have been written first.
+
+---
+
 ## v791 — 2026-08-04
 
 **`candStore` is wired in. `fallbackBackoff`, `fallbackAttempt` and `dialing` are gone — three maps keyed by bare address, replaced by one store keyed by address *and protocol* and port.**

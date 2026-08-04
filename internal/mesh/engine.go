@@ -732,6 +732,28 @@ type netState struct {
 	// other peer sharing that IP (e.g. several nodes behind one NAT gateway,
 	// or in tests, several local peers all on 127.0.0.1) as satisfying this
 	// seed too.
+	// seedOwnerProto is seedOwner keyed by protocol as well as address, and it
+	// wins whenever it has an entry.
+	//
+	// seedOwner is a map[netip.AddrPort]string, which cannot represent two
+	// peers configured at the identical host:port and distinguished only by
+	// UDP vs TCP — a real and ordinary topology: two nodes behind one NAT
+	// gateway, port-forwarded to the same external address on different
+	// protocols. Whichever registered last silently owned both.
+	//
+	// That was not a cosmetic gap. seedCandidates feeds Candidate.ConflictsWith,
+	// which exists to stop a candidate being dialed when it lands exactly on a
+	// *different* peer's configured seed. With one shared entry, the other
+	// peer's seed reported the same owner as the candidate, ConflictsWith saw
+	// owner == owner, and declined to flag it — so the guard silently passed
+	// the one case it was written for, and the dial went to the wrong host.
+	//
+	// configuredSeedOwnerUDP/TCP already split by transport for
+	// ManagedPeers.IsSeed, for exactly this reason, but they are populated
+	// only after a handshake completes and are scoped to that one caller.
+	// This is the general form.
+	seedOwnerProto map[CandKey]string
+
 	seedFallback map[netip.AddrPort]netip.AddrPort
 	// seedOwner records, for a seed entry, the node ID it's known to belong to
 	// — populated only where that's cheaply known at add time (currently:
@@ -1551,6 +1573,7 @@ func (e *Engine) newNetState(spec NetSpec) *netState {
 		seedBackoff:            make(map[netip.AddrPort]time.Time),
 		seedFallback:           make(map[netip.AddrPort]netip.AddrPort),
 		seedOwner:              make(map[netip.AddrPort]string),
+		seedOwnerProto:         make(map[CandKey]string),
 		configuredSeedOwnerUDP: make(map[netip.AddrPort]string),
 		configuredSeedOwnerTCP: make(map[netip.AddrPort]string),
 		explicitSeed:           explicitSeedSet(spec.Seeds, spec.TCPSeeds),
@@ -1902,7 +1925,7 @@ func explicitSeedSet(lists ...[]netip.AddrPort) map[netip.AddrPort]bool {
 // will never touch it — the safe default for callers that don't cheaply know
 // which node an address belongs to.
 func (e *Engine) AddSeed(networkID uint64, seed netip.AddrPort) {
-	e.addSeed(networkID, seed, "", false)
+	e.addSeed(networkID, seed, "", false, nil)
 }
 
 // AddSeedFor is AddSeed plus recording which node this address is known to
@@ -1912,7 +1935,17 @@ func (e *Engine) AddSeed(networkID uint64, seed netip.AddrPort) {
 // evicting a different node's still-needed seed if they happen to share an
 // address (see the same precision requirement in connectedTo).
 func (e *Engine) AddSeedFor(networkID uint64, seed netip.AddrPort, nodeID string) {
-	e.addSeed(networkID, seed, nodeID, false)
+	e.addSeed(networkID, seed, nodeID, false, nil)
+}
+
+// AddSeedForProto is AddSeedFor when the caller knows which transport the seed
+// belongs to. Use it wherever that is knowable — a "tcp://" config entry, or a
+// handshake that completed over TLS — because it is the only form that can
+// attribute two peers configured at one host:port and split only by protocol.
+// AddSeedFor's address-only attribution silently gives both to whichever
+// registered last.
+func (e *Engine) AddSeedForProto(networkID uint64, seed netip.AddrPort, nodeID string, proto Proto) {
+	e.addSeed(networkID, seed, nodeID, false, &proto)
 }
 
 // AddExplicitSeed is AddSeed plus marking the address as one the operator
@@ -1921,13 +1954,13 @@ func (e *Engine) AddSeedFor(networkID uint64, seed netip.AddrPort, nodeID string
 // network construction (newNetState) and by ReloadRuntime's config-seed
 // merge — see netState.explicitSeed's doc comment for what this unlocks.
 func (e *Engine) AddExplicitSeed(networkID uint64, seed netip.AddrPort) {
-	e.addSeed(networkID, seed, "", true)
+	e.addSeed(networkID, seed, "", true, nil)
 }
 
 // addSeed returns true if seed was newly added to ns.seeds (false if it was
 // already present, or was rejected as an overlay address). Callers use this to
 // log only genuinely new information rather than re-announcing on every tick.
-func (e *Engine) addSeed(networkID uint64, seed netip.AddrPort, nodeID string, explicit bool) bool {
+func (e *Engine) addSeed(networkID uint64, seed netip.AddrPort, nodeID string, explicit bool, proto *Proto) bool {
 	if e.isOverlayAddr(seed.Addr()) {
 		// A gossip-learned (or otherwise discovered) endpoint that lands inside an
 		// overlay subnet is a mesh address, not a real underlay endpoint. Dialing
@@ -1953,6 +1986,23 @@ func (e *Engine) addSeed(networkID uint64, seed netip.AddrPort, nodeID string, e
 	}
 	if nodeID != "" {
 		ns.seedOwner[seed] = nodeID
+		// Also record it against the transport this seed was registered for,
+		// so two peers sharing a host:port and differing only by protocol each
+		// keep their own attribution — seedOwner alone cannot hold both.
+		//
+		// The protocol is passed in, never inferred from tcpSeeds membership.
+		// Inferring is what the first attempt at this did, and it is wrong for
+		// exactly the case it was meant to fix: membership is a property of
+		// the *address*, so when both a TCP and a UDP seed exist at one
+		// host:port, every registration looks like TCP and the second one
+		// overwrites the first. The caller knows which transport it holds; it
+		// has to say so.
+		if proto != nil {
+			if ns.seedOwnerProto == nil {
+				ns.seedOwnerProto = map[CandKey]string{}
+			}
+			ns.seedOwnerProto[CandKey{Addr: seed.Addr().Unmap(), Port: seed.Port(), Proto: *proto}] = nodeID
+		}
 		// Promote to the node-keyed map the moment an explicitly-configured
 		// address's owner becomes known, so the priority follows that node
 		// even once it's reached at a different (e.g. roamed) address — see

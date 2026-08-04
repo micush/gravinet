@@ -400,7 +400,7 @@ func (e *Engine) addLocalCandidates(netID uint64, nodeID string, eps []netip.Add
 		ns.hostCand[ep] = true
 		ns.mu.Unlock()
 
-		e.addSeed(netID, ep, nodeID, false)
+		e.addSeed(netID, ep, nodeID, false, nil)
 		if firstTime {
 			e.log.Infof("mesh: learned host candidate %s for peer %q on net %016x — will try it for a direct path", ep, nodeID, netID)
 		}
