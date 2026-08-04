@@ -18,7 +18,7 @@ func TestExemptHandler(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := dir + "/config.json"
 	cfg := &config.Config{
-		PrimaryPort: 51820, EnableIPv4: true,
+		UDPPorts: []int{51820}, EnableIPv4: true,
 		WebAdmin: config.WebAdmin{Listen: "127.0.0.1:8443"},
 		Networks: []config.Network{{ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24",
 			Firewall: config.Firewall{Enabled: true}}},

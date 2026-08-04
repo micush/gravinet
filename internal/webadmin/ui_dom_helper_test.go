@@ -477,8 +477,8 @@ func TestUpgradeAllThenLocalOption(t *testing.T) {
 	// "rest" (non-seed batch or seed loop) must not gate anything that
 	// follows it. Guarded by absence: neither of these should exist anymore.
 	for _, mustNotHave := range []string{
-		"stoppedEarly",                 // the old blanket stop-on-any-failure flag
-		"if (nonSeedNodes.length){",    // the old (unconditional-push, but gate-setting) non-seed phase
+		"stoppedEarly",                            // the old blanket stop-on-any-failure flag
+		"if (nonSeedNodes.length){",               // the old (unconditional-push, but gate-setting) non-seed phase
 		"if (!stoppedEarly && seedNodes.length){", // the old seed phase, gated on the non-seed batch's success
 	} {
 		if strings.Contains(block, mustNotHave) {
@@ -681,4 +681,3 @@ func TestBgpNeighborFiltersPillWired(t *testing.T) {
 		t.Error("the BGP config save payload no longer includes each neighbor's filter_in/filter_out")
 	}
 }
-

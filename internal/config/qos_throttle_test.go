@@ -5,7 +5,7 @@ import "testing"
 // Enabling QoS must enable the up-throttle (QoS only reorders behind a rate
 // cap), seeding a placeholder rate when none is configured.
 func TestQoSEnablesUpThrottle(t *testing.T) {
-	c := &Config{PrimaryPort: 65432, EnableIPv4: true,
+	c := &Config{UDPPorts: []int{65432}, EnableIPv4: true,
 		Networks: []Network{{ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24",
 			QoS: QoS{Enabled: true}}}}
 	if err := c.Validate(); err != nil {
@@ -22,7 +22,7 @@ func TestQoSEnablesUpThrottle(t *testing.T) {
 
 // An already-configured up-rate is preserved, not overwritten by the placeholder.
 func TestQoSKeepsExistingUpRate(t *testing.T) {
-	c := &Config{PrimaryPort: 65432, EnableIPv4: true,
+	c := &Config{UDPPorts: []int{65432}, EnableIPv4: true,
 		Networks: []Network{{ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24",
 			QoS:      QoS{Enabled: true},
 			Throttle: Throttle{Enabled: false, UpBytesPerSec: 2_000_000}}}}
@@ -40,7 +40,7 @@ func TestQoSKeepsExistingUpRate(t *testing.T) {
 
 // With QoS disabled, the throttle is left entirely alone.
 func TestQoSDisabledLeavesThrottle(t *testing.T) {
-	c := &Config{PrimaryPort: 65432, EnableIPv4: true,
+	c := &Config{UDPPorts: []int{65432}, EnableIPv4: true,
 		Networks: []Network{{ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24"}}}
 	if err := c.Validate(); err != nil {
 		t.Fatal(err)

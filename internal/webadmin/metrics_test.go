@@ -160,7 +160,7 @@ func TestHandleMetricsClampAllows24h(t *testing.T) {
 
 func TestHandleMetrics(t *testing.T) {
 	cfgPath := t.TempDir() + "/cfg.json"
-	cfg := &config.Config{PrimaryPort: 65432, EnableIPv4: true,
+	cfg := &config.Config{UDPPorts: []int{65432}, EnableIPv4: true,
 		WebAdmin: config.WebAdmin{Listen: "127.0.0.1:8443"},
 		Networks: []config.Network{{ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24"}}}
 	if err := cfg.Validate(); err != nil {

@@ -302,7 +302,7 @@ func TestProxyRejectsTraversal(t *testing.T) {
 func TestHandleManagedAppliesLiveNoRestart(t *testing.T) {
 	cfgPath := t.TempDir() + "/cfg.json"
 	cfg := &config.Config{
-		PrimaryPort: 65432, EnableIPv4: true,
+		UDPPorts: []int{65432}, EnableIPv4: true,
 		WebAdmin: config.WebAdmin{Listen: "127.0.0.1:8443"},
 	}
 	if err := cfg.Validate(); err != nil {
@@ -369,7 +369,7 @@ func TestHandleManagedAppliesLiveNoRestart(t *testing.T) {
 func TestHandleManagerAppliesLiveNoRestart(t *testing.T) {
 	cfgPath := t.TempDir() + "/cfg.json"
 	cfg := &config.Config{
-		PrimaryPort: 65432, EnableIPv4: true,
+		UDPPorts: []int{65432}, EnableIPv4: true,
 		WebAdmin: config.WebAdmin{Listen: "127.0.0.1:8443"},
 	}
 	if err := cfg.Validate(); err != nil {

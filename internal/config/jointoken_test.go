@@ -9,7 +9,7 @@ import (
 
 func memberConfig(t *testing.T) *Config {
 	t.Helper()
-	c := &Config{PrimaryPort: 65432, EnableIPv4: true,
+	c := &Config{UDPPorts: []int{65432}, EnableIPv4: true,
 		Networks: []Network{{ID: "00000000feedface", Name: "lan", Enabled: true, Subnet4: "10.42.0.0/16"}}}
 	c.Networks[0].Keys[0] = KeySlot{Key: mustKey(t), Label: "key0", Enabled: true}
 	c.Networks[0].Seeds = SeedList{{Address: "203.0.113.5:65432"}}
@@ -33,7 +33,7 @@ func TestJoinTokenRoundTrip(t *testing.T) {
 	}
 
 	// A blank node consumes it.
-	dst := &Config{PrimaryPort: 65432, EnableIPv4: true}
+	dst := &Config{UDPPorts: []int{65432}, EnableIPv4: true}
 	id, name, err := dst.NetworkJoinToken(tok)
 	if err != nil {
 		t.Fatal(err)
@@ -151,13 +151,13 @@ func TestNetworkTokenNoKey(t *testing.T) {
 
 func TestJoinTokenCarriesTCPPort(t *testing.T) {
 	src := memberConfig(t)
-	src.TCPFallbackPort = 443 // non-default fallback port
+	src.TCPPorts = []int{443} // non-default TCP port
 	tok, err := src.NetworkToken("lan", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// The joiner adopts the port as a seed-dial hint (not as its own listen port).
-	dst := &Config{PrimaryPort: 65432, EnableIPv4: true, TCPFallbackPort: 9999}
+	dst := &Config{UDPPorts: []int{65432}, EnableIPv4: true, TCPPorts: []int{9999}}
 	if _, _, err := dst.NetworkJoinToken(tok); err != nil {
 		t.Fatal(err)
 	}
@@ -169,19 +169,19 @@ func TestJoinTokenCarriesTCPPort(t *testing.T) {
 		t.Fatalf("SeedTCPPort = %d, want 443", n.SeedTCPPort)
 	}
 	// The joiner's own fallback port is untouched (heterogeneous ports allowed).
-	if dst.TCPFallbackPort != 9999 {
-		t.Fatalf("joiner's own TCP port changed to %d", dst.TCPFallbackPort)
+	if p := dst.AdvertisedTCPPort(); p != 9999 {
+		t.Fatalf("joiner's own TCP port changed to %d", p)
 	}
 }
 
 func TestJoinTokenOmitsTCPPortWhenDisabled(t *testing.T) {
 	src := memberConfig(t)
-	src.DisableTCPFallback = true
+	src.TCPPorts = nil // TCP off
 	tok, err := src.NetworkToken("lan", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	dst := &Config{PrimaryPort: 65432, EnableIPv4: true}
+	dst := &Config{UDPPorts: []int{65432}, EnableIPv4: true}
 	if _, _, err := dst.NetworkJoinToken(tok); err != nil {
 		t.Fatal(err)
 	}

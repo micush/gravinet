@@ -39,7 +39,7 @@ func shellTestServer(t *testing.T, allow bool) (*Server, *stubBackend, *httptest
 		LoginBan:         config.BanPolicy{MaxFailures: 3, WindowSeconds: 60, BanSeconds: 900},
 		AllowRemoteShell: allow,
 	}
-	cfg := &config.Config{PrimaryPort: 65432, EnableIPv4: true, WebAdmin: wcfg}
+	cfg := &config.Config{UDPPorts: []int{65432}, EnableIPv4: true, WebAdmin: wcfg}
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -527,7 +527,7 @@ func newTLSShellServer(t *testing.T, allow bool) (*Server, *stubBackend, *httpte
 		LoginBan:         config.BanPolicy{MaxFailures: 3, WindowSeconds: 60, BanSeconds: 900},
 		AllowRemoteShell: allow,
 	}
-	cfg := &config.Config{PrimaryPort: 65432, EnableIPv4: true, WebAdmin: wcfg}
+	cfg := &config.Config{UDPPorts: []int{65432}, EnableIPv4: true, WebAdmin: wcfg}
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}

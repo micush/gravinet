@@ -13,7 +13,7 @@ type alwaysRefuse struct {
 	*fakeFallback
 }
 
-func (a *alwaysRefuse) DialFallback(to netip.AddrPort) error {
+func (a *alwaysRefuse) DialTCP(to netip.AddrPort) error {
 	a.mu.Lock()
 	a.dialed = append(a.dialed, to)
 	a.mu.Unlock()

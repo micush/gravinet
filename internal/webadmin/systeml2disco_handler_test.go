@@ -18,7 +18,7 @@ func l2discoTestServer(t *testing.T) (*httptest.Server, *http.Cookie) {
 	dir := t.TempDir()
 	cfgPath := dir + "/config.json"
 	cfg := &config.Config{
-		PrimaryPort: 51820, EnableIPv4: true,
+		UDPPorts: []int{51820}, EnableIPv4: true,
 		WebAdmin: config.WebAdmin{Listen: "127.0.0.1:8443", AuthMode: "local"},
 	}
 	if err := cfg.Validate(); err != nil {

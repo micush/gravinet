@@ -3,7 +3,7 @@ package config
 import "testing"
 
 func snmpTestCfg() *Config {
-	return &Config{PrimaryPort: 65432, EnableIPv4: true}
+	return &Config{UDPPorts: []int{65432}, EnableIPv4: true}
 }
 
 // TestSNMPCommunityMigration checks that a config file from before SNMP

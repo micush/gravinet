@@ -70,13 +70,13 @@ type Sender interface {
 	Send(to netip.AddrPort, payload []byte) error
 }
 
-// fallbackDialer is an optional capability of the attached Sender (implemented by
+// tcpDialer is an optional capability of the attached Sender (implemented by
 // transport.Dual): it opens a TCP/TLS fallback connection to a peer when UDP
 // can't reach it. The engine type-asserts its Sender to this; a transport
 // without it (UDP-only) simply never falls back.
-type fallbackDialer interface {
-	DialFallback(to netip.AddrPort) error
-	HasFallback(to netip.AddrPort) bool
+type tcpDialer interface {
+	DialTCP(to netip.AddrPort) error
+	HasTCP(to netip.AddrPort) bool
 }
 
 // NetSpec describes one overlay the engine should serve.
@@ -699,15 +699,31 @@ type netState struct {
 	// actually in configuredSeeds/configuredTCPSeeds (bounded: at most one
 	// entry per configured seed, never grows with gossip or NAT churn the
 	// way ns.seeds/seedOwner deliberately do), keyed by whether the
-	// completing connection was over the TCP fallback (see fallbackDialer.
-	// HasFallback, the same check ListPeers already uses to report
+	// completing connection was over the TCP fallback (see tcpDialer.
+	// HasTCP, the same check ListPeers already uses to report
 	// transport) or plain UDP.
 	configuredSeedOwnerUDP map[netip.AddrPort]string
 	configuredSeedOwnerTCP map[netip.AddrPort]string
 	seedBackoff            map[netip.AddrPort]time.Time // don't retry a seed before this time
-	// fallbackBackoff cools down TCP fallback addresses whose socket connects
-	// but which never yield a mesh session (see watchFallbackHandshake).
-	fallbackBackoff map[netip.AddrPort]fallbackBackoffEntry
+	// cands holds every dial candidate for this network and paces each one:
+	// in-flight claims, failure backoff, success. It replaces what used to be
+	// three separate maps keyed by bare netip.AddrPort — fallbackBackoff,
+	// fallbackAttempt and dialing — which between them had two problems.
+	//
+	// Keying by address alone cannot distinguish udp/65432 from tcp/65432 at
+	// one address, and those are independent NAT mappings that can reach
+	// different hosts; the maps only avoided conflating them by happening to
+	// be separate maps, one per protocol, which is a property of the code
+	// rather than of the key. CandKey carries the protocol, so the guarantee
+	// is structural.
+	//
+	// And splitting pacing across maps is what produced v780: the escalating
+	// backoff was written against the derived fallback address while the only
+	// reader checked the seed, so the ladder climbed 30s to 10m purely for the
+	// log's benefit and a flat cooldown remained the real pace. One store,
+	// keyed by what is actually dialed, means the entry written and the entry
+	// read are the same entry.
+	cands *candStore
 	// seedFallback records, per seed, the specific fallback address
 	// ensureFallback last resolved and dialed for it (same IP, a different
 	// port). Used by connectedTo/install to recognize "this seed's peer is
@@ -728,7 +744,7 @@ type netState struct {
 	// (NetSpec.Seeds, at network construction or ReloadRuntime's config-seed
 	// merge — see AddExplicitSeed) rather than being discovered dynamically
 	// via gossip (AddSeedFor) or a fallback dial's own bookkeeping (AddSeed
-	// from dialFallbackCandidate/ban.go's unban re-dial). explicitSeedNode is
+	// from dialCandidate/ban.go's unban re-dial). explicitSeedNode is
 	// the node-keyed counterpart addSeed promotes an entry into the moment a
 	// node ID becomes known for an address already in this map (via
 	// seedOwner, from either gossip or a direct connection) — node-keyed
@@ -772,13 +788,13 @@ type netState struct {
 	// of them can trigger an upgrade; without a per-node gate they all fire at
 	// once, every tick. See seedOwnerNeedsUpgrade.
 	upgradeNodeAt map[string]time.Time
-	// fallbackAttempt records when ensureFallback last dialed each seed, so a
-	// retry is paced instead of re-issued on every init tick. initSeedTick calls
-	// ensureFallback for every cooling-down seed each tick; with host candidates
-	// persisting there can be dozens, and a dial is the most expensive thing in
-	// the loop (socket + TLS handshake + goroutine). The first attempt for a
-	// seed is always immediate — only retries wait.
-	fallbackAttempt map[netip.AddrPort]time.Time
+	// seedAttempt paces how often ensureFallback re-examines a seed, distinct
+	// from the per-candidate pacing in cands. initSeedTick calls it for every
+	// cooling-down seed each tick; with host candidates persisting there can be
+	// dozens, and expanding a seed into candidates and claiming each is work
+	// worth doing at a bounded rate. The first attempt for a seed is always
+	// immediate — only retries wait.
+	seedAttempt map[netip.AddrPort]time.Time
 	// seedFirstSeen records when each seed entry first entered ns.seeds, so
 	// sweepDeadSeeds (control.go) can tell "still deserves a fair chance"
 	// apart from "has been retried for a long time and never once worked."
@@ -805,13 +821,7 @@ type netState struct {
 	// auto-pruned by staleness again, no matter how long the current outage
 	// lasts.
 	everConnected map[netip.AddrPort]bool
-	// dialing tracks fallback addresses with a DialFallback currently in
-	// flight, so concurrent ensureFallback calls for the same resolved
-	// address (e.g. from several stale duplicate seed entries for one peer,
-	// all processed in the same initLoop tick) don't all race past the
-	// already-connected checks and each independently dial+log.
-	dialing map[netip.AddrPort]bool
-	nodes   map[string]*nodeInfo // learned node registry (by node id)
+	nodes         map[string]*nodeInfo // learned node registry (by node id)
 	// relayRefusedLog/relayDeclinedLog throttle the two relay-refusal warnings
 	// (logRelayRefused, keyed by target; logRelayDeclined, keyed by src\x00dst)
 	// to one per relayRefusedLogEvery. Both report persistent misconfiguration
@@ -1038,13 +1048,6 @@ type routeEntry struct {
 
 // nodeInfo is what we know about a node in the mesh, whether or not we currently
 // hold a session to it. Used for gossip propagation and (step 6) hosts sync.
-// fallbackBackoffEntry is one address's cooldown: how long the current wait
-// is (doubling on each failure) and when it expires.
-type fallbackBackoffEntry struct {
-	wait  time.Duration
-	until time.Time
-}
-
 type nodeInfo struct {
 	nodeID   string
 	hostname string
@@ -1555,11 +1558,11 @@ func (e *Engine) newNetState(spec NetSpec) *netState {
 		hostCand:               make(map[netip.AddrPort]bool),
 		hostCandDead:           make(map[netip.AddrPort]bool),
 		upgradeNodeAt:          make(map[string]time.Time),
-		fallbackAttempt:        make(map[netip.AddrPort]time.Time),
+		seedAttempt:            make(map[netip.AddrPort]time.Time),
+		cands:                  newCandStore(),
 		seedFirstSeen:          make(map[netip.AddrPort]time.Time),
 		directUpgradeAttempt:   make(map[netip.AddrPort]time.Time),
 		everConnected:          make(map[netip.AddrPort]bool),
-		dialing:                make(map[netip.AddrPort]bool),
 		nodes:                  make(map[string]*nodeInfo),
 		relayRefusedLog:        make(map[string]time.Time),
 		relayDeclinedLog:       make(map[string]time.Time),

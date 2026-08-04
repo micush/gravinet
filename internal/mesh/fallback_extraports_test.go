@@ -53,9 +53,9 @@ func TestEnsureFallbackDialsExtraPortsInParallel(t *testing.T) {
 			t.Errorf("expected a dial to %s, never happened (dialed: %v)", addr, f.dials())
 		}
 	}
-	if got := len(f.dials()); got != 3 {
-		t.Errorf("expected exactly 3 dials (primary + 2 extras), got %d: %v", got, f.dials())
-	}
+	// Each candidate dialed at most once; the count itself is not pinned,
+	// since the seed's own port is a candidate too under the flat model.
+	assertNoDuplicateDials(t, f)
 }
 
 // TestEnsureFallbackSkipsExtraPortDuplicatingPrimary confirms an extra port
@@ -77,7 +77,26 @@ func TestEnsureFallbackSkipsExtraPortDuplicatingPrimary(t *testing.T) {
 	for time.Now().Before(deadline) && len(f.dials()) < 2 {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if got := len(f.dials()); got != 2 {
-		t.Fatalf("expected exactly 2 dials (8443 once, 443 once), got %d: %v", got, f.dials())
+	// The property under test is that a duplicate extra port isn't dialed
+	// twice — not the total, which now includes the seed's own port.
+	assertNoDuplicateDials(t, f)
+	if !dialedContains(f, netip.MustParseAddrPort("203.0.113.7:8443")) ||
+		!dialedContains(f, netip.MustParseAddrPort("203.0.113.7:443")) {
+		t.Fatalf("expected dials to both 8443 and 443, got %v", f.dials())
+	}
+}
+
+// assertNoDuplicateDials pins the deduplication that matters: whatever the
+// candidate set contains, no address in it is dialed more than once.
+func assertNoDuplicateDials(t *testing.T, f *fakeFallback) {
+	t.Helper()
+	seen := map[netip.AddrPort]int{}
+	for _, d := range f.dials() {
+		seen[d]++
+	}
+	for addr, n := range seen {
+		if n != 1 {
+			t.Errorf("address %s dialed %d times, want once", addr, n)
+		}
 	}
 }

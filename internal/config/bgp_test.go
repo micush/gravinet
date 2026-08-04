@@ -6,7 +6,7 @@ import (
 )
 
 func baseValid() *Config {
-	return &Config{PrimaryPort: 65432, EnableIPv4: true,
+	return &Config{UDPPorts: []int{65432}, EnableIPv4: true,
 		Networks: []Network{{ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24"}}}
 }
 

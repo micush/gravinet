@@ -993,14 +993,14 @@ func (e *Engine) ListPeers(networkID uint64) []PeerInfo {
 	// Grab the transport before locking ns: if it can fall back to TCP/TLS, a
 	// peer with a live fallback connection is currently reached over TCP.
 	e.mu.RLock()
-	fd, hasFB := e.tr.(fallbackDialer)
+	fd, hasFB := e.tr.(tcpDialer)
 	e.mu.RUnlock()
 	ns.mu.RLock()
 	defer ns.mu.RUnlock()
 	out := make([]PeerInfo, 0, len(ns.byNode))
 	for _, ps := range ns.byNode {
 		transport := "udp"
-		if hasFB && fd.HasFallback(ps.ep()) {
+		if hasFB && fd.HasTCP(ps.ep()) {
 			transport = "tcp"
 		}
 		pi := PeerInfo{NodeID: ps.nodeID, Hostname: ps.hostname, Endpoint: ps.ep().String(), Relayed: ps.getRelay() != nil,

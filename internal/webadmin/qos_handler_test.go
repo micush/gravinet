@@ -17,7 +17,7 @@ import (
 func TestHandleQoSRuleEnableDisable(t *testing.T) {
 	cfgPath := t.TempDir() + "/cfg.json"
 	cfg := &config.Config{
-		PrimaryPort: 65432, EnableIPv4: true,
+		UDPPorts: []int{65432}, EnableIPv4: true,
 		WebAdmin: config.WebAdmin{Listen: "127.0.0.1:8443"},
 		Networks: []config.Network{{ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24"}},
 	}
@@ -86,7 +86,7 @@ func TestHandleQoSRuleEnableDisable(t *testing.T) {
 func TestHandleQoSServices(t *testing.T) {
 	cfgPath := t.TempDir() + "/cfg.json"
 	cfg := &config.Config{
-		PrimaryPort: 65432, EnableIPv4: true,
+		UDPPorts: []int{65432}, EnableIPv4: true,
 		WebAdmin: config.WebAdmin{Listen: "127.0.0.1:8443"},
 		Networks: []config.Network{{ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24"}},
 	}

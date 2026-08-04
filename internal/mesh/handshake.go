@@ -39,9 +39,9 @@ type hsPayload struct {
 	// them — an unset SelfSeed on an old peer, or one the operator hasn't
 	// gotten to yet, should degrade to the previous approximate behavior,
 	// not to "never a seed."
-	SelfSeed  bool
-	WebPort   uint16 // web-admin port, advertised so a manager can reach it over the overlay
-	TCPPort   uint16 // TCP/TLS fallback port, advertised so peers can dial it when UDP fails
+	SelfSeed bool
+	WebPort  uint16 // web-admin port, advertised so a manager can reach it over the overlay
+	TCPPort  uint16 // TCP/TLS fallback port, advertised so peers can dial it when UDP fails
 	// ExtraTCPPorts/ExtraUDPPorts are additional listen ports (config
 	// extra_tcp_listen_ports/extra_listen_ports) beyond the primary ones
 	// above, advertised so a peer can try them too — the primary UDP port

@@ -60,7 +60,7 @@ func TestParseTopSize(t *testing.T) {
 		in   string
 		want uint64
 	}{
-		{"512", 512},          // bare number: already KB
+		{"512", 512}, // bare number: already KB
 		{"512K", 512},
 		{"733M", 733 * 1024},
 		{"11G", 11 * 1024 * 1024},

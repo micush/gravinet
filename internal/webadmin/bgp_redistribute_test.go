@@ -44,7 +44,7 @@ func mustPrefix(t *testing.T, s string) netip.Prefix {
 // RedistributeBGPRoutes and sitting right there in the (fake) learned set.
 func TestBGPMeshRedistributorSync(t *testing.T) {
 	cfg := &config.Config{
-		PrimaryPort: 51820, EnableIPv4: true,
+		UDPPorts: []int{51820}, EnableIPv4: true,
 		BGP: config.BGPConfig{Enabled: true, ASN: 65001},
 		Networks: []config.Network{
 			{
@@ -99,7 +99,7 @@ func TestBGPMeshRedistributorSync(t *testing.T) {
 // union of both.
 func TestBGPMeshRedistributorSyncPerNetworkSelection(t *testing.T) {
 	cfg := &config.Config{
-		PrimaryPort: 51820, EnableIPv4: true,
+		UDPPorts: []int{51820}, EnableIPv4: true,
 		BGP: config.BGPConfig{Enabled: true, ASN: 65001},
 		Networks: []config.Network{
 			{ID: "0000000000000001", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24",
@@ -143,7 +143,7 @@ func TestBGPMeshRedistributorSyncPerNetworkSelection(t *testing.T) {
 // with whatever was last pushed gossiping into the mesh forever.
 func TestBGPMeshRedistributorSyncClearsWhenSelectionEmptied(t *testing.T) {
 	cfg := &config.Config{
-		PrimaryPort: 51820, EnableIPv4: true,
+		UDPPorts: []int{51820}, EnableIPv4: true,
 		BGP: config.BGPConfig{Enabled: true, ASN: 65001},
 		Networks: []config.Network{
 			{ID: "0000000000000001", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24",
@@ -192,7 +192,7 @@ func TestBGPMeshRedistributorSyncClearsWhenSelectionEmptied(t *testing.T) {
 // costing a subprocess spawn every bgpRedistributePollInterval for nothing.
 func TestBGPMeshRedistributorSyncSkipsWhenNothingWantsIt(t *testing.T) {
 	cfg := &config.Config{
-		PrimaryPort: 51820, EnableIPv4: true,
+		UDPPorts: []int{51820}, EnableIPv4: true,
 		Networks: []config.Network{
 			{ID: "0000000000000001", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24"},
 		},
@@ -221,7 +221,7 @@ func TestBGPMeshRedistributorSyncSkipsWhenNothingWantsIt(t *testing.T) {
 // producing an empty candidate set.
 func TestBGPMeshRedistributorSyncSkipsWhenBGPDisabled(t *testing.T) {
 	cfg := &config.Config{
-		PrimaryPort: 51820, EnableIPv4: true,
+		UDPPorts: []int{51820}, EnableIPv4: true,
 		// BGP left disabled entirely.
 		Networks: []config.Network{
 			{ID: "0000000000000001", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24",

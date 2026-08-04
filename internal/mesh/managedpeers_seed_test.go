@@ -127,7 +127,7 @@ func addManagedNode(ns *netState, nodeID string, endpoint netip.AddrPort) {
 // onHSResp write path -- not just ManagedPeers' read side, which every test
 // above this one exercises by directly seeding configuredSeedOwnerUDP/TCP
 // rather than earning it through a real handshake. If the membership check
-// added there, or the e.tr/fallbackDialer transport detection, or the
+// added there, or the e.tr/tcpDialer transport detection, or the
 // locking around either, were subtly wrong, a test that only pokes the map
 // directly would never catch it.
 func TestOutboundHandshakeAttributesConfiguredSeedOwner(t *testing.T) {

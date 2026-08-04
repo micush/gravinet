@@ -6,7 +6,7 @@ import (
 )
 
 func TestHostAddDelete(t *testing.T) {
-	c := &Config{PrimaryPort: 65432, EnableIPv4: true,
+	c := &Config{UDPPorts: []int{65432}, EnableIPv4: true,
 		Networks: []Network{{ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24"}}}
 	if err := c.HostAdd("lan", "web.local", "192.168.5.5"); err != nil {
 		t.Fatal(err)
@@ -36,7 +36,7 @@ func TestHostAddDelete(t *testing.T) {
 }
 
 func TestHostSetEnabled(t *testing.T) {
-	c := &Config{PrimaryPort: 65432, EnableIPv4: true,
+	c := &Config{UDPPorts: []int{65432}, EnableIPv4: true,
 		Networks: []Network{{ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24"}}}
 	if err := c.HostAdd("lan", "web.local", "192.168.5.5"); err != nil {
 		t.Fatal(err)
@@ -99,7 +99,7 @@ func TestHostRecordBackwardCompat(t *testing.T) {
 }
 
 func TestHostUpdate(t *testing.T) {
-	c := &Config{PrimaryPort: 65432, EnableIPv4: true,
+	c := &Config{UDPPorts: []int{65432}, EnableIPv4: true,
 		Networks: []Network{{ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24"}}}
 	if err := c.HostAdd("lan", "web.local", "192.168.5.5"); err != nil {
 		t.Fatal(err)
@@ -156,7 +156,7 @@ func TestHostUpdate(t *testing.T) {
 }
 
 func TestHostRejectOps(t *testing.T) {
-	c := &Config{PrimaryPort: 65432, EnableIPv4: true,
+	c := &Config{UDPPorts: []int{65432}, EnableIPv4: true,
 		Networks: []Network{{ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24"}}}
 
 	if err := c.HostRejectAdd("lan", "bad.local"); err != nil {

@@ -12,7 +12,7 @@ func baseNet() Network {
 
 func validate(t *testing.T, n Network) Network {
 	t.Helper()
-	c := &Config{EnableIPv4: true, PrimaryPort: 51820, Networks: []Network{n}}
+	c := &Config{EnableIPv4: true, UDPPorts: []int{51820}, Networks: []Network{n}}
 	if err := c.Validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestRouteRejectRemovalSticks(t *testing.T) {
 	// Start from the materialized default, remove both entries, re-validate:
 	// must stay gone (opting a node fully into a full-tunnel default in
 	// either family, e.g. an IPv6-only exit node, must actually stick).
-	c := &Config{EnableIPv4: true, PrimaryPort: 51820, Networks: []Network{baseNet()}}
+	c := &Config{EnableIPv4: true, UDPPorts: []int{51820}, Networks: []Network{baseNet()}}
 	c.Networks[0].RouteRej = nil
 	if err := c.Validate(); err != nil { // injects [0.0.0.0/0, ::/0]
 		t.Fatal(err)
@@ -97,7 +97,7 @@ func TestRejectRouteJSONBackCompat(t *testing.T) {
 }
 
 func TestRouteRejectOpSetsInclusive(t *testing.T) {
-	c := &Config{EnableIPv4: true, PrimaryPort: 51820, Networks: []Network{baseNet()}}
+	c := &Config{EnableIPv4: true, UDPPorts: []int{51820}, Networks: []Network{baseNet()}}
 	c.Networks[0].RouteRej = []RejectRoute{}
 	if err := c.RouteReject("n1", "10.129.16.0/21", false); err != nil {
 		t.Fatal(err)

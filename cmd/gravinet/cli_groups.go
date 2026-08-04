@@ -294,6 +294,7 @@ var systemGroup = []groupLeaf{
 // preference stored client-side with nothing in config.json to set.
 var settingsGroup = []groupLeaf{
 	{"login-ban", "web admin login lockout policy: ATTEMPTS SECONDS; needs a restart", cmdSettingsLoginBan},
+	{"listen-addrs", "IP addresses the web admin binds, comma-separated, or \"default\" (loopback + mesh); needs a restart", cmdSettingsListenAddrs},
 	{"history-limit", "how many config snapshots to keep before pruning; applied live", cmdSettingsHistoryLimit},
 	{"managed", "get/set managed mode (be managed by a Manager-mode peer)", cmdManaged},
 	{"manager", "get/set manager mode (manage other nodes)", cmdManager},

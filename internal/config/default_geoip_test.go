@@ -56,7 +56,7 @@ func TestGeoIPLookupExplicitFalsePersists(t *testing.T) {
 	// omitempty round-trips fine on its own, but permanently bakes an
 	// explicit true into the file on the very next unrelated save, which is
 	// indistinguishable from every other config also getting bumped to true).
-	c2.PrimaryPort = 12345
+	c2.UDPPorts = []int{12345}
 	if err := c2.SaveTo(path); err != nil {
 		t.Fatal(err)
 	}

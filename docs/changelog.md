@@ -2,6 +2,215 @@
 
 ---
 
+## v791 — 2026-08-04
+
+**`candStore` is wired in. `fallbackBackoff`, `fallbackAttempt` and `dialing` are gone — three maps keyed by bare address, replaced by one store keyed by address *and protocol* and port.**
+
+The last piece of the flattening. v788 removed the derivation, v789 the config shape, v790 the naming; this removes the data structure that made the whole class of bug expressible.
+
+Two things were wrong with those three maps.
+
+**Keying by address alone cannot distinguish udp/65432 from tcp/65432**, and those are independent NAT mappings that can reach different hosts — the exact shape of the live failure that started this. The maps only avoided conflating them by happening to be one map per protocol, which is a property of the code rather than of the key. `CandKey` carries the protocol, so the guarantee is structural. Nothing has to stay careful for it to hold.
+
+**Splitting pacing across maps is what produced v780.** The escalating backoff was written against the derived fallback address while the only reader checked the seed, so the ladder climbed 30s to 10m purely for the log's benefit while a flat cooldown remained the real pace. One store, keyed by what is actually dialed, means the entry written and the entry read are the same entry.
+
+`noteFallbackFailure`/`clearFallbackBackoff`/`fallbackInBackoff` are now thin wrappers over `candStore.Fail`/`Succeed`/`Due`. `fallbackAttempt` became `seedAttempt`, which is what it always was — how often a *seed* is re-examined, distinct from how often a *candidate* is dialed.
+
+### The consolidation removed a check by making it impossible
+
+`dialCandidate` used to claim the address and then separately test `fallbackInBackoff`. With the in-flight flag and the cooldown deadline in one entry, the claim already declines a cooling-down candidate — and keeping both checks deadlocks the path outright, because the claim marks the candidate in flight and a subsequent `Due()` correctly reports in-flight as not-dialable. Every dial would suppress itself.
+
+That is what happened on the first attempt here: four tests went from passing to dialing nothing at all. Worth recording because it is the honest shape of this kind of merge — the redundant check is not merely redundant once the two states share an entry, it is actively wrong, and only a test that asserts a dial *happens* catches it.
+
+### `seedBackoff` stays, deliberately
+
+It looks like a fourth map to fold in and isn't. It is a flat 15-second cooldown whose whole purpose is noticing a genuinely offline seed coming back quickly, not an escalating ladder against a candidate that connects but never handshakes. Folding it in would mean either changing that behaviour or giving `candStore` two pacing modes — reintroducing exactly the two-mechanisms-for-one-job problem this removed. Different concept, same-looking type.
+
+### Verified
+
+`go build ./...` and `go vet ./...` clean, `gofmt -l` clean on files touched. The full `internal/mesh` suite passes — all 523 tests in chunks (A–H, I–P, Q–Z) plus the four multi-minute tests that skip under `-short` run individually, all green on the first attempt this time. `internal/transport`, `internal/config`, `internal/webadmin` and `cmd/gravinet` pass. Standing caveat unchanged: all builds `CGO_ENABLED=0`, so `auth_pam.go` was not compiled.
+
+Two tests were ported rather than deleted. `TestFallbackBackoffExpires` now reads the deadline back through the same store the writer used, which is the property v780 was about. The claim-leak assertion in `fallbackdial_backoff_test.go` can no longer inspect a `dialing` map, so it asserts the observable form instead: once the cooldown expires, the candidate becomes claimable again.
+
+With this, nothing in the tree treats TCP as a tier derived from UDP — not the dial path, not the config, not the transport interface, not the pacing state.
+
+---
+
+## v790 — 2026-08-04
+
+**`DialFallback`/`HasFallback` are now `DialTCP`/`HasTCP`, and `fallbackDialer` is `tcpDialer`. The last place the word "fallback" described a transport rather than a preference.**
+
+Finishes what v788 and v789 started. v788 removed the derivation that let one peer's TCP port be used for another; v789 removed the config shape that invited it. This removes the naming, which is not cosmetic here — the interface was the last thing in the codebase asserting that TCP is something UDP falls back *to*, rather than one of two ways to reach a peer.
+
+`transport.Dual`'s doc comment now says so directly:
+
+> Neither is a fallback for the other. They are two ways to reach a peer, and which one works is a fact about that peer and the network between, not a tier to descend. UDP is preferred only because it is cheaper to set up.
+
+The mechanism is unchanged: `Dual.Send` still prefers a live TLS connection and otherwise uses UDP, and either transport may be nil (no TCP port bound, or `udp_ports` emptied) with `Validate` refusing both. `errNoFallback` is `errNoTCP`, and its message no longer implies a missing tier — a node without TCP simply has no TCP transport.
+
+`dialFallbackCandidate` is `dialCandidate`, and the comments that still described the interface by its old name were updated with it. A grep for `DialFallback|HasFallback|fallbackDialer|dialFallbackCandidate` across the tree now returns nothing. Test doubles renamed to match.
+
+Verified: `go build ./...` and `go vet ./...` clean, `gofmt -l` clean on files touched, cross-compiled for darwin, freebsd, openbsd, windows and linux/arm64. The full `internal/mesh` suite passes — all 523 tests in chunks (A–P, Q–Z) plus the four multi-minute tests that skip under `-short` run individually. `internal/transport`, `internal/config`, `internal/webadmin` and `cmd/gravinet` all pass. Standing caveat unchanged: all builds `CGO_ENABLED=0`, so `auth_pam.go` was not compiled.
+
+Two flakes surfaced while verifying, both under co-execution and neither a regression. `TestDistributedBan` failed once at 27s inside a combined mesh+transport run and passes in 3s alone. `TestRelayedSessionSurvivesLossOnTheRelayLeg` — which measures session survival under simulated 25% loss — failed once when paired with `TestDeadSeedWithTCPFallbackDoesNotDegrade`, and passed that same pairing both before and after, plus twice solo. Both are timing-sensitive tests being starved by a heavy neighbour rather than anything this change touched, but they are worth knowing about before reading a red result here as a real failure.
+
+### The one piece left, and an honest assessment of it
+
+`candStore` is still defined and tested but not wired into `netState`. The maps it would replace — `fallbackBackoff`, `fallbackAttempt`, `ns.dialing` for the TCP side, `seedBackoff` for UDP — remain in use across 26 call sites in `engine.go` and `handshake_engine.go`.
+
+Worth being precise about what that does and does not leave exposed. The conflation `candStore`'s protocol-aware key exists to prevent is **not** currently reachable: `seedBackoff` only ever holds UDP seeds and `fallbackBackoff` only ever holds TCP addresses, so the two are de facto protocol-separated by being separate maps. What remains is the structural problem rather than a live bug — pacing state split across maps keyed by address alone, which is the shape that produced the v780 write-here-read-there split where the backoff ladder climbed for the log while a flat cooldown stayed the real pace.
+
+So this is cleanup with a real motive, not an outstanding defect, and it was left rather than half-applied: a partial migration with two pacing systems coexisting would be worse than either alone.
+
+---
+
+## v789 — 2026-08-04
+
+**A node listens on a set of UDP ports and a set of TCP ports. That is the whole model. `primary_port`, `extra_listen_ports`, `tcp_fallback_port`, `disable_tcp_fallback` and `extra_tcp_listen_ports` are gone, replaced by `udp_ports` and `tcp_ports`.**
+
+v788 removed the derivation that let one peer's TCP port be used for another. This removes the framing that kept inviting it. There was never a primary and never a fallback: a peer is reachable at some set of `{address, protocol, port}`, any of which might work, and every mechanism that treated TCP as a tier derived from UDP was answering a question about a peer with information about something else.
+
+The old shape said the same thing four different ways. "Off" was spelled twice — `primary_port: 0` for UDP, a separate `disable_tcp_fallback` bool for TCP. "More ports" was spelled twice more, as `extra_listen_ports` and `extra_tcp_listen_ports`, each defined relative to a primary that only existed because of the hierarchy. Now:
+
+```json
+"udp_ports": [51820, 443, 80],
+"tcp_ports": [65432, 21]
+```
+
+Empty means that transport is off, the same way for both. `Validate` refuses only both-empty — a node with no transport could never be reached. Every port answers identically; the first is what this node advertises to peers as canonical, which is presentation, not precedence.
+
+`AdvertisedUDPPort`/`AdvertisedTCPPort`/`UDPPortList`/`TCPPortList`/`UDPEnabled`/`TCPEnabled` replace `TCPFallbackPortValue` and `TCPFallbackEnabled`. Web admin, CLI (`gravinet settings udp-port` / `tcp-port`, both now a plain comma-separated list or `-`), join tokens and the daemon's bind path all read the lists directly.
+
+The transport layer keeps one socket as the source for outbound datagrams — something has to be chosen to transmit on. What went away is the idea that this says anything about a *peer*; it is now purely local, and `udpPrimary`/`udpExtras`/`tcpExtras` in cmd/gravinet adapt the lists to it.
+
+### Removing the fields rather than deprecating them
+
+The legacy fields are not retained on `Config`. Keeping them would have let every existing reader compile while silently seeing zero once migration cleared them — a node that quietly binds nothing, with no error and no warning, which is the worst available outcome for a schema change. Removing them turned each of roughly thirty call sites into a compile failure that had to be looked at individually.
+
+Old configs still load: `portsOnDisk` decodes both spellings, and `migratePortConfig` folds the legacy keys in. Order-preserving, so what was primary leads the list and stays the port this node advertises — an upgraded node is reachable at the address its peers already know.
+
+### Two bugs the migration tests caught
+
+**The migration never fired.** The first version tested `len(c.UDPPorts) == 0` to mean "the file didn't specify ports". But `Default()` seeds those lists before the file is unmarshalled, so the check was never true, and every upgraded node would have silently reverted to default ports and dropped off its mesh. Presence in the file is the only thing that can answer the question, and only a separate decode can see presence — hence `portsOnDisk`'s pointer fields, where absent and empty are distinguishable.
+
+**"Off" did not survive a save.** `udp_ports` carried `omitempty`, so an empty list was written as nothing at all, which on the next load is indistinguishable from a config predating the keys — the migration would re-derive defaults and reopen a port the operator had deliberately closed. Both fields are now written unconditionally, empty lists as `[]`, and the handlers and CLI assign `[]int{}` rather than nil so it never marshals as `null`.
+
+Six new tests cover the fold: order preservation, `primary_port: 0` staying off, `disable_tcp_fallback` beating a port value that is still present beside it, `tcp_fallback_port: 0` meaning the default rather than off, flat keys winning over legacy ones without merging, and a save/reload round trip asserting no legacy key survives.
+
+### Verified
+
+`go build ./...` and `go vet ./...` clean, `gofmt -l` clean on files touched, cross-compiled for darwin, freebsd, openbsd, windows and linux/arm64.
+
+The full `internal/mesh` suite passes — all 523 tests in chunks (A–H, I–P, Q–Z) plus the four multi-minute tests that skip under `-short` run individually. `internal/config`, `internal/webadmin` and `cmd/gravinet` pass, including `navparity`.
+
+Migration exercised end to end against a real pre-v789 config file: `primary_port: 51820` + `extra_listen_ports: [443, 80]` reads back as `udp port(s): 51820,443,80`; turning TCP off writes `"tcp_ports": []` and stays off across a reload while the UDP list is untouched.
+
+Standing caveat unchanged: all builds `CGO_ENABLED=0`, so `auth_pam.go` was not compiled.
+
+### Still not done
+
+`HasFallback`/`DialFallback` still split the transport in two rather than taking a protocol, and `candStore` remains defined and tested but not wired into `netState` — the four `AddrPort`-keyed maps it replaces are still the ones in use. Neither affects correctness now that the derivation and the config shape are gone.
+
+---
+
+## v788 — 2026-08-03
+
+**There is no such thing as a fallback. There is a list of ports, and you try them. The TCP "fallback" was modelled as a tier derived from the UDP primary, and every mechanism that derived it was guessing at a fact only the peer knows — one of which put two nodes behind one NAT onto the same socket, permanently.**
+
+Found on a live mesh. Two peers behind one public IP, `174.64.247.165` — cush1 reached over TCP/65432, cush2 over UDP/65432. Independent NAT mappings, an entirely ordinary setup, and the operator's seed list said which was which:
+
+```
+tcp://174.64.247.165:65432   "cox gn-cush1 nat phoenix"
+     174.64.247.165:65432    "cox-gn-cush2 nat phoenix"
+```
+
+The engine threw both the scheme and the port away and re-derived them. `ensureFallback` manufactured a TCP candidate for cush2's UDP seed at the same address, asked `tcpPortForEndpoint` for "the TCP port at this IP", got cush1's — and dialed cush1's listener. On one manager node this produced `tx=28, rx=0` against cush2 and a session that flapped up-and-pruned every fifteen seconds for hours.
+
+`tcpPortForEndpoint`'s own comment allowed for this and dismissed it:
+
+> a wrong guess here just fails to complete a handshake, same as today, so an occasional same-IP collision is self-correcting, not destructive.
+
+It was neither occasional nor self-correcting. The loop walked `ns.byNode` and returned the first session sharing the IP, and Go's map order made that the same peer every time. Deterministic, permanent, and invisible except as a peer that would not stay up.
+
+### The model
+
+A peer is reachable at a set of endpoints. Each is `{Addr, Port, Proto}`. Any might work. That is all.
+
+`internal/mesh/candidate.go` defines that set. The decisive part is that **protocol is part of identity** — `CandKey` is address *plus protocol* plus port — because `tcp://IP:65432` and `udp://IP:65432` are different NAT mappings that can reach different hosts. Collapsing them is precisely what put two peers on one socket, and in a flat set the collision cannot be expressed.
+
+Seed expansion is a **parse, not an inference**. The seed syntax has always carried what was needed (`tcp://host:65432,443,23` is a protocol and three ports); `SeedCandidates` reads it. The only place this node's own ports may enter is a seed that names no port at all, and a test pins that confinement — every bug here came from a port leaking sideways between peers.
+
+"Fallback" survives as `Less`: seed beats advertised beats observed beats host-candidate, UDP before TCP within a tier. A preference over one set, not two tiers. A TCP seed still outranks a UDP host-candidate, because probably-right beats cheap.
+
+`internal/mesh/candstore.go` replaces four maps that were all keyed by bare `AddrPort` — `seedBackoff`, `fallbackBackoff`, `fallbackAttempt`, `dialing` — plus `seedFallback`, which mapped each seed to the single derived address it became. Pacing is per candidate, never per peer: a peer with four candidates keeps trying the other three at full speed while one cools down, which is the entire point of having a set. It also makes the v780 bug unexpressible — that one was the backoff being *written* against the derived address and *read* against the seed, so the ladder climbed 30s → 10m purely for the log while a flat 30s stayed the real pace. One store keyed by what is actually dialed means the entry written and the entry read are the same entry.
+
+### The cutover
+
+`ensureFallback` no longer picks a port. It builds a candidate set and dials all of it, in preference order:
+
+```
+seed.Port()                    what the operator typed
+SeedTCPPort                    join-token hint
+tcpPortForOwner(owner)         node-keyed — well-posed
+tcpPortForExactEndpoint(seed)  addr+port precise
+tcpPortForUniqueIP(addr)       only when one node is at that address
+ourPort                        last resort
+```
+
+`tcpPortForEndpoint` is deleted; nothing references it. `ConflictsWith` additionally skips any candidate landing exactly on **another owner's configured seed** — known-wrong before a socket opens. Deliberately narrow: only seeds disqualify (a shared observed endpoint is ordinary NAT and says nothing about who answers), and an unowned candidate is never disqualified, because refusing to dial is worse than a wrong guess. No answer means no connectivity.
+
+### Two things this got wrong first, and how they were caught
+
+**The IP walk was deleted wholesale.** `TestEnsureFallbackDiscoversPortFromLiveSessionOnDifferentPort` failed, and rightly: that walk exists to unstick an operator-configured seed whose port the peer has since moved off, which is a real case. It is back as `tcpPortForUniqueIP`, which answers only when exactly one node is known at that address — precisely when the question has one answer. When it declines, the seed's own port and this node's port remain candidates, so a decline costs a possible extra dial, never connectivity.
+
+**The exact-endpoint match went with it.** Restored separately: `addr:port` precise cannot conflate two peers behind one NAT, since they necessarily differ in port or protocol. Only the IP-*only* match was ever ambiguous.
+
+Both were caught by tests that already existed. That is the argument for having finished the suite rather than assuming the delta was contained.
+
+### Tests
+
+31 new across `candidate_test.go` and `candstore_test.go`, including `TestTwoPeersBehindOneNAT`, which rebuilds the live failure from the operator's actual seed strings and asserts the two peers stay two candidates.
+
+Six existing tests changed. Five asserted an exact dial count; the flat model dials the seed's own port alongside the resolved one, which is the intended change, so they assert containment now plus a new `assertNoDuplicateDials` pinning the property that actually matters — whatever the set holds, no address in it is dialed twice. The sixth (`TestTCPPortForHostCandidateUsesOwnersAdvertisedPort`) was ported from the address-keyed lookup to the node-keyed one.
+
+Verified: `go build ./...` and `go vet ./...` clean, `gofmt -l` clean on files touched, cross-compiled for darwin, freebsd, openbsd, windows and linux/arm64. `cmd/gravinet`, `internal/config`, `internal/webadmin`, `internal/upgrade`, `internal/control` and `internal/logx` all pass.
+
+The full `internal/mesh` suite passes — all 523 tests, run in chunks (A–B, C, D, E–H, I–P, Q–Z) plus the four multi-minute tests that skip under `-short` run individually: `TestDeadSeedRetryDoesNotDegradeOtherPeers` (181s), `TestDeadSeedWithTCPFallbackDoesNotDegrade` (91s), `TestSelfSeedDoesNotDegradeOtherPeers` (181s), `TestRelayedSessionSurvivesLossOnTheRelayLeg` (80s). Chunking was needed because the suite takes ~12.6 minutes end to end, not because of any failure. Standing caveat unchanged: all builds `CGO_ENABLED=0`, so `auth_pam.go` was not compiled.
+
+### Not done
+
+This lands the model and cuts the dial path over to it. `TCPFallbackPort` remains a node-global config field, `HasFallback`/`DialFallback` still split the transport in two, and `candStore` is defined and tested but not yet wired into `netState` — the four maps it replaces are still the ones in use. Those are follow-on work; the correctness bug is fixed here.
+
+---
+
+## v787 — 2026-08-03
+
+**Settings > Admin interface addresses: a chip picker for which IP addresses the web admin binds, defaulting to loopback plus this node's mesh addresses. Saving restarts quietly, like the rest of Settings.**
+
+The admin interface bound one address from `webadmin.listen`, plus whatever overlay addresses the cluster-management binder added on its own. Answering on a third address — a LAN interface, a second NIC — wasn't expressible.
+
+`webadmin.listen_addrs` is now a picked set of IP literals. The port is untouched and still comes from `listen`: this picks *addresses*, which is the question an operator actually has here, and keeping the port out of it means the port advertised to peers for cluster management can't drift as a side effect of an address edit.
+
+**The default is not written out.** Empty `listen_addrs` means loopback plus this node's mesh addresses — exactly what an unconfigured node already does. Existing configs keep their behaviour with no migration, and the picker opens pre-selected on those addresses rather than on nothing, so it reflects what the daemon is actually running.
+
+Once a set *is* configured it is exhaustive. The overlay auto-bind sweep is skipped, because an operator who has deliberately chosen a set should not find addresses added back behind them. A test pins both halves of that.
+
+**Reusing the existing widget.** `buildRouteChipPicker` already took `labelOf`/`placeholder`/`noneText`, so the BGP redistribute picker's search-to-add chips work here unchanged — no second near-copy. Options come from the live interface list rather than config, so they reflect what is bindable right now, labelled with their interface (`192.168.5.108 (vio0)`) since a bare IP is not something most people can place. Loopback and mesh sort to the top; the address carrying the current session is marked "you are here".
+
+**Guards, and one that stays despite the request.** Names are refused rather than resolved — this binds a socket, and a name resolving differently later would silently move what the admin interface is exposed on. Link-locals are refused (they need a zone). The wildcards `0.0.0.0` and `::` are offered but never part of the default, since exposing every address the host has *and every one it gains later* is a broader decision than picking addresses.
+
+Saving an empty set is refused outright. It is the one irreversible mistake here: every other removal is recoverable from the browser you are already using, and that one removes the interface you would fix it from. Deselecting the address carrying the current session is allowed but confirmed first, naming the address.
+
+**Restart rather than live rebind.** The primary socket is the one serving the request making the change, so applying in place means answering through a socket being torn down. The handler returns `restart: true` and the UI's existing `quietRestart()` handles it, matching every other structural setting.
+
+**CLI.** `gravinet settings listen-addrs` — status, a comma-separated set, or `default`. This one earns its CLI more than most: it is the setting that can take the web admin away from you, and the console is then the only way back. Whole-set replace rather than add/remove, matching what the picker writes, so neither front door can half-apply a change to which addresses answer. Both paths prefer loopback as the primary bind when it's in the set — it's the one address that cannot stop existing underneath the daemon.
+
+`navparity`'s Settings-to-CLI parity test caught the missing leaf before this shipped, which is what it's for.
+
+Verified: `go build ./...` and `go vet` clean, `gofmt -l` clean on files touched. `internal/webadmin` (52s), `internal/config`, and `cmd/gravinet` including `navparity` all pass. Seven new tests covering the empty-set and name refusals, normalization, loopback-first primary selection, and the default-vs-configured bind sets. CLI exercised end to end against a scratch config. Same standing caveats: `CGO_ENABLED=0` so `auth_pam.go` is uncompiled, and `internal/mesh` was not run (untouched by this change).
+
+---
+
 ## v786 — 2026-08-03
 
 **A peer's own overlay address could end up as its session endpoint, and from there as a kernel route pinning that mesh address to the physical gateway. The peer then looked perfectly healthy — session up, counters clean, inbound packets arriving — while every reply left by the wrong interface and was lost. Three fixes: the roam that starts it, the bypass route that makes it permanent, and a sweep for nodes already holding one.**

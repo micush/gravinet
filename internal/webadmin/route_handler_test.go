@@ -17,7 +17,7 @@ func TestRouteAppliesLive(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := dir + "/config.json"
 	cfg := &config.Config{
-		PrimaryPort: 51820, EnableIPv4: true,
+		UDPPorts: []int{51820}, EnableIPv4: true,
 		Networks: []config.Network{{ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24"}},
 	}
 	if err := cfg.Validate(); err != nil {
@@ -88,7 +88,7 @@ func TestRouteEditReconcilesMeshRedistribute(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := dir + "/config.json"
 	cfg := &config.Config{
-		PrimaryPort: 51820, EnableIPv4: true,
+		UDPPorts: []int{51820}, EnableIPv4: true,
 		Networks: []config.Network{{ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24"}},
 		BGP:      config.BGPConfig{Enabled: true, ASN: 65001, RedistributeMeshRoutes: []string{"192.168.50.0/24"}},
 	}

@@ -12,7 +12,7 @@ import (
 // nil-pointer-panic on literally the first send attempt to any peer once UDP
 // was ever turned off. It must now return errNoUDP instead, the same way a
 // nil TLS with no fallback available already returns errNoFallback from
-// DialFallback — an ordinary, non-fatal "try something else" signal, not a
+// DialTCP — an ordinary, non-fatal "try something else" signal, not a
 // crash.
 func TestDualSendNilUDP(t *testing.T) {
 	to := netip.MustParseAddrPort("203.0.113.5:65432")

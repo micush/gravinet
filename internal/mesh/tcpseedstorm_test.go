@@ -27,7 +27,7 @@ type refuseAllBut struct {
 	open netip.AddrPort
 }
 
-func (r *refuseAllBut) DialFallback(to netip.AddrPort) error {
+func (r *refuseAllBut) DialTCP(to netip.AddrPort) error {
 	r.mu.Lock()
 	r.dialed = append(r.dialed, to)
 	if r.has == nil {
@@ -70,11 +70,11 @@ func TestPrimeTCPSeedsStopsAtTheFirstWorkingPortOnAHost(t *testing.T) {
 	// First pass: nothing is up, so every port is a legitimate candidate.
 	e.primeTCPSeeds(ns)
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && !f.HasFallback(f.open) {
+	for time.Now().Before(deadline) && !f.HasTCP(f.open) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	first := len(f.dials())
-	if !f.HasFallback(f.open) {
+	if !f.HasTCP(f.open) {
 		t.Fatal("the one open port was never connected")
 	}
 

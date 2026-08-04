@@ -13,7 +13,7 @@ import (
 // TestDeadSeedRetryDoesNotDegradeOtherPeers's counterpart with real TCP/TLS
 // fallback enabled on both nodes (production always enables this — see
 // main.go's cfg.TCPFallbackEnabled()), so I's dead "gn-cush1" seed actually
-// exercises ensureFallback -> Dual.DialFallback -> TLSTransport.Dial against
+// exercises ensureFallback -> Dual.DialTCP -> TLSTransport.Dial against
 // a target with nothing listening on either UDP or TCP, not just the UDP
 // path in isolation.
 func TestDeadSeedWithTCPFallbackDoesNotDegrade(t *testing.T) {

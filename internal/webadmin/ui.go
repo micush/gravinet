@@ -1013,11 +1013,11 @@ async function load() {
   // consistently ordered without each renderer re-sorting.
   state.cfg = ((c.body && c.body.nets) || []).slice().sort((a, b) =>
     netNameCmp(a.name || a.id, b.name || b.id));
-  state.primaryPort = (c.body && c.body.primary_port) || 0;
-  state.tcpPort = (c.body && c.body.tcp_fallback_port) || 0;
-  state.tcpFallbackDisabled = !!(c.body && c.body.tcp_fallback_disabled);
-  state.extraUDPPorts = (c.body && c.body.extra_listen_ports) || [];
-  state.extraTCPPorts = (c.body && c.body.extra_tcp_listen_ports) || [];
+  // Two flat lists. Empty means that transport is off — there is no separate
+  // "disabled" flag any more, and no primary/extras split, because neither
+  // was a real distinction (see v789).
+  state.udpPorts = (c.body && c.body.udp_ports) || [];
+  state.tcpPorts = (c.body && c.body.tcp_ports) || [];
   state.natStateTimeout = (c.body && c.body.nat_state_timeout) || 0;
   state.geoipLookup = !!(c.body && c.body.geoip_lookup);
   state.enableUpnp = !!(c.body && c.body.enable_upnp);
@@ -1118,6 +1118,7 @@ function buildSearchIndex(){
     ['dark-mode-row', 'Dark mode', 'Switch between dark and light interface theme.', 'general'],
     ['loginban-attempts-row', 'Lockout attempts', 'How many failed logins from one source before it is locked out.', 'security'],
     ['loginban-duration-row', 'Lockout duration', 'How long a lockout lasts once triggered, in minutes.', 'security'],
+    ['listen-addrs-row', 'Admin interface addresses', 'Which IP addresses the admin interface answers on. Defaults to loopback plus this node\u2019s mesh addresses. Applies on restart.', 'security'],
     ['tls-cert-upload-row', 'TLS certificate', 'Upload a certificate and private key to replace the self-signed one.', 'security'],
     ['tls-cert-reset-row', 'Revert to self-signed', 'Stop using an uploaded certificate.', 'security'],
     ['config-history-limit-row', 'Config history retention limit', 'How many configuration snapshots to keep before the oldest are pruned.', 'general'],
@@ -1132,7 +1133,7 @@ function buildSearchIndex(){
     ['keepalive-row', 'Keepalive interval', 'How often this node pings each connected peer, keeping NAT mappings open and measuring round-trip time.', 'network'],
     ['peertimeout-row', 'Peer timeout', 'How long a peer may go silent before its session is dropped.', 'network'],
     ['udpport-row', 'UDP port', 'The UDP port(s) this node listens on; comma-separated for more than one, so a peer behind a restrictive firewall can reach it on a well-known port too.', 'network'],
-    ['tcpport-row', 'TCP port', 'The TCP port(s) this node listens on for the TLS fallback; comma-separated for more than one.', 'network'],
+    ['tcpport-row', 'TCP port', 'The TCP/TLS port(s) this node listens on; comma-separated for more than one. Independent of the UDP list \u2014 neither is derived from the other.', 'network'],
     ['natstate-row', 'NAT state timeout', 'How long an idle translated NAT connection is remembered before its mapping is reclaimed.', 'network'],
     ['ip-forwarding-row', 'IP forwarding', 'Whether this node turns on host IPv4/IPv6 forwarding at startup \u2014 the on-ramp for redistributed routes and NAT. On by default; needs a restart to take effect.', 'network'],
     ['ip-redirects-row', 'Disable ICMP redirects', 'Turn off host acceptance and sending of ICMP IPv4/IPv6 redirects at startup. On by default. icmp redirect', 'network'],
@@ -2823,6 +2824,56 @@ function secSettingsSecurity(c) {
 
   c.appendChild(card); card = $('<div class="card"></div>');
 
+  card.appendChild($('<h3>Admin interface addresses</h3>'));
+  card.appendChild($('<div class="settings-desc" style="margin-bottom:10px">Which IP addresses this node\u2019s admin interface answers on. The port is unchanged \u2014 this picks addresses only. Defaults to loopback plus this node\u2019s mesh addresses, which is what keeps it reachable from other peers for cluster management. Applies on restart.</div>'));
+
+  const laRow = $('<div class="settings-row" id="listen-addrs-row" style="align-items:flex-start"></div>');
+  laRow.appendChild($('<div><div class="settings-label">Listen addresses</div><div class="settings-desc">Removing the address you are connected through will end this session \u2014 you would need to reach the node on one of the others.</div></div>'));
+  const laWrap = $('<div style="flex:1;min-width:280px"></div>');
+  laRow.appendChild(laWrap);
+  card.appendChild(laRow);
+
+  api('/api/webadmin/listen-options').then(lo => {
+    if (!lo || !lo.options) return;
+    // Label lookup, so a chip reads "192.168.5.108 (vio0)" rather than a bare
+    // address nobody can place, and so search matches the interface name too.
+    const byAddr = {};
+    lo.options.forEach(o => { byAddr[o.addr] = o; });
+    const labelOf = v => {
+      const o = byAddr[v];
+      if (!o) return v;
+      let s = o.label;
+      if (v === lo.current) s += ' \u2014 you are here';
+      else if (o.kind === 'mesh') s += ' \u2014 mesh';
+      return s;
+    };
+    let selected = (lo.selected || []).slice();
+    const save = async (addrs) => {
+      // Warn once, and only for the address actually carrying this session:
+      // every other removal is recoverable from the browser you are already
+      // using, and this one is not.
+      if (lo.current && selected.indexOf(lo.current) >= 0 && addrs.indexOf(lo.current) < 0) {
+        if (!confirm('Stop listening on ' + lo.current + '?\n\nThat is the address you are connected through, so this session will end when the node restarts. Make sure you can reach it on one of the addresses you have kept.')) {
+          renderSection();
+          return;
+        }
+      }
+      selected = addrs.slice();
+      await edit('/api/webadmin/listen-addrs', { addrs: addrs });
+    };
+    laWrap.appendChild(buildRouteChipPicker(
+      lo.options.map(o => o.addr), selected, save,
+      { labelOf: labelOf,
+        placeholder: 'search addresses to add\u2026',
+        noneText: 'no bindable addresses found',
+        loadingText: 'loading addresses\u2026',
+        staleTitle: 'not currently present on this host' }));
+  }).catch(() => {
+    laWrap.appendChild($('<div class="hint">could not load addresses</div>'));
+  });
+
+  c.appendChild(card); card = $('<div class="card"></div>');
+
   card.appendChild($('<h3>TLS certificate</h3>'));
   card.appendChild($('<div class="settings-desc" style="margin-bottom:10px">Upload a certificate and its matching private key (PEM). Validated before anything is saved. Needs a restart to take effect.</div>'));
 
@@ -3089,16 +3140,16 @@ function secSettingsNetwork(c) {
 
   card.appendChild($('<h3>Underlay</h3>'));
   card.appendChild(buildPortListRow('udpport', 'UDP port',
-    'The UDP port(s) this node listens on; comma-separated for more than one. The first is the primary: used for outbound and advertised to peers. Changing it applies immediately: the node rebinds and connected peers migrate automatically; the old port keeps serving inbound for a couple of minutes so nothing drops. Peers that only know this node by a fixed seed address will need that seed updated if the primary changes. Any further ports are extra, inbound-only listeners (e.g. 65432, 443, 80), so a peer behind a restrictive firewall can still reach this node; best-effort, a port that\u2019s privileged or already in use is skipped, not rejected. Enter <b>-</b> to turn UDP off entirely and rely on the TCP fallback below; refused while that\u2019s also off, since the node needs at least one way to be reached.',
-    [state.primaryPort, ...(state.extraUDPPorts||[])], '/api/port',
-    (ports, disabled) => { state.primaryPort = disabled ? 0 : ports[0]; state.extraUDPPorts = disabled ? [] : ports.slice(1); },
-    state.primaryPort === 0));
+    'The UDP port(s) this node listens on; comma-separated for more than one (e.g. 65432, 443, 80), so a peer behind a restrictive firewall can still reach this node. Every port answers the same \u2014 there is no primary and no extras. The first is simply what this node advertises to peers as its canonical port, so peers that know this node only by a fixed seed address will need that seed updated if the first one changes. Changing the list applies immediately: the node rebinds and connected peers migrate automatically; the old ports keep serving inbound for a couple of minutes so nothing drops. Best-effort per port \u2014 one that\u2019s privileged or already in use is skipped, not rejected. Enter <b>-</b> to turn UDP off entirely; refused while TCP below is also off, since the node needs at least one way to be reached.',
+    state.udpPorts, '/api/port',
+    (ports, disabled) => { state.udpPorts = disabled ? [] : ports; },
+    (state.udpPorts||[]).length === 0));
 
   card.appendChild(buildPortListRow('tcpport', 'TCP port',
-    'The TCP port(s) this node listens on for the TLS fallback, used to reach the mesh when UDP is blocked; comma-separated for more than one. The first defaults to the same number as the UDP port (65432); set it to anything (e.g. 443) to make the fallback look like ordinary HTTPS. Changing it applies immediately: the node rebinds the fallback listener and dials peers on it. Keep it the same on every node in a mesh. Any further ports are extra fallback listeners, best-effort the same way as extra UDP ports. Enter <b>-</b> to turn the TCP fallback off entirely; refused while UDP above is also off.',
-    [state.tcpPort, ...(state.extraTCPPorts||[])], '/api/tcpport',
-    (ports, disabled) => { state.tcpFallbackDisabled = disabled; if (!disabled) { state.tcpPort = ports[0]; state.extraTCPPorts = ports.slice(1); } },
-    state.tcpFallbackDisabled));
+    'The TCP port(s) this node listens on, wrapped in TLS so they look like ordinary HTTPS \u2014 how the mesh stays reachable where UDP is blocked. Comma-separated for more than one (e.g. 65432, 443). This list is independent of the UDP list above: neither is derived from the other, and nodes in one mesh may use different ports. Changing it applies immediately: the node rebinds and dials peers on the new set. Enter <b>-</b> to turn TCP off entirely; refused while UDP above is also off.',
+    state.tcpPorts, '/api/tcpport',
+    (ports, disabled) => { state.tcpPorts = disabled ? [] : ports; },
+    (state.tcpPorts||[]).length === 0));
 
   c.appendChild(card); card = $('<div class="card"></div>');
 

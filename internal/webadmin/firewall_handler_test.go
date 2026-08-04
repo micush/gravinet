@@ -58,8 +58,8 @@ func TestFirewallTogglesAreLive(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := dir + "/config.json"
 	cfg := &config.Config{
-		PrimaryPort: 51820,
-		EnableIPv4:  true,
+		UDPPorts:   []int{51820},
+		EnableIPv4: true,
 		Networks: []config.Network{{
 			ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24",
 			Firewall: config.Firewall{Enabled: true, Rules: []config.FirewallRule{
@@ -119,8 +119,8 @@ func TestFirewallCatalogGlobalOpsNotNetScoped(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := dir + "/config.json"
 	cfg := &config.Config{
-		PrimaryPort: 51820,
-		EnableIPv4:  true,
+		UDPPorts:   []int{51820},
+		EnableIPv4: true,
 		Networks: []config.Network{
 			{ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24"},
 			{ID: "5678", Name: "wan", Enabled: true, Subnet4: "10.1.0.0/24"},

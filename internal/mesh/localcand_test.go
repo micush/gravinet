@@ -81,12 +81,16 @@ func TestLocalEndpointsFallBackToTCPPortWhenUDPDisabled(t *testing.T) {
 
 // TestTCPPortForHostCandidateUsesOwnersAdvertisedPort pins the other half of
 // making host candidates work over TCP. A peer's LAN address is by definition
-// not its observed endpoint, so tcpPortForEndpoint's exact-match on ni.endpoint
-// can never hit for a candidate — before the owner lookup, every LAN candidate
-// silently fell through to *our own* fallback port, which is correct only by
-// coincidence (when both nodes happen to use the same one). Here the peer
-// advertises 8443 while we use 443; dialing our own 443 at its LAN address
-// would just fail.
+// not its observed endpoint, so a lookup keyed on the endpoint can never hit
+// for a candidate — before the owner lookup, every LAN candidate silently fell
+// through to *our own* fallback port, which is correct only by coincidence
+// (when both nodes happen to use the same one). Here the peer advertises 8443
+// while we use 443; dialing our own 443 at its LAN address would just fail.
+//
+// Ported from tcpPortForEndpoint to the candidate model. The lookup is now
+// keyed by node rather than by address, which is what makes it well-posed when
+// two peers share one NAT — and the caller dials the whole candidate set, so
+// the owner's advertised port is tried whether or not it wins the ordering.
 func TestTCPPortForHostCandidateUsesOwnersAdvertisedPort(t *testing.T) {
 	e, ns := testEngineWithNet(t)
 	e.SetFallbackPort(443) // ours, deliberately different from the peer's
@@ -98,8 +102,23 @@ func TestTCPPortForHostCandidateUsesOwnersAdvertisedPort(t *testing.T) {
 		endpoint: netip.MustParseAddrPort("203.0.113.1:40001")} // its observed (shared public) endpoint
 	ns.mu.Unlock()
 
-	if got := ns.tcpPortForEndpoint(lan); got != 8443 {
-		t.Fatalf("host candidate should resolve to its owner's advertised TCP port 8443, got %d", got)
+	if got := ns.tcpPortForOwner("gn-cush1"); got != 8443 {
+		t.Fatalf("owner lookup should resolve to the peer's advertised TCP port 8443, got %d", got)
+	}
+	// And the candidate set built for that seed must actually contain it.
+	cands := e.fallbackCandidates(ns, lan, 443, ns.seedOwnerOf(lan))
+	var ports []uint16
+	for _, c := range cands {
+		ports = append(ports, c.Port)
+	}
+	found := false
+	for _, p := range ports {
+		if p == 8443 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("candidate ports %v omit the owner's advertised 8443", ports)
 	}
 }
 

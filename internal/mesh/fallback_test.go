@@ -21,7 +21,7 @@ func init() {
 	fallbackHandshakeGrace = 50 * time.Millisecond
 }
 
-// fakeFallback is a Sender that also implements fallbackDialer, recording dials.
+// fakeFallback is a Sender that also implements tcpDialer, recording dials.
 type fakeFallback struct {
 	mu     sync.Mutex
 	dialed []netip.AddrPort
@@ -30,7 +30,7 @@ type fakeFallback struct {
 
 func (f *fakeFallback) Send(netip.AddrPort, []byte) error { return nil }
 
-func (f *fakeFallback) DialFallback(to netip.AddrPort) error {
+func (f *fakeFallback) DialTCP(to netip.AddrPort) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.dialed = append(f.dialed, to)
@@ -41,7 +41,7 @@ func (f *fakeFallback) DialFallback(to netip.AddrPort) error {
 	return nil
 }
 
-func (f *fakeFallback) HasFallback(to netip.AddrPort) bool {
+func (f *fakeFallback) HasTCP(to netip.AddrPort) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.has[to]
@@ -84,8 +84,13 @@ func TestEnsureFallbackDialsAndSeeds(t *testing.T) {
 	for time.Now().Before(deadline) && len(f.dials()) == 0 {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if d := f.dials(); len(d) != 1 || d[0] != fb {
-		t.Fatalf("expected one dial to %s, got %v", fb, d)
+	// Containment, not an exact count. The flat candidate model dials every
+	// plausible candidate — here the seed's own port alongside the resolved
+	// one — rather than choosing between them. Choosing is what forced the old
+	// code to derive a port, and deriving is what let one peer's port be used
+	// for another (two nodes behind one NAT, tcp/65432 and udp/65432).
+	if !dialedContains(f, fb) {
+		t.Fatalf("expected a dial to %s, got %v", fb, f.dials())
 	}
 
 	ns.mu.RLock()
@@ -101,11 +106,15 @@ func TestEnsureFallbackDialsAndSeeds(t *testing.T) {
 		t.Fatalf("fallback endpoint %s not added as seed; seeds=%v", fb, seeds)
 	}
 
-	// Idempotent: with a fallback conn already up (HasFallback true), no re-dial.
+	// Idempotent: with a fallback conn already up (HasTCP true), no
+	// re-dial of anything already dialed. Compared against the set from the
+	// first pass rather than against a fixed count, since the candidate set
+	// may legitimately hold more than one address.
+	before := len(f.dials())
 	e.ensureFallback(ns, seed)
 	time.Sleep(100 * time.Millisecond)
-	if d := f.dials(); len(d) != 1 {
-		t.Fatalf("expected no second dial, got %d", len(d))
+	if d := f.dials(); len(d) != before {
+		t.Fatalf("expected no further dials (was %d), got %d: %v", before, len(d), d)
 	}
 }
 
@@ -146,7 +155,7 @@ func TestEnsureFallbackDisabled(t *testing.T) {
 	}
 }
 
-// TestEnsureFallbackNoDialerIsNoop: a UDP-only transport (no fallbackDialer)
+// TestEnsureFallbackNoDialerIsNoop: a UDP-only transport (no tcpDialer)
 // must be tolerated without panic.
 func TestEnsureFallbackNoDialerIsNoop(t *testing.T) {
 	e := NewEngine(Options{
@@ -154,13 +163,13 @@ func TestEnsureFallbackNoDialerIsNoop(t *testing.T) {
 		TCPFallbackPort: 443,
 		Nets:            []NetSpec{{ID: 1, Name: "n", Dev: newFakeDev("d"), Subnet4: netip.MustParsePrefix("10.0.0.0/24")}},
 	})
-	e.Attach(nopSender{}) // implements Sender but not fallbackDialer
+	e.Attach(nopSender{}) // implements Sender but not tcpDialer
 	ns := e.netSnapshot()[1]
 	e.ensureFallback(ns, netip.MustParseAddrPort("203.0.113.7:65432")) // must not panic
 }
 
 // slowFallback wraps fakeFallback with an artificial delay before
-// DialFallback completes, opening a window during which concurrent callers
+// DialTCP completes, opening a window during which concurrent callers
 // could race past the already-connected/already-has-fallback checks if
 // nothing coalesces them.
 type slowFallback struct {
@@ -168,9 +177,9 @@ type slowFallback struct {
 	delay time.Duration
 }
 
-func (f *slowFallback) DialFallback(to netip.AddrPort) error {
+func (f *slowFallback) DialTCP(to netip.AddrPort) error {
 	time.Sleep(f.delay)
-	return f.fakeFallback.DialFallback(to)
+	return f.fakeFallback.DialTCP(to)
 }
 
 // TestEnsureFallbackCoalescesConcurrentDials reproduces the real-world
@@ -210,8 +219,21 @@ func TestEnsureFallbackCoalescesConcurrentDials(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	time.Sleep(150 * time.Millisecond) // let any (wrongly) racing extra dials land
-	if d := f.dials(); len(d) != 1 {
-		t.Fatalf("expected exactly 1 dial despite 30 concurrent callers for the same fallback address, got %d: %v", len(d), d)
+	// The claim must still coalesce: each distinct candidate address is dialed
+	// at most once no matter how many callers arrive together. What is no
+	// longer asserted is that there is only one address — the set may hold
+	// several, and each is separately coalesced.
+	seen := map[netip.AddrPort]int{}
+	for _, d := range f.dials() {
+		seen[d]++
+	}
+	for addr, n := range seen {
+		if n != 1 {
+			t.Fatalf("address %s dialed %d times despite 30 concurrent callers; the claim did not coalesce", addr, n)
+		}
+	}
+	if len(seen) == 0 {
+		t.Fatal("no dial at all")
 	}
 }
 
@@ -245,7 +267,7 @@ func TestEnsureFallbackPropagatesSeedOwnerToFb(t *testing.T) {
 }
 
 // TestWatchFallbackHandshakeWarnsWhenNoSessionForms is the core diagnostic
-// this fix adds: DialFallback succeeding only confirms a raw socket
+// this fix adds: DialTCP succeeding only confirms a raw socket
 // connected, not that a gravinet peer is on the other end. If no mesh
 // session forms over fb within the grace window, a warning should be logged
 // — otherwise an address that isn't running gravinet (or fails its handshake

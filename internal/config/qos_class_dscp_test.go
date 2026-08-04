@@ -3,7 +3,7 @@ package config
 import "testing"
 
 func TestQoSSetClassDSCP(t *testing.T) {
-	c := &Config{PrimaryPort: 65432, EnableIPv4: true,
+	c := &Config{UDPPorts: []int{65432}, EnableIPv4: true,
 		Networks: []Network{{ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24"}}}
 
 	// Setting a class's mark before any QoS config exists should seed the
@@ -51,7 +51,7 @@ func TestQoSSetClassDSCP(t *testing.T) {
 }
 
 func TestQoSClearClassDSCP(t *testing.T) {
-	c := &Config{PrimaryPort: 65432, EnableIPv4: true,
+	c := &Config{UDPPorts: []int{65432}, EnableIPv4: true,
 		Networks: []Network{{ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24"}}}
 	if err := c.QoSSetClassDSCP("lan", 2, 12); err != nil {
 		t.Fatal(err)

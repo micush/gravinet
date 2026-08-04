@@ -7,7 +7,7 @@ import (
 )
 
 func TestRouteSetEnabled(t *testing.T) {
-	c := &Config{EnableIPv4: true, PrimaryPort: 51820, Networks: []Network{baseNet()}}
+	c := &Config{EnableIPv4: true, UDPPorts: []int{51820}, Networks: []Network{baseNet()}}
 	if err := c.RouteAdd("n1", "192.168.9.0/24", 5); err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +40,7 @@ func TestRouteSetEnabled(t *testing.T) {
 }
 
 func TestRouteRejectSetEnabled(t *testing.T) {
-	c := &Config{EnableIPv4: true, PrimaryPort: 51820, Networks: []Network{baseNet()}}
+	c := &Config{EnableIPv4: true, UDPPorts: []int{51820}, Networks: []Network{baseNet()}}
 	c.Networks[0].RouteRej = []RejectRoute{}
 	if err := c.RouteReject("n1", "10.0.0.0/8", false); err != nil {
 		t.Fatal(err)

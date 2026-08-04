@@ -378,11 +378,8 @@ first to see current values before deciding what to send.
       ]
     }
   ],
-  "primary_port": 51820,
-  "tcp_fallback_port": 51821,
-  "tcp_fallback_disabled": false,
-  "extra_listen_ports": [],
-  "extra_tcp_listen_ports": [],
+  "udp_ports": [51820],
+  "tcp_ports": [51821],
   "nat_state_timeout": 120,
   "geoip_lookup": true,
   "enable_upnp": false,

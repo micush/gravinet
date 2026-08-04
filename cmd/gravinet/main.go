@@ -48,7 +48,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "786"
+	version = "791"
 	commit  = "none"
 )
 
@@ -539,9 +539,9 @@ func cmdRun(args []string) {
 			UnderlayMTU:       cfg.UnderlayMTUValue(),
 			UnderlayMTUMax:    cfg.UnderlayMTUMaxValue(),
 			TCPFallbackPort:   engineFallbackPort(cfg),
-			PrimaryPort:       cfg.PrimaryPort,
-			ExtraTCPPorts:     toUint16Ports(cfg.ExtraTCPListenPorts),
-			ExtraUDPPorts:     toUint16Ports(cfg.ExtraListenPorts),
+			PrimaryPort:       udpPrimary(cfg),
+			ExtraTCPPorts:     toUint16Ports(tcpExtras(cfg)),
+			ExtraUDPPorts:     toUint16Ports(udpExtras(cfg)),
 			TunWorkers:        workers,
 			FirewallObjects:   toMeshFirewallObjects(cfg.FirewallObjects),
 			FirewallServices:  toMeshFirewallServices(cfg.FirewallServices),
@@ -587,12 +587,12 @@ func cmdRun(args []string) {
 		// stays nil when the fallback is off or fails to bind. Dual.Send already
 		// treats a nil UDP the same way it treats a nil TLS.
 		var tr *transport.Transport
-		if cfg.PrimaryPort > 0 {
+		if udpPrimary(cfg) > 0 {
 			var err error
 			tr, err = transport.Open(transport.Options{
-				PrimaryPort:   cfg.PrimaryPort,
+				PrimaryPort:   udpPrimary(cfg),
 				FallbackPorts: config.FallbackUDPPorts,
-				ExtraPorts:    cfg.ExtraListenPorts,
+				ExtraPorts:    udpExtras(cfg),
 				EnableV4:      cfg.EnableIPv4,
 				EnableV6:      cfg.EnableIPv6,
 				Workers:       workers,
@@ -621,11 +621,11 @@ func cmdRun(args []string) {
 		// skipped there, not fatal — this only reaches the UDP-only fallback below if
 		// *none* of them could bind.
 		var tlsTr *transport.TLSTransport
-		if cfg.TCPFallbackEnabled() {
-			fp := cfg.TCPFallbackPortValue()
+		if cfg.TCPEnabled() {
+			fp := cfg.AdvertisedTCPPort()
 			if tt, terr := transport.OpenTLS(transport.TLSOptions{
 				Port:       fp,
-				ExtraPorts: cfg.ExtraTCPListenPorts,
+				ExtraPorts: tcpExtras(cfg),
 				Handler:    pktHandler,
 				Log:        logx.Default(),
 			}); terr != nil {
@@ -650,7 +650,7 @@ func cmdRun(args []string) {
 		// The two primary ports are mapped using the port that actually
 		// bound (tr.Port()/tlsTr.Port()), not just what was configured: the
 		// UDP primary in particular can silently fall back to a different
-		// port than cfg.PrimaryPort (see transport.Open's doc comment and
+		// port than udpPrimary(cfg) (see transport.Open's doc comment and
 		// config.FallbackUDPPorts) — mapping the configured-but-unbound
 		// port would forward WAN traffic to a port nothing is listening on.
 		// Extra listen ports don't have an equivalent "what actually bound"
@@ -668,10 +668,10 @@ func cmdRun(args []string) {
 			if tlsTr != nil && tlsTr.HasPrimary() {
 				mappings = append(mappings, upnp.PortMapping{Port: tlsTr.Port(), Protocol: "TCP"})
 			}
-			for _, p := range cfg.ExtraListenPorts {
+			for _, p := range udpExtras(cfg) {
 				mappings = append(mappings, upnp.PortMapping{Port: p, Protocol: "UDP"})
 			}
-			for _, p := range cfg.ExtraTCPListenPorts {
+			for _, p := range tcpExtras(cfg) {
 				mappings = append(mappings, upnp.PortMapping{Port: p, Protocol: "TCP"})
 			}
 			// NewManager drops non-positive/duplicate entries and no-ops if
@@ -694,15 +694,15 @@ func cmdRun(args []string) {
 		// port — extra_listen_ports/extra_tcp_listen_ports changing alone used to
 		// go unnoticed until the next unrelated port change or a full restart.
 		var trMu sync.Mutex
-		reqPort := cfg.PrimaryPort
+		reqPort := udpPrimary(cfg)
 		curTr := tr
 		curTLS := tlsTr
 		reqTCPPort := 0
 		if tlsTr != nil {
 			reqTCPPort = tlsTr.Port()
 		}
-		reqExtraUDP := cfg.ExtraListenPorts
-		reqExtraTCP := cfg.ExtraTCPListenPorts
+		reqExtraUDP := udpExtras(cfg)
+		reqExtraTCP := tcpExtras(cfg)
 		getTr := func() *transport.Transport {
 			trMu.Lock()
 			defer trMu.Unlock()
@@ -1141,14 +1141,14 @@ func cmdRun(args []string) {
 					// at startup); resolve them here so a seed added at runtime is
 					// dialed live via ReloadRuntime's seed merge.
 					boot := append(append([]string{}, n.Seeds.Addrs()...), n.PeerCache...)
-					spec.Seeds = resolveSeeds(boot, newCfg.PrimaryPort, overlays)
-					spec.TCPSeeds = resolveTCPSeeds(boot, newCfg.TCPFallbackPortValue(), overlays)
+					spec.Seeds = resolveSeeds(boot, udpPrimary(newCfg), overlays)
+					spec.TCPSeeds = resolveTCPSeeds(boot, newCfg.AdvertisedTCPPort(), overlays)
 					// Clean counterparts: exactly the operator's configured Seeds,
 					// none of PeerCache folded in -- see NetSpec.ConfiguredSeeds'
 					// doc comment. Same resolver, same expansion rules (multi-port
 					// lists, tcp:// scheme), just without boot's extra addresses.
-					spec.ConfiguredSeeds = resolveSeeds(n.Seeds.Addrs(), newCfg.PrimaryPort, overlays)
-					spec.ConfiguredTCPSeeds = resolveTCPSeeds(n.Seeds.Addrs(), newCfg.TCPFallbackPortValue(), overlays)
+					spec.ConfiguredSeeds = resolveSeeds(n.Seeds.Addrs(), udpPrimary(newCfg), overlays)
+					spec.ConfiguredTCPSeeds = resolveTCPSeeds(n.Seeds.Addrs(), newCfg.AdvertisedTCPPort(), overlays)
 					if ks, kerr := crypto.NewKeySet(keyStrings(n)); kerr == nil {
 						spec.Keys = ks
 						spec.KeyLabels = keyLabelMap(n)
@@ -1238,7 +1238,7 @@ func cmdRun(args []string) {
 			// port), then close it. Connected peers are poked immediately so they roam
 			// to the new endpoint without waiting for the next keepalive.
 			//
-			// newCfg.PrimaryPort == 0 means UDP is being turned off entirely (the "-"
+			// udpPrimary(newCfg) == 0 means UDP is being turned off entirely (the "-"
 			// sentinel in the web admin's UDP port field) — handled the same way the
 			// TCP/TLS fallback's on/off toggle is just below. Config.Validate refuses
 			// to let both be off at once, so there's always at least one live
@@ -1248,11 +1248,11 @@ func cmdRun(args []string) {
 			prevExtraUDP := reqExtraUDP
 			trMu.Unlock()
 			// The extra-ports-only branch only matters while UDP stays enabled
-			// (newCfg.PrimaryPort != 0) — if it's off before and after, there's no
+			// (udpPrimary(newCfg) != 0) — if it's off before and after, there's no
 			// listener to attach extra ports to either way, so a change to the list
 			// is moot (same reasoning as the TCP fallback's extras check below).
-			if newCfg.PrimaryPort != prevPort || (newCfg.PrimaryPort != 0 && !slices.Equal(newCfg.ExtraListenPorts, prevExtraUDP)) {
-				if newCfg.PrimaryPort == 0 {
+			if udpPrimary(newCfg) != prevPort || (udpPrimary(newCfg) != 0 && !slices.Equal(udpExtras(newCfg), prevExtraUDP)) {
+				if udpPrimary(newCfg) == 0 {
 					trMu.Lock()
 					prev := curTr
 					curTr = nil
@@ -1270,9 +1270,9 @@ func cmdRun(args []string) {
 						}(prev)
 					}
 				} else if nt, terr := transport.Open(transport.Options{
-					PrimaryPort:   newCfg.PrimaryPort,
+					PrimaryPort:   udpPrimary(newCfg),
 					FallbackPorts: config.FallbackUDPPorts,
-					ExtraPorts:    newCfg.ExtraListenPorts,
+					ExtraPorts:    udpExtras(newCfg),
 					EnableV4:      newCfg.EnableIPv4,
 					EnableV6:      newCfg.EnableIPv6,
 					Workers:       workers,
@@ -1282,19 +1282,19 @@ func cmdRun(args []string) {
 					EnableUDPGSO:  newCfg.UDPGSOEnabled(),
 					SocketBuffer:  newCfg.SocketBufferValue(),
 				}); terr != nil {
-					logx.Errorf("underlay port change %d -> %d failed: %v — keeping port %d", prevPort, newCfg.PrimaryPort, terr, prevPort)
+					logx.Errorf("underlay port change %d -> %d failed: %v — keeping port %d", prevPort, udpPrimary(newCfg), terr, prevPort)
 				} else {
 					trMu.Lock()
 					prev := curTr
 					curTr = nt
-					reqPort = newCfg.PrimaryPort
-					reqExtraUDP = newCfg.ExtraListenPorts
+					reqPort = udpPrimary(newCfg)
+					reqExtraUDP = udpExtras(newCfg)
 					trMu.Unlock()
-					reattach()                                                      // outbound now originates from the new port (keeps current TLS)
-					engine.PokePeers()                                              // immediate keepalive so peers roam to it
-					engine.SetExtraUDPPorts(toUint16Ports(newCfg.ExtraListenPorts)) // advertise the new list live
-					engine.SetPrimaryPort(newCfg.PrimaryPort)                       // host candidates carry the port; re-advertise them on the new one
-					logx.Infof("underlay port changed %d -> %d (old port still serving inbound for %s, then closing)", prevPort, newCfg.PrimaryPort, portChangeGrace)
+					reattach()                                                // outbound now originates from the new port (keeps current TLS)
+					engine.PokePeers()                                        // immediate keepalive so peers roam to it
+					engine.SetExtraUDPPorts(toUint16Ports(udpExtras(newCfg))) // advertise the new list live
+					engine.SetPrimaryPort(udpPrimary(newCfg))                 // host candidates carry the port; re-advertise them on the new one
+					logx.Infof("underlay port changed %d -> %d (old port still serving inbound for %s, then closing)", prevPort, udpPrimary(newCfg), portChangeGrace)
 					if prev != nil {
 						go func(old *transport.Transport) {
 							time.Sleep(portChangeGrace)
@@ -1311,13 +1311,13 @@ func cmdRun(args []string) {
 			prevExtraTCP := reqExtraTCP
 			trMu.Unlock()
 			wantTCP := 0
-			if newCfg.TCPFallbackEnabled() {
-				wantTCP = newCfg.TCPFallbackPortValue()
+			if newCfg.TCPEnabled() {
+				wantTCP = newCfg.AdvertisedTCPPort()
 			}
 			// The extra-ports-only branch only matters while fallback stays enabled
 			// (wantTCP != 0) — if it's off before and after, there's no listener to
 			// attach extra ports to either way, so a change to the list is moot.
-			if wantTCP != prevTCP || (wantTCP != 0 && !slices.Equal(newCfg.ExtraTCPListenPorts, prevExtraTCP)) {
+			if wantTCP != prevTCP || (wantTCP != 0 && !slices.Equal(tcpExtras(newCfg), prevExtraTCP)) {
 				if wantTCP == 0 {
 					trMu.Lock()
 					prev := curTLS
@@ -1332,17 +1332,17 @@ func cmdRun(args []string) {
 					if prev != nil {
 						go func(old *transport.TLSTransport) { time.Sleep(portChangeGrace); old.Close() }(prev)
 					}
-				} else if ntls, terr := transport.OpenTLS(transport.TLSOptions{Port: wantTCP, ExtraPorts: newCfg.ExtraTCPListenPorts, Handler: pktHandler, Log: logx.Default()}); terr != nil {
+				} else if ntls, terr := transport.OpenTLS(transport.TLSOptions{Port: wantTCP, ExtraPorts: tcpExtras(newCfg), Handler: pktHandler, Log: logx.Default()}); terr != nil {
 					logx.Errorf("tcp fallback port change %d -> %d failed: %v — keeping %d", prevTCP, wantTCP, terr, prevTCP)
 				} else {
 					trMu.Lock()
 					prev := curTLS
 					curTLS = ntls
 					reqTCPPort = wantTCP
-					reqExtraTCP = newCfg.ExtraTCPListenPorts
+					reqExtraTCP = tcpExtras(newCfg)
 					trMu.Unlock()
 					engine.SetFallbackPort(wantTCP)
-					engine.SetExtraTCPPorts(toUint16Ports(newCfg.ExtraTCPListenPorts))
+					engine.SetExtraTCPPorts(toUint16Ports(tcpExtras(newCfg)))
 					reattach()
 					if !ntls.HasPrimary() {
 						logx.Warnf("tcp/%d fallback port already in use — skipped; still listening on configured extra tcp port(s)", wantTCP)
@@ -1511,6 +1511,28 @@ func cmdRun(args []string) {
 			if port := webPortOf(cfg); port != 0 {
 				go func() {
 					ensure := func() {
+						// Operator-picked addresses first (Settings > web admin
+						// listen addresses). When the pick list is set it is the
+						// whole answer, and the overlay sweep below is skipped:
+						// having deliberately chosen a set, an operator should
+						// not find addresses added back behind them.
+						if picked := cfg.ListenAddrsRaw(); len(picked) > 0 {
+							for _, raw := range picked {
+								a, err := netip.ParseAddr(raw)
+								if err != nil {
+									continue
+								}
+								addr := net.JoinHostPort(a.String(), strconv.Itoa(int(port)))
+								if err := webSrv.EnsureListener(addr); err != nil {
+									// Debug, not error: an address that isn't up
+									// yet (DHCP lease, interface still coming up)
+									// is normal on this ticker and resolves by
+									// itself on a later pass.
+									logx.Debugf("webadmin listener %s: %v", addr, err)
+								}
+							}
+							return
+						}
 						for _, id := range engine.NetworkIDs() {
 							a4, a6, ok := engine.NetworkSelfAddrs(id)
 							if !ok {
@@ -2531,12 +2553,12 @@ func buildOneNetSpec(n config.Network, cfg *config.Config, overlays []netip.Pref
 		}
 	}
 	boot := append(append([]string{}, n.Seeds.Addrs()...), n.PeerCache...)
-	spec.Seeds = resolveSeeds(boot, cfg.PrimaryPort, overlays)
-	spec.TCPSeeds = resolveTCPSeeds(boot, cfg.TCPFallbackPortValue(), overlays)
+	spec.Seeds = resolveSeeds(boot, udpPrimary(cfg), overlays)
+	spec.TCPSeeds = resolveTCPSeeds(boot, cfg.AdvertisedTCPPort(), overlays)
 	// Clean counterparts: exactly the operator's configured Seeds, none of
 	// PeerCache folded in -- see NetSpec.ConfiguredSeeds' doc comment.
-	spec.ConfiguredSeeds = resolveSeeds(n.Seeds.Addrs(), cfg.PrimaryPort, overlays)
-	spec.ConfiguredTCPSeeds = resolveTCPSeeds(n.Seeds.Addrs(), cfg.TCPFallbackPortValue(), overlays)
+	spec.ConfiguredSeeds = resolveSeeds(n.Seeds.Addrs(), udpPrimary(cfg), overlays)
+	spec.ConfiguredTCPSeeds = resolveTCPSeeds(n.Seeds.Addrs(), cfg.AdvertisedTCPPort(), overlays)
 
 	spec.HostsSync = n.HostsSync.Enabled
 	spec.HostsPath = n.HostsSync.Path
@@ -3245,10 +3267,10 @@ func prefixBits(cidr string) int {
 // listen on (so it can dial them when UDP fails). Zero when the fallback is
 // disabled, which turns off outbound fallback dialing.
 func engineFallbackPort(cfg *config.Config) int {
-	if !cfg.TCPFallbackEnabled() {
+	if !cfg.TCPEnabled() {
 		return 0
 	}
-	return cfg.TCPFallbackPortValue()
+	return cfg.AdvertisedTCPPort()
 }
 
 // toUint16Ports converts config's []int port lists (validated 1-65535 by
@@ -3521,4 +3543,25 @@ func qosClassRules(in []config.QoSRule, fwServices []config.FirewallService, net
 		}
 	}
 	return rules
+}
+
+// udpPrimary/udpExtras/tcpExtras adapt the flat port lists to the transport
+// layer, which still binds one socket as the source for outbound datagrams and
+// the rest as listen-only.
+//
+// That distinction is real and stays: something has to be chosen to send from.
+// What went away in v789 is the idea that it implies anything about a *peer* —
+// the old config called it "primary" with a "fallback" derived from it, and
+// that framing kept inviting the engine to guess a peer's port from this
+// node's, or from an unrelated session at the same address. Here it is purely
+// local: which of our own sockets we transmit on.
+func udpPrimary(c *config.Config) int  { return c.AdvertisedUDPPort() }
+func udpExtras(c *config.Config) []int { return restPorts(c.UDPPortList()) }
+func tcpExtras(c *config.Config) []int { return restPorts(c.TCPPortList()) }
+
+func restPorts(ports []int) []int {
+	if len(ports) < 2 {
+		return nil
+	}
+	return ports[1:]
 }

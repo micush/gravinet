@@ -7,7 +7,7 @@ import (
 )
 
 // waitFor polls cond until it holds or the deadline passes. The dial itself
-// runs off the init loop in its own goroutine (see dialFallbackCandidate), so
+// runs off the init loop in its own goroutine (see dialCandidate), so
 // asserting on f.dials() immediately after the call would race; the existing
 // fallback tests spell this loop out inline each time.
 func waitFor(t *testing.T, cond func() bool, msg string) {
@@ -35,9 +35,9 @@ func waitFor(t *testing.T, cond func() bool, msg string) {
 // across a twelve-node mesh in three hours, on every node, each with a fresh
 // socket and TLS handshake behind it. See v780.
 
-// TestDialFallbackCandidateHonorsBackoff: an fb still cooling down is not
+// TestDialCandidateHonorsBackoff: an fb still cooling down is not
 // redialled.
-func TestDialFallbackCandidateHonorsBackoff(t *testing.T) {
+func TestDialCandidateHonorsBackoff(t *testing.T) {
 	e, f, ns := fallbackEngine(t, 443)
 	seed := netip.MustParseAddrPort("203.0.113.7:65432")
 	fb := netip.MustParseAddrPort("203.0.113.7:443")
@@ -50,52 +50,52 @@ func TestDialFallbackCandidateHonorsBackoff(t *testing.T) {
 		t.Fatal("fb should be in backoff after a recorded failure")
 	}
 
-	e.dialFallbackCandidate(ns, f, seed, 443)
+	e.dialCandidate(ns, f, seed, 443)
 
 	if got := f.dials(); len(got) != 0 {
 		t.Fatalf("dialed %v while fb was in backoff; the recorded cooldown is being ignored", got)
 	}
-	// The claim must be released, not leaked — a stuck ns.dialing entry would
-	// suppress the dial permanently rather than for the backoff window.
-	ns.mu.RLock()
-	stuck := ns.dialing[fb]
-	ns.mu.RUnlock()
-	if stuck {
-		t.Fatal("dialFallbackCandidate left fb claimed after declining to dial")
+	// The claim must be released, not leaked — a stuck in-flight claim would
+	// suppress the dial permanently rather than for the backoff window. Once
+	// the cooldown expires the candidate has to become claimable again, which
+	// is the observable form of "not leaked" now that the claim and the
+	// backoff live in one entry.
+	if !ns.cands.Claim(tcpCandKey(fb), time.Now().Add(candBackoffMax+time.Second)) {
+		t.Fatal("dialCandidate left fb claimed after declining to dial")
 	}
 }
 
-// TestDialFallbackCandidateDialsOnceBackoffCleared: the suppression is a
+// TestDialCandidateDialsOnceBackoffCleared: the suppression is a
 // cooldown, not a permanent ban. A session forming clears it
 // (watchFallbackHandshake's success path) and the address becomes dialable
 // again.
-func TestDialFallbackCandidateDialsOnceBackoffCleared(t *testing.T) {
+func TestDialCandidateDialsOnceBackoffCleared(t *testing.T) {
 	e, f, ns := fallbackEngine(t, 443)
 	seed := netip.MustParseAddrPort("203.0.113.7:65432")
 	fb := netip.MustParseAddrPort("203.0.113.7:443")
 
 	ns.noteFallbackFailure(fb)
-	e.dialFallbackCandidate(ns, f, seed, 443)
+	e.dialCandidate(ns, f, seed, 443)
 	if got := f.dials(); len(got) != 0 {
 		t.Fatalf("dialed %v while in backoff", got)
 	}
 
 	ns.clearFallbackBackoff(fb)
-	e.dialFallbackCandidate(ns, f, seed, 443)
+	e.dialCandidate(ns, f, seed, 443)
 
 	waitFor(t, func() bool { return len(f.dials()) == 1 }, "fb not dialed after its backoff was cleared")
 }
 
-// TestDialFallbackCandidateBackoffIsPerAddress: penalizing one candidate port
+// TestDialCandidateBackoffIsPerAddress: penalizing one candidate port
 // must not suppress the others. The whole point of a multi-port candidate list
 // is that one port getting through when another doesn't is the expected case.
-func TestDialFallbackCandidateBackoffIsPerAddress(t *testing.T) {
+func TestDialCandidateBackoffIsPerAddress(t *testing.T) {
 	e, f, ns := fallbackEngine(t, 443)
 	seed := netip.MustParseAddrPort("203.0.113.7:65432")
 	dead := netip.MustParseAddrPort("203.0.113.7:443")
 
 	ns.noteFallbackFailure(dead)
-	e.dialFallbackCandidate(ns, f, seed, 23)
+	e.dialCandidate(ns, f, seed, 23)
 
 	waitFor(t, func() bool {
 		for _, d := range f.dials() {

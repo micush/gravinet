@@ -155,7 +155,7 @@ func TestRelayedConnectionUpgradesToDirect(t *testing.T) {
 
 // TestUpgradeAttemptAlsoTriesFallback is the fast, isolated counterpart to
 // TestRelayedConnectionUpgradesToDirect, for the gap that test's own harness
-// (a plain in-memory UDP switchboard, with no fallbackDialer at all) can't
+// (a plain in-memory UDP switchboard, with no tcpDialer at all) can't
 // exercise: before this fix, seedOwnerNeedsUpgrade decided an upgrade
 // attempt was due, but initLoop's upgrade branch only ever acted on that by
 // calling planHandshake/e.send — the plain UDP path. Once a peer was
@@ -212,8 +212,13 @@ func TestUpgradeAttemptAlsoTriesFallback(t *testing.T) {
 	for time.Now().Before(deadline) && len(f.dials()) == 0 {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if d := f.dials(); len(d) != 1 || d[0] != fb {
-		t.Fatalf("initSeedTick on a relay-only owner due for an upgrade should have dialed the fallback %s; got dials=%v", fb, d)
+	// Containment, not an exact count. The flat candidate model dials every
+	// plausible candidate — here the seed's own port alongside the resolved
+	// one — rather than choosing between them. Choosing is what forced the old
+	// code to derive a port, and deriving is what let one peer's port be used
+	// for another (two nodes behind one NAT, tcp/65432 and udp/65432).
+	if !dialedContains(f, fb) {
+		t.Fatalf("initSeedTick on a relay-only owner due for an upgrade should have dialed the fallback %s; got dials=%v", fb, f.dials())
 	}
 }
 

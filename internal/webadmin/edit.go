@@ -960,11 +960,10 @@ func (s *Server) handlePort(w http.ResponseWriter, r *http.Request) {
 	}
 	err := s.mutateConfig(r, func(cfg *config.Config) error {
 		if req.Disabled {
-			if !cfg.TCPFallbackEnabled() {
-				return fmt.Errorf("can't turn off the UDP port while the TCP fallback is also off — at least one must stay on")
+			if !cfg.TCPEnabled() {
+				return fmt.Errorf("can't turn off the UDP ports while TCP is also off — at least one transport must stay on")
 			}
-			cfg.PrimaryPort = 0
-			cfg.ExtraListenPorts = nil
+			cfg.UDPPorts = []int{} // explicit empty, not null: see UDPPorts' doc comment
 			return nil
 		}
 		if len(req.Ports) == 0 {
@@ -975,24 +974,22 @@ func (s *Server) handlePort(w http.ResponseWriter, r *http.Request) {
 				return fmt.Errorf("port %d must be between 1 and 65535", p)
 			}
 		}
-		cfg.PrimaryPort = req.Ports[0]
-		cfg.ExtraListenPorts = req.Ports[1:]
+		cfg.UDPPorts = req.Ports
 		return nil
 	})
 	s.editResult(w, err, false) // applied live; no restart
 }
 
-// handleTCPPort is handlePort's TCP/TLS-fallback counterpart: the first port
-// in the list is the fallback listener itself (config tcp_fallback_port),
-// any rest are extra TCP/TLS ports (extra_tcp_listen_ports). Applied live
-// the same way — the daemon rebinds the fallback listener (and any extra
-// ones) to the new set; the old ones keep serving briefly.
+// handleTCPPort is handlePort's TCP counterpart. Both write a plain list of
+// ports: there is no fallback listener and no extras, just the set of TCP
+// ports this node answers on, exactly as handlePort writes the UDP set.
 //
-// disabled:true (the web UI's "-" sentinel) sets disable_tcp_fallback
-// instead of a port list — the TCPFallbackPort/ExtraTCPListenPorts values
-// are left as-is (not cleared) so they're remembered if re-enabled later.
-// Refused if the UDP port is also off, for the same reason handlePort
-// refuses the opposite; Config.Validate enforces this as a backstop too.
+// Applied live — the daemon rebinds to the new set; the old sockets keep
+// serving briefly.
+//
+// disabled:true (the web UI's "-" sentinel) clears the list. Refused if UDP
+// is also off, for the same reason handlePort refuses the opposite; Validate
+// enforces it as a backstop.
 func (s *Server) handleTCPPort(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Ports    []int
@@ -1003,10 +1000,10 @@ func (s *Server) handleTCPPort(w http.ResponseWriter, r *http.Request) {
 	}
 	err := s.mutateConfig(r, func(cfg *config.Config) error {
 		if req.Disabled {
-			if cfg.PrimaryPort == 0 {
-				return fmt.Errorf("can't turn off the TCP fallback while the UDP port is also off — at least one must stay on")
+			if !cfg.UDPEnabled() {
+				return fmt.Errorf("can't turn off the TCP ports while UDP is also off — at least one transport must stay on")
 			}
-			cfg.DisableTCPFallback = true
+			cfg.TCPPorts = []int{} // explicit empty, not null: see UDPPorts' doc comment
 			return nil
 		}
 		if len(req.Ports) == 0 {
@@ -1017,9 +1014,7 @@ func (s *Server) handleTCPPort(w http.ResponseWriter, r *http.Request) {
 				return fmt.Errorf("port %d must be between 1 and 65535", p)
 			}
 		}
-		cfg.DisableTCPFallback = false
-		cfg.TCPFallbackPort = req.Ports[0]
-		cfg.ExtraTCPListenPorts = req.Ports[1:]
+		cfg.TCPPorts = req.Ports
 		return nil
 	})
 	s.editResult(w, err, false) // applied live; no restart

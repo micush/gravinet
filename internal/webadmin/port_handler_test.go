@@ -18,7 +18,10 @@ import (
 func TestHandlePortChangesConfigAndReloads(t *testing.T) {
 	cfgPath := t.TempDir() + "/cfg.json"
 	cfg := &config.Config{
-		PrimaryPort: 51820, EnableIPv4: true,
+		// Both lists explicit. Under the flat model a Config literal gets
+		// exactly the transports it names — there is no implicit "TCP is on
+		// unless disabled", which is what disable_tcp_fallback used to mean.
+		UDPPorts: []int{51820}, TCPPorts: []int{65432}, EnableIPv4: true,
 		WebAdmin: config.WebAdmin{Listen: "127.0.0.1:8443"},
 		Networks: []config.Network{{ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24",
 			Firewall: config.Firewall{Enabled: true}}},
@@ -64,11 +67,11 @@ func TestHandlePortChangesConfigAndReloads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.PrimaryPort != 51821 {
-		t.Errorf("config PrimaryPort = %d, want 51821", got.PrimaryPort)
+	if p := got.AdvertisedUDPPort(); p != 51821 {
+		t.Errorf("advertised udp port = %d, want 51821", p)
 	}
-	if len(got.ExtraListenPorts) != 0 {
-		t.Errorf("config ExtraListenPorts = %v, want empty", got.ExtraListenPorts)
+	if l := got.UDPPortList(); len(l) != 1 {
+		t.Errorf("udp ports = %v, want just the one", l)
 	}
 	if reloads == 0 {
 		t.Error("reload was not triggered")
@@ -80,11 +83,11 @@ func TestHandlePortChangesConfigAndReloads(t *testing.T) {
 		t.Fatalf("port list change rejected: %v", out)
 	}
 	got, _ = config.Load(cfgPath)
-	if got.PrimaryPort != 51822 {
-		t.Errorf("config PrimaryPort = %d, want 51822", got.PrimaryPort)
+	if p := got.AdvertisedUDPPort(); p != 51822 {
+		t.Errorf("advertised udp port = %d, want 51822", p)
 	}
-	if len(got.ExtraListenPorts) != 2 || got.ExtraListenPorts[0] != 443 || got.ExtraListenPorts[1] != 80 {
-		t.Errorf("config ExtraListenPorts = %v, want [443 80]", got.ExtraListenPorts)
+	if l := got.UDPPortList(); len(l) != 3 || l[0] != 51822 || l[1] != 443 || l[2] != 80 {
+		t.Errorf("udp ports = %v, want [51822 443 80]", l)
 	}
 
 	// invalid port anywhere in the list rejects the whole thing, config unchanged
@@ -93,8 +96,8 @@ func TestHandlePortChangesConfigAndReloads(t *testing.T) {
 		t.Error("out-of-range port in the list should be rejected")
 	}
 	got, _ = config.Load(cfgPath)
-	if got.PrimaryPort != 51822 {
-		t.Errorf("config PrimaryPort changed on invalid input: %d", got.PrimaryPort)
+	if p := got.AdvertisedUDPPort(); p != 51822 {
+		t.Errorf("udp ports changed on invalid input: %d", p)
 	}
 
 	// empty list rejected — a primary port is mandatory
@@ -103,24 +106,27 @@ func TestHandlePortChangesConfigAndReloads(t *testing.T) {
 		t.Error("an empty port list should be rejected")
 	}
 	got, _ = config.Load(cfgPath)
-	if got.PrimaryPort != 51822 {
-		t.Errorf("config PrimaryPort changed on empty list: %d", got.PrimaryPort)
+	if p := got.AdvertisedUDPPort(); p != 51822 {
+		t.Errorf("udp ports changed on empty list: %d", p)
 	}
 }
 
 // TestHandlePortDisableInteraction covers the "-" sentinel (sent as
-// {disabled:true}): turning UDP off must clear PrimaryPort/ExtraListenPorts,
+// {disabled:true}): turning UDP off must clear the UDP port list,
 // must be refused while the TCP/TLS fallback is also off (a node can't have
 // neither), and re-enabling UDP with a normal port list must work again
 // afterward. The TCP side of the same interaction is exercised at the config
-// layer by TestValidatePrimaryPortZeroRequiresTCPFallback; this test is the
+// layer by the both-empty check in Validate; this test is the
 // end-to-end HTTP-handler version of the UDP side specifically, including
 // the case where handleTCPPort's own disable is what's refused because UDP
 // is the one currently off.
 func TestHandlePortDisableInteraction(t *testing.T) {
 	cfgPath := t.TempDir() + "/cfg.json"
 	cfg := &config.Config{
-		PrimaryPort: 51820, EnableIPv4: true,
+		// Both lists explicit. Under the flat model a Config literal gets
+		// exactly the transports it names — there is no implicit "TCP is on
+		// unless disabled", which is what disable_tcp_fallback used to mean.
+		UDPPorts: []int{51820}, TCPPorts: []int{65432}, EnableIPv4: true,
 		WebAdmin: config.WebAdmin{Listen: "127.0.0.1:8443"},
 		Networks: []config.Network{{ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24",
 			Firewall: config.Firewall{Enabled: true}}},
@@ -156,7 +162,7 @@ func TestHandlePortDisableInteraction(t *testing.T) {
 	}
 
 	// Turning UDP off while the TCP fallback is on (the default) must
-	// succeed and clear both PrimaryPort and any extras.
+	// succeed and clear the whole UDP port list.
 	out := postTo("/api/port", map[string]any{"disabled": true})
 	if ok, _ := out["ok"].(bool); !ok {
 		t.Fatalf("disabling udp with tcp fallback enabled should succeed: %v", out)
@@ -165,11 +171,8 @@ func TestHandlePortDisableInteraction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.PrimaryPort != 0 {
-		t.Errorf("config PrimaryPort = %d, want 0 after disabling udp", got.PrimaryPort)
-	}
-	if len(got.ExtraListenPorts) != 0 {
-		t.Errorf("config ExtraListenPorts = %v, want empty after disabling udp", got.ExtraListenPorts)
+	if got.UDPEnabled() {
+		t.Errorf("udp ports = %v, want empty after disabling udp", got.UDPPortList())
 	}
 
 	// With UDP now off, disabling the TCP fallback too must be refused —
@@ -179,8 +182,8 @@ func TestHandlePortDisableInteraction(t *testing.T) {
 		t.Fatal("disabling tcp fallback while udp is already off should be refused")
 	}
 	got, _ = config.Load(cfgPath)
-	if got.DisableTCPFallback {
-		t.Error("tcp fallback should still be enabled after the refused disable")
+	if !got.TCPEnabled() {
+		t.Error("tcp should still be on after the refused disable")
 	}
 
 	// Re-enabling UDP with a normal port list must work again, and clears
@@ -190,8 +193,8 @@ func TestHandlePortDisableInteraction(t *testing.T) {
 		t.Fatalf("re-enabling udp with a port list should succeed: %v", out)
 	}
 	got, _ = config.Load(cfgPath)
-	if got.PrimaryPort != 51820 {
-		t.Errorf("config PrimaryPort = %d, want 51820 after re-enabling udp", got.PrimaryPort)
+	if p := got.AdvertisedUDPPort(); p != 51820 {
+		t.Errorf("advertised udp port = %d, want 51820 after re-enabling udp", p)
 	}
 
 	// Now that both are on again, disabling the TCP fallback must succeed.
@@ -200,8 +203,8 @@ func TestHandlePortDisableInteraction(t *testing.T) {
 		t.Fatalf("disabling tcp fallback with udp enabled should succeed: %v", out)
 	}
 	got, _ = config.Load(cfgPath)
-	if !got.DisableTCPFallback {
-		t.Error("tcp fallback should be disabled")
+	if got.TCPEnabled() {
+		t.Errorf("tcp ports = %v, want empty after disabling tcp", got.TCPPortList())
 	}
 
 	// And with the TCP fallback now off, disabling UDP too must be refused.
@@ -210,7 +213,7 @@ func TestHandlePortDisableInteraction(t *testing.T) {
 		t.Fatal("disabling udp while tcp fallback is already off should be refused")
 	}
 	got, _ = config.Load(cfgPath)
-	if got.PrimaryPort != 51820 {
-		t.Errorf("config PrimaryPort = %d, want unchanged (51820) after the refused disable", got.PrimaryPort)
+	if p := got.AdvertisedUDPPort(); p != 51820 {
+		t.Errorf("advertised udp port = %d, want unchanged (51820) after the refused disable", p)
 	}
 }

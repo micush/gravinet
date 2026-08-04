@@ -19,11 +19,11 @@ control plane, relay fallback, and broadcast/multicast:
 - **Config / Crypto / Protocol / TUN / Transport** — hot-reloadable config,
   AES-256-GCM + X25519 + HKDF, keyID-by-identity matching, replay protection,
   raw-ioctl Linux TUN (jumbo MTU, v4/v6, poller-managed I/O), UDP underlay with
-  port fallback and a cores-1 REUSEPORT worker pool. Both the UDP underlay and
-  the TCP/TLS fallback can also listen on additional ports at the same time
-  (`extra_listen_ports`/`extra_tcp_listen_ports`, or Settings → Underlay in
-  the web UI) — best-effort, applied live, so a peer behind a restrictive
-  firewall can reach this node on whichever well-known port gets through.
+  port fallback and a cores-1 REUSEPORT worker pool. A node listens on a set of
+  UDP ports and a set of TCP/TLS ports (`udp_ports`/`tcp_ports`, or Settings →
+  Underlay in the web UI) — no primary, no fallback, just two lists — so a peer
+  behind a restrictive firewall can reach this node on whichever well-known
+  port gets through. Best-effort per port, applied live.
   Extra ports are advertised to peers too (handshake and gossip, alongside
   the existing per-peer TCP fallback port advertisement), so the mesh
   actually tries them: TCP dials every advertised candidate for a peer in
@@ -479,10 +479,10 @@ daemon to rebuild interfaces and sessions, so the `network` commands **restart
 the service for you** (via systemd/launchd/SCM); pass `--no-restart` to skip that.
 The CLI tells you which case you're in after each change.
 
-Seed peers can be given without a port (`peer 198.51.100.7`). gravinet binds its
-primary port (65432, or your `primary_port`) first and falls back to well-known
-ports — 443, 4500, 3478, 1194, 500, 53 — when that's blocked, so a port-less seed
-is tried on **all** of them, since the remote may have landed on any. Give an
+Seed peers can be given without a port (`peer 198.51.100.7`). gravinet tries the
+first port in your `udp_ports` list (65432 by default) and then the well-known
+ones — 443, 4500, 3478, 1194, 500, 53 — so a port-less seed is tried on **all**
+of them, since the remote may be listening on any. Give an
 explicit `host:port` only to pin a node to one port.
 
 ## Test

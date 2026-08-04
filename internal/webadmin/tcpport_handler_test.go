@@ -19,7 +19,7 @@ import (
 func TestHandleTCPPortChangesConfigAndReloads(t *testing.T) {
 	cfgPath := t.TempDir() + "/cfg.json"
 	cfg := &config.Config{
-		PrimaryPort: 65432, EnableIPv4: true,
+		UDPPorts: []int{65432}, EnableIPv4: true,
 		WebAdmin: config.WebAdmin{Listen: "127.0.0.1:8443"},
 		Networks: []config.Network{{ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24",
 			Firewall: config.Firewall{Enabled: true}}},
@@ -65,11 +65,11 @@ func TestHandleTCPPortChangesConfigAndReloads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.TCPFallbackPort != 443 {
-		t.Errorf("config TCPFallbackPort = %d, want 443", got.TCPFallbackPort)
+	if p := got.AdvertisedTCPPort(); p != 443 {
+		t.Errorf("advertised tcp port = %d, want 443", p)
 	}
-	if len(got.ExtraTCPListenPorts) != 0 {
-		t.Errorf("config ExtraTCPListenPorts = %v, want empty", got.ExtraTCPListenPorts)
+	if l := got.TCPPortList(); len(l) != 1 {
+		t.Errorf("tcp ports = %v, want just the one", l)
 	}
 	if reloads == 0 {
 		t.Error("reload was not triggered")
@@ -81,11 +81,11 @@ func TestHandleTCPPortChangesConfigAndReloads(t *testing.T) {
 		t.Fatalf("tcp port list change rejected: %v", out)
 	}
 	got, _ = config.Load(cfgPath)
-	if got.TCPFallbackPort != 65432 {
-		t.Errorf("config TCPFallbackPort = %d, want 65432", got.TCPFallbackPort)
+	if p := got.AdvertisedTCPPort(); p != 65432 {
+		t.Errorf("advertised tcp port = %d, want 65432", p)
 	}
-	if len(got.ExtraTCPListenPorts) != 2 || got.ExtraTCPListenPorts[0] != 21 || got.ExtraTCPListenPorts[1] != 80 {
-		t.Errorf("config ExtraTCPListenPorts = %v, want [21 80]", got.ExtraTCPListenPorts)
+	if l := got.TCPPortList(); len(l) != 3 || l[0] != 65432 || l[1] != 21 || l[2] != 80 {
+		t.Errorf("tcp ports = %v, want [65432 21 80]", l)
 	}
 
 	// invalid port anywhere in the list rejects the whole thing, config unchanged
@@ -94,8 +94,8 @@ func TestHandleTCPPortChangesConfigAndReloads(t *testing.T) {
 		t.Error("out-of-range tcp port in the list should be rejected")
 	}
 	got, _ = config.Load(cfgPath)
-	if got.TCPFallbackPort != 65432 {
-		t.Errorf("config TCPFallbackPort changed on invalid input: %d", got.TCPFallbackPort)
+	if p := got.AdvertisedTCPPort(); p != 65432 {
+		t.Errorf("tcp ports changed on invalid input: %d", p)
 	}
 
 	// empty list rejected — a fallback port is mandatory
@@ -104,7 +104,7 @@ func TestHandleTCPPortChangesConfigAndReloads(t *testing.T) {
 		t.Error("an empty port list should be rejected")
 	}
 	got, _ = config.Load(cfgPath)
-	if got.TCPFallbackPort != 65432 {
-		t.Errorf("config TCPFallbackPort changed on empty list: %d", got.TCPFallbackPort)
+	if p := got.AdvertisedTCPPort(); p != 65432 {
+		t.Errorf("tcp ports changed on empty list: %d", p)
 	}
 }

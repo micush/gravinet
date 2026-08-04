@@ -607,8 +607,9 @@ time across that same standard set (`resolveSeeds`), so bootstrap is tried on
 every port the remote might have landed on; an explicit `host:port` pins one.
 
 To be reachable *through* a restrictive firewall (which blocks inbound 65432 but
-permits, say, 443), set `extra_listen_ports` — these bind concurrently with the
-primary rather than as failover, so the node actually answers on them. Binding is
+permits, say, 443), add the port to `udp_ports` (or `tcp_ports`) — every port in
+the list binds concurrently and answers identically; there is no primary and no
+failover between them. Binding is
 best-effort: a privileged or already-taken port is logged and skipped, not fatal.
 Crucially, a reply is sent back out the socket the peer arrived on (tracked per
 remote in the transport), so a peer that dialed `:443` sees the answer come from

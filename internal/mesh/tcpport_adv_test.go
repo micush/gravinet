@@ -129,9 +129,15 @@ func TestEnsureFallbackUsesAdvertisedPort(t *testing.T) {
 	for time.Now().Before(deadline) && len(f.dials()) == 0 {
 		time.Sleep(10 * time.Millisecond)
 	}
+	// Containment, not exclusivity. The flat candidate model dials every
+	// candidate rather than picking one: the seed's own port and the peer's
+	// advertised port are both plausible and both cheap to try, and insisting
+	// on exactly one dial is what forced the old code to *choose* — which is
+	// how it ended up borrowing a port from an unrelated session at the same
+	// IP. What matters is that the advertised port is among them.
 	want := netip.MustParseAddrPort("203.0.113.7:8443")
-	if d := f.dials(); len(d) != 1 || d[0] != want {
-		t.Fatalf("expected dial to advertised port %s, got %v", want, d)
+	if !dialedContains(f, want) {
+		t.Fatalf("expected a dial to advertised port %s, got %v", want, f.dials())
 	}
 	// fb differs from the seed, so it should be added as a seed.
 	ns.mu.RLock()
@@ -167,8 +173,26 @@ func TestEnsureFallbackUsesSeedHint(t *testing.T) {
 	for time.Now().Before(deadline) && len(f.dials()) == 0 {
 		time.Sleep(10 * time.Millisecond)
 	}
-	want := netip.MustParseAddrPort("203.0.113.7:443") // the hint, not 65432
-	if d := f.dials(); len(d) != 1 || d[0] != want {
-		t.Fatalf("expected dial to seed-hint port %s, got %v", want, d)
+	// The hint must be dialed; the seed's own port being dialed alongside it
+	// is the intended flat-model behaviour, not a failure.
+	want := netip.MustParseAddrPort("203.0.113.7:443")
+	if !dialedContains(f, want) {
+		t.Fatalf("expected a dial to seed-hint port %s, got %v", want, f.dials())
 	}
+}
+
+// dialedContains waits briefly for want to appear among the dials. The dials
+// run in goroutines, and with several candidates in flight the one under test
+// is not necessarily first.
+func dialedContains(f *fakeFallback, want netip.AddrPort) bool {
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, d := range f.dials() {
+			if d == want {
+				return true
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
 }

@@ -14,7 +14,7 @@ import (
 func TestHandleDNSAddUpdateRemove(t *testing.T) {
 	cfgPath := t.TempDir() + "/cfg.json"
 	cfg := &config.Config{
-		PrimaryPort: 65432, EnableIPv4: true,
+		UDPPorts: []int{65432}, EnableIPv4: true,
 		WebAdmin: config.WebAdmin{Listen: "127.0.0.1:8443"},
 		Networks: []config.Network{{ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24",
 			Firewall: config.Firewall{Enabled: true}}},
@@ -121,7 +121,7 @@ func TestHandleDNSAddUpdateRemove(t *testing.T) {
 func TestHandleDNSReject(t *testing.T) {
 	cfgPath := t.TempDir() + "/cfg.json"
 	cfg := &config.Config{
-		PrimaryPort: 65432, EnableIPv4: true,
+		UDPPorts: []int{65432}, EnableIPv4: true,
 		WebAdmin: config.WebAdmin{Listen: "127.0.0.1:8443"},
 		Networks: []config.Network{{ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24",
 			Firewall: config.Firewall{Enabled: true}}},
@@ -195,7 +195,7 @@ func TestHandleDNSReject(t *testing.T) {
 func TestHandleDNSSearchOpRemoved(t *testing.T) {
 	cfgPath := t.TempDir() + "/cfg.json"
 	cfg := &config.Config{
-		PrimaryPort: 65432, EnableIPv4: true,
+		UDPPorts: []int{65432}, EnableIPv4: true,
 		WebAdmin: config.WebAdmin{Listen: "127.0.0.1:8443"},
 		Networks: []config.Network{{ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24",
 			Firewall: config.Firewall{Enabled: true}}},

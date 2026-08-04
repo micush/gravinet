@@ -22,6 +22,8 @@ package main
 
 import (
 	"fmt"
+	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 
@@ -263,27 +265,24 @@ func fmtPortList(primary int, extras []int) string {
 }
 
 // cmdSettingsUDPPort gets/sets the UDP underlay port(s): the first becomes
-// the primary (outbound + advertised), the rest extra listen-only ports —
-// or "-" to turn UDP off entirely. Applied live (the daemon rebinds on
-// reload); mirrors handlePort exactly, including refusing to turn UDP off
-// while the TCP fallback is also off.
+// a plain comma-separated list, or "-" to turn UDP off entirely. There is no
+// primary and no extras: the node listens on every port in the list and a
+// peer may reach it on any of them. The first entry is what this node
+// advertises to peers as its canonical port, which is presentation, not
+// precedence. Applied live (the daemon rebinds on reload); mirrors handlePort,
+// including refusing to turn UDP off while TCP is also off.
 func cmdSettingsUDPPort(args []string) {
 	cfg, path, rest := openCfg(args)
 	if len(rest) == 0 || rest[0] == "status" {
-		if cfg.PrimaryPort == 0 {
-			fmt.Println("udp: off (\"-\")")
-		} else {
-			fmt.Printf("udp port(s): %s\n", fmtPortList(cfg.PrimaryPort, cfg.ExtraListenPorts))
-		}
+		printPortList("udp", cfg.UDPPortList())
 		return
 	}
 	if rest[0] == "-" {
-		if !cfg.TCPFallbackEnabled() {
-			fatal("can't turn off the UDP port while the TCP fallback is also off — at least one must stay on")
+		if !cfg.TCPEnabled() {
+			fatal("can't turn off the UDP ports while TCP is also off — at least one transport must stay on")
 		}
-		cfg.PrimaryPort = 0
-		cfg.ExtraListenPorts = nil
-		fmt.Println("udp -> off (TCP/TLS fallback only)")
+		cfg.UDPPorts = []int{} // explicit empty, not null: see UDPPorts' doc comment
+		fmt.Println("udp -> off (TCP only)")
 		commitCfg(cfg, path)
 		return
 	}
@@ -291,48 +290,54 @@ func cmdSettingsUDPPort(args []string) {
 	if err != nil {
 		fatal("%v (comma-separated, e.g. 65432,443 — or \"-\" to turn UDP off)", err)
 	}
-	cfg.PrimaryPort = ports[0]
-	cfg.ExtraListenPorts = ports[1:]
-	fmt.Printf("udp port(s) -> %s (first is primary; applied live, the daemon rebinds)\n", fmtPortList(ports[0], ports[1:]))
+	cfg.UDPPorts = ports
+	fmt.Printf("udp port(s) -> %s (applied live, the daemon rebinds)\n", joinPorts(ports))
 	commitCfg(cfg, path)
 }
 
-// cmdSettingsTCPPort is cmdSettingsUDPPort's TCP/TLS-fallback counterpart —
-// first port is the fallback listener, the rest extras, "-" disables the
-// fallback (values are kept, not cleared, so re-enabling remembers them).
-// Mirrors handleTCPPort, including the can't-disable-both refusal.
+// cmdSettingsTCPPort is cmdSettingsUDPPort's TCP counterpart, and deliberately
+// identical in shape: a list of ports, "-" to turn TCP off. Neither list is
+// derived from the other, which is the point — a peer's TCP port is a fact
+// about that peer, and the old primary/fallback framing kept inviting the code
+// to guess it from something else (see v788).
 func cmdSettingsTCPPort(args []string) {
 	cfg, path, rest := openCfg(args)
 	if len(rest) == 0 || rest[0] == "status" {
-		if !cfg.TCPFallbackEnabled() {
-			fmt.Println("tcp fallback: off (\"-\")")
-			return
-		}
-		p := cfg.TCPFallbackPort
-		if p == 0 {
-			p = config.DefaultTCPFallbackPort
-		}
-		fmt.Printf("tcp port(s): %s\n", fmtPortList(p, cfg.ExtraTCPListenPorts))
+		printPortList("tcp", cfg.TCPPortList())
 		return
 	}
 	if rest[0] == "-" {
-		if cfg.PrimaryPort == 0 {
-			fatal("can't turn off the TCP fallback while the UDP port is also off — at least one must stay on")
+		if !cfg.UDPEnabled() {
+			fatal("can't turn off the TCP ports while UDP is also off — at least one transport must stay on")
 		}
-		cfg.DisableTCPFallback = true
-		fmt.Println("tcp fallback -> off (ports remembered for later re-enable)")
+		cfg.TCPPorts = []int{} // explicit empty, not null: see UDPPorts' doc comment
+		fmt.Println("tcp -> off (UDP only)")
 		commitCfg(cfg, path)
 		return
 	}
 	ports, err := parsePortList(rest[0])
 	if err != nil {
-		fatal("%v (comma-separated, e.g. 65432,443 — or \"-\" to turn the TCP fallback off)", err)
+		fatal("%v (comma-separated, e.g. 65432,443 — or \"-\" to turn TCP off)", err)
 	}
-	cfg.DisableTCPFallback = false
-	cfg.TCPFallbackPort = ports[0]
-	cfg.ExtraTCPListenPorts = ports[1:]
-	fmt.Printf("tcp port(s) -> %s (first is the fallback listener; applied live)\n", fmtPortList(ports[0], ports[1:]))
+	cfg.TCPPorts = ports
+	fmt.Printf("tcp port(s) -> %s (applied live, the daemon rebinds)\n", joinPorts(ports))
 	commitCfg(cfg, path)
+}
+
+func printPortList(proto string, ports []int) {
+	if len(ports) == 0 {
+		fmt.Printf("%s: off (\"-\")\n", proto)
+		return
+	}
+	fmt.Printf("%s port(s): %s\n", proto, joinPorts(ports))
+}
+
+func joinPorts(ports []int) string {
+	parts := make([]string, 0, len(ports))
+	for _, p := range ports {
+		parts = append(parts, strconv.Itoa(p))
+	}
+	return strings.Join(parts, ",")
 }
 
 // ---------------------------------------------------------------------------
@@ -604,4 +609,90 @@ func cmdSettingsLoginBan(args []string) {
 	}
 	fmt.Printf("login lockout -> %d attempt(s), %ds (needs a restart to take effect)\n", attempts, secs)
 	commitCfgStructural(cfg, path, noRestart)
+}
+
+// cmdSettingsListenAddrs picks which IP addresses the web admin binds.
+//
+//	gravinet settings listen-addrs                    show the current set
+//	gravinet settings listen-addrs 127.0.0.1,10.0.0.5 replace it
+//	gravinet settings listen-addrs default            back to loopback + mesh
+//
+// This one earns its CLI more than most settings do: it is the setting that
+// can take the web admin away from you, and the console is then the only way
+// back. Deliberately a whole-set replace rather than add/remove — the web
+// admin's picker writes the whole set too, so both spell the same operation
+// and neither can half-apply a change to which addresses answer.
+func cmdSettingsListenAddrs(args []string) {
+	cfg, path, rest := openCfg(args)
+	port := cfg.WebAdminPort()
+	if len(rest) == 0 || rest[0] == "status" {
+		if len(cfg.ListenAddrsRaw()) == 0 {
+			fmt.Printf("listen addresses: default (loopback + this node's mesh addresses), port %d\n", port)
+			return
+		}
+		fmt.Printf("listen addresses (port %d):\n", port)
+		for _, a := range cfg.ListenAddrsRaw() {
+			fmt.Printf("  %s\n", a)
+		}
+		return
+	}
+	if rest[0] == "default" || rest[0] == "-" {
+		cfg.WebAdmin.ListenAddrs = nil
+		fmt.Println("listen addresses -> default (loopback + this node's mesh addresses)")
+		commitCfg(cfg, path)
+		return
+	}
+	var addrs []string
+	for _, s := range strings.Split(rest[0], ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			addrs = append(addrs, s)
+		}
+	}
+	clean, err := validateListenAddrList(addrs)
+	if err != nil {
+		fatal("%v", err)
+	}
+	cfg.WebAdmin.ListenAddrs = clean
+	// Keep Listen's host consistent with the pick list, preferring loopback as
+	// the primary bind for the same reason the web admin does: it is the one
+	// address that cannot stop existing underneath the daemon.
+	if _, ps, e := net.SplitHostPort(cfg.WebAdmin.Listen); e == nil {
+		lead := clean[0]
+		for _, a := range clean {
+			if ip, err := netip.ParseAddr(a); err == nil && ip.IsLoopback() {
+				lead = a
+				break
+			}
+		}
+		cfg.WebAdmin.Listen = net.JoinHostPort(lead, ps)
+	}
+	fmt.Printf("listen addresses -> %s (port %d); restart to apply\n", strings.Join(clean, ", "), port)
+	commitCfg(cfg, path)
+}
+
+// validateListenAddrList mirrors the web admin's validateListenAddrs: IP
+// literals only (a name would silently move what the admin interface is
+// exposed on if it later resolved differently), no link-locals (they need a
+// zone to bind), and never an empty set.
+func validateListenAddrList(in []string) ([]string, error) {
+	seen := map[string]bool{}
+	var out []string
+	for _, raw := range in {
+		ip, err := netip.ParseAddr(strings.TrimSpace(raw))
+		if err != nil {
+			return nil, fmt.Errorf("%q is not an IP address (names aren't accepted here — this binds a socket)", raw)
+		}
+		if ip.IsLinkLocalUnicast() {
+			return nil, fmt.Errorf("%s is link-local and needs a zone to bind", ip)
+		}
+		k := ip.Unmap().String()
+		if !seen[k] {
+			seen[k] = true
+			out = append(out, k)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("give at least one address, or \"default\" for loopback + mesh")
+	}
+	return out, nil
 }

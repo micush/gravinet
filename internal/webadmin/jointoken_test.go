@@ -15,7 +15,7 @@ import (
 // writeMemberConfig writes a config file with one keyed network and returns its path.
 func writeMemberConfig(t *testing.T) string {
 	t.Helper()
-	c := &config.Config{PrimaryPort: 65432, EnableIPv4: true,
+	c := &config.Config{UDPPorts: []int{65432}, EnableIPv4: true,
 		Networks: []config.Network{{ID: "00000000feedface", Name: "lan", Enabled: true, Subnet4: "10.42.0.0/16",
 			Seeds: config.SeedList{{Address: "203.0.113.5:65432"}}}}}
 	c.Networks[0].Keys[0] = config.KeySlot{Key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", Label: "key0", Enabled: true}
@@ -55,7 +55,7 @@ func TestNetworkTokenGenerateAndJoinOverHTTP(t *testing.T) {
 
 	// Node B joins via the token over HTTP.
 	dstPath := filepath.Join(t.TempDir(), "config.json")
-	blank := &config.Config{PrimaryPort: 65432, EnableIPv4: true}
+	blank := &config.Config{UDPPorts: []int{65432}, EnableIPv4: true}
 	if err := blank.Validate(); err != nil {
 		t.Fatal(err)
 	}

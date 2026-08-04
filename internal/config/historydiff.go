@@ -247,9 +247,9 @@ func networkKeySlotsDiff(old, new any) string {
 // networkArea is one sub-area of a network's composite diff: a label plus
 // how to compute its detail phrase from the two networks' generic JSON.
 type networkArea struct {
-	field  string // the network's JSON field this area covers
-	label  string
-	diff   func(old, new any) string
+	field string // the network's JSON field this area covers
+	label string
+	diff  func(old, new any) string
 }
 
 // networkAreas lists every sub-area a network diff checks, in display

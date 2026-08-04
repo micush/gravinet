@@ -478,9 +478,9 @@ func (e *Engine) onHSResp(payload []byte, from netip.AddrPort, via *peerSession)
 	// same way send()/ListPeers already do, computed before any of the
 	// logic below so it can never interact with or be affected by it.
 	e.mu.RLock()
-	fd, hasFB := e.tr.(fallbackDialer)
+	fd, hasFB := e.tr.(tcpDialer)
 	e.mu.RUnlock()
-	viaTCP := hasFB && fd.HasFallback(p.endpoint)
+	viaTCP := hasFB && fd.HasTCP(p.endpoint)
 
 	// The response is sealed under whichever key the responder matched; try our
 	// keys (≤8) to open it. This is robust to key cycling on our side.
@@ -1016,53 +1016,138 @@ func (e *Engine) connectedToSeedOwner(ns *netState, seed netip.AddrPort) bool {
 // whose underlay endpoint matches ep (learned via handshake or gossip), or 0 if
 // unknown. This lets the fallback dial a peer's actual port without a mesh-wide
 // agreement on a single port.
-func (ns *netState) tcpPortForEndpoint(ep netip.AddrPort) uint16 {
+// tcpPortForUniqueIP is the IP-based lookup the old tcpPortForEndpoint did,
+// narrowed to the case where it is actually well-posed.
+//
+// The reason that lookup existed is real and worth keeping: an
+// operator-configured seed whose port is stale (the peer's live session
+// settled on a different one) is otherwise never dialed at the port that
+// works, and the seed stays stuck. Matching by IP unsticks it.
+//
+// What was wrong was doing it unconditionally. With two peers behind one NAT
+// the question "what TCP port is used at this IP" has two answers, and the old
+// loop returned whichever came first in map order — the same one every time,
+// so the collision its comment called "occasional and self-correcting" was
+// permanent. Here it answers only when exactly one node is known at that
+// address, which is precisely when there is one answer to give.
+//
+// When it declines, nothing is lost that the caller didn't already have: the
+// seed's own port and this node's port remain candidates, so a decline costs a
+// possible extra dial, never connectivity.
+func (ns *netState) tcpPortForUniqueIP(addr netip.Addr) uint16 {
+	addr = addr.Unmap()
 	ns.mu.RLock()
 	defer ns.mu.RUnlock()
-	// A connected session is the most authoritative source. Matched by IP,
-	// not the exact port: this is what lets a stale seed (e.g. an
-	// operator-configured bootstrap address whose port is no longer the
-	// peer's actual TCP fallback port — the peer's live session settled on a
-	// different one) get unstuck. Once ANY live session exists for this
-	// address's IP, its advertised port is a trustworthy port to try,
-	// regardless of which port the seed being resolved happens to use.
-	//
-	// Unlike connectedTo (which gates whether to dial/retry at all, and must
-	// stay address-precise — matching by IP there risks conflating distinct
-	// peers that happen to share an address, e.g. behind one NAT gateway; see
-	// its doc comment), this is purely a "which port should I try" choice: a
-	// wrong guess here just fails to complete a handshake, same as today, so
-	// an occasional same-IP collision is self-correcting, not destructive.
+	var port uint16
+	seen := map[string]bool{}
+	for id, ps := range ns.byNode {
+		if ps.ep().Addr().Unmap() == addr {
+			seen[id] = true
+			if ps.tcpPort != 0 {
+				port = ps.tcpPort
+			}
+		}
+	}
+	for id, ni := range ns.nodes {
+		if ni.endpoint.Addr().Unmap() == addr {
+			seen[id] = true
+			if port == 0 && ni.tcpPort != 0 {
+				port = ni.tcpPort
+			}
+		}
+	}
+	if len(seen) != 1 {
+		return 0 // ambiguous: two peers share this address
+	}
+	return port
+}
+
+// tcpPortForExactEndpoint returns the TCP port advertised by a node whose
+// endpoint is exactly ep — address and port both. Precise enough to be safe
+// where the removed IP-only walk was not: two peers behind one NAT necessarily
+// differ in port or protocol, so an exact addr:port match identifies at most
+// one of them.
+func (ns *netState) tcpPortForExactEndpoint(ep netip.AddrPort) uint16 {
+	ns.mu.RLock()
+	defer ns.mu.RUnlock()
 	for _, ps := range ns.byNode {
-		if ps.ep().Addr() == ep.Addr() && ps.tcpPort != 0 {
+		if ps.ep() == ep && ps.tcpPort != 0 {
 			return ps.tcpPort
 		}
 	}
-	// Next, the seed's owning node, when we know it (AddSeedFor records it —
-	// gossip-learned endpoints and host candidates both carry a node ID). This
-	// is what makes a host candidate (localcand.go) resolvable at all: a peer's
-	// LAN address is by definition NOT its observed endpoint, so the exact-match
-	// on ni.endpoint just below can never hit for one, and without this step
-	// every LAN candidate would silently fall through to *our own* fallback port
-	// — right only by coincidence, whenever both nodes happen to use the same
-	// one. Going through the owner instead reads the port that node actually
-	// advertised, for the exact node the candidate belongs to. Node-keyed, so
-	// it carries none of the same-IP collision risk of matching on address.
-	if owner, ok := ns.seedOwner[ep]; ok && owner != "" {
-		if ni := ns.nodes[owner]; ni != nil && ni.tcpPort != 0 {
-			return ni.tcpPort
-		}
-	}
-	// Otherwise fall back to gossip/handshake-learned node info. Kept
-	// exact-match: this can be stale (learned about a peer no longer
-	// connected), so matching by IP alone here has less certain payoff than
-	// the live-session case above.
 	for _, ni := range ns.nodes {
 		if ni.endpoint == ep && ni.tcpPort != 0 {
 			return ni.tcpPort
 		}
 	}
 	return 0
+}
+
+// tcpPortForOwner returns the TCP port a specific node advertised for itself,
+// or 0 if that node has no live session or announced no port.
+//
+// This replaces tcpPortForEndpoint, which answered "what TCP port is used at
+// this IP" by walking every live session for one whose endpoint shared the
+// address and returning its port. That question has no single answer when two
+// peers sit behind one NAT, and Go's map order picked the same wrong one every
+// time — so a collision its own comment called "self-correcting" was in fact
+// permanent, and cush2's dials landed on cush1's listener indefinitely.
+//
+// Keyed by node, the question is well-posed: a peer's TCP port is a fact about
+// that peer. Where the node isn't known, this returns 0 and the caller falls
+// through to the seed's own port, which is what an operator configured.
+func (ns *netState) tcpPortForOwner(nodeID string) uint16 {
+	if nodeID == "" {
+		return 0
+	}
+	ns.mu.RLock()
+	defer ns.mu.RUnlock()
+	if ps, ok := ns.byNode[nodeID]; ok && ps.tcpPort != 0 {
+		return ps.tcpPort
+	}
+	if ni, ok := ns.nodes[nodeID]; ok && ni.tcpPort != 0 {
+		return ni.tcpPort
+	}
+	return 0
+}
+
+// seedOwnerOf reports the node a seed belongs to, when known.
+func (ns *netState) seedOwnerOf(seed netip.AddrPort) string {
+	ns.mu.RLock()
+	defer ns.mu.RUnlock()
+	return ns.seedOwner[seed]
+}
+
+// seedCandidates is the operator-configured seed set as candidates, for
+// ConflictsWith. Only explicitly-configured seeds are included: an address
+// learned by gossip or observed behind a NAT says nothing authoritative about
+// who answers there, and treating it as if it did would disqualify legitimate
+// dials.
+func (ns *netState) seedCandidates() []Candidate {
+	ns.mu.RLock()
+	defer ns.mu.RUnlock()
+	var out []Candidate
+	for _, s := range ns.seeds {
+		if !ns.explicitSeed[s] {
+			continue
+		}
+		owner := ns.seedOwner[s]
+		if owner == "" {
+			continue // nothing to contradict
+		}
+		// A configured seed's protocol comes from its config entry; the store
+		// records TCP seeds explicitly (see explicitTCPSeed), and everything
+		// else is UDP.
+		proto := ProtoUDP
+		for _, t := range ns.tcpSeeds {
+			if t == s {
+				proto = ProtoTCP
+				break
+			}
+		}
+		out = append(out, Candidate{Addr: s.Addr().Unmap(), Port: s.Port(), Proto: proto, Src: SrcSeed, Owner: owner})
+	}
+	return SortCandidates(out)
 }
 
 // extraTCPPortsForEndpoint is tcpPortForEndpoint's counterpart for the extra
@@ -1107,7 +1192,7 @@ func (e *Engine) primeTCPSeeds(ns *netState) {
 	e.mu.RLock()
 	tr := e.tr
 	e.mu.RUnlock()
-	fd, ok := tr.(fallbackDialer)
+	fd, ok := tr.(tcpDialer)
 	if !ok {
 		return // UDP-only transport: can't dial a TCP seed
 	}
@@ -1152,7 +1237,7 @@ func (e *Engine) primeTCPSeeds(ns *netState) {
 	}
 	ns.mu.RUnlock()
 	for _, seed := range seeds {
-		if seed.Addr().IsValid() && fd.HasFallback(seed) {
+		if seed.Addr().IsValid() && fd.HasTCP(seed) {
 			reached[seed.Addr()] = true
 		}
 	}
@@ -1162,7 +1247,7 @@ func (e *Engine) primeTCPSeeds(ns *netState) {
 		if !seed.Addr().IsValid() {
 			continue
 		}
-		if fd.HasFallback(seed) {
+		if fd.HasTCP(seed) {
 			e.AddSeed(netID, seed) // connected; make sure the handshake loop dials it
 			continue
 		}
@@ -1174,7 +1259,7 @@ func (e *Engine) primeTCPSeeds(ns *netState) {
 		}
 		s := seed
 		go func() {
-			if err := fd.DialFallback(s); err != nil {
+			if err := fd.DialTCP(s); err != nil {
 				// A dial that fails outright gets the same cooldown as one
 				// that connects and never handshakes (v713). Both mean "this
 				// address is not usable right now", and this is by far the
@@ -1241,7 +1326,7 @@ func (e *Engine) addTCPSeed(networkID uint64, seed netip.AddrPort) {
 // paying its full timeout before trying alternates would work against the
 // feature's own purpose. Multiple candidates succeeding is harmless, not
 // something this cancels for: each resolves to its own distinct fb address
-// dialFallbackCandidate independently claims and dials, so they can't
+// dialCandidate independently claims and dials, so they can't
 // collide with each other the way retrying the *same* fb concurrently
 // would, and an extra live connection that ends up unused simply sits idle
 // rather than causing any conflicting state.
@@ -1257,10 +1342,10 @@ const fallbackDialCooldown = 30 * time.Second
 func (e *Engine) fallbackDialDue(ns *netState, seed netip.AddrPort, now time.Time) bool {
 	ns.mu.Lock()
 	defer ns.mu.Unlock()
-	if last, tried := ns.fallbackAttempt[seed]; tried && now.Sub(last) < fallbackDialCooldown {
+	if last, tried := ns.seedAttempt[seed]; tried && now.Sub(last) < fallbackDialCooldown {
 		return false
 	}
-	ns.fallbackAttempt[seed] = now
+	ns.seedAttempt[seed] = now
 	return true
 }
 
@@ -1302,35 +1387,97 @@ func (e *Engine) ensureFallback(ns *netState, seed netip.AddrPort) {
 	e.mu.RLock()
 	tr := e.tr
 	e.mu.RUnlock()
-	// Primary port resolution, most-authoritative first:
-	//  1. the peer's advertised TCP port (learned via handshake or gossip),
-	//  2. the join-token seed hint (lets a cold bootstrap reach the seeds over TCP
-	//     on a non-default port before any advertisement is known),
-	//  3. our own port, as the last-resort assumption.
-	// This is what lets nodes run different TCP ports without a mesh-wide agreement.
-	port := fp
-	if ns.spec.SeedTCPPort > 0 {
-		port = ns.spec.SeedTCPPort
-	}
-	if adv := ns.tcpPortForEndpoint(seed); adv != 0 {
-		port = int(adv)
-	}
-	e.dialFallbackCandidate(ns, tr, seed, port)
-	// Any advertised extra ports beyond the primary, each its own parallel
-	// attempt — see this function's own doc comment for why parallel, not
-	// sequential.
-	for _, extra := range ns.extraTCPPortsForEndpoint(seed) {
-		if int(extra) != port {
-			e.dialFallbackCandidate(ns, tr, seed, int(extra))
+
+	// Candidates, not a derived port. What used to happen here was a
+	// three-step guess at a fact only the peer knows — our own port, then a
+	// join-token hint, then tcpPortForEndpoint walking live sessions for one
+	// whose endpoint shared an IP and borrowing its port. That last step is
+	// what put two peers on one socket: with cush1 (tcp://IP:65432) and cush2
+	// (udp://IP:65432) behind one NAT, cush2's seed had a TCP candidate
+	// manufactured at the same address, took cush1's port from cush1's live
+	// session, and dialed cush1's listener. Deterministically, every tick,
+	// because map order made the same peer win each time — so the "occasional,
+	// self-correcting" collision tcpPortForEndpoint's comment allowed for was
+	// in fact permanent.
+	//
+	// The seed already carried the answer. seed.Port() is the port an operator
+	// typed, usually beside a note naming the peer, and it leads the list now
+	// instead of being discarded.
+	owner := ns.seedOwnerOf(seed)
+	cands := e.fallbackCandidates(ns, seed, fp, owner)
+	seeds := ns.seedCandidates()
+	for _, c := range cands {
+		// A candidate landing exactly on a different peer's configured seed is
+		// known-wrong before a socket opens. Only seeds disqualify, and only
+		// when both owners are known: an unowned candidate has nothing to
+		// contradict and must stay dialable, because refusing to dial is worse
+		// than a wrong guess — no answer means no connectivity.
+		if c.ConflictsWith(seeds) {
+			e.log.Debugf("mesh: skipping %s for %q — it is %q's configured seed", c, owner, seedOwnerAt(seeds, c))
+			continue
 		}
+		e.dialCandidate(ns, tr, seed, int(c.Port))
 	}
 }
 
-// dialFallbackCandidate is ensureFallback's per-candidate-port body — claim,
+// fallbackCandidates builds the ordered candidate set for one seed.
+//
+// Sources, most authoritative first — and note that none of them reaches
+// across peers, which is the whole difference from the derivation this
+// replaces:
+//
+//	seed.Port()   what the operator configured for this address
+//	advertised    ports this peer announced about itself
+//	ourPort       our own port, only as the last-resort assumption
+//
+// Every candidate is TCP: this is the TCP dial path. Protocol is carried
+// explicitly so a UDP seed can never silently become a TCP candidate at the
+// same address, which is how cush2's seed became cush1's socket.
+func (e *Engine) fallbackCandidates(ns *netState, seed netip.AddrPort, ourPort int, owner string) []Candidate {
+	var out []Candidate
+	add := func(port uint16, src CandSource) {
+		if port != 0 {
+			out = append(out, Candidate{Addr: seed.Addr().Unmap(), Port: port, Proto: ProtoTCP, Src: src, Owner: owner})
+		}
+	}
+	add(seed.Port(), SrcSeed)
+	if ns.spec.SeedTCPPort > 0 {
+		add(uint16(ns.spec.SeedTCPPort), SrcSeed)
+	}
+	add(ns.tcpPortForOwner(owner), SrcAdvertised)
+	// Exact-endpoint match, kept from the old lookup. This is addr *and* port
+	// precise, so unlike the IP-only walk it removed, it cannot conflate two
+	// peers behind one NAT — they cannot both be at the same addr:port. It is
+	// what resolves a peer whose advertised port is known from node info
+	// before any seed owner has been recorded (a cold start where gossip
+	// arrived before AddSeedFor did).
+	add(ns.tcpPortForExactEndpoint(seed), SrcAdvertised)
+	// Unsticks a stale seed whose port is no longer the peer's, but only when
+	// exactly one node is known at that address — see tcpPortForUniqueIP.
+	add(ns.tcpPortForUniqueIP(seed.Addr()), SrcAdvertised)
+	for _, extra := range ns.extraTCPPortsForEndpoint(seed) {
+		add(extra, SrcAdvertised)
+	}
+	add(uint16(ourPort), SrcObserved)
+	return SortCandidates(out)
+}
+
+// seedOwnerAt names the peer whose configured seed a candidate collides with,
+// for the log line that explains the skip.
+func seedOwnerAt(seeds []Candidate, c Candidate) string {
+	for _, s := range seeds {
+		if s.Key() == c.Key() {
+			return s.Owner
+		}
+	}
+	return "another peer"
+}
+
+// dialCandidate is ensureFallback's per-candidate-port body — claim,
 // check, and dial exactly one fallback address. Factored out so the primary
 // port and any extra ports all go through the identical logic rather than
 // duplicating it once per candidate.
-func (e *Engine) dialFallbackCandidate(ns *netState, tr Sender, seed netip.AddrPort, port int) {
+func (e *Engine) dialCandidate(ns *netState, tr Sender, seed netip.AddrPort, port int) {
 	// Dial the peer at the chosen fallback port. When it equals the seed's port
 	// (the default — both 65432), fb == seed and the existing seed simply starts
 	// routing over TLS once the connection is up; when they differ (e.g. the peer
@@ -1349,48 +1496,49 @@ func (e *Engine) dialFallbackCandidate(ns *netState, tr Sender, seed netip.AddrP
 	// address within the same tick.
 	ns.mu.Lock()
 	ns.seedFallback[seed] = fb
-	if ns.dialing[fb] {
-		ns.mu.Unlock()
-		return // another call is already resolving this exact fallback address
-	}
-	ns.dialing[fb] = true
 	ns.mu.Unlock()
-	release := func() {
-		ns.mu.Lock()
-		delete(ns.dialing, fb)
-		ns.mu.Unlock()
+
+	// One claim covers both "already dialing this" and "still cooling down".
+	// They were separate checks against separate maps before, which is what
+	// let concurrent callers slip past a due-check before the first dial had
+	// updated anything — the claim is atomic, so only one caller proceeds.
+	k := CandKey{Addr: fb.Addr().Unmap(), Port: fb.Port(), Proto: ProtoTCP}
+	ns.cands.Add(Candidate{Addr: k.Addr, Port: k.Port, Proto: ProtoTCP, Src: SrcSeed, Owner: ns.seedOwnerOf(seed)})
+	if !ns.cands.Claim(k, time.Now()) {
+		return // another call has this candidate in flight, or it is cooling down
 	}
+	release := func() { ns.cands.Release(k) }
 
 	if e.connectedTo(ns, fb) {
 		release()
 		return // already connected over the fallback
 	}
-	fd, ok := tr.(fallbackDialer)
-	if !ok || fd.HasFallback(fb) {
+	fd, ok := tr.(tcpDialer)
+	if !ok || fd.HasTCP(fb) {
 		release()
 		return // transport has no fallback, or a connection is already up
 	}
-	if ns.fallbackInBackoff(fb) {
-		release()
-		// Connected before without ever handshaking; still cooling down.
-		//
-		// watchFallbackHandshake has recorded an escalating backoff against fb
-		// (noteFallbackFailure) and logged "not retrying for <wait>" since
-		// v713, but nothing on this path ever read it back: the only caller of
-		// fallbackInBackoff was primeTCPSeeds' explicit-TCP-seed loop, keyed on
-		// the seed, while the address watchFallbackHandshake actually penalizes
-		// is fb — the derived candidate port, which for any advertised extra
-		// port isn't the seed at all. So the ladder climbed 30s → 10m entirely
-		// for the log's benefit while fallbackDialCooldown's flat 30s remained
-		// the real pace, and the warning stated a suppression window that was
-		// off by more than an order of magnitude at the top of the ladder. See
-		// v780.
-		return
-	}
+	// No separate backoff check here any more: the claim above already
+	// declined if this candidate is cooling down, because the in-flight flag
+	// and the cooldown deadline are one entry in candStore rather than two
+	// maps. Keeping both would in fact deadlock the path — the claim marks the
+	// candidate in flight, which a subsequent Due() correctly reports as
+	// not-dialable, so every dial would suppress itself.
+	//
+	// That consolidation is the fix for v780. watchFallbackHandshake had
+	// recorded an escalating backoff against fb (noteFallbackFailure) and
+	// logged "not retrying for <wait>" since v713, but nothing on this path
+	// read it back: the only caller of fallbackInBackoff was primeTCPSeeds'
+	// explicit-TCP-seed loop, keyed on the *seed*, while the address
+	// watchFallbackHandshake penalizes is fb — the candidate port, which for
+	// any advertised extra port isn't the seed at all. So the ladder climbed
+	// 30s to 10m entirely for the log's benefit while a flat cooldown stayed
+	// the real pace. Written and read through one keyed entry, that class of
+	// bug is no longer expressible.
 	netID := ns.spec.ID
 	go func() {
 		defer release()
-		if err := fd.DialFallback(fb); err != nil {
+		if err := fd.DialTCP(fb); err != nil {
 			e.log.Debugf("mesh: tcp fallback dial %s: %v", fb, err)
 			return
 		}
@@ -1427,7 +1575,7 @@ var fallbackHandshakeGrace = 10 * time.Second
 
 // watchFallbackHandshake warns if fb never yields a working mesh session
 // within fallbackHandshakeGrace of its raw TCP/TLS socket connecting.
-// DialFallback succeeding only confirms the socket connected — it says
+// DialTCP succeeding only confirms the socket connected — it says
 // nothing about whether a gravinet peer is actually on the other end. Without
 // this, an address that isn't running gravinet (or isn't reachable as the
 // peer expected, or fails the handshake for some other reason — wrong key,
@@ -1451,7 +1599,7 @@ func (e *Engine) watchFallbackHandshake(ns *netState, fb netip.AddrPort) {
 	// Back off before redialling. A socket that connects and never handshakes
 	// is not transient: the address isn't running gravinet, isn't the peer
 	// expected, or the handshake is failing for a standing reason. Because
-	// DialFallback succeeded, HasFallback reports the address as connected, so
+	// DialTCP succeeded, HasTCP reports the address as connected, so
 	// nothing else suppresses it — it was redialled on the same cycle
 	// indefinitely, each attempt burning a 10s grace period. Observed against
 	// a local gateway that accepts connections to arbitrary addresses, which
@@ -1460,48 +1608,32 @@ func (e *Engine) watchFallbackHandshake(ns *netState, fb netip.AddrPort) {
 	e.log.Warnf("mesh: tcp fallback to %s connected but no mesh session formed within %s — the address may not be running gravinet, may not be the peer expected, or the handshake may be failing (wrong key, banned, version mismatch); not retrying for %s", fb, fallbackHandshakeGrace, wait)
 }
 
-// Fallback backoff. Doubles from fallbackBackoffMin to fallbackBackoffMax and
-// resets the moment a session actually forms, so a genuinely transient failure
-// costs one extra dial while a permanently wrong address settles at one
-// attempt per fallbackBackoffMax instead of one per tick.
-const (
-	fallbackBackoffMin = 30 * time.Second
-	fallbackBackoffMax = 10 * time.Minute
-)
+// Candidate backoff. Doubles from candBackoffMin to candBackoffMax and resets
+// the moment a session actually forms, so a genuinely transient failure costs
+// one extra dial while a permanently wrong address settles at one attempt per
+// candBackoffMax instead of one per tick.
+//
+// These three are thin wrappers over candStore now rather than a private map.
+// The map they replaced was keyed by bare address, so it could not tell
+// udp/65432 from tcp/65432 at one address; it only avoided conflating them by
+// being a separate map from the UDP one, which is a property of the code
+// rather than of the key. CandKey carries the protocol.
+
+func tcpCandKey(fb netip.AddrPort) CandKey {
+	return CandKey{Addr: fb.Addr().Unmap(), Port: fb.Port(), Proto: ProtoTCP}
+}
 
 func (ns *netState) noteFallbackFailure(fb netip.AddrPort) time.Duration {
-	ns.mu.Lock()
-	defer ns.mu.Unlock()
-	if ns.fallbackBackoff == nil {
-		ns.fallbackBackoff = map[netip.AddrPort]fallbackBackoffEntry{}
-	}
-	e := ns.fallbackBackoff[fb]
-	if e.wait == 0 {
-		e.wait = fallbackBackoffMin
-	} else if e.wait < fallbackBackoffMax {
-		e.wait *= 2
-		if e.wait > fallbackBackoffMax {
-			e.wait = fallbackBackoffMax
-		}
-	}
-	e.until = time.Now().Add(e.wait)
-	ns.fallbackBackoff[fb] = e
-	return e.wait
+	return ns.cands.Fail(tcpCandKey(fb), time.Now())
 }
 
 func (ns *netState) clearFallbackBackoff(fb netip.AddrPort) {
-	ns.mu.Lock()
-	defer ns.mu.Unlock()
-	delete(ns.fallbackBackoff, fb)
+	ns.cands.Succeed(tcpCandKey(fb))
 }
 
-// fallbackInBackoff reports whether fb is still cooling down. Callers hold no
-// lock; this takes ns.mu itself.
+// fallbackInBackoff reports whether fb is still cooling down.
 func (ns *netState) fallbackInBackoff(fb netip.AddrPort) bool {
-	ns.mu.RLock()
-	defer ns.mu.RUnlock()
-	e, ok := ns.fallbackBackoff[fb]
-	return ok && time.Now().Before(e.until)
+	return !ns.cands.Due(tcpCandKey(fb), time.Now())
 }
 
 // deadSeedGrace is how long a seed entry that's never once connected keeps

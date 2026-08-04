@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,29 +54,46 @@ type Config struct {
 	Hostname string `json:"hostname"` // advertised to peers; OS hostname if empty
 	LogLevel string `json:"log_level"`
 
-	// Underlay listening. PrimaryPort is bound first; if it fails, the daemon
-	// walks FallbackUDPPorts. 0 turns UDP off entirely (the "-" sentinel in the
-	// web admin's UDP port field) — Validate refuses this unless the TCP/TLS
-	// fallback is enabled, since the node needs at least one live transport.
-	PrimaryPort int `json:"primary_port"`
-	// ExtraListenPorts are bound *in addition* to the primary so peers behind a
-	// restrictive firewall can reach this node on a well-known port (e.g. 443).
-	// Best-effort: a port that can't bind (privileged or in use) is skipped with
-	// a warning. Replies go back out the port a peer arrived on. Empty by default.
-	ExtraListenPorts []int `json:"extra_listen_ports,omitempty"`
-	// TCP/TLS fallback: every node also listens on this TCP port (default 65432,
-	// same as the UDP port), wrapped in TLS so it looks like HTTPS, so peers on
-	// UDP-hostile networks can still reach the mesh. Set it to any port (e.g. 443)
-	// to change it. On by default; set disable_tcp_fallback to opt out. A bind
-	// failure (privileged/in use) is non-fatal (UDP-only).
-	TCPFallbackPort    int  `json:"tcp_fallback_port,omitempty"` // 0 => 65432
-	DisableTCPFallback bool `json:"disable_tcp_fallback,omitempty"`
-	// ExtraTCPListenPorts are additional TCP/TLS fallback listeners, bound *in
-	// addition* to TCPFallbackPort — the TCP-side equivalent of
-	// ExtraListenPorts above, same motivation and same best-effort semantics
-	// (a port that can't bind is skipped with a warning, not fatal). Empty by
-	// default.
-	ExtraTCPListenPorts []int `json:"extra_tcp_listen_ports,omitempty"`
+	// Underlay listening. A node listens on a set of UDP ports and a set of
+	// TCP/TLS ports. That is the whole model — there is no primary and no
+	// fallback, because neither was ever a real distinction: a peer is
+	// reachable at some set of {address, protocol, port}, and any of them
+	// might work.
+	//
+	// The old shape (PrimaryPort + ExtraListenPorts, TCPFallbackPort +
+	// ExtraTCPListenPorts) encoded a hierarchy the network does not have, and
+	// the hierarchy leaked. Because TCP was "derived from" UDP, the engine
+	// kept re-deriving a peer's TCP port from things that were not that
+	// peer — our own config, an unrelated session at the same IP — and two
+	// nodes behind one NAT ended up on one socket. See v788.
+	//
+	// UDPPorts empty turns UDP off entirely (the "-" sentinel in the web
+	// admin's UDP port field); TCPPorts empty turns TCP off. Validate refuses
+	// both being empty, since the node needs at least one live transport.
+	// Binding is best-effort per port: one that can't bind (privileged, in
+	// use) is skipped with a warning, never fatal, so a list is safe to widen.
+	// Replies go back out the port a peer arrived on.
+	//
+	// The first entry in each list is what this node advertises to peers as
+	// its canonical port. That is a presentation choice, not a tier: every
+	// bound port answers identically, and a peer may reach this node on any
+	// of them.
+	// No omitempty, deliberately. "This transport is off" is an empty list,
+	// and with omitempty an empty list is written as nothing at all — which on
+	// the next load is indistinguishable from a config that predates these
+	// keys, so the migration would re-derive defaults and silently reopen a
+	// port the operator had closed. Written as [] it round-trips.
+	UDPPorts []int `json:"udp_ports"`
+	TCPPorts []int `json:"tcp_ports"`
+
+	// The pre-v789 spelling (primary_port, extra_listen_ports,
+	// tcp_fallback_port, disable_tcp_fallback, extra_tcp_listen_ports) is
+	// still read from disk — see legacyPorts and Load — but deliberately has
+	// no field here. Keeping the fields would have let every existing reader
+	// go on compiling while silently seeing zero once the migration cleared
+	// them, which is the worst possible outcome for a schema change: no
+	// error, no warning, just a node that quietly binds nothing. Removing
+	// them turns each one into a compile failure that has to be looked at.
 
 	// EnableUPnP turns on gravinet's own best-effort UPnP IGD port-forwarding
 	// helper: on startup, gravinet asks the LAN gateway (via UPnP, if it
@@ -1350,16 +1368,132 @@ func resolveDocPath(filename, override, configPath, exeDir string) string {
 // UnderlayMTUValue is the resolved underlay datagram cap in bytes. Default 1280;
 // clamped to [590, 9216] so a fragment always carries useful payload and the cap
 // never exceeds the jumbo tunnel ceiling.
-// TCPFallbackEnabled reports whether the node should also listen on the TCP/TLS
-// fallback port. On by default for every node; set disable_tcp_fallback to opt out.
-func (c *Config) TCPFallbackEnabled() bool { return !c.DisableTCPFallback }
+// UDPPortList and TCPPortList are the ports this node listens on, in bind
+// order. They are the only supported way to read the listen configuration —
+// the legacy fields are folded in by Load and cleared, so reading them
+// directly would see zero on any config this build has saved.
+//
+// An empty list means that protocol is off. Both empty is refused by Validate:
+// a node with no transport can never be reached.
+func (c *Config) UDPPortList() []int { return dedupePorts(c.UDPPorts) }
+func (c *Config) TCPPortList() []int { return dedupePorts(c.TCPPorts) }
 
-// TCPFallbackPortValue is the TCP/TLS fallback listen port (default 443).
-func (c *Config) TCPFallbackPortValue() int {
-	if c.TCPFallbackPort == 0 {
-		return DefaultTCPFallbackPort
+// UDPEnabled/TCPEnabled report whether each transport has any port at all.
+func (c *Config) UDPEnabled() bool { return len(c.UDPPortList()) > 0 }
+func (c *Config) TCPEnabled() bool { return len(c.TCPPortList()) > 0 }
+
+// AdvertisedUDPPort and AdvertisedTCPPort are the ports this node tells peers
+// about as its canonical ones — the first in each list. This is presentation,
+// not precedence: every bound port answers identically, and a peer may reach
+// this node on any of them. It exists because a peer's candidate list has to
+// start somewhere, and "the one the operator wrote first" is the least
+// surprising choice. 0 means the protocol is off.
+func (c *Config) AdvertisedUDPPort() int { return firstPort(c.UDPPortList()) }
+func (c *Config) AdvertisedTCPPort() int { return firstPort(c.TCPPortList()) }
+
+func firstPort(ps []int) int {
+	if len(ps) == 0 {
+		return 0
 	}
-	return c.TCPFallbackPort
+	return ps[0]
+}
+
+// dedupePorts drops duplicates and out-of-range entries while preserving
+// order. Binding the same port twice fails the second time and looks like a
+// configuration error in the log; a list is meant to be safe to widen.
+func dedupePorts(in []int) []int {
+	// Non-nil even when empty: a nil slice marshals as null, which decodes
+	// back into a nil pointer and reads as absent rather than as "off".
+	out := []int{}
+	seen := map[int]bool{}
+	for _, p := range in {
+		if p < 1 || p > 65535 || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	return out
+}
+
+// migratePortConfig folds the pre-v789 primary/fallback fields into the flat
+// lists and clears them, so a config round-tripped through this build carries
+// only the flat form.
+//
+// Called from Load, before anything reads a port. The old shape carried the
+// same information in a way that implied a hierarchy — PrimaryPort *then*
+// ExtraListenPorts, TCPFallbackPort *then* ExtraTCPListenPorts — so the fold
+// is order-preserving: what was primary leads the list and becomes what this
+// node advertises, which keeps an upgraded node advertising exactly what it
+// advertised before.
+//
+// A config that already has flat lists is left alone; the legacy fields are
+// still cleared, so a hand-edited file carrying both doesn't silently keep a
+// stale value that nothing reads.
+// portsOnDisk is what the config file actually said about ports, flat keys and
+// legacy keys alike, with pointers so absent and empty are distinguishable.
+//
+// That distinction is the whole difficulty. Default() seeds UDPPorts/TCPPorts
+// before the file is unmarshalled, so "c.UDPPorts is non-empty" cannot mean
+// "the file specified it" — the first version of this migration tested exactly
+// that and silently never fired, leaving every upgraded node on the defaults
+// instead of the ports it had been running. Only presence in the file can
+// answer it, and only a separate decode can see presence.
+type portsOnDisk struct {
+	UDPPorts *[]int `json:"udp_ports"`
+	TCPPorts *[]int `json:"tcp_ports"`
+
+	PrimaryPort         *int  `json:"primary_port"`
+	ExtraListenPorts    []int `json:"extra_listen_ports"`
+	TCPFallbackPort     *int  `json:"tcp_fallback_port"`
+	DisableTCPFallback  *bool `json:"disable_tcp_fallback"`
+	ExtraTCPListenPorts []int `json:"extra_tcp_listen_ports"`
+}
+
+// migratePortConfig resolves the port lists from what the file said. Called
+// from Load before anything reads a port.
+//
+// Precedence: the flat keys if present, then the pre-v789 primary/fallback
+// keys, then whatever Default() seeded. The fold is order-preserving — what
+// was primary leads the list and so stays the port this node advertises, which
+// is what keeps an upgraded node reachable at the address its peers already
+// know.
+func (c *Config) migratePortConfig(d portsOnDisk) {
+	switch {
+	case d.UDPPorts != nil:
+		c.UDPPorts = *d.UDPPorts
+	case d.PrimaryPort != nil:
+		// primary_port 0 meant "UDP off" and must stay off — an empty list,
+		// not a defaulted one.
+		if *d.PrimaryPort != 0 {
+			c.UDPPorts = append([]int{*d.PrimaryPort}, d.ExtraListenPorts...)
+		} else {
+			c.UDPPorts = nil
+		}
+	}
+
+	switch {
+	case d.TCPPorts != nil:
+		c.TCPPorts = *d.TCPPorts
+	case d.PrimaryPort != nil || d.TCPFallbackPort != nil || d.DisableTCPFallback != nil:
+		// This config predates the flat keys. disable_tcp_fallback was the off
+		// switch and is a separate field from the port, so an off config
+		// usually still carries a port value — reading the port and ignoring
+		// the bool would turn TCP back on. tcp_fallback_port 0 or absent meant
+		// "the default", not "off", which is most nodes.
+		if d.DisableTCPFallback != nil && *d.DisableTCPFallback {
+			c.TCPPorts = nil
+		} else {
+			p := DefaultTCPFallbackPort
+			if d.TCPFallbackPort != nil && *d.TCPFallbackPort != 0 {
+				p = *d.TCPFallbackPort
+			}
+			c.TCPPorts = append([]int{p}, d.ExtraTCPListenPorts...)
+		}
+	}
+
+	c.UDPPorts = dedupePorts(c.UDPPorts)
+	c.TCPPorts = dedupePorts(c.TCPPorts)
 }
 
 // SocketBufferMinBytes/SocketBufferMaxBytes/SocketBufferDefaultBytes bound and
@@ -1662,6 +1796,72 @@ func (c *Config) LogFilePath(configPath string) string {
 	}
 }
 
+// WebAdminListenSet returns the admin bind addresses as "host:port", in the
+// order they should be bound, with the primary first.
+//
+// meshAddrs are this node's current overlay addresses, which the caller
+// supplies because config can't know them — they're assigned at runtime. They
+// are used only to expand the default; once ListenAddrs is set, it is the
+// whole answer and nothing is added behind the operator's back.
+//
+// The primary is chosen rather than taken positionally: loopback first if it
+// was picked, because that's the one address that cannot stop working
+// underneath you, and Start binds the primary directly while the rest are
+// best-effort. If loopback wasn't picked, the first entry leads and the
+// operator has accepted that trade by deselecting it.
+func (c *Config) WebAdminListenSet(meshAddrs []netip.Addr) []string {
+	port := c.WebAdminPort()
+	if port == 0 {
+		return nil
+	}
+	var ips []netip.Addr
+	if len(c.ListenAddrsRaw()) > 0 {
+		for _, raw := range c.ListenAddrsRaw() {
+			if ip, err := netip.ParseAddr(strings.TrimSpace(raw)); err == nil {
+				ips = append(ips, ip)
+			}
+		}
+	} else {
+		// Default: whatever Listen already names, plus the overlay addresses
+		// the cluster-management binder would have added anyway.
+		if h, _, err := net.SplitHostPort(c.WebAdmin.Listen); err == nil {
+			if ip, err := netip.ParseAddr(h); err == nil {
+				ips = append(ips, ip)
+			}
+		}
+		ips = append(ips, meshAddrs...)
+	}
+	// Loopback leads if present.
+	sort.SliceStable(ips, func(i, j int) bool {
+		return ips[i].IsLoopback() && !ips[j].IsLoopback()
+	})
+	seen := map[string]bool{}
+	var out []string
+	for _, ip := range ips {
+		if !ip.IsValid() {
+			continue
+		}
+		a := net.JoinHostPort(ip.String(), strconv.Itoa(port))
+		if seen[a] {
+			continue
+		}
+		seen[a] = true
+		out = append(out, a)
+	}
+	return out
+}
+
+// ListenAddrsRaw is the configured pick list, trimmed of blanks.
+func (c *Config) ListenAddrsRaw() []string {
+	var out []string
+	for _, s := range c.WebAdmin.ListenAddrs {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // WebAdminPort returns the configured web-admin TCP port, or 0 if web admin is
 // disabled or the listen address can't be parsed.
 func (c *Config) WebAdminPort() int {
@@ -1906,8 +2106,29 @@ type NAT struct {
 
 // WebAdmin configures the admin interface.
 type WebAdmin struct {
-	Enabled    bool   `json:"enabled"`
-	Listen     string `json:"listen"`   // e.g. 127.0.0.1:8443
+	Enabled bool   `json:"enabled"`
+	Listen  string `json:"listen"` // e.g. 127.0.0.1:8443
+
+	// ListenAddrs is the set of IP addresses the admin interface binds, as
+	// chosen in Settings. The port always comes from Listen — this picks
+	// addresses, not sockets, which is the whole question an operator has
+	// here ("answer on my LAN address too", "stop answering on loopback").
+	//
+	// Empty means the default, and the default is deliberately not written
+	// out: loopback plus this node's mesh overlay addresses, which is exactly
+	// what an unconfigured node already does today (loopback from Listen,
+	// overlay addresses from the automatic cluster-management binder). So an
+	// existing config keeps its current behaviour with no migration, and the
+	// picker starts pre-selected on those same addresses rather than on
+	// nothing.
+	//
+	// Entries are bare IP literals, never names: this binds a socket, and a
+	// name that resolved differently later would silently change what the
+	// admin interface is exposed on. An address that isn't present yet (a
+	// DHCP lease, an interface still coming up) is retried rather than
+	// failing startup, and one unbindable entry never costs the others.
+	ListenAddrs []string `json:"listen_addrs,omitempty"`
+
 	TLSCert    string `json:"tls_cert"` // path; self-signed generated if empty
 	TLSKey     string `json:"tls_key"`
 	AuthMode   string `json:"auth_mode"`   // "local", "pam" (linux/macos/freebsd), "system" (openbsd bsd_auth), or "windows"
@@ -2018,7 +2239,8 @@ func (h HostsSync) TTL() time.Duration { return time.Duration(h.TTLSeconds) * ti
 func Default() *Config {
 	return &Config{
 		LogLevel:      "info",
-		PrimaryPort:   DefaultUDPPort,
+		UDPPorts:      []int{DefaultUDPPort},
+		TCPPorts:      []int{DefaultTCPFallbackPort},
 		EnableIPv4:    true,
 		EnableIPv6:    true,
 		WorkerThreads: 0,
@@ -2131,6 +2353,13 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 	c.path = path
+	// Before anything reads a port: fold the pre-v789 primary/fallback keys
+	// into the flat lists, so no consumer ever sees the old shape. Decoded
+	// separately because Config no longer has fields for them — see
+	// legacyPorts.
+	var pod portsOnDisk
+	_ = json.Unmarshal(data, &pod)
+	c.migratePortConfig(pod)
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
@@ -2339,27 +2568,22 @@ func (c *Config) PeerTimeoutDuration() time.Duration {
 
 // Validate checks structural invariants and normalizes a few fields.
 func (c *Config) Validate() error {
-	// 0 means the UDP underlay is turned off entirely (see the "-" sentinel
-	// in the web admin's UDP port field, and Dual.Send's corresponding nil
-	// check) — anything else must be a real port.
-	if c.PrimaryPort < 0 || c.PrimaryPort > 65535 {
-		return fmt.Errorf("primary_port %d out of range", c.PrimaryPort)
-	}
-	if c.PrimaryPort == 0 && !c.TCPFallbackEnabled() {
-		return fmt.Errorf("primary_port is off (0) and the TCP/TLS fallback is also off — at least one underlay transport must stay on, or this node could never be reached")
-	}
-	for _, p := range c.ExtraListenPorts {
-		if p <= 0 || p > 65535 {
-			return fmt.Errorf("extra_listen_ports: %d out of range", p)
+	// A node listens on a set of UDP ports and a set of TCP ports. Either may
+	// be empty (that protocol is off); both empty means the node has no
+	// transport at all and could never be reached, which is the one
+	// combination worth refusing outright.
+	for _, spec := range []struct {
+		name  string
+		ports []int
+	}{{"udp_ports", c.UDPPorts}, {"tcp_ports", c.TCPPorts}} {
+		for _, p := range spec.ports {
+			if p < 1 || p > 65535 {
+				return fmt.Errorf("%s: %d out of range (1-65535)", spec.name, p)
+			}
 		}
 	}
-	if c.TCPFallbackPort != 0 && (c.TCPFallbackPort < 0 || c.TCPFallbackPort > 65535) {
-		return fmt.Errorf("tcp_fallback_port %d out of range", c.TCPFallbackPort)
-	}
-	for _, p := range c.ExtraTCPListenPorts {
-		if p <= 0 || p > 65535 {
-			return fmt.Errorf("extra_tcp_listen_ports: %d out of range", p)
-		}
+	if !c.UDPEnabled() && !c.TCPEnabled() {
+		return fmt.Errorf("udp_ports and tcp_ports are both empty — at least one underlay transport must stay on, or this node could never be reached")
 	}
 	// A configured log cap must parse; reject bad input at save time so the
 	// running daemon never has to fall back silently (see LogMaxBytes).

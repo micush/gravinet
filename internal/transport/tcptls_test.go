@@ -148,7 +148,7 @@ func TestDualFallsBackToUDP(t *testing.T) {
 }
 
 // TestDualFallbackDial exercises the engine-facing fallback API on Dual:
-// HasFallback/DialFallback open a TLS path, after which Send routes over it.
+// HasTCP/DialTCP open a TLS path, after which Send routes over it.
 func TestDualFallbackDial(t *testing.T) {
 	srvRec := newRecorder()
 	srv := openTLSLoopback(t, srvRec.handle)
@@ -164,14 +164,14 @@ func TestDualFallbackDial(t *testing.T) {
 	defer udp.Close()
 
 	d := Dual{UDP: udp, TLS: cliTLS}
-	if d.HasFallback(srvAddr) {
-		t.Fatal("HasFallback true before dial")
+	if d.HasTCP(srvAddr) {
+		t.Fatal("HasTCP true before dial")
 	}
-	if err := d.DialFallback(srvAddr); err != nil {
-		t.Fatalf("DialFallback: %v", err)
+	if err := d.DialTCP(srvAddr); err != nil {
+		t.Fatalf("DialTCP: %v", err)
 	}
-	if !d.HasFallback(srvAddr) {
-		t.Fatal("HasFallback false after dial")
+	if !d.HasTCP(srvAddr) {
+		t.Fatal("HasTCP false after dial")
 	}
 	if err := d.Send(srvAddr, []byte("ping")); err != nil {
 		t.Fatalf("send: %v", err)
@@ -189,10 +189,10 @@ func TestDualNoFallbackWhenTLSNil(t *testing.T) {
 	defer udp.Close()
 	d := Dual{UDP: udp, TLS: nil}
 	addr := netip.MustParseAddrPort("127.0.0.1:443")
-	if d.HasFallback(addr) {
-		t.Fatal("HasFallback should be false with nil TLS")
+	if d.HasTCP(addr) {
+		t.Fatal("HasTCP should be false with nil TLS")
 	}
-	if err := d.DialFallback(addr); err == nil {
+	if err := d.DialTCP(addr); err == nil {
 		t.Fatal("expected error dialing fallback with nil TLS")
 	}
 }

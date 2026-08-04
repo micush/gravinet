@@ -6,7 +6,7 @@ import (
 )
 
 func TestQoSRuleSetEnabled(t *testing.T) {
-	c := &Config{PrimaryPort: 65432, EnableIPv4: true,
+	c := &Config{UDPPorts: []int{65432}, EnableIPv4: true,
 		Networks: []Network{{ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24"}}}
 	if err := c.QoSAdd("lan", "tcp", 22, nil, 0); err != nil {
 		t.Fatal(err)
@@ -47,7 +47,7 @@ func TestQoSRuleSetEnabled(t *testing.T) {
 // firewall rules resolve their own Services field against. Add/delete/
 // enable-disable are keyed by the services set, order- and case-insensitively.
 func TestQoSRuleServices(t *testing.T) {
-	c := &Config{PrimaryPort: 65432, EnableIPv4: true,
+	c := &Config{UDPPorts: []int{65432}, EnableIPv4: true,
 		Networks: []Network{{ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24"}}}
 	if err := c.QoSAdd("lan", "", 0, []string{"ssh", "rdp"}, 0); err != nil {
 		t.Fatal(err)

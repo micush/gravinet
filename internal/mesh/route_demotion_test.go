@@ -263,7 +263,6 @@ func TestDemotePhysicalDefaultRouteRedemotesAfterNetworkChange(t *testing.T) {
 	}
 }
 
-
 // failure is best-effort, not fatal: the mesh's own default route still
 // gets installed (matching syncFullTunnelRoute's existing not-fatal
 // handling of every other OS-table failure in this path), and no bogus

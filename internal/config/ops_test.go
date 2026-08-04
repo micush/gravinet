@@ -257,10 +257,10 @@ func TestValidateAllowsSeededNoSubnet(t *testing.T) {
 	const key = "Gw+MBYbuVb7OEzjnd6jZqtCXgBpUBjNQub7ves3WQ3M="
 	// A joined network with a seed but no subnet yet must validate (it will learn one).
 	c := &Config{
-		NodeID:      "abcd",
-		PrimaryPort: 51820,
-		EnableIPv4:  true,
-		Networks:    []Network{{ID: "0000000000000001", MTU: 1400, Seeds: SeedList{{Address: "203.0.113.5"}}, Keys: [KeySlots]KeySlot{{Key: key, Enabled: true}}}},
+		NodeID:     "abcd",
+		UDPPorts:   []int{51820},
+		EnableIPv4: true,
+		Networks:   []Network{{ID: "0000000000000001", MTU: 1400, Seeds: SeedList{{Address: "203.0.113.5"}}, Keys: [KeySlots]KeySlot{{Key: key, Enabled: true}}}},
 	}
 	if err := c.Validate(); err != nil {
 		t.Fatalf("seeded subnet-less network should validate: %v", err)
@@ -275,7 +275,7 @@ func TestValidateAllowsSeededNoSubnet(t *testing.T) {
 func TestValidateAcceptsPeerCacheOnly(t *testing.T) {
 	const key = "Gw+MBYbuVb7OEzjnd6jZqtCXgBpUBjNQub7ves3WQ3M="
 	c := &Config{
-		NodeID: "abcd", PrimaryPort: 51820, EnableIPv4: true,
+		NodeID: "abcd", UDPPorts: []int{51820}, EnableIPv4: true,
 		Networks: []Network{{
 			ID: "0000000000000001", MTU: 1400,
 			PeerCache: []string{"198.51.100.7:51820"}, // bootstrap source, no seeds/subnet yet
@@ -345,7 +345,7 @@ func TestNetworkDeleteByNumericallyEqualID(t *testing.T) {
 // "initial"/"joined") and that KeySetLabel changes only the label.
 func TestKeyZeroLabelAndRelabel(t *testing.T) {
 	dir := t.TempDir()
-	c := &Config{PrimaryPort: DefaultUDPPort, EnableIPv4: true, path: dir + "/c.json"}
+	c := &Config{UDPPorts: []int{DefaultUDPPort}, EnableIPv4: true, path: dir + "/c.json"}
 	if _, err := c.NetworkAdd("lan", "10.96.0.0/24", ""); err != nil {
 		t.Fatalf("add: %v", err)
 	}

@@ -27,7 +27,7 @@ func TestWithLockAndLockSerializeAgainstEachOther(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/config.json"
 	cfg := Default()
-	cfg.PrimaryPort = 51820
+	cfg.UDPPorts = []int{51820}
 	cfg.EnableIPv4 = true
 	if err := cfg.SaveTo(path); err != nil {
 		t.Fatal(err)
@@ -36,7 +36,7 @@ func TestWithLockAndLockSerializeAgainstEachOther(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// Writer A (WithLock, mirroring mutateConfig): sets PrimaryPort.
+	// Writer A (WithLock, mirroring mutateConfig): sets the UDP ports.
 	go func() {
 		defer wg.Done()
 		if err := WithLock(path, func() error {
@@ -45,14 +45,14 @@ func TestWithLockAndLockSerializeAgainstEachOther(t *testing.T) {
 				return err
 			}
 			time.Sleep(50 * time.Millisecond) // give writer B a chance to race
-			c.PrimaryPort = 12345
+			c.UDPPorts = []int{12345}
 			return c.SaveTo(path)
 		}); err != nil {
 			t.Errorf("writer A: %v", err)
 		}
 	}()
 
-	// Writer B (raw Lock, mirroring the persist hook): sets TCPFallbackPort.
+	// Writer B (raw Lock, mirroring the persist hook): sets the TCP ports.
 	go func() {
 		defer wg.Done()
 		l := Lock(path)
@@ -64,7 +64,7 @@ func TestWithLockAndLockSerializeAgainstEachOther(t *testing.T) {
 			return
 		}
 		time.Sleep(50 * time.Millisecond) // give writer A a chance to race
-		c.TCPFallbackPort = 8443
+		c.TCPPorts = []int{8443}
 		if err := c.SaveTo(path); err != nil {
 			t.Errorf("writer B save: %v", err)
 		}
@@ -76,11 +76,11 @@ func TestWithLockAndLockSerializeAgainstEachOther(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if final.PrimaryPort != 12345 {
-		t.Errorf("PrimaryPort = %d, want 12345 (writer A's change was lost)", final.PrimaryPort)
+	if p := final.AdvertisedUDPPort(); p != 12345 {
+		t.Errorf("udp port = %d, want 12345 (writer A's change was lost)", p)
 	}
-	if final.TCPFallbackPort != 8443 {
-		t.Errorf("TCPFallbackPort = %d, want 8443 (writer B's change was lost)", final.TCPFallbackPort)
+	if p := final.AdvertisedTCPPort(); p != 8443 {
+		t.Errorf("tcp port = %d, want 8443 (writer B's change was lost)", p)
 	}
 }
 

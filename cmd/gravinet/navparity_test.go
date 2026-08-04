@@ -247,6 +247,7 @@ func TestSettingsGroupCoversSettingsPage(t *testing.T) {
 		"upnp":                 "upnp",
 		"worker-threads":       "worker-threads",
 		"tun-queues":           "tun-queues",
+		"listen-addrs":         "listen-addrs",
 		"socket-buffer":        "socket-buffer",
 		"udp-gso":              "udp-gso",
 	}

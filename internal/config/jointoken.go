@@ -61,9 +61,9 @@ func (c *Config) NetworkToken(ref string, extraSeeds []string, ttl time.Duration
 		return "", fmt.Errorf("network %q not found", ref)
 	}
 	jt := joinToken{V: 1, ID: n.ID, Name: n.Name, Subnet4: n.Subnet4, Subnet6: n.Subnet6}
-	if c.TCPFallbackEnabled() {
-		jt.TCPPort = c.TCPFallbackPortValue() // let joiners reach the seeds over TCP if UDP is blocked
-	}
+	// Let joiners reach the seeds over TCP when UDP is blocked. The
+	// advertised port is simply the first in this node's TCP list.
+	jt.TCPPort = c.AdvertisedTCPPort()
 	now := time.Now()
 	for _, k := range n.Keys {
 		if k.Key == "" || !k.Enabled || k.Expired(now) {

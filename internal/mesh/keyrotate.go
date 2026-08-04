@@ -123,9 +123,9 @@ func decodeKeyDel(b []byte) (crypto.KeyID, bool) {
 type keyAddOutcome int
 
 const (
-	keyAddUnchanged  keyAddOutcome = iota // already known, nothing changed — stop the flood
-	keyAddNew                             // new to this node — flood onward
-	keyAddMetaChanged                     // already known, but label and/or expiry changed — flood onward
+	keyAddUnchanged   keyAddOutcome = iota // already known, nothing changed — stop the flood
+	keyAddNew                              // new to this node — flood onward
+	keyAddMetaChanged                      // already known, but label and/or expiry changed — flood onward
 )
 
 // addPropagatedKey folds raw into the live key set (if not already present)

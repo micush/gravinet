@@ -27,7 +27,7 @@ func TestKeyDistribute(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := dir + "/config.json"
 	cfg := &config.Config{
-		PrimaryPort: 51820, EnableIPv4: true,
+		UDPPorts: []int{51820}, EnableIPv4: true,
 		Networks: []config.Network{{
 			ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24",
 			Keys: [8]config.KeySlot{
@@ -130,7 +130,7 @@ func TestKeyUndistribute(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := dir + "/config.json"
 	cfg := &config.Config{
-		PrimaryPort: 51820, EnableIPv4: true,
+		UDPPorts: []int{51820}, EnableIPv4: true,
 		Networks: []config.Network{{
 			ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24",
 			Keys: [8]config.KeySlot{
@@ -205,7 +205,7 @@ func TestKeyDeleteRetractsDistributed(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := dir + "/config.json"
 	cfg := &config.Config{
-		PrimaryPort: 51820, EnableIPv4: true,
+		UDPPorts: []int{51820}, EnableIPv4: true,
 		Networks: []config.Network{{
 			ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24",
 			Keys: [8]config.KeySlot{
@@ -286,7 +286,7 @@ func TestKeyLabelPropagatesToDistributedPeers(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := dir + "/config.json"
 	cfg := &config.Config{
-		PrimaryPort: 51820, EnableIPv4: true,
+		UDPPorts: []int{51820}, EnableIPv4: true,
 		Networks: []config.Network{{
 			ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24",
 			Keys: [8]config.KeySlot{
@@ -373,7 +373,7 @@ func TestKeyExpiryPropagatesToDistributedPeers(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := dir + "/config.json"
 	cfg := &config.Config{
-		PrimaryPort: 51820, EnableIPv4: true,
+		UDPPorts: []int{51820}, EnableIPv4: true,
 		Networks: []config.Network{{
 			ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24",
 			Keys: [8]config.KeySlot{

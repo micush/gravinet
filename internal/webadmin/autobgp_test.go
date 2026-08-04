@@ -241,7 +241,7 @@ func autoBGPTestServer(t *testing.T, cfg *config.Config, be *stubBackend) *Serve
 // directly — no derivation involved for the peer's side at all.
 func TestAutoBGPReconcilerSyncDerivesAndCreates(t *testing.T) {
 	cfg := &config.Config{
-		PrimaryPort: 51820, EnableIPv4: true,
+		UDPPorts: []int{51820}, EnableIPv4: true,
 		BGP: config.BGPConfig{AutoBGP: true},
 		Networks: []config.Network{
 			{ID: "0000000000000001", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24"},
@@ -294,7 +294,7 @@ func TestAutoBGPReconcilerSyncDerivesAndCreates(t *testing.T) {
 // coexisting in the same list survives untouched.
 func TestAutoBGPReconcilerSyncRemovesOnDisconnect(t *testing.T) {
 	cfg := &config.Config{
-		PrimaryPort: 51820, EnableIPv4: true,
+		UDPPorts: []int{51820}, EnableIPv4: true,
 		BGP: config.BGPConfig{
 			AutoBGP: true, Enabled: true, ASN: 4200000001, RouterID: "10.0.0.1",
 			Neighbors: []config.BGPNeighbor{
@@ -349,7 +349,7 @@ func TestAutoBGPReconcilerSyncRemovesOnDisconnect(t *testing.T) {
 // whether AutoBGP is what produced it.
 func TestAutoBGPReconcilerSyncOffWhenDisabled(t *testing.T) {
 	cfg := &config.Config{
-		PrimaryPort: 51820, EnableIPv4: true,
+		UDPPorts: []int{51820}, EnableIPv4: true,
 		BGP: config.BGPConfig{
 			AutoBGP: false, Enabled: true, ASN: 65001, RouterID: "203.0.113.1",
 			Neighbors: []config.BGPNeighbor{{Peer: "192.0.2.1", RemoteAS: 65099, Password: "s3cr3t"}},
@@ -388,7 +388,7 @@ func TestAutoBGPReconcilerSyncOffWhenDisabled(t *testing.T) {
 // treats as "skip this peer".
 func TestAutoBGPReconcilerSyncGossipsZeroWhenBGPDisabled(t *testing.T) {
 	cfg := &config.Config{
-		PrimaryPort: 51820, EnableIPv4: true,
+		UDPPorts: []int{51820}, EnableIPv4: true,
 		BGP: config.BGPConfig{AutoBGP: false, Enabled: false, ASN: 65001}, // Enabled=false: the ASN, if any, doesn't count
 		Networks: []config.Network{
 			{ID: "0000000000000001", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24"},
