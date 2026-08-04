@@ -1118,7 +1118,7 @@ function buildSearchIndex(){
     ['dark-mode-row', 'Dark mode', 'Switch between dark and light interface theme.', 'general'],
     ['loginban-attempts-row', 'Lockout attempts', 'How many failed logins from one source before it is locked out.', 'security'],
     ['loginban-duration-row', 'Lockout duration', 'How long a lockout lasts once triggered, in minutes.', 'security'],
-    ['listen-addrs-row', 'Admin interface addresses', 'Which IP addresses the admin interface answers on. Defaults to loopback plus this node\u2019s mesh addresses. Applies on restart.', 'security'],
+    ['listen-addrs-row', 'Admin interface addresses', 'Which IP addresses the admin interface answers on. Defaults to loopback plus this node\u2019s mesh addresses.', 'security'],
     ['tls-cert-upload-row', 'TLS certificate', 'Upload a certificate and private key to replace the self-signed one.', 'security'],
     ['tls-cert-reset-row', 'Revert to self-signed', 'Stop using an uploaded certificate.', 'security'],
     ['config-history-limit-row', 'Config history retention limit', 'How many configuration snapshots to keep before the oldest are pruned.', 'general'],
@@ -2825,7 +2825,7 @@ function secSettingsSecurity(c) {
   c.appendChild(card); card = $('<div class="card"></div>');
 
   card.appendChild($('<h3>Admin interface addresses</h3>'));
-  card.appendChild($('<div class="settings-desc" style="margin-bottom:10px">Which IP addresses this node\u2019s admin interface answers on. The port is unchanged \u2014 this picks addresses only. Defaults to loopback plus this node\u2019s mesh addresses, which is what keeps it reachable from other peers for cluster management. Applies on restart.</div>'));
+  card.appendChild($('<div class="settings-desc" style="margin-bottom:10px">Which IP addresses this node\u2019s admin interface answers on. The port is unchanged \u2014 this picks addresses only. Defaults to loopback plus this node\u2019s mesh addresses, which is what keeps it reachable from other peers for cluster management.</div>'));
 
   const laRow = $('<div class="settings-row" id="listen-addrs-row" style="align-items:flex-start"></div>');
   laRow.appendChild($('<div><div class="settings-label">Listen addresses</div><div class="settings-desc">Removing the address you are connected through will end this session \u2014 you would need to reach the node on one of the others.</div></div>'));
@@ -2833,8 +2833,15 @@ function secSettingsSecurity(c) {
   laRow.appendChild(laWrap);
   card.appendChild(laRow);
 
-  api('/api/webadmin/listen-options').then(lo => {
-    if (!lo || !lo.options) return;
+  api('/api/webadmin/listen-options').then(r => {
+    // api() returns {ok,status,body} — the payload is r.body, not r. Reading
+    // the wrapper made the guard below bail on every load, so the card
+    // rendered its label and description with no picker under them.
+    const lo = r && r.body;
+    if (!r || !r.ok || !lo || !lo.options || !lo.options.length) {
+      laWrap.appendChild($('<div class="hint">could not load addresses</div>'));
+      return;
+    }
     // Label lookup, so a chip reads "192.168.5.108 (vio0)" rather than a bare
     // address nobody can place, and so search matches the interface name too.
     const byAddr = {};

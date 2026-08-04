@@ -2,6 +2,33 @@
 
 ---
 
+## v793 — 2026-08-04
+
+**Settings > Admin interface addresses rendered a label and a description with no picker under them. The handler was correct the whole time; the UI read the payload off `api()`'s wrapper instead of out of it.**
+
+`api()` returns `{ok, status, body}`. The card did:
+
+```js
+api('/api/webadmin/listen-options').then(lo => {
+  if (!lo || !lo.options) return;
+```
+
+`lo` is the wrapper, so `lo.options` was always undefined, the guard always matched, and it returned without a word — no picker, no error, nothing in the console. Fixed by reading `r.body`, and the failure path now renders "could not load addresses" instead of leaving an empty card, so a genuinely bad response looks different from a silent one.
+
+Also dropped "Applies on restart." from the card and the settings search entry, per operator request.
+
+### Why nothing caught it
+
+The handler test asserted the JSON and the DOM helper tests asserted the markup. The bug lived exactly between them: correct data, correct card, wrong field name on the join. Both sides were green.
+
+Three tests now pin that seam. `TestListenOptionsPayloadShape` asserts the payload carries every key the picker names, spelled the same way, and that `selected` is non-empty so the picker never opens showing nothing chosen on a node that is in fact listening. `TestListenPickerUnwrapsAPIResponse` asserts against the shipped script text that the call site unwraps `.body` and has a visible failure path — a DOM test cannot see this, because the DOM it would inspect is the empty one the bug produced. `TestListenCardHasNoRestartClaim` keeps the removed sentence removed.
+
+Asserting on script text is ugly and worth saying so: it is a proxy for a browser test this project has no harness for. It catches the specific class of mistake that shipped here — a call site that silently drops its response — and nothing more.
+
+Verified: `go build ./...` and `go vet ./...` clean, `gofmt -l` clean on files touched. `internal/webadmin` and `cmd/gravinet` pass. Standing caveat unchanged: all builds `CGO_ENABLED=0`, so `auth_pam.go` was not compiled.
+
+---
+
 ## v792 — 2026-08-04
 
 **The originally reported failure still reproduced. Seed ownership was keyed by address alone, so of two peers configured at one host:port and split only by protocol, whichever registered last owned both — and the guard meant to catch a cross-peer dial compared a candidate against its own owner and passed.**
