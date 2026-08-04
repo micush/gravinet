@@ -107,6 +107,62 @@ func (ps *peerSession) reports(id string) bool {
 	return ps.reported[id]
 }
 
+// reportedRTTObs is one gossiped RTT and when it arrived — see
+// peerSession.reportedRTT.
+type reportedRTTObs struct {
+	rtt time.Duration
+	at  time.Time
+}
+
+// reportedRTTTTL bounds how long a gossiped RTT is trusted. It must stay
+// comfortably longer than gossipFullRefresh (180s), which is the worst-case
+// interval between refreshes on a mesh where nothing else about the peer list
+// changes — RTT is deliberately not part of peerListSig, so it does not
+// trigger a re-flood of its own. Set below that and a quiet mesh would spend
+// most of its time treating every relay's far leg as unknown, which loses the
+// whole point of gossiping it.
+const reportedRTTTTL = 10 * time.Minute
+
+// noteReportedRTT records the RTTs carried by a received peer list. A zero
+// rttMillis means the advertiser has no measurement (not "zero latency"), so
+// it is skipped rather than stored — storing it would read back as an
+// unbeatably fast far leg.
+func (ps *peerSession) noteReportedRTT(entries []peerEntry) {
+	now := time.Now()
+	ps.reportedMu.Lock()
+	for _, en := range entries {
+		if en.nodeID == "" || en.rttMillis == 0 {
+			continue
+		}
+		if ps.reportedRTT == nil {
+			ps.reportedRTT = make(map[string]reportedRTTObs, len(entries))
+		}
+		ps.reportedRTT[en.nodeID] = reportedRTTObs{
+			rtt: time.Duration(en.rttMillis) * time.Millisecond,
+			at:  now,
+		}
+	}
+	ps.reportedMu.Unlock()
+}
+
+// reportedRTTFor returns this peer's advertised round trip to id, and whether
+// a fresh figure exists at all. A stale observation is reported as unknown and
+// dropped, so the map cannot grow without bound on a peer that keeps gossiping
+// a churning set of node ids.
+func (ps *peerSession) reportedRTTFor(id string) (time.Duration, bool) {
+	ps.reportedMu.Lock()
+	defer ps.reportedMu.Unlock()
+	obs, ok := ps.reportedRTT[id]
+	if !ok {
+		return 0, false
+	}
+	if time.Since(obs.at) > reportedRTTTTL {
+		delete(ps.reportedRTT, id)
+		return 0, false
+	}
+	return obs.rtt, true
+}
+
 // ---- relay discovery ----
 
 const relayPendingTTL = 12 * time.Second
@@ -254,7 +310,7 @@ func bestRelay(peers []*peerSession, target string) (best *peerSession, refused 
 			refused++
 			continue
 		}
-		if best == nil || relayBetter(ps, best) {
+		if best == nil || relayBetter(ps, best, target) {
 			best = ps
 		}
 	}
@@ -270,27 +326,63 @@ func (ps *peerSession) willRelay() bool {
 	return !ps.relayKnown || ps.allowRelay
 }
 
+// relayCost estimates what reaching target through cand would cost: this
+// node's measured round trip to cand, plus cand's own advertised round trip to
+// target (see peerEntry.rttMillis). full reports whether both legs are known.
+//
+// A partial cost — near leg measured, far leg unadvertised — is still the best
+// available ordering signal among candidates that are equally in the dark, and
+// is exactly what this scored on before the far leg was gossiped at all, so it
+// is returned rather than discarded. But it is never comparable to a full one:
+// a 20ms near leg with an unknown far leg is not "better" than a 60ms total
+// that is actually known end to end. Callers that act on cost (rescoreRelays)
+// require full; callers that merely order candidates (relayBetter) prefer full
+// over partial and otherwise compare like with like.
+//
+// known is false when even the near leg is unmeasured, which orders below
+// everything — see relayBetter.
+func relayCost(cand *peerSession, target string) (cost time.Duration, full, known bool) {
+	near := time.Duration(cand.rttNanos.Load())
+	if near <= 0 {
+		return 0, false, false
+	}
+	if far, ok := cand.reportedRTTFor(target); ok {
+		return near + far, true, true
+	}
+	return near, false, true
+}
+
 // relayBetter reports whether a is a better relay candidate than b: reached
 // directly beats reached via a relay regardless of RTT (stacking hops is
-// worse than a slightly slower single hop), and within the same tier, a
-// lower measured RTT wins. An unmeasured RTT (0 — no ctrlPong round trip
-// completed yet, e.g. a peer connected within the last keepaliveInterval)
-// never beats anything, including another unmeasured candidate, so ties
-// among fresh, same-tier candidates simply keep whichever bestRelay saw
-// first rather than flapping between them.
-func relayBetter(a, b *peerSession) bool {
+// worse than a slightly slower single hop), and within the same tier, the
+// lower estimated end-to-end cost wins (see relayCost).
+//
+// Within a tier the ordering is: a candidate whose full path is known beats
+// one whose far leg isn't, and within the same knowledge class the lower cost
+// wins. An unmeasured near leg never beats anything, including another
+// unmeasured candidate, so ties among fresh, same-tier candidates simply keep
+// whichever bestRelay saw first rather than flapping between them. Note that
+// bestRelay iterates a map, so "saw first" is arbitrary — on a mesh where no
+// keepalive round trip has completed yet, the pick is effectively random. That
+// is survivable only because rescoreRelays revisits it; before that existed,
+// an arbitrary startup pick was permanent.
+func relayBetter(a, b *peerSession, target string) bool {
 	aDirect, bDirect := a.getRelay() == nil, b.getRelay() == nil
 	if aDirect != bDirect {
 		return aDirect
 	}
-	aRTT, bRTT := a.rttNanos.Load(), b.rttNanos.Load()
-	if aRTT == 0 {
+	aCost, aFull, aKnown := relayCost(a, target)
+	bCost, bFull, bKnown := relayCost(b, target)
+	if !aKnown {
 		return false
 	}
-	if bRTT == 0 {
+	if !bKnown {
 		return true
 	}
-	return aRTT < bRTT
+	if aFull != bFull {
+		return aFull
+	}
+	return aCost < bCost
 }
 
 // logRelayDeclined reports, at most once per relayRefusedLogEvery per
@@ -307,6 +399,147 @@ func (e *Engine) logRelayDeclined(ns *netState, src, dst string) {
 	ns.relayDeclinedLog[key] = now
 	ns.mu.Unlock()
 	e.log.Warnf("mesh: declining to relay %q → %q on net %x: allow_relay is disabled on this node, so %q cannot reach %q through us", src, dst, ns.spec.ID, src, dst)
+}
+
+// ---- relay re-scoring ----
+
+// tryRelays only ever considers nodes it is *not* connected to, and a relayed
+// session sits in ns.byNode exactly like a direct one. So the relay chosen when
+// a path was first established was, until this existed, never revisited: it
+// survived every better candidate connecting afterwards, every RTT measurement
+// that arrived after the pick, and every far-leg RTT gossiped since. Combined
+// with relayBetter's arbitrary ordering among not-yet-measured candidates (see
+// its doc comment), a node whose direct path can never come up — two peers
+// behind one NAT, say — could sit on a randomly-chosen relay indefinitely, and
+// on a mesh with one distant peer that is the difference between 50ms and 350ms
+// forever.
+//
+// These bounds keep that from becoming a different failure. Latency is noisy
+// and a relay switch is not free — it costs a handshake and a brief
+// interruption — so a challenger must be better by a real margin, not by
+// jitter, and a path must have been in place long enough to have been measured
+// properly before it can be moved off.
+var (
+	// relayRescoreDwell is how long a relayed session must have been
+	// established before it may be moved. Deliberately several keepalive
+	// intervals: rttNanos on a session installed seconds ago is one sample or
+	// none, and moving a path on that basis is how the arbitrary-pick problem
+	// gets reintroduced with extra steps.
+	relayRescoreDwell = 90 * time.Second
+	// relayRescoreInterval throttles how often a given target may be moved,
+	// measured from the last move. Without it a mesh where two candidates sit
+	// either side of the margin could hand a path back and forth every dwell
+	// period.
+	relayRescoreInterval = 5 * time.Minute
+	// A challenger must beat the incumbent by both of these to displace it.
+	// The ratio alone would chase noise on a fast path (25% of 4ms is
+	// nothing); the absolute floor alone would chase noise on a slow one
+	// (30ms of 400ms is well inside normal variance). Requiring both means a
+	// switch only happens when the improvement is large in relative *and*
+	// practical terms.
+	relayRescoreMargin  = 0.75 // challenger must be at most 75% of incumbent
+	relayRescoreMinGain = 30 * time.Millisecond
+)
+
+// relaySwitch is one decision to move a target's relayed path onto a different
+// relay — see relaySwitches, which decides, and rescoreRelays, which acts.
+type relaySwitch struct {
+	target string
+	from   string        // the relay currently carrying this path
+	to     *peerSession  // the challenger
+	was    time.Duration // incumbent's measured end-to-end cost
+	now    time.Duration // challenger's estimated end-to-end cost
+}
+
+// relaySwitches decides which relayed paths should move, and is deliberately
+// separate from performing the move: every bound that makes this safe to run on
+// every maintenance tick lives here, and none of it needs a handshake, a key
+// set or a socket to exercise.
+//
+// The incumbent's cost needs no estimating: ctrlPing/ctrlPong travel inside the
+// per-peer encrypted session, so a relayed session's own rttNanos is the true
+// end-to-end figure through its current relay (see peerSession.rttNanos). Only
+// the challenger has to be estimated, and only a fully-known estimate counts —
+// trading a measured path for a half-known one is not an improvement, it is a
+// coin flip with extra latency.
+func (e *Engine) relaySwitches(ns *netState, now time.Time) []relaySwitch {
+	ns.mu.RLock()
+	peers := make([]*peerSession, 0, len(ns.byNode))
+	for _, ps := range ns.byNode {
+		peers = append(peers, ps)
+	}
+	// A relay switch is pointless while a handshake for that target is already
+	// in flight — including one an earlier tick started.
+	inFlight := make(map[string]bool, len(ns.pending))
+	for _, p := range ns.pending {
+		if p.targetNode != "" {
+			inFlight[p.targetNode] = true
+		}
+	}
+	lastMoved := make(map[string]time.Time, len(ns.relayRescored))
+	for target, at := range ns.relayRescored {
+		lastMoved[target] = at
+	}
+	ns.mu.RUnlock()
+
+	var out []relaySwitch
+	for _, ps := range peers {
+		via := ps.getRelay()
+		if via == nil {
+			continue // direct: nothing to improve on, and never worth moving onto a relay
+		}
+		if now.Sub(ps.established) < relayRescoreDwell {
+			continue
+		}
+		if last, ok := lastMoved[ps.nodeID]; ok && now.Sub(last) < relayRescoreInterval {
+			continue
+		}
+		if inFlight[ps.nodeID] {
+			continue
+		}
+		if ns.isBanned(ps.nodeID) || ns.isPeerDisabled(ps.nodeID) {
+			continue
+		}
+		was := time.Duration(ps.rttNanos.Load())
+		if was <= 0 {
+			continue // no end-to-end measurement to compare a challenger against
+		}
+		cand, _ := bestRelay(peers, ps.nodeID)
+		if cand == nil || cand.nodeID == via.nodeID {
+			continue
+		}
+		cost, full, _ := relayCost(cand, ps.nodeID)
+		if !full {
+			continue // far leg unknown: not a measurement, not grounds to move
+		}
+		if cost > time.Duration(float64(was)*relayRescoreMargin) || was-cost < relayRescoreMinGain {
+			continue
+		}
+		out = append(out, relaySwitch{target: ps.nodeID, from: via.nodeID, to: cand, was: was, now: cost})
+	}
+	return out
+}
+
+// rescoreRelays applies relaySwitches' decisions.
+//
+// The switch reuses startRelayHandshake rather than tearing the old session
+// down first: install() replaces the session for a node wholesale, so the
+// existing path keeps carrying traffic until the new one completes, and a
+// challenger that turns out to be unreachable costs a failed handshake rather
+// than an outage. This is the same shape as the relayed→direct upgrade path.
+func (e *Engine) rescoreRelays(ns *netState) {
+	now := time.Now()
+	for _, sw := range e.relaySwitches(ns, now) {
+		ns.mu.Lock()
+		if ns.relayRescored == nil {
+			ns.relayRescored = make(map[string]time.Time)
+		}
+		ns.relayRescored[sw.target] = now
+		ns.mu.Unlock()
+		e.log.Infof("mesh: moving relayed path to %q on net %x from %q (%v measured end to end) to %q (%v estimated); keeping the current path until the new one completes",
+			sw.target, ns.spec.ID, sw.from, sw.was.Round(time.Millisecond), sw.to.nodeID, sw.now.Round(time.Millisecond))
+		e.startRelayHandshake(ns, sw.target, sw.to)
+	}
 }
 
 func (e *Engine) startRelayHandshake(ns *netState, target string, relay *peerSession) {

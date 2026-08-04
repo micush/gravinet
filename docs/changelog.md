@@ -2,6 +2,68 @@
 
 ---
 
+## v797 — 2026-08-04
+
+**A relayed path was chosen once and never revisited, and it was scored on half the information. A node reached a peer 363ms away through the slowest of five relays because that relay happened to win an arbitrary tie at startup, and nothing ever looked again.**
+
+Two independent faults, both in `internal/mesh/relay.go`.
+
+`tryRelays` builds its work list only from nodes it is *not* connected to:
+
+```go
+if _, connected := ns.byNode[nid]; connected {
+    continue
+}
+```
+
+A relayed session sits in `ns.byNode` exactly like a direct one, so the moment a path came up it stopped being a candidate for re-scoring — permanently. Better candidates connecting later, RTT samples arriving after the pick, a relay moving closer to the target: none of it mattered. `repointRelayUsers`' own comment already said the choice was only revisited when the session was reaped.
+
+And the score compared this node's RTT to the *candidate*, which is the near half of the path. The far leg — the candidate's own round trip to the target — was invisible: a relay forwards opaque ciphertext it never decrypts, so no round trip to the target can be attributed to it. The package comment said as much and called it "optimizes the half of the path that's measurable."
+
+Those two compound badly. `relayBetter` treats an unmeasured candidate as beating nothing, so when *every* candidate is fresh — the first `tryRelays` tick fires at `maintInterval` (5s), before a `keepaliveInterval` (10s) round trip has completed — `best` just keeps whichever the loop saw first. That loop ranges a map. The startup pick was a coin flip, and permanent.
+
+### The far leg is now gossiped
+
+`peerEntry.rttMillis` carries each node's own measured RTT to each peer it advertises, in a new trailing block `peerListRTTBlock = 0x07`, emitted last so a decoder predating it stops before reaching it — the same backward-compatibility rule every optional block in this format follows. Zero means "not measured," kept distinct from fast: `rttMillisOf` returns 1 for a sub-millisecond path and clamps at 65535 rather than wrapping, since a wrapped 120-second path would read as the fastest relay on the mesh.
+
+`relayCost` sums the locally measured near leg and the gossiped far leg, and reports whether both are known. `relayBetter` keeps the direct-beats-relayed tier rule, then prefers a fully-known cost over a half-known one, then lower cost. With no gossiped RTTs anywhere it degrades to precisely the old near-leg comparison, which is why every existing assertion in `relayscore_test.go` still holds under nothing but a signature change.
+
+Receivers store the figure timestamped in `peerSession.reportedRTT`, deliberately unlike the append-only `reported` set beside it: "has ever known this node" stays useful indefinitely, but a stale latency number is worse than none, because it is trusted enough to move a working path onto a guess.
+
+**One tradeoff worth stating plainly.** RTT is *not* in `peerListSig`. It moves on every keepalive, so including it would make that signature differ on essentially every tick and re-flood the full peer list unconditionally — the exact O(N²) cost the signature exists to prevent. The consequence is that an advertised RTT only refreshes when some other field changes or at `gossipFullRefresh` (180s), so `reportedRTTTTL` is 10 minutes and a test pins it above `gossipFullRefresh`. Relay selection tolerates three-minute-old latency data; re-flooding every peer list every ten seconds would not be tolerable.
+
+### The choice is now revisited, under hysteresis
+
+`relaySwitches` decides, `rescoreRelays` acts, called from the maintenance tick. The incumbent needs no estimating at all: `ctrlPing`/`ctrlPong` travel inside the per-peer encrypted session, so a relayed session's own `rttNanos` is already the true end-to-end figure through its current relay. Only the challenger is estimated, and only a fully-known estimate counts — trading a measured path for a half-known one is not an improvement, it is a coin flip with extra latency.
+
+Bounds, because latency is noisy and a switch costs a handshake: 90s dwell before a path may be moved (`rttNanos` on a seconds-old session is one sample or none, and moving on that basis reintroduces the arbitrary pick with extra steps), a 5-minute per-target throttle, and a challenger must be **both** ≤75% of the incumbent and ≥30ms faster. The ratio alone chases jitter on a fast path (3ms off 6ms); the floor alone chases it on a slow one (30ms off 400ms). Requiring both means a move needs to be worth making in relative and practical terms at once.
+
+The switch reuses `startRelayHandshake` rather than tearing down first: `install()` replaces a node's session wholesale, so the old path carries traffic until the new one completes, and an unreachable challenger costs a failed handshake instead of an outage. Same shape as the relayed→direct upgrade path.
+
+`relaySwitches` is split from `rescoreRelays` because every bound above is a decision needing no key set, socket or handshake to exercise — the first attempt at testing this panicked in `crypto.KeySet.Order` through `startRelayHandshake`, which was the design telling us where the seam belonged.
+
+### Tests
+
+`internal/mesh/relayrescore_test.go` — 23 tests: the codec round-trips RTT and omits the block when nothing is measured; a missing block reads as unknown rather than zero; the new block doesn't shadow any earlier one (asserted by populating every block at once); `relayCost` sums both legs; a nearby relay with a long onward leg loses to a distant one sitting next to the target, which is the bug stated as an assertion; stale gossip expires and is dropped; `peerListSig` ignores RTT; and each hysteresis bound is exercised in isolation — margin, absolute floor, dwell, unknown far leg, direct sessions, no incumbent measurement, re-picking the incumbent, the throttle (including that it releases afterward, so it is a delay and not a permanent pin), and an in-flight handshake.
+
+`internal/mesh/relaymigrate_test.go` — the end-to-end half, and the part that was previously only reasoned about. Four real engines, A blocked from B, two willing relays; the path migrates through a genuine handshake and a real `install()`, stays relayed, and a fresh packet arrives afterward. 8/8 runs clean. Its limits are stated in the test: the in-memory switchboard gives every path ~0 RTT, so the cost picture is injected and the re-score driven directly rather than awaited (real keepalives overwrite `rttNanos` every 10s), which trades away coverage of the `maintLoop` call site — covered instead by a source assertion, the same proxy-for-a-missing-harness pattern as `internal/webadmin`'s script-text tests.
+
+### Verified
+
+A real Go toolchain was available for this entry: `archive.ubuntu.com` is reachable and `golang-go` is 1.22, matching `go.mod`.
+
+`go build ./...` and `go vet ./...` clean, `gofmt -l` clean on files touched. **Full `internal/mesh` suite — all 551 tests pass**, run in nine chunks (A-C, D-E, F, G-L, M-O, P-Q, R, S, T-Z), with `TestDeadSeedRetryDoesNotDegradeOtherPeers` run individually. `internal/transport`, `internal/config`, `internal/webadmin` and `cmd/gravinet` all pass. Standing caveat unchanged: all builds `CGO_ENABLED=0`, so `auth_pam.go` was not compiled.
+
+One scare worth recording: that dead-seed test blew a 270s cap and looked like a hang introduced here. It was not — `-timeout` bounds the whole test binary and that chunk had ~101s of other tests ahead of it. Run alone it takes 181.038s on this tree against 181.040s on untouched v795. Worth measuring rather than assuming, since this change touches the gossip codec that test exercises indirectly.
+
+**Retroactive note on v796:** that entry recorded that `go build`, `go vet` and `go test` had *not* been run, for lack of a toolchain. They have now been. All four of v796's new tests pass, along with the rest of `internal/webadmin`. That entry's Verified gap is closed.
+
+### What is still not solved
+
+A relay's advertised far leg is its RTT to the target, which is honest but not free of staleness (up to `gossipFullRefresh` old, per the `peerListSig` tradeoff above). And nothing gossips *transitively*: a two-hop relay chain's total is still unknown, which is why the direct-beats-relayed tier rule remains the first thing `relayBetter` checks rather than something the cost model subsumes. Selection also still cannot see loss or jitter, only latency — a 40ms path dropping 5% of packets scores better than a clean 80ms one.
+
+---
+
 ## v796 — 2026-08-04
 
 **Settings > Admin interface addresses still rendered no picker — a second, independent bug in the same block, hidden behind the same message. `buildRouteChipPicker` returns a handle, not a node, and `appendChild` on the handle threw inside the `.then()`, where the chain's own `.catch()` caught it and rendered "could not load addresses".**

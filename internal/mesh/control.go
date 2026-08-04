@@ -75,6 +75,22 @@ type peerEntry struct {
 	// handshake with a peer (ps.selfSeed) always takes precedence over
 	// anything reported about it here.
 	selfSeed bool
+	// rttMillis is the advertising node's own most recently measured round
+	// trip to this entry's node, in milliseconds, 0 meaning unknown. This is
+	// the second half of a relay path: a node scoring candidate C as a relay
+	// to target T measures C itself locally, but C's leg to T is invisible
+	// from here — the relay forwards opaque ciphertext it never decrypts, so
+	// no round trip to T can be attributed to it. C gossiping the figure is
+	// the only way to learn it. See relayCost and the package comment in
+	// relay.go.
+	//
+	// Deliberately excluded from peerListSig: RTT moves a little on every
+	// keepalive, and folding it into the signature would defeat the whole
+	// point of that signature by re-flooding the full peer list on every
+	// gossip tick. It rides along on gossip that was going to happen anyway,
+	// which bounds its staleness at gossipFullRefresh — hence the freshness
+	// TTL on the receiving side (see reportedRTTFor).
+	rttMillis uint16
 }
 
 // ---- control dispatch ----
@@ -204,6 +220,7 @@ func (e *Engine) learnPeers(ps *peerSession, entries []peerEntry) {
 		}
 	}
 	ps.markReported(reported)
+	ps.noteReportedRTT(entries)
 
 	now := time.Now()
 	for _, en := range entries {
@@ -367,6 +384,7 @@ func (e *Engine) floodSinglePeer(ns *netState, ps *peerSession) {
 		nodeID: ps.nodeID, hostname: ps.hostname, overlay4: ps.overlay4, overlay6: ps.overlay6,
 		endpoint: ps.ep(), managed: ps.managed, manager: ps.manager, webPort: ps.webPort, tcpPort: ps.tcpPort,
 		extraTCPPorts: ps.extraTCPPorts, extraUDPPorts: ps.extraUDPPorts, selfSeed: ps.selfSeed,
+		rttMillis: rttMillisOf(ps),
 	}
 	ns.mu.RUnlock()
 	if !stillConnected {
@@ -430,6 +448,7 @@ func (e *Engine) buildPeerList(ns *netState, exceptNodeID string) []byte {
 			localEndpoints: p.localEndpoints,
 			version:        p.version,
 			selfSeed:       p.selfSeed,
+			rttMillis:      rttMillisOf(p),
 		})
 	}
 	ns.mu.RUnlock()
@@ -438,6 +457,27 @@ func (e *Engine) buildPeerList(ns *netState, exceptNodeID string) []byte {
 	out = append(out, ctrlPeerList)
 	out = append(out, encodePeerList(entries)...)
 	return out
+}
+
+// rttMillisOf converts a session's measured RTT to the millisecond form
+// gossip carries: 0 for "not measured yet", clamped to the uint16 ceiling
+// rather than wrapping (a path slower than ~65s is not a relay candidate
+// anybody is choosing on latency, but wrapping would make it look like the
+// fastest one on the mesh). Rounds to nearest so a sub-millisecond LAN path
+// reports 0/1 rather than always 0 — see peerEntry.rttMillis.
+func rttMillisOf(ps *peerSession) uint16 {
+	ns := ps.rttNanos.Load()
+	if ns <= 0 {
+		return 0
+	}
+	ms := (ns + int64(time.Millisecond)/2) / int64(time.Millisecond)
+	if ms > 65535 {
+		return 65535
+	}
+	if ms == 0 {
+		return 1 // measured, but faster than half a millisecond: not "unknown"
+	}
+	return uint16(ms)
 }
 
 // peerListSig returns a deterministic summary of every directly-connected
@@ -473,6 +513,15 @@ func (ns *netState) peerListSig() string {
 			p.localEndpoints, // host candidates are gossiped too, so a change in them must re-flood
 			p.version,        // ...as is the build version: a peer restarting onto a new build
 			p.selfSeed)       // ...as is seed status, which a partial mesh needs fresh (see NetSpec.PartialMesh)
+		// Note what is NOT here: peerEntry.rttMillis, which buildPeerList
+		// does gossip. It moves slightly on every keepalive, so including it
+		// would make this signature differ on essentially every tick and
+		// re-flood the full peer list unconditionally — precisely the O(N^2)
+		// cost this function exists to avoid. The consequence is that a
+		// relay's advertised RTT only refreshes when some *other* field
+		// changes or at gossipFullRefresh, which is why the receiving side
+		// treats it as valid for a bounded window rather than forever. See
+		// peerEntry.rttMillis and reportedRTTFor.
 		// otherwise keeps an identical signature (same hostname, overlay and
 		// endpoint), so without this the new version would only propagate at
 		// the next gossipFullRefresh rather than promptly.
@@ -616,6 +665,7 @@ func (e *Engine) maintLoop(ns *netState) {
 		e.syncHosts(ns, now)
 		e.syncDNS(ns, now)
 		e.tryRelays(ns)
+		e.rescoreRelays(ns)
 		e.maybePersistPeers(ns)
 	}
 }
@@ -1133,6 +1183,20 @@ func encodePeerList(entries []peerEntry) []byte {
 				b = append(b, v)
 			}
 		}
+		// Measured RTT to each entry: one more trailing block, same rules
+		// again, emitted after every block above and decoded in the same
+		// order, since a decoder predating it stops at the first marker it
+		// doesn't recognize. Only emitted when at least one entry has a
+		// measurement, so a mesh where nothing has completed a keepalive
+		// round trip yet costs nothing. See peerEntry.rttMillis.
+		if peerListHasRTT(entries) {
+			b = append(b, peerListRTTBlock)
+			for _, en := range entries {
+				var rt [2]byte
+				binary.BigEndian.PutUint16(rt[:], en.rttMillis)
+				b = append(b, rt[:]...)
+			}
+		}
 	}
 	return b
 }
@@ -1175,6 +1239,18 @@ func peerListHasVersion(entries []peerEntry) bool {
 	return false
 }
 
+// peerListHasRTT reports whether any entry carries a measured RTT worth
+// encoding a trailing block for — see encodePeerList. Same shape as the
+// predicates above.
+func peerListHasRTT(entries []peerEntry) bool {
+	for _, en := range entries {
+		if en.rttMillis != 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // peerListHasSeed reports whether any entry is a seed, worth encoding a
 // trailing block for — see encodePeerList. Mirrors peerListHasVersion's
 // all-false-costs-nothing shape.
@@ -1199,6 +1275,7 @@ const (
 	peerListLocalBlock    = 0x04
 	peerListVersionBlock  = 0x05
 	peerListSeedBlock     = 0x06
+	peerListRTTBlock      = 0x07
 )
 
 func appendLenStr(b []byte, s string) []byte {
@@ -1353,6 +1430,14 @@ blocks:
 					break blocks
 				}
 				entries[i].selfSeed = v != 0
+			}
+		case peerListRTTBlock:
+			for i := range entries {
+				rt, ok := r.take(2)
+				if !ok {
+					break blocks
+				}
+				entries[i].rttMillis = binary.BigEndian.Uint16(rt)
 			}
 		default:
 			break blocks // unrecognized block: stop rather than misparse

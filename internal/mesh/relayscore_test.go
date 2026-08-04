@@ -25,10 +25,10 @@ func mkCandidate(id string, relayed bool, rttMs int) *peerSession {
 func TestRelayBetterPrefersDirectOverRelayedRegardlessOfRTT(t *testing.T) {
 	direct := mkCandidate("direct", false, 500) // slow, but direct
 	relayed := mkCandidate("relayed", true, 10) // fast, but itself relayed
-	if !relayBetter(direct, relayed) {
+	if !relayBetter(direct, relayed, "unadvertised-target") {
 		t.Fatalf("a slow direct candidate should beat a fast already-relayed one (avoids stacking hops)")
 	}
-	if relayBetter(relayed, direct) {
+	if relayBetter(relayed, direct, "unadvertised-target") {
 		t.Fatalf("relayed should not beat direct in the reverse comparison")
 	}
 }
@@ -36,17 +36,17 @@ func TestRelayBetterPrefersDirectOverRelayedRegardlessOfRTT(t *testing.T) {
 func TestRelayBetterPrefersLowerRTTWithinSameTier(t *testing.T) {
 	fast := mkCandidate("fast", false, 20)
 	slow := mkCandidate("slow", false, 200)
-	if !relayBetter(fast, slow) {
+	if !relayBetter(fast, slow, "unadvertised-target") {
 		t.Fatalf("lower RTT should win among two direct candidates")
 	}
-	if relayBetter(slow, fast) {
+	if relayBetter(slow, fast, "unadvertised-target") {
 		t.Fatalf("higher RTT should not win")
 	}
 
 	// Same comparison, both already relayed (same tier, still compared by RTT).
 	fastR := mkCandidate("fastR", true, 20)
 	slowR := mkCandidate("slowR", true, 200)
-	if !relayBetter(fastR, slowR) {
+	if !relayBetter(fastR, slowR, "unadvertised-target") {
 		t.Fatalf("lower RTT should win among two already-relayed candidates too")
 	}
 }
@@ -54,15 +54,15 @@ func TestRelayBetterPrefersLowerRTTWithinSameTier(t *testing.T) {
 func TestRelayBetterUnmeasuredNeverWins(t *testing.T) {
 	measured := mkCandidate("measured", false, 900) // slow, but a real sample
 	unmeasured := mkCandidate("unmeasured", false, -1)
-	if relayBetter(unmeasured, measured) {
+	if relayBetter(unmeasured, measured, "unadvertised-target") {
 		t.Fatalf("an unmeasured candidate should not beat a measured one, even a slow one")
 	}
-	if !relayBetter(measured, unmeasured) {
+	if !relayBetter(measured, unmeasured, "unadvertised-target") {
 		t.Fatalf("a measured candidate should beat an unmeasured one")
 	}
 	// Two unmeasured: neither beats the other (bestRelay keeps first-seen).
 	otherUnmeasured := mkCandidate("other-unmeasured", false, -1)
-	if relayBetter(unmeasured, otherUnmeasured) || relayBetter(otherUnmeasured, unmeasured) {
+	if relayBetter(unmeasured, otherUnmeasured, "unadvertised-target") || relayBetter(otherUnmeasured, unmeasured, "unadvertised-target") {
 		t.Fatalf("neither of two unmeasured candidates should claim to beat the other")
 	}
 }

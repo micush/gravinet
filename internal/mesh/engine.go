@@ -860,6 +860,12 @@ type netState struct {
 	// forwarded packet.
 	relayRefusedLog  map[string]time.Time
 	relayDeclinedLog map[string]time.Time
+	// relayRescored is when each target's relayed path was last moved onto a
+	// different relay, keyed by target node id — the throttle behind
+	// relayRescoreInterval. Keyed by target rather than by relay pair because
+	// the thing being rate-limited is disruption to that peer's path, however
+	// many candidates it gets handed between.
+	relayRescored map[string]time.Time
 
 	lastGossip      time.Time
 	lastGossipSig   string    // content signature of the last full peer-list broadcast (see peerListSig)
@@ -1216,6 +1222,17 @@ type peerSession struct {
 
 	reportedMu sync.Mutex
 	reported   map[string]bool // node ids this peer advertised (relay candidate info)
+	// reportedRTT is this peer's own advertised round trip to each node it
+	// gossips about (see peerEntry.rttMillis) — the far leg of a relay path
+	// through it, which this node cannot measure itself. Timestamped because
+	// unlike `reported` above it must NOT be sticky: "has ever known this
+	// node" stays true usefully, but a latency figure from twenty minutes ago
+	// is worse than no figure at all, since it would be trusted enough to
+	// move a working path onto a guess. Read through reportedRTTFor, which
+	// applies the freshness window; entries are overwritten, never deleted on
+	// absence, because a single-entry ctrlPeerAdd is a valid peer list and
+	// deleting what it omits would wipe the whole table.
+	reportedRTT map[string]reportedRTTObs
 
 	reasmMu sync.Mutex // guards reasm (fragment reassembly buffers)
 	reasm   map[uint32]*fragReasm
@@ -1607,6 +1624,7 @@ func (e *Engine) newNetState(spec NetSpec) *netState {
 		nodes:                  make(map[string]*nodeInfo),
 		relayRefusedLog:        make(map[string]time.Time),
 		relayDeclinedLog:       make(map[string]time.Time),
+		relayRescored:          make(map[string]time.Time),
 		self4:                  spec.Self4,
 		self6:                  spec.Self6,
 		subnet4:                spec.Subnet4,
