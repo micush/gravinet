@@ -2,6 +2,53 @@
 
 ---
 
+## v794 — 2026-08-04
+
+**Two peers behind one NAT gateway, port-forwarded to the same external address, were closing each other's TCP connections in a loop. `conns` held one connection per remote host:port, and registering a second closed the first.**
+
+This is the actual mechanism behind the failure reported at the start of this run, and it is not the one v788 through v792 addressed. Those all sit on the outbound candidate dial path — which port to derive, which candidate to skip, who owns which seed. The broken session was never *chosen*: the peer dialled in, and the collision happened when this node replied.
+
+```go
+if old := t.conns[ap]; old != nil && old.raw != c {
+    old.raw.Close()
+}
+t.conns[ap] = tc
+```
+
+One node had an outbound connection to cush1 at `174.64.247.165:65432` and an inbound one from cush2 at the same address — genuinely distinct TCP connections, distinct 4-tuples, both legal at once, identical remote host:port. Each arrival closed the other. The log shows it plainly: cush2 inbound at `:51`, `:09`, `:27`, `:45`, `:57`, `:07`, with cush1's outbound wedged in the middle, one cycle every 12-18 seconds. cush2 showed `tx=19, rx=0` and 45 tunnel-ups against a baseline of 7 for a stable peer — the worst of thirteen on that node — and went unreachable for management whenever a fan-out caught it mid-cycle.
+
+`ss -tnp | grep 174.64` returning nothing was the confirmation, not a contradiction: at any instant one connection is mid-teardown and the other mid-handshake, so often neither is established.
+
+`conns` is now `map[netip.AddrPort][]*tlsConn`, newest first, capped at 4 per endpoint so a redial loop cannot grow it without bound.
+
+### The eviction was right for its own case
+
+It exists for a peer whose NAT rebound and reconnected from the same address, leaving a dead socket behind. That is real, and reaping it matters. What it could not do is tell that apart from a *different* peer at the same address — and it guessed the same way every time.
+
+Reaping moved to where deadness is actually observable rather than assumed: the read loop and write failure, both of which already call `unregister` with the specific connection that failed. `Send` now walks the list newest-first and reaps each connection whose write fails before trying the next, so a stale socket costs one failed write instead of severing a live one pre-emptively.
+
+Newest-first is a guess, and worth naming as one. When identity is unknown a reconnect usually does supersede a stale socket; where two peers genuinely share an address, a wrong pick fails one write and the mesh layer's own retry reaches the other on its next attempt. Guessing occasionally beats severing a working connection every time. Keying by node id would remove the guess entirely, but it changes what `Sender` addresses, and this fixes the observed fault without that.
+
+### The reproduction was written first
+
+Deliberately, after four releases that each fixed something real and left the reported failure intact. `internal/transport/conneviction_test.go` failed on the exact eviction before any change:
+
+> registering cush2's connection closed cush1's — this is the eviction loop
+
+Two companions guard against over-correcting, and both passed *before* the fix as well as after, so neither is passing vacuously: re-registering the same raw connection stays a no-op, and unregistering one of two connections at a shared address must not take the other with it.
+
+### Verified
+
+`go build ./...` and `go vet ./...` clean, `gofmt -l` clean on files touched. `internal/transport` passes in full, and the whole `internal/mesh` suite — 523 tests in chunks (A-H, I-P, Q-Z) plus the four multi-minute tests individually, including `TestDeadSeedWithTCPFallbackDoesNotDegrade`, which is the one that exercises this transport directly. `cmd/gravinet` passes. Standing caveat unchanged: all builds `CGO_ENABLED=0`, so `auth_pam.go` was not compiled.
+
+Two runs failed on the harness rather than the code, both timeouts from pairing multi-minute tests under a 3-4 minute cap; each passes alone.
+
+### Still worth doing on the mesh itself
+
+Giving one of the two peers a different external port makes the collision impossible rather than survivable, and is a one-node config change. This makes the shared-address case work; it does not make it optimal.
+
+---
+
 ## v793 — 2026-08-04
 
 **Settings > Admin interface addresses rendered a label and a description with no picker under them. The handler was correct the whole time; the UI read the payload off `api()`'s wrapper instead of out of it.**

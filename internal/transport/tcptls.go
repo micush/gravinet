@@ -110,8 +110,26 @@ type TLSTransport struct {
 	ln       net.Listener   // primary
 	extraLns []net.Listener // config extra_tcp_listen_ports — see TLSOptions.ExtraPorts
 
-	mu    sync.RWMutex
-	conns map[netip.AddrPort]*tlsConn // remote endpoint -> live connection
+	mu sync.RWMutex
+	// conns maps a remote endpoint to every live connection at it. A slice
+	// rather than a single entry because one remote host:port can legitimately
+	// carry more than one connection: two peers behind a NAT gateway,
+	// port-forwarded to the same external address, are distinct TCP
+	// connections with distinct 4-tuples and identical remote host:port.
+	//
+	// It held one entry, and registering a second closed the first — so those
+	// two peers evicted each other in a loop, roughly every 12-18 seconds:
+	// this node's outbound dial killed the inbound peer's connection, that
+	// peer redialled and killed the outbound one, forever. The affected peer
+	// showed tx climbing with rx flat at zero and went unreachable for
+	// management whenever a fan-out caught it mid-cycle.
+	//
+	// Newest first. Send writes to the newest live connection, which is the
+	// right guess when identity is unknown: a reconnect supersedes a stale
+	// socket, and where two peers really are sharing the address the mesh
+	// layer's own retry reaches the other one on its next attempt. Guessing
+	// occasionally beats severing a working connection every time.
+	conns map[netip.AddrPort][]*tlsConn
 
 	dialMu  sync.Mutex // serializes dial attempts per remote
 	dialing map[netip.AddrPort]bool
@@ -171,7 +189,7 @@ func OpenTLS(o TLSOptions) (*TLSTransport, error) {
 		handler: o.Handler,
 		log:     o.Log,
 		tlsCfg:  &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
-		conns:   make(map[netip.AddrPort]*tlsConn),
+		conns:   make(map[netip.AddrPort][]*tlsConn),
 		dialing: make(map[netip.AddrPort]bool),
 	}
 
@@ -280,20 +298,62 @@ func (t *TLSTransport) readConn(c net.Conn) {
 	}
 }
 
+// register records a live connection at ap, keeping any others already there.
+//
+// It used to close an existing connection whose raw conn differed, which is
+// correct for the case it was written for — a peer whose NAT rebound,
+// reconnecting from the same address, leaving a dead socket behind — and
+// indistinguishable from the case it broke: a *different* peer at the same
+// address. Reaping now happens where deadness is actually observable, in the
+// read loop and on write failure, both of which call unregister with the
+// specific connection that failed.
 func (t *TLSTransport) register(ap netip.AddrPort, c net.Conn) {
 	tc := &tlsConn{fc: &frameConn{w: c}, raw: c}
 	t.mu.Lock()
-	if old := t.conns[ap]; old != nil && old.raw != c {
-		old.raw.Close()
+	existing := t.conns[ap]
+	for _, old := range existing {
+		if old.raw == c {
+			t.mu.Unlock() // already registered; re-registering is a no-op
+			return
+		}
 	}
-	t.conns[ap] = tc
+	// Newest first.
+	t.conns[ap] = append([]*tlsConn{tc}, existing...)
+	if n := len(t.conns[ap]); n > maxConnsPerEndpoint {
+		// Bounded so a peer stuck in a redial loop can't grow this without
+		// limit. The oldest is the least likely to be live, and dropping it
+		// costs at most one retry.
+		drop := t.conns[ap][n-1]
+		t.conns[ap] = t.conns[ap][:n-1]
+		t.mu.Unlock()
+		drop.raw.Close()
+		return
+	}
 	t.mu.Unlock()
 }
 
+// maxConnsPerEndpoint caps how many live connections one remote host:port may
+// hold. Two is the real-world case (two peers behind one NAT); the headroom is
+// for a reconnect racing a not-yet-reaped predecessor.
+const maxConnsPerEndpoint = 4
+
+// unregister removes one specific connection, leaving any others at the same
+// address alone — a peer disconnecting must not strand its neighbour behind
+// the same NAT.
 func (t *TLSTransport) unregister(ap netip.AddrPort, c net.Conn) {
 	t.mu.Lock()
-	if tc := t.conns[ap]; tc != nil && tc.raw == c {
-		delete(t.conns, ap)
+	if list := t.conns[ap]; list != nil {
+		out := list[:0]
+		for _, tc := range list {
+			if tc.raw != c {
+				out = append(out, tc)
+			}
+		}
+		if len(out) == 0 {
+			delete(t.conns, ap)
+		} else {
+			t.conns[ap] = out
+		}
 	}
 	t.mu.Unlock()
 	c.Close()
@@ -303,7 +363,7 @@ func (t *TLSTransport) unregister(ap netip.AddrPort, c net.Conn) {
 func (t *TLSTransport) HasConn(to netip.AddrPort) bool {
 	to = netip.AddrPortFrom(to.Addr().Unmap(), to.Port())
 	t.mu.RLock()
-	_, ok := t.conns[to]
+	ok := len(t.conns[to]) > 0
 	t.mu.RUnlock()
 	return ok
 }
@@ -317,13 +377,24 @@ func (t *TLSTransport) Send(to netip.AddrPort, payload []byte) error {
 	}
 	to = netip.AddrPortFrom(to.Addr().Unmap(), to.Port())
 	t.mu.RLock()
-	tc := t.conns[to]
+	list := append([]*tlsConn(nil), t.conns[to]...)
 	t.mu.RUnlock()
-	if tc == nil {
+	if len(list) == 0 {
 		return fmt.Errorf("transport: no tls conn for %s", to)
 	}
-	if err := tc.fc.writeFrame(payload); err != nil {
+	// Newest first, falling through on write failure. A failed write is the
+	// point at which a connection is observably dead, so it is reaped here
+	// rather than pre-emptively at registration — which is what let a live
+	// connection be severed by an unrelated peer's arrival.
+	var err error
+	for _, tc := range list {
+		if err = tc.fc.writeFrame(payload); err == nil {
+			t.txPackets.Add(1)
+			return nil
+		}
 		t.unregister(to, tc.raw)
+	}
+	if err != nil {
 		return err
 	}
 	t.txPackets.Add(1)
@@ -427,10 +498,12 @@ func (t *TLSTransport) Close() error {
 		ln.Close()
 	}
 	t.mu.Lock()
-	for _, tc := range t.conns {
-		tc.raw.Close()
+	for _, list := range t.conns {
+		for _, tc := range list {
+			tc.raw.Close()
+		}
 	}
-	t.conns = make(map[netip.AddrPort]*tlsConn)
+	t.conns = make(map[netip.AddrPort][]*tlsConn)
 	t.mu.Unlock()
 	t.wg.Wait()
 	return nil
