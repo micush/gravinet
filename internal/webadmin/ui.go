@@ -112,7 +112,7 @@ const indexHTML = `<!doctype html>
   .rail-divider { height:1px; background:var(--line); margin:0 0 8px; }
   .rail-logout:hover { color:var(--danger); background:var(--hover); }
   .settings-row { display:flex; align-items:center; justify-content:space-between; gap:40px; padding:12px 0; border-bottom:1px solid var(--line); }
-  .settings-row:has(.route-picker) { flex-direction:column; align-items:stretch; justify-content:flex-start; gap:10px; }
+  .settings-row:has(.route-picker), .settings-row.stacked { flex-direction:column; align-items:stretch; justify-content:flex-start; gap:10px; }
   .settings-row:last-child { border-bottom:0; }
   .settings-row > input, .settings-row > .sw { flex-shrink:0; }
   .local-only-disabled { opacity:.5; }
@@ -129,7 +129,15 @@ const indexHTML = `<!doctype html>
      picker underneath — rather than beside them the way a switch or short
      text input sits, since the chip list's width and height are both
      unbounded in principle (as many routes, and as long each one's CIDR
-     text, as are selected) in a way neither of those ever was. */
+     text, as are selected) in a way neither of those ever was.
+     .stacked is the unconditional opt-in to that same layout, for a row
+     whose picker is built after a fetch resolves: :has() can only match
+     once the picker is in the DOM, so such a row would sit in the
+     side-by-side layout until then — and stay there for good if the fetch
+     fails, leaving the error text beside the label instead of under it.
+     A row that stacks either way declares it up front. Note also that
+     the align-items here is a stylesheet declaration, so an inline
+     align-items on the row itself silently beats it. */
   .route-picker { display:flex; flex-direction:column; gap:8px; max-width:420px; flex-shrink:0; }
   .route-search { width:280px; }
   .route-search .ss-input { width:100%; }
@@ -2827,9 +2835,15 @@ function secSettingsSecurity(c) {
   card.appendChild($('<h3>Admin interface addresses</h3>'));
   card.appendChild($('<div class="settings-desc" style="margin-bottom:10px">Which IP addresses this node\u2019s admin interface answers on. The port is unchanged \u2014 this picks addresses only. Defaults to loopback plus this node\u2019s mesh addresses, which is what keeps it reachable from other peers for cluster management.</div>'));
 
-  const laRow = $('<div class="settings-row" id="listen-addrs-row" style="align-items:flex-start"></div>');
+  // stacked, not the default side-by-side: the picker (and, when the load
+  // fails, the message in its place) belongs under the label and description,
+  // not in a narrow column beside them. Declared on the row rather than left
+  // to settings-row:has(.route-picker), because the picker here only exists
+  // once the fetch below resolves. No inline align-items — that would override
+  // the stretch the stacked rule sets.
+  const laRow = $('<div class="settings-row stacked" id="listen-addrs-row"></div>');
   laRow.appendChild($('<div><div class="settings-label">Listen addresses</div><div class="settings-desc">Removing the address you are connected through will end this session \u2014 you would need to reach the node on one of the others.</div></div>'));
-  const laWrap = $('<div style="flex:1;min-width:280px"></div>');
+  const laWrap = $('<div></div>');
   laRow.appendChild(laWrap);
   card.appendChild(laRow);
 
@@ -2868,14 +2882,23 @@ function secSettingsSecurity(c) {
       selected = addrs.slice();
       await edit('/api/webadmin/listen-addrs', { addrs: addrs });
     };
-    laWrap.appendChild(buildRouteChipPicker(
+    // buildRouteChipPicker returns a handle ({wrap,get,set,setAvailable}), not
+    // a node — appending the handle itself throws, and the throw lands in the
+    // .catch() below, so a working endpoint looked like a failed load. Every
+    // other call site appends .wrap; this one now does too.
+    const laPicker = buildRouteChipPicker(
       lo.options.map(o => o.addr), selected, save,
       { labelOf: labelOf,
         placeholder: 'search addresses to add\u2026',
         noneText: 'no bindable addresses found',
         loadingText: 'loading addresses\u2026',
-        staleTitle: 'not currently present on this host' }));
-  }).catch(() => {
+        staleTitle: 'not currently present on this host' });
+    laWrap.appendChild(laPicker.wrap);
+  }).catch(e => {
+    // Log it: this catch also sees exceptions thrown while rendering, not just
+    // a bad response, and swallowing those is what made a render bug read as
+    // "could not load addresses" with nothing to go on.
+    console.warn('/api/webadmin/listen-options:', e);
     laWrap.appendChild($('<div class="hint">could not load addresses</div>'));
   });
 

@@ -2,6 +2,36 @@
 
 ---
 
+## v796 — 2026-08-04
+
+**Settings > Admin interface addresses still rendered no picker — a second, independent bug in the same block, hidden behind the same message. `buildRouteChipPicker` returns a handle, not a node, and `appendChild` on the handle threw inside the `.then()`, where the chain's own `.catch()` caught it and rendered "could not load addresses".**
+
+v793 fixed the payload unwrap and added the visible failure path. Both were correct. The line immediately after was not:
+
+```js
+laWrap.appendChild(buildRouteChipPicker(...));
+```
+
+The widget returns `{wrap, get, set, setAvailable}`. Every other call site — the BGP redistribute rows, Mesh Routes, L2 Disco, the upgrade push selector — appends `.wrap`; this one appended the handle, which is a `TypeError`. Because the throw happened inside the promise callback, it landed in the `catch` that v793 had just added for bad responses, so a working handler and a dead one produced identical output. The `catch` now logs its error: it guards the render as well as the fetch, and discarding the reason is what made a render bug indistinguishable from a load failure.
+
+### Layout
+
+The picker also belonged under the label and description rather than in a column beside them, which is what `.settings-row:has(.route-picker)` already does for every other picker. Two things kept this row out of it. `:has()` cannot match before the picker is in the DOM, and this row's picker only exists once its fetch resolves — so the row started side-by-side and stayed there permanently when the fetch failed, which is why the error text sat off to the right of the label. And the row set `align-items:flex-start` inline, which silently beats the stylesheet rule's own `align-items:stretch`.
+
+`.settings-row.stacked` is the unconditional opt-in to that layout, for a row that should stack regardless of what its contents are yet. The listen-address row declares it, drops the inline `align-items`, and drops the `flex:1;min-width:280px` right-hand-column sizing from the picker's container. The `:has()` form stays — the four synchronously-built pickers rely on it and never set the class.
+
+### Tests
+
+`TestChipPickerCallSitesAppendWrap` checks every `buildRouteChipPicker` call site, not just this one: the widget is shared and the mistake is equally available to all of them. It fails on v795 at exactly one offset. `TestListenPickerRendersAndReportsFailures` asserts this card reaches `.wrap` and that its `catch` keeps the error. `TestListenRowStacksLayout` and `TestStackedSettingsRowRuleExists` pin the layout, including that the rule the row asks for exists and that the `:has()` form survives.
+
+v793's own test asserted `.body` and the presence of a failure path. Both still passed while the card was broken — the assertion was one line short of where the bug was.
+
+### Verified
+
+Assertions checked against the shipped script text: all pass on the fix, and the call-site, inline-`align-items`, `flex:1` and missing-rule checks all fail on v795. No Go toolchain was available in the environment this was fixed in, so `go build`, `go vet` and `go test` were **not** run — that is a gap in this entry relative to every other one here, and `internal/webadmin` and `cmd/gravinet` should be run before this ships.
+
+---
+
 ## v795 — 2026-08-04
 
 **Which underlay carried a peer's traffic is now a fact the transport reports, not an inference from the destination address. That inference — "is there a TLS connection to this endpoint" — is correct only while one address means one peer, and two peers behind one NAT gateway make it wrong for one of them.**
