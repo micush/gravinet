@@ -460,12 +460,33 @@ func (e *Engine) buildPeerList(ns *netState, exceptNodeID string) []byte {
 }
 
 // rttMillisOf converts a session's measured RTT to the millisecond form
-// gossip carries: 0 for "not measured yet", clamped to the uint16 ceiling
-// rather than wrapping (a path slower than ~65s is not a relay candidate
-// anybody is choosing on latency, but wrapping would make it look like the
-// fastest one on the mesh). Rounds to nearest so a sub-millisecond LAN path
-// reports 0/1 rather than always 0 — see peerEntry.rttMillis.
+// gossip carries: 0 for "not measured, or not measured over a path worth
+// advertising", clamped to the uint16 ceiling rather than wrapping (a path
+// slower than ~65s is not a relay candidate anybody is choosing on latency,
+// but wrapping would make it look like the fastest one on the mesh). Rounds to
+// nearest so a sub-millisecond LAN path reports 0/1 rather than always 0 — see
+// peerEntry.rttMillis.
+//
+// A *relayed* session reports nothing, deliberately. Its RTT describes a
+// two-hop path, and a receiver has no way to tell that from a direct one: it
+// adds the figure to its own leg and believes it has a two-hop estimate when it
+// actually has three or more. Worse, the hidden hop can be the receiver itself
+// — A relaying to T through B, while B's own path to T runs back through A — at
+// which point the two nodes are advertising a loop to each other as a cheap
+// path, and neither can see it, because a scalar carries no path information.
+// v797 shipped without this and the result was exactly that: relay chains
+// forming, measured RTTs climbing 140ms → 2.3s → 5.9s as they did, and paths
+// carrying tens of megabytes inbound while sending nothing.
+//
+// Advertising only direct measurements makes the invariant checkable instead of
+// hoped for: every far leg on the wire is one direct hop, so a relayed path
+// assembled from one is exactly two direct hops (see bestRelay), and a
+// candidate whose leg to the target is direct cannot be routing that target
+// back through us.
 func rttMillisOf(ps *peerSession) uint16 {
+	if ps.getRelay() != nil {
+		return 0
+	}
 	ns := ps.rttNanos.Load()
 	if ns <= 0 {
 		return 0

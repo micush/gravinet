@@ -2,6 +2,60 @@
 
 ---
 
+## v798 — 2026-08-04
+
+**v797 took the mesh down. It compared an estimate against a measurement, called the estimate better, and moved the path — over and over, on exactly the throttle interval, until relay chains formed and RTTs climbed from 140ms to 5.9s. This reverts the behaviour to something defensible and makes the two quantities commensurable.**
+
+Field evidence, from bundles collected on five nodes: `gn-openbsd` on `mcfed` logged `attempting relayed handshake` every five seconds for the last three minutes of the log, alternating between two relays, never forming a session. `mcfed`'s peer table went from 13 peers to 5. Its session to `gn-cush1` showed 5276ms RTT, 21k packets received, **zero sent**, relayed through `gn-ionos3` — which was itself carrying 27MB inbound in two minutes and had stopped answering its own admin API. Three targets reported incumbent costs of *identically* 2.317s.
+
+### What went wrong
+
+**The comparison was between two different kinds of quantity.** `relaySwitches` scored the challenger with `relayCost` — this node's measured RTT to the candidate plus the candidate's gossiped RTT to the target, two samples added — and compared it against the incumbent's *measured* end-to-end `rttNanos`, which additionally contains the relay's store-and-forward delay, its queueing, and the second decrypt/encrypt hop. The estimate therefore ran systematically low, by considerably more than the 25%/30ms margin. So every challenger won, was switched to, promptly measured worse than it had estimated, and was displaced in turn by the next challenger. Paths churned on precisely `relayRescoreInterval`.
+
+The margin could not have saved this. A margin bounds how often a wrong decision repeats; it cannot make a wrong decision right. v797's margins were the same values this entry ships and the mesh still churned.
+
+**Nothing prevented chains or loops.** `rttMillisOf` advertised a session's RTT whether that session was direct or relayed, so a node gossiped a far leg measured over its own two-hop path — possibly a path running back through the recipient. A scalar metric carries no path information, which is the count-to-infinity setup, and the RTT inflation across successive log lines is its signature. Meanwhile `bestRelay` treated direct-vs-relayed as a *preference* (`relayBetter`'s tier rule) rather than a rule, so a chain was assembled whenever nothing direct qualified: `mcfed` relayed through `gn-cush1` while `gn-cush1` was itself only reachable via `gn-ionos3`.
+
+### Fixes
+
+**A relayed session advertises no RTT.** `rttMillisOf` returns 0 when `getRelay() != nil`. Every far leg on the wire is now one direct hop, which makes the two-hop invariant checkable rather than hoped for.
+
+**A relayed peer is never a relay candidate.** Hard exclusion in `bestRelay`. Together with the above, every relayed path is exactly two direct hops, and a candidate whose leg to the target is direct cannot be routing that target back through us. The cost is real and asserted in a test rather than buried: a target reachable *only* through a chain is now unreachable rather than reachable badly. That is the deliberate trade — an unreachable peer is a visible, local, stable failure; a chain is an invisible one that degrades every other path sharing its links.
+
+**The incumbent is scored by the same estimator as the challenger.** Both sides of the comparison are now `relayCost`. An incumbent whose relay advertises no far leg has no comparable figure and is left alone, rather than falling back to the measurement and reintroducing the mismatch for exactly the paths most likely to be broken. The measured RTT keeps one job — a veto: if the path already measures better than the challenger merely estimates, there is nothing to win.
+
+**Per-target exponential backoff.** `relayRescoreInterval` is now a base that doubles per move for that target, capped at 2h by `relayRescoreBackoffMax`. A target the cost model cannot settle on stops being churned. v797's flat interval meant oscillation continued for as long as the process ran.
+
+The log line now carries the estimate, the measurement, the move count and the next eligible time. v797 logged only the measurement and labelled it the incumbent's cost, which actively hid that it was being compared against something else.
+
+### The 2.317s anomaly
+
+Not a bug. Those three sessions were all relayed through the same stalled peer; keepalives go out in one batch, so their pongs drained together and landed in the same millisecond. Head-of-line blocking on a shared relay — which corroborates the congestion story rather than being a separate fault. Recorded because it looked like a smoking gun and was worth chasing to ground before touching constants.
+
+### Tests
+
+Nine new tests in `relayrescore_test.go` cover the invariants: a relayed session advertises nothing and `buildPeerList` honours that on the wire; `bestRelay` refuses relayed candidates and prefers a slow direct one over a fast chained one; the backoff grows, caps, and actually gates a repeat move; the measured-RTT veto fires; an incumbent without a comparable estimate is skipped.
+
+`TestRescoreComparesEstimateAgainstEstimate` pins the exact regression: an incumbent estimating 100ms but measuring 300ms, against a challenger estimating 90ms. v798 leaves it alone (inside the margin). v797 would have moved it, because 90ms beats 300ms by a mile — which is the bug, stated as an assertion.
+
+The existing fixtures had to change: `relayedIncumbent` now builds an incumbent whose relay is itself scorable, with explicit near and far legs summing to slightly less than the measured RTT, because that understated-estimate relationship is the real one and the tests should encode it.
+
+**Why the existing tests missed this.** `TestRelayedPathMigratesToABetterRelay` passed on v797 and still passes. It could never have caught the defect: the in-memory switchboard gives every path ~0 RTT, so the costs were injected by hand — and a test where the author supplies both sides of a comparison cannot detect that the two sides are incommensurable. That limitation was written into the test's own doc comment on v797 and shipped anyway.
+
+### Verified
+
+`go build ./...`, `go vet ./...`, `gofmt -l` clean (all `CGO_ENABLED=0`; `auth_pam.go` not compiled, as ever). Full `internal/mesh` suite passes across all nine chunks, with `TestDeadSeedRetryDoesNotDegradeOtherPeers` run individually at its usual 181s. `internal/transport`, `internal/config`, `cmd/gravinet` pass.
+
+**One unresolved flake.** An early chunk-R run failed at 190.835s. Its output is unrecoverable — the run was piped through `tail -3`, so the failing test's name was discarded, leaving only an exit status. Since then chunk R has passed four consecutive times, `TestRelayedPathMigratesToABetterRelay` 25/25, and `TestRelayedSessionSurvivesLossOnTheRelayLeg` (the 25%-loss test, the most plausible timing-sensitive suspect) 3/3. So: one failure in five attempts, unidentified, not reproduced in roughly 35 subsequent runs of the likely candidates. Whether it was introduced here, pre-existing, or environmental is **not known**. It is recorded rather than omitted because a one-in-five failure in the relay chunk of a release that exists to fix a relay outage is exactly the thing a reader of this file needs to know. Full logs, no piping through `tail`, next time.
+
+### What is still not solved
+
+Relay selection still cannot see loss or jitter, only latency: a 40ms path dropping 5% of packets scores better than a clean 80ms one. The far leg can be up to `gossipFullRefresh` (180s) stale, per the `peerListSig` tradeoff in v797's entry. And the estimate still understates what a path will measure — v798 makes the comparison consistent, not accurate, so the margins remain a second line of defence and not a first.
+
+The handshake storm seen on `mcfed` — `tryRelays` retrying every `maintInterval` indefinitely for a target with no session — was not introduced here and is not fixed here. The churn triggered it by killing sessions; the retry behaviour itself predates v797 and wants its own backoff.
+
+---
+
 ## v797 — 2026-08-04
 
 **A relayed path was chosen once and never revisited, and it was scored on half the information. A node reached a peer 363ms away through the slowest of five relays because that relay happened to win an arbitrary tie at startup, and nothing ever looked again.**

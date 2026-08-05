@@ -866,6 +866,11 @@ type netState struct {
 	// the thing being rate-limited is disruption to that peer's path, however
 	// many candidates it gets handed between.
 	relayRescored map[string]time.Time
+	// relayRescoreCount is how many times each target's path has been moved,
+	// driving relayRescoreBackoff. A target the cost model keeps changing its
+	// mind about is one whose cost model is wrong, and the useful response is
+	// to stop moving it rather than to keep paying for the churn.
+	relayRescoreCount map[string]int
 
 	lastGossip      time.Time
 	lastGossipSig   string    // content signature of the last full peer-list broadcast (see peerListSig)
@@ -1625,6 +1630,7 @@ func (e *Engine) newNetState(spec NetSpec) *netState {
 		relayRefusedLog:        make(map[string]time.Time),
 		relayDeclinedLog:       make(map[string]time.Time),
 		relayRescored:          make(map[string]time.Time),
+		relayRescoreCount:      make(map[string]int),
 		self4:                  spec.Self4,
 		self6:                  spec.Self6,
 		subnet4:                spec.Subnet4,

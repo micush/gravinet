@@ -301,10 +301,26 @@ func (e *Engine) logRelayRefused(ns *netState, target string, refused int) {
 // it has allow_relay turned off" — two situations that look identical from
 // here and demand completely different fixes. See the package doc above for
 // what "best" does and doesn't account for.
+//
+// A peer we reach *through a relay* is never itself a candidate. Until v798
+// this was a preference (relayBetter's tier rule) rather than a rule, so a
+// chain was still assembled whenever nothing direct qualified — and chains are
+// what took the mesh down in v797: three-plus hops whose real cost nothing
+// could see, and no way to rule out that a link in the chain was routing back
+// through us. Together with rttMillisOf advertising direct measurements only,
+// the rule here makes every relayed path exactly two direct hops.
+//
+// The cost is real and worth naming: a target reachable *only* through a chain
+// is now unreachable rather than reachable badly. That is the deliberate
+// trade. An unreachable peer is a visible, local, stable failure; a chain is an
+// invisible one that degrades every other path sharing its links.
 func bestRelay(peers []*peerSession, target string) (best *peerSession, refused int) {
 	for _, ps := range peers {
 		if ps.nodeID == target || !ps.reports(target) {
 			continue
+		}
+		if ps.getRelay() != nil {
+			continue // reached via a relay: would make this a chain
 		}
 		if !ps.willRelay() {
 			refused++
@@ -426,29 +442,54 @@ var (
 	// none, and moving a path on that basis is how the arbitrary-pick problem
 	// gets reintroduced with extra steps.
 	relayRescoreDwell = 90 * time.Second
-	// relayRescoreInterval throttles how often a given target may be moved,
-	// measured from the last move. Without it a mesh where two candidates sit
-	// either side of the margin could hand a path back and forth every dwell
-	// period.
+	// relayRescoreInterval is the *base* throttle after a move. Each further
+	// move of the same target doubles it (see relayRescoreBackoff), so a
+	// target the cost model cannot settle on stops being churned instead of
+	// oscillating forever. v797 had a flat interval, and paths moved on
+	// precisely that cadence for as long as the log ran.
 	relayRescoreInterval = 5 * time.Minute
+	// relayRescoreBackoffMax caps that doubling. A target that has been moved
+	// this many times is not going to be improved by moving it again; at that
+	// point re-scoring has become the problem and stopping is the fix.
+	relayRescoreBackoffMax = 2 * time.Hour
 	// A challenger must beat the incumbent by both of these to displace it.
 	// The ratio alone would chase noise on a fast path (25% of 4ms is
 	// nothing); the absolute floor alone would chase noise on a slow one
 	// (30ms of 400ms is well inside normal variance). Requiring both means a
 	// switch only happens when the improvement is large in relative *and*
 	// practical terms.
+	//
+	// Note what these can and cannot do. They bound how often a *wrong*
+	// decision repeats; they cannot make a wrong decision right. v797's
+	// margins were these exact values and the mesh still churned, because the
+	// two costs being compared were not measured the same way. Margins are the
+	// second line of defence, not the first.
 	relayRescoreMargin  = 0.75 // challenger must be at most 75% of incumbent
 	relayRescoreMinGain = 30 * time.Millisecond
 )
 
+// relayRescoreBackoff returns the throttle for a target that has already been
+// moved n times: the base interval doubled per move, capped.
+func relayRescoreBackoff(n int) time.Duration {
+	d := relayRescoreInterval
+	for i := 0; i < n && d < relayRescoreBackoffMax; i++ {
+		d *= 2
+	}
+	if d > relayRescoreBackoffMax {
+		return relayRescoreBackoffMax
+	}
+	return d
+}
+
 // relaySwitch is one decision to move a target's relayed path onto a different
 // relay — see relaySwitches, which decides, and rescoreRelays, which acts.
 type relaySwitch struct {
-	target string
-	from   string        // the relay currently carrying this path
-	to     *peerSession  // the challenger
-	was    time.Duration // incumbent's measured end-to-end cost
-	now    time.Duration // challenger's estimated end-to-end cost
+	target   string
+	from     string        // the relay currently carrying this path
+	to       *peerSession  // the challenger
+	was      time.Duration // incumbent's cost, by the same estimator as `now`
+	now      time.Duration // challenger's estimated end-to-end cost
+	measured time.Duration // incumbent's real end-to-end RTT, for the log only
 }
 
 // relaySwitches decides which relayed paths should move, and is deliberately
@@ -456,12 +497,22 @@ type relaySwitch struct {
 // every maintenance tick lives here, and none of it needs a handshake, a key
 // set or a socket to exercise.
 //
-// The incumbent's cost needs no estimating: ctrlPing/ctrlPong travel inside the
-// per-peer encrypted session, so a relayed session's own rttNanos is the true
-// end-to-end figure through its current relay (see peerSession.rttNanos). Only
-// the challenger has to be estimated, and only a fully-known estimate counts —
-// trading a measured path for a half-known one is not an improvement, it is a
-// coin flip with extra latency.
+// The comparison is estimate against estimate, both from relayCost. v797
+// compared the challenger's estimate against the incumbent's *measured*
+// end-to-end rttNanos, and that was the defect that made the hysteresis
+// useless: an estimate is two RTT samples added together, while the measurement
+// includes the relay's store-and-forward delay, its queueing, and the second
+// decrypt/encrypt hop. The estimate therefore ran systematically low — by more
+// than the 25%/30ms margin — so every candidate looked better than the
+// incumbent, was switched to, promptly measured worse than it had estimated,
+// and was itself displaced by the next candidate. Paths churned on exactly the
+// relayRescoreInterval cadence. Two quantities that are not the same kind of
+// thing cannot be compared and the margin cannot rescue them; measuring both
+// the same way can.
+//
+// The incumbent's measured RTT is still used, but only as a gate that can veto
+// a move, never as the thing being beaten: if the path already measures better
+// than what the challenger merely estimates, there is nothing to win.
 func (e *Engine) relaySwitches(ns *netState, now time.Time) []relaySwitch {
 	ns.mu.RLock()
 	peers := make([]*peerSession, 0, len(ns.byNode))
@@ -480,6 +531,10 @@ func (e *Engine) relaySwitches(ns *netState, now time.Time) []relaySwitch {
 	for target, at := range ns.relayRescored {
 		lastMoved[target] = at
 	}
+	moveCount := make(map[string]int, len(ns.relayRescoreCount))
+	for target, n := range ns.relayRescoreCount {
+		moveCount[target] = n
+	}
 	ns.mu.RUnlock()
 
 	var out []relaySwitch
@@ -491,7 +546,7 @@ func (e *Engine) relaySwitches(ns *netState, now time.Time) []relaySwitch {
 		if now.Sub(ps.established) < relayRescoreDwell {
 			continue
 		}
-		if last, ok := lastMoved[ps.nodeID]; ok && now.Sub(last) < relayRescoreInterval {
+		if last, ok := lastMoved[ps.nodeID]; ok && now.Sub(last) < relayRescoreBackoff(moveCount[ps.nodeID]) {
 			continue
 		}
 		if inFlight[ps.nodeID] {
@@ -500,9 +555,13 @@ func (e *Engine) relaySwitches(ns *netState, now time.Time) []relaySwitch {
 		if ns.isBanned(ps.nodeID) || ns.isPeerDisabled(ps.nodeID) {
 			continue
 		}
-		was := time.Duration(ps.rttNanos.Load())
-		if was <= 0 {
-			continue // no end-to-end measurement to compare a challenger against
+		// The incumbent, scored by the same estimator as any challenger. If its
+		// relay stopped advertising a far leg to this target, there is no
+		// comparable figure and nothing to compare against — leave it be rather
+		// than fall back to the measurement and reintroduce v797's mismatch.
+		wasEst, wasFull, _ := relayCost(via, ps.nodeID)
+		if !wasFull {
+			continue
 		}
 		cand, _ := bestRelay(peers, ps.nodeID)
 		if cand == nil || cand.nodeID == via.nodeID {
@@ -512,10 +571,20 @@ func (e *Engine) relaySwitches(ns *netState, now time.Time) []relaySwitch {
 		if !full {
 			continue // far leg unknown: not a measurement, not grounds to move
 		}
-		if cost > time.Duration(float64(was)*relayRescoreMargin) || was-cost < relayRescoreMinGain {
+		if cost > time.Duration(float64(wasEst)*relayRescoreMargin) || wasEst-cost < relayRescoreMinGain {
 			continue
 		}
-		out = append(out, relaySwitch{target: ps.nodeID, from: via.nodeID, to: cand, was: was, now: cost})
+		// Veto: the path as it actually measures is already better than the
+		// challenger's estimate. The estimate omits relay overhead, so a
+		// challenger that cannot even beat the incumbent's real number on paper
+		// will certainly not beat it in practice.
+		if measured := time.Duration(ps.rttNanos.Load()); measured > 0 && measured <= cost {
+			continue
+		}
+		out = append(out, relaySwitch{
+			target: ps.nodeID, from: via.nodeID, to: cand,
+			was: wasEst, now: cost, measured: time.Duration(ps.rttNanos.Load()),
+		})
 	}
 	return out
 }
@@ -534,10 +603,19 @@ func (e *Engine) rescoreRelays(ns *netState) {
 		if ns.relayRescored == nil {
 			ns.relayRescored = make(map[string]time.Time)
 		}
+		if ns.relayRescoreCount == nil {
+			ns.relayRescoreCount = make(map[string]int)
+		}
 		ns.relayRescored[sw.target] = now
+		ns.relayRescoreCount[sw.target]++
+		n := ns.relayRescoreCount[sw.target]
 		ns.mu.Unlock()
-		e.log.Infof("mesh: moving relayed path to %q on net %x from %q (%v measured end to end) to %q (%v estimated); keeping the current path until the new one completes",
-			sw.target, ns.spec.ID, sw.from, sw.was.Round(time.Millisecond), sw.to.nodeID, sw.now.Round(time.Millisecond))
+		// Both figures, plus what the path actually measures: v797 logged only
+		// the measurement and called it the incumbent's cost, which hid the
+		// fact that it was being compared against something else entirely.
+		e.log.Infof("mesh: moving relayed path to %q on net %x from %q (est %v, measures %v) to %q (est %v); move %d for this target, next not before %v; keeping the current path until the new one completes",
+			sw.target, ns.spec.ID, sw.from, sw.was.Round(time.Millisecond), sw.measured.Round(time.Millisecond),
+			sw.to.nodeID, sw.now.Round(time.Millisecond), n, relayRescoreBackoff(n))
 		e.startRelayHandshake(ns, sw.target, sw.to)
 	}
 }

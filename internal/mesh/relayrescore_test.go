@@ -234,11 +234,22 @@ func TestPeerListSigIgnoresRTT(t *testing.T) {
 
 // ---- re-scoring ----
 
-// relayed builds an incumbent relayed session established dwell ago, with an
-// end-to-end RTT of rtt, reached via the session named by relay.
-func relayedIncumbent(target, relay string, rtt, age time.Duration) *peerSession {
+// relayedIncumbent builds a relayed session to target, established age ago,
+// measuring rtt end to end, reached through a relay that is itself a scorable
+// candidate — near leg measured, far leg advertised.
+//
+// The incumbent's relay must be scorable because v798 compares estimate against
+// estimate: an incumbent whose relay advertises no far leg has no figure
+// comparable to a challenger's and is left alone. v797 compared the challenger's
+// estimate against this measured rtt, which is a different kind of quantity and
+// systematically larger, so every challenger won.
+//
+// incNear/incFar are chosen by each caller to sum to slightly less than the
+// measured rtt, which is the real relationship: an estimate omits the relay's
+// store-and-forward and queueing, so it always runs a little low.
+func relayedIncumbent(target, relay string, incNear, incFar, rtt, age time.Duration) *peerSession {
 	ps := &peerSession{nodeID: target, established: time.Now().Add(-age)}
-	ps.relay = &peerSession{nodeID: relay}
+	ps.relay = candidateFor(relay, target, incNear, incFar)
 	ps.rttNanos.Store(int64(rtt))
 	return ps
 }
@@ -260,12 +271,16 @@ func candidateFor(id, target string, near, far time.Duration) *peerSession {
 func rescoreState(inc *peerSession, cands ...*peerSession) (*Engine, *netState) {
 	e := &Engine{nodeID: "self", log: logx.New(io.Discard, logx.LevelDebug)}
 	ns := &netState{
-		byNode:        map[string]*peerSession{inc.nodeID: inc},
-		pending:       map[uint32]*pendingHS{},
-		nodes:         map[string]*nodeInfo{},
-		relayRescored: map[string]time.Time{},
+		byNode:            map[string]*peerSession{inc.nodeID: inc},
+		pending:           map[uint32]*pendingHS{},
+		nodes:             map[string]*nodeInfo{},
+		relayRescored:     map[string]time.Time{},
+		relayRescoreCount: map[string]int{},
 	}
 	ns.spec.ID = 0x1234
+	if via := inc.getRelay(); via != nil {
+		ns.byNode[via.nodeID] = via // the incumbent relay is a peer like any other
+	}
 	for _, c := range cands {
 		ns.byNode[c.nodeID] = c
 	}
@@ -291,7 +306,7 @@ func rescoreFixture(t *testing.T, inc *peerSession, cands ...*peerSession) []str
 func TestRescoreMovesPathToAMateriallyBetterRelay(t *testing.T) {
 	// The screenshot case: reaching the target costs 363ms through the
 	// incumbent, and a candidate offers 60ms end to end.
-	inc := relayedIncumbent("target", "slow-relay", 363*time.Millisecond, relayRescoreDwell+time.Minute)
+	inc := relayedIncumbent("target", "slow-relay", 180*time.Millisecond, 150*time.Millisecond, 363*time.Millisecond, relayRescoreDwell+time.Minute)
 	good := candidateFor("fast-relay", "target", 50*time.Millisecond, 10*time.Millisecond)
 
 	e, ns := rescoreState(inc, good)
@@ -305,8 +320,14 @@ func TestRescoreMovesPathToAMateriallyBetterRelay(t *testing.T) {
 	}
 	// The reported figures are what the log line carries, so an operator can
 	// see why the path moved rather than just that it did.
-	if sw.was != 363*time.Millisecond {
-		t.Errorf("was = %v, want the incumbent's measured 363ms", sw.was)
+	// `was` is the incumbent's *estimate* (180 near + 150 far), deliberately
+	// not its measured 363ms: comparing an estimate against a measurement is
+	// what made v797 churn. `measured` carries the real figure for the log.
+	if sw.was != 330*time.Millisecond {
+		t.Errorf("was = %v, want the incumbent's estimate of 330ms (180 near + 150 far)", sw.was)
+	}
+	if sw.measured != 363*time.Millisecond {
+		t.Errorf("measured = %v, want the incumbent's real end-to-end 363ms", sw.measured)
 	}
 	if sw.now != 60*time.Millisecond {
 		t.Errorf("now = %v, want the challenger's estimated 60ms (50 near + 10 far)", sw.now)
@@ -316,7 +337,7 @@ func TestRescoreMovesPathToAMateriallyBetterRelay(t *testing.T) {
 func TestRescoreLeavesPathAloneWithinMargin(t *testing.T) {
 	// 90ms vs a measured 100ms: a real improvement, but well inside the
 	// margin, and a handshake plus a brief interruption costs more than 10ms.
-	inc := relayedIncumbent("target", "incumbent", 100*time.Millisecond, relayRescoreDwell+time.Minute)
+	inc := relayedIncumbent("target", "incumbent", 50*time.Millisecond, 40*time.Millisecond, 100*time.Millisecond, relayRescoreDwell+time.Minute)
 	marginal := candidateFor("marginal", "target", 60*time.Millisecond, 30*time.Millisecond)
 
 	if moved := rescoreFixture(t, inc, marginal); len(moved) != 0 {
@@ -327,7 +348,7 @@ func TestRescoreLeavesPathAloneWithinMargin(t *testing.T) {
 // The absolute floor exists for fast paths, where the ratio alone would chase
 // jitter: 3ms is 50% better than 6ms and completely meaningless.
 func TestRescoreRequiresAbsoluteGainNotJustRatio(t *testing.T) {
-	inc := relayedIncumbent("target", "incumbent", 6*time.Millisecond, relayRescoreDwell+time.Minute)
+	inc := relayedIncumbent("target", "incumbent", 3*time.Millisecond, 2*time.Millisecond, 6*time.Millisecond, relayRescoreDwell+time.Minute)
 	jitter := candidateFor("jitter", "target", 2*time.Millisecond, time.Millisecond)
 
 	if moved := rescoreFixture(t, inc, jitter); len(moved) != 0 {
@@ -338,7 +359,7 @@ func TestRescoreRequiresAbsoluteGainNotJustRatio(t *testing.T) {
 // A freshly established path has one RTT sample or none. Moving it on that
 // basis reintroduces the arbitrary-pick problem with extra steps.
 func TestRescoreRespectsDwell(t *testing.T) {
-	inc := relayedIncumbent("target", "slow-relay", 363*time.Millisecond, relayRescoreDwell/2)
+	inc := relayedIncumbent("target", "slow-relay", 180*time.Millisecond, 150*time.Millisecond, 363*time.Millisecond, relayRescoreDwell/2)
 	good := candidateFor("fast-relay", "target", 50*time.Millisecond, 10*time.Millisecond)
 
 	if moved := rescoreFixture(t, inc, good); len(moved) != 0 {
@@ -349,7 +370,7 @@ func TestRescoreRespectsDwell(t *testing.T) {
 // Trading a measured path for one whose far leg is a guess is not an
 // improvement; it is a coin flip with extra latency.
 func TestRescoreIgnoresCandidateWithUnknownFarLeg(t *testing.T) {
-	inc := relayedIncumbent("target", "slow-relay", 363*time.Millisecond, relayRescoreDwell+time.Minute)
+	inc := relayedIncumbent("target", "slow-relay", 180*time.Millisecond, 150*time.Millisecond, 363*time.Millisecond, relayRescoreDwell+time.Minute)
 	unknown := candidateFor("unadvertised", "target", 20*time.Millisecond, 0) // near leg only
 
 	if moved := rescoreFixture(t, inc, unknown); len(moved) != 0 {
@@ -383,7 +404,7 @@ func TestRescoreSkipsIncumbentWithNoMeasurement(t *testing.T) {
 
 // Re-picking the relay already in use would be a pointless handshake.
 func TestRescoreDoesNotMoveToTheIncumbentRelay(t *testing.T) {
-	inc := relayedIncumbent("target", "same-relay", 363*time.Millisecond, relayRescoreDwell+time.Minute)
+	inc := relayedIncumbent("target", "same-relay", 180*time.Millisecond, 150*time.Millisecond, 363*time.Millisecond, relayRescoreDwell+time.Minute)
 	same := candidateFor("same-relay", "target", 5*time.Millisecond, 5*time.Millisecond)
 
 	if moved := rescoreFixture(t, inc, same); len(moved) != 0 {
@@ -394,7 +415,7 @@ func TestRescoreDoesNotMoveToTheIncumbentRelay(t *testing.T) {
 // Two candidates either side of the margin could otherwise hand a path back and
 // forth every dwell period.
 func TestRescoreThrottlesRepeatMoves(t *testing.T) {
-	inc := relayedIncumbent("target", "slow-relay", 363*time.Millisecond, relayRescoreDwell+time.Minute)
+	inc := relayedIncumbent("target", "slow-relay", 180*time.Millisecond, 150*time.Millisecond, 363*time.Millisecond, relayRescoreDwell+time.Minute)
 	good := candidateFor("fast-relay", "target", 50*time.Millisecond, 10*time.Millisecond)
 
 	e, ns := rescoreState(inc, good)
@@ -413,7 +434,7 @@ func TestRescoreThrottlesRepeatMoves(t *testing.T) {
 
 // A handshake already in flight for this target means a switch is redundant.
 func TestRescoreSkipsTargetWithHandshakeInFlight(t *testing.T) {
-	inc := relayedIncumbent("target", "slow-relay", 363*time.Millisecond, relayRescoreDwell+time.Minute)
+	inc := relayedIncumbent("target", "slow-relay", 180*time.Millisecond, 150*time.Millisecond, 363*time.Millisecond, relayRescoreDwell+time.Minute)
 	good := candidateFor("fast-relay", "target", 50*time.Millisecond, 10*time.Millisecond)
 
 	e, ns := rescoreState(inc, good)
@@ -440,5 +461,144 @@ func TestRescoreHysteresisBoundsAreSane(t *testing.T) {
 	}
 	if relayRescoreMinGain <= 0 {
 		t.Error("relayRescoreMinGain must be positive, or the ratio alone governs fast paths")
+	}
+}
+
+// ---- v798: the invariants v797 lacked ----
+
+// A relayed session must advertise no RTT. Its figure describes two hops, a
+// receiver cannot tell that from one, and the hidden hop may be the receiver
+// itself — which is how v797 built chains that nothing could see.
+func TestRelayedSessionAdvertisesNoRTT(t *testing.T) {
+	direct := &peerSession{nodeID: "d"}
+	direct.rttNanos.Store(int64(40 * time.Millisecond))
+	if got := rttMillisOf(direct); got != 40 {
+		t.Errorf("direct session: got %d, want 40", got)
+	}
+	viaRelay := &peerSession{nodeID: "r"}
+	viaRelay.rttNanos.Store(int64(40 * time.Millisecond))
+	viaRelay.relay = &peerSession{nodeID: "somebody"}
+	if got := rttMillisOf(viaRelay); got != 0 {
+		t.Errorf("relayed session: got %d, want 0 — a two-hop RTT must not be advertised as a one-hop leg", got)
+	}
+}
+
+// buildPeerList must apply that rule too, not just the helper: the block is
+// what actually reaches the wire.
+func TestGossipOmitsRelayedRTT(t *testing.T) {
+	relayed := &peerSession{nodeID: "r", hostname: "r"}
+	relayed.rttNanos.Store(int64(90 * time.Millisecond))
+	relayed.relay = &peerSession{nodeID: "via"}
+	entries := []peerEntry{{nodeID: relayed.nodeID, rttMillis: rttMillisOf(relayed)}}
+	if peerListHasRTT(entries) {
+		t.Fatal("a peer list containing only relayed sessions should carry no RTT block")
+	}
+}
+
+// A peer we reach through a relay is not a relay candidate. This is the rule
+// that bounds every relayed path to two direct hops, and it is a hard exclusion
+// in v798 rather than v797's preference — a preference still built chains
+// whenever nothing direct qualified.
+func TestBestRelayRefusesRelayedCandidates(t *testing.T) {
+	chained := candidateFor("chained", "t", 5*time.Millisecond, time.Millisecond)
+	chained.relay = &peerSession{nodeID: "somebody-else"}
+	if best, _ := bestRelay([]*peerSession{chained}, "t"); best != nil {
+		t.Fatalf("picked %q, which we reach via a relay: that is a chain", best.nodeID)
+	}
+	// ...and a target reachable only that way is now unreachable rather than
+	// reachable badly. Deliberate, and the reason it is asserted here.
+	direct := candidateFor("direct", "t", 200*time.Millisecond, 200*time.Millisecond)
+	best, _ := bestRelay([]*peerSession{chained, direct}, "t")
+	if best == nil || best.nodeID != "direct" {
+		t.Fatalf("best = %v, want the slow direct candidate over the fast chained one", best)
+	}
+}
+
+// The core v797 regression: the incumbent must be scored by the same estimator
+// as the challenger. With both scored alike, a challenger that is merely
+// *slightly* better no longer displaces anything — under v797's mismatch the
+// same setup moved the path, because the incumbent's measurement always
+// exceeded its own estimate by more than the margin.
+func TestRescoreComparesEstimateAgainstEstimate(t *testing.T) {
+	// Incumbent estimates 100ms (60+40) but measures 300ms, the sort of gap a
+	// relay's store-and-forward and queueing actually produce.
+	inc := relayedIncumbent("target", "incumbent", 60*time.Millisecond, 40*time.Millisecond,
+		300*time.Millisecond, relayRescoreDwell+time.Minute)
+	// Challenger estimates 90ms: better than the incumbent's estimate, but not
+	// by the margin. Against the *measured* 300ms it would win easily, which is
+	// precisely the comparison being removed.
+	challenger := candidateFor("challenger", "target", 50*time.Millisecond, 40*time.Millisecond)
+
+	if moved := rescoreFixture(t, inc, challenger); len(moved) != 0 {
+		t.Fatalf("moved = %v, want none: 90ms vs the incumbent's 100ms estimate is inside the margin. "+
+			"Comparing 90ms against the measured 300ms is the v797 bug", moved)
+	}
+}
+
+// The measured figure still has a job: vetoing a move the estimate would wave
+// through. If the path already measures better than the challenger merely
+// estimates, there is nothing to win.
+func TestRescoreVetoesWhenMeasuredBeatsChallengerEstimate(t *testing.T) {
+	// Incumbent estimates 400ms but actually measures a fast 20ms — a stale or
+	// pessimistic far-leg advertisement from its relay.
+	inc := relayedIncumbent("target", "incumbent", 200*time.Millisecond, 200*time.Millisecond,
+		20*time.Millisecond, relayRescoreDwell+time.Minute)
+	challenger := candidateFor("challenger", "target", 30*time.Millisecond, 30*time.Millisecond) // 60ms est
+
+	if moved := rescoreFixture(t, inc, challenger); len(moved) != 0 {
+		t.Fatalf("moved = %v, want none: the path measures 20ms and the challenger only estimates 60ms", moved)
+	}
+}
+
+// An incumbent whose relay advertises no far leg has no comparable figure. It
+// must be left alone rather than fall back to the measurement, which would
+// reintroduce the mismatch for exactly the paths most likely to be broken.
+func TestRescoreSkipsIncumbentWithNoComparableEstimate(t *testing.T) {
+	inc := relayedIncumbent("target", "incumbent", 100*time.Millisecond, 0, // far leg unadvertised
+		900*time.Millisecond, relayRescoreDwell+time.Minute)
+	challenger := candidateFor("challenger", "target", 10*time.Millisecond, 10*time.Millisecond)
+
+	if moved := rescoreFixture(t, inc, challenger); len(moved) != 0 {
+		t.Fatalf("moved = %v, want none: the incumbent has no estimate to compare against", moved)
+	}
+}
+
+// Backoff doubles per move and caps, so a target the cost model cannot settle
+// on stops being churned. v797's flat interval meant oscillation continued for
+// as long as the process ran.
+func TestRescoreBackoffGrowsAndCaps(t *testing.T) {
+	if got := relayRescoreBackoff(0); got != relayRescoreInterval {
+		t.Errorf("first move: got %v, want the base %v", got, relayRescoreInterval)
+	}
+	if got := relayRescoreBackoff(1); got != 2*relayRescoreInterval {
+		t.Errorf("second move: got %v, want %v", got, 2*relayRescoreInterval)
+	}
+	if a, b := relayRescoreBackoff(3), relayRescoreBackoff(2); a <= b {
+		t.Errorf("backoff must keep growing: n=3 gave %v, n=2 gave %v", a, b)
+	}
+	for _, n := range []int{20, 100, 1000} {
+		if got := relayRescoreBackoff(n); got != relayRescoreBackoffMax {
+			t.Errorf("n=%d: got %v, want the cap %v", n, got, relayRescoreBackoffMax)
+		}
+	}
+}
+
+// And the backoff must actually gate a repeat move, not merely compute a number.
+func TestRescoreBackoffGatesRepeatMoves(t *testing.T) {
+	inc := relayedIncumbent("target", "slow-relay", 180*time.Millisecond, 150*time.Millisecond,
+		363*time.Millisecond, relayRescoreDwell+time.Minute)
+	good := candidateFor("fast-relay", "target", 50*time.Millisecond, 10*time.Millisecond)
+
+	e, ns := rescoreState(inc, good)
+	ns.relayRescored["target"] = time.Now()
+	ns.relayRescoreCount["target"] = 3 // already moved three times
+
+	// Past the base interval, but nowhere near the backed-off one.
+	at := time.Now().Add(relayRescoreInterval + time.Minute)
+	if got := e.relaySwitches(ns, at); len(got) != 0 {
+		t.Fatalf("got %d switches, want 0: backoff for 3 moves is %v", len(got), relayRescoreBackoff(3))
+	}
+	if got := e.relaySwitches(ns, time.Now().Add(relayRescoreBackoff(3)+time.Minute)); len(got) != 1 {
+		t.Fatalf("got %d switches once the backoff elapsed, want 1", len(got))
 	}
 }
