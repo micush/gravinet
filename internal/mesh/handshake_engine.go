@@ -508,7 +508,12 @@ func (e *Engine) onHSResp(payload []byte, from netip.AddrPort, via *peerSession)
 		ns.mu.Lock()
 		delete(ns.pending, p.idxI)
 		ns.mu.Unlock()
-		e.log.Debugf("mesh: dropping handshake response from %q on net %x: partial mesh — neither this node nor %q is a seed, so a direct link between them isn't allowed", pl.NodeID, hdr.Network, pl.NodeID)
+		// Record it, or initLoop re-dials this address on its next 1s tick and
+		// every tick after. Deleting the pending above is what frees the only
+		// throttle this path has (see seedRefusedByPolicy), so the record is
+		// what replaces it.
+		e.noteSeedPolicyRefused(ns, pl.NodeID, from)
+		e.log.Debugf("mesh: dropping handshake response from %q on net %x: partial mesh — neither this node nor %q is a seed, so a direct link between them isn't allowed; suppressing dials to it for %v", pl.NodeID, hdr.Network, pl.NodeID, policyRefusedTTL)
 		return
 	}
 	if pl.NodeID == e.nodeID {
@@ -744,6 +749,19 @@ func (e *Engine) initLoop(ns *netState) {
 // TestUpgradeAttemptAlsoTriesFallback). backoff is initLoop's already-taken
 // snapshot of ns.seedBackoff for this tick.
 func (e *Engine) initSeedTick(ns *netState, seed netip.AddrPort, backoff map[netip.AddrPort]time.Time, now time.Time) {
+	if e.seedRefusedByPolicy(ns, seed, now) {
+		// A dial that partial-mesh policy will refuse is not a retry that might
+		// eventually land; onHSInit/onHSResp refuse a peer-to-peer link every
+		// time. Without this the loop is unbounded: the refusal happens on
+		// *receipt* of the response, which deletes the pending handshake, so
+		// planHandshake never exhausts its key cycle and never arms
+		// seedRetryBackoff — the one throttle on this path only advances when a
+		// dial goes unanswered. initLoop ticks at 1s, so one field log carried
+		// ~150 refusals a minute across eight peers, each a full authenticated
+		// handshake discarded after two round trips, surviving restarts because
+		// the endpoints come back from PeerCache. See seedRefusedByPolicy.
+		return
+	}
 	if !e.canSourceFamily(seed.Addr()) {
 		// No routable address in this family, so every send and every fallback
 		// dial to it is a guaranteed ENETUNREACH. Don't spend the tick learning

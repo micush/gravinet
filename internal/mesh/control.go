@@ -310,6 +310,15 @@ func (e *Engine) learnPeers(ps *peerSession, entries []peerEntry) {
 			e.log.Warnf("mesh: overlay address conflict with %q on net %x; re-assigning", en.nodeID, ns.spec.ID)
 			e.maybeAssignAddress(ns)
 		}
+		if en.selfSeed {
+			// This node is now advertised as a seed, so a link to it is
+			// permitted: drop any partial-mesh refusal recorded against it and
+			// resume dialing on the next tick rather than waiting out
+			// policyRefusedTTL.
+			ns.mu.Lock()
+			ns.clearSeedPolicyRefused(en.nodeID)
+			ns.mu.Unlock()
+		}
 		if !directlyConnected && en.endpoint.IsValid() && (!ns.spec.PartialMesh || en.selfSeed) {
 			e.AddSeedFor(ns.spec.ID, en.endpoint, en.nodeID) // initLoop dials it next tick
 			// Extra UDP ports (config extra_listen_ports on the peer's end)

@@ -875,6 +875,13 @@ type netState struct {
 	// relayAttemptAllowed. Keyed by target because the thing being rate-limited
 	// is how hard we chase one unreachable node, not how many relays we try.
 	relayAttempts map[string]*relayAttempt
+	// policyRefusedNode/policyRefusedEP record links partial-mesh policy has
+	// refused, so initLoop stops re-dialing them every second — see
+	// seedRefusedByPolicy. Keyed both ways because the endpoint is what
+	// initLoop iterates while the node id is what survives a roam and what
+	// gossip can clear.
+	policyRefusedNode map[string]time.Time
+	policyRefusedEP   map[netip.AddrPort]time.Time
 
 	lastGossip      time.Time
 	lastGossipSig   string    // content signature of the last full peer-list broadcast (see peerListSig)
@@ -1636,6 +1643,8 @@ func (e *Engine) newNetState(spec NetSpec) *netState {
 		relayRescored:          make(map[string]time.Time),
 		relayRescoreCount:      make(map[string]int),
 		relayAttempts:          make(map[string]*relayAttempt),
+		policyRefusedNode:      make(map[string]time.Time),
+		policyRefusedEP:        make(map[netip.AddrPort]time.Time),
 		self4:                  spec.Self4,
 		self6:                  spec.Self6,
 		subnet4:                spec.Subnet4,

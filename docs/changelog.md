@@ -2,6 +2,53 @@
 
 ---
 
+## v800 — 2026-08-04
+
+**The same defect v799 fixed on the relay path was also on the direct-dial path, where it fires five times more often. A partial-mesh spoke re-dialled every other spoke it had an endpoint for, once per second, forever — roughly 150 refused handshakes a minute across eight peers, surviving restarts.**
+
+v799 fixed the 5s relay loop and left this 1s loop running beside it, having noted the possibility without checking. The check took three steps and is worth recording, because the same shape will recur:
+
+1. **Where is the throttle armed?** `seedBackoff` is written in exactly one place — `planHandshake`, on the branch where a pending handshake has exhausted every key after repeated `handshakeRetry` timeouts. The unanswered path, and only that.
+2. **Can a rejection reach that branch?** No. `onHSResp` deletes the pending the instant the partial-mesh check fires, so the key cycle never exhausts and the cooldown is never armed. Nothing else gates the redial.
+3. **Does the field data agree?** `initLoop` ticks at 1s; the rejection timestamps in the bundle are one per second, occasionally two. Predicted cadence, observed cadence, match — across two capture windows hours apart, so not transient.
+
+Each refused dial is a full authenticated handshake: two round trips and key derivation on both sides, then discarded.
+
+### Why it survived restarts
+
+`NetSpec.Seeds` is built in `buildOneNetSpec` as `Seeds.Addrs()` **plus the entire PeerCache**, resolved and handed to the engine with no partial-mesh filter and no node attribution. So every spoke this node ever cached came back as a dial target on every start. `learnPeers` has gated gossip-driven dials since v742 and `tryRelays` since v799, but neither covers an address that was already in the boot list before any gossip arrived.
+
+### Fix
+
+`initSeedTick` now returns early for a seed whose link partial-mesh policy will refuse, on either of two grounds, because the information arrives at different times:
+
+- **Proactive.** The address is attributed to a node we know about and that node is not a seed. Catches endpoints armed by gossip or by a post-teardown redial before a single packet is sent.
+- **Recorded refusal.** `onHSResp` calls `noteSeedPolicyRefused` when it rejects, keyed by both node id and answering endpoint. This is the only thing that can cover a cold-start PeerCache entry, whose owner is unknown until something answers — cost is one handshake per node per TTL rather than one per second forever.
+
+Both keys are needed: the endpoint is what `initLoop` iterates and so what can gate a dial, while the node id survives a roam to a new address and is what gossip can clear.
+
+`policyRefusedTTL` is 30 minutes. The refusal reflects the far node's own `SelfSeed` config, which is stable, so suppression is deliberately long — but not permanent, or a peer that later becomes a seed would be unreachable until this node restarted. Gossip is the fast path: `learnPeers` calls `clearSeedPolicyRefused` the moment a node is advertised as a seed, which also clears any `seedBackoff` on its addresses so the dial happens on the next tick instead of sitting out a cooldown it earned while forbidden.
+
+### Tests
+
+`internal/mesh/policyrefuse_test.go`: an unattributed endpoint is dialled exactly once (or its owner is never learned); a dial 1s later is suppressed, since that is the observed storm cadence; the suppression holds for the TTL and then expires; it follows a node to a roamed address; a known non-seed peer is never dialled at all; the gate is inert for seeds and for full mesh; seed gossip clears both the refusal and the cooldown. `TestForbiddenPeerIsNotDialledEveryTick` asserts the rate directly — exactly 1 dial where the unbounded loop managed 600.
+
+### Verified
+
+`go build ./...`, `go vet ./...`, `gofmt -l` clean (`CGO_ENABLED=0`; `auth_pam.go` not compiled). Full `internal/mesh` suite across all nine chunks, `TestDeadSeedRetryDoesNotDegradeOtherPeers` individually at 181.046s. `internal/transport`, `internal/config`, `internal/webadmin`, `cmd/gravinet` pass. `initSeedTick` is on every connection path, so the whole suite is load-bearing for this change rather than just the relay chunks.
+
+Chunk R clean again at 190.823s — seven consecutive passes since v798's single unexplained failure, whose output remains unrecoverable.
+
+### What is still not solved
+
+**PeerCache is still folded into the boot seed list unfiltered.** The fix suppresses the dials rather than stopping the forbidden endpoints from being loaded in the first place. That is deliberate for now — the boot path has no node attribution to filter on, and inventing one there is a larger change than this — but it means a partial-mesh spoke still spends exactly one refused handshake per cached spoke on every start, and `peer_cache` on such a node still accumulates addresses it may never legitimately dial. Filtering at persist time (`mergePeerCache`) is the better fix and is not done here.
+
+The inbound direction is untouched: a spoke running an older build will still dial *this* node once a second and be refused by `onHSInit`. Nothing here can stop that, and `onHSInit` deliberately does not record a refusal, since suppressing our own dials to a node that is dialling us would be the wrong response.
+
+Relay selection still sees only latency, not loss or jitter.
+
+---
+
 ## v799 — 2026-08-04
 
 **A partial-mesh spoke attempted a relayed handshake to every other spoke it heard about, every 5 seconds, forever. One field log carried 7825 partial-mesh rejections. The attempts could never have succeeded: the policy refuses a peer-to-peer link by design, and `tryRelays` never learned to stop proposing one.**

@@ -796,3 +796,97 @@ type relayAttempt struct {
 	n    int       // attempts made in the current run
 	last time.Time // when the last attempt was made
 }
+
+// ---- partial-mesh dial suppression ----
+
+// policyRefusedTTL bounds how long a recorded partial-mesh refusal suppresses
+// dialing. The refusal reflects the far node's own SelfSeed config, which is a
+// stable property, so this is deliberately long — but not permanent: an
+// operator turning SelfSeed on over there should be picked up without needing a
+// restart here. Gossip is the fast path for that (learnPeers clears the record
+// as soon as the node is advertised as a seed); this is only the backstop for a
+// node whose seed status is not being gossiped to us at all.
+const policyRefusedTTL = 30 * time.Minute
+
+// noteSeedPolicyRefused records that a handshake with node was refused because
+// partial-mesh policy forbids the link, keyed by both the node and the endpoint
+// it answered from.
+//
+// Both keys are needed. The endpoint is what initLoop iterates, so it is what
+// can actually gate a dial — but the endpoint that answers is not always the one
+// dialed, and a roamed peer arrives at a new address. The node id is stable and
+// covers that; it also lets learnPeers clear the record when gossip says the
+// node has become a seed.
+func (e *Engine) noteSeedPolicyRefused(ns *netState, nodeID string, ep netip.AddrPort) {
+	now := time.Now()
+	ns.mu.Lock()
+	defer ns.mu.Unlock()
+	if ns.policyRefusedNode == nil {
+		ns.policyRefusedNode = make(map[string]time.Time)
+	}
+	if nodeID != "" {
+		ns.policyRefusedNode[nodeID] = now
+	}
+	if ep.IsValid() {
+		if ns.policyRefusedEP == nil {
+			ns.policyRefusedEP = make(map[netip.AddrPort]time.Time)
+		}
+		ns.policyRefusedEP[ep] = now
+		// Attribute the address so the proactive check below can gate it even
+		// after the TTL lapses, without waiting for another refusal.
+		if nodeID != "" && ns.seedOwner[ep] == "" {
+			ns.seedOwner[ep] = nodeID
+		}
+	}
+}
+
+// clearSeedPolicyRefused forgets any refusal recorded against a node, called
+// when gossip reports it as a seed — at which point the link is permitted and
+// dialing should resume immediately rather than wait out policyRefusedTTL.
+func (ns *netState) clearSeedPolicyRefused(nodeID string) {
+	if nodeID == "" {
+		return
+	}
+	if _, ok := ns.policyRefusedNode[nodeID]; !ok {
+		return
+	}
+	delete(ns.policyRefusedNode, nodeID)
+	for ep, owner := range ns.seedOwner {
+		if owner == nodeID {
+			delete(ns.policyRefusedEP, ep)
+			delete(ns.seedBackoff, ep) // dial on the next tick, don't sit out a cooldown
+		}
+	}
+}
+
+// seedRefusedByPolicy reports whether dialing this seed is pointless because
+// partial-mesh policy forbids the resulting link.
+//
+// Two independent grounds, because the information arrives at different times.
+// The proactive one — this node is not a seed, the address belongs to a node we
+// know about, and that node is not a seed either — catches endpoints armed by
+// gossip or by a post-teardown redial, before any packet is sent. It cannot
+// catch a PeerCache entry at cold start, whose owner is unknown until something
+// answers; the recorded-refusal one covers exactly that case, costing a single
+// handshake per node per TTL instead of one per second forever.
+func (e *Engine) seedRefusedByPolicy(ns *netState, seed netip.AddrPort, now time.Time) bool {
+	ns.mu.RLock()
+	defer ns.mu.RUnlock()
+	if !ns.spec.PartialMesh || ns.spec.SelfSeed {
+		return false // full mesh, or we are a seed: every link is permitted
+	}
+	if at, ok := ns.policyRefusedEP[seed]; ok && now.Sub(at) < policyRefusedTTL {
+		return true
+	}
+	owner := ns.seedOwner[seed]
+	if owner == "" {
+		return false // unattributed: let it answer so we can learn who it is
+	}
+	if at, ok := ns.policyRefusedNode[owner]; ok && now.Sub(at) < policyRefusedTTL {
+		return true
+	}
+	if ni, ok := ns.nodes[owner]; ok && !ni.selfSeed {
+		return true // known peer, known not to be a seed
+	}
+	return false
+}
