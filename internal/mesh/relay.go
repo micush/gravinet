@@ -167,6 +167,66 @@ func (ps *peerSession) reportedRTTFor(id string) (time.Duration, bool) {
 
 const relayPendingTTL = 12 * time.Second
 
+// Relay handshake attempts back off per target. relayPendingTTL alone is not a
+// throttle: it only bounds how long an *unanswered* attempt occupies the
+// pending slot, so it governs the silent-target case and nothing else. Any
+// target that answers and is then rejected — partial-mesh policy, a ban, a key
+// mismatch, a hairpin claiming our own node id — has its pending deleted on
+// receipt, freeing the slot immediately and letting the next maintenance tick
+// attempt again, forever, at maintInterval. The partial-mesh gate in tryRelays
+// removes the one cause seen in the field; this bounds the whole class,
+// including causes not yet found.
+//
+// Deliberately not reset on success: install() removes the target from the
+// wants list entirely, and a later teardown re-entering the loop should not get
+// a fresh unthrottled burst. relayAttemptReset drops the entry only when the
+// target has been quiet long enough that a genuinely new situation is likely.
+var (
+	relayAttemptBase = 10 * time.Second
+	relayAttemptMax  = 10 * time.Minute
+	// relayAttemptReset is how long without an attempt before a target's
+	// counter is forgotten. Longer than relayAttemptMax so a target sitting at
+	// the cap does not silently reset itself between attempts.
+	relayAttemptReset = 30 * time.Minute
+)
+
+// relayAttemptBackoff returns the delay before the next attempt for a target
+// that has already had n attempts: the base doubled once per attempt *after the
+// first*, capped. So n=1 is one base interval, n=2 is two, n=3 is four.
+func relayAttemptBackoff(n int) time.Duration {
+	d := relayAttemptBase
+	for i := 1; i < n && d < relayAttemptMax; i++ {
+		d *= 2
+	}
+	if d > relayAttemptMax {
+		return relayAttemptMax
+	}
+	return d
+}
+
+// relayAttemptAllowed reports whether a relayed handshake to target may be
+// attempted now, and records the attempt if so. Caller must hold ns.mu.
+func (ns *netState) relayAttemptAllowed(target string, now time.Time) bool {
+	if ns.relayAttempts == nil {
+		ns.relayAttempts = make(map[string]*relayAttempt)
+	}
+	a := ns.relayAttempts[target]
+	if a == nil {
+		ns.relayAttempts[target] = &relayAttempt{n: 1, last: now}
+		return true
+	}
+	if now.Sub(a.last) > relayAttemptReset {
+		a.n, a.last = 1, now
+		return true
+	}
+	if now.Sub(a.last) < relayAttemptBackoff(a.n) {
+		return false
+	}
+	a.n++
+	a.last = now
+	return true
+}
+
 // tryRelays looks for nodes we know about but cannot reach directly, and
 // starts a relayed handshake through the best-scoring connected peer that
 // reports knowing them (see bestRelay).
@@ -191,6 +251,24 @@ func (e *Engine) tryRelays(ns *netState) {
 			continue
 		}
 		if _, connected := ns.byNode[nid]; connected {
+			continue
+		}
+		// Partial mesh permits only seed-to-seed and seed-to-peer links, and
+		// onHSInit/onHSResp refuse a peer-to-peer one outright — relayed or
+		// not, since a relayed session is still a session between those two
+		// nodes. Attempting one here is therefore not a retry that might
+		// eventually succeed; it is a request guaranteed to be refused, and
+		// refused *after* a round trip, which is what made it a storm rather
+		// than a no-op: the response deletes the pending handshake, so
+		// relayPendingTTL never gets to throttle anything and the next
+		// maintenance tick starts over. One node's log carried 7825 partial-mesh
+		// rejections and a relayed handshake to the same unreachable target
+		// every 5 seconds without pause.
+		//
+		// learnPeers already applies this exact gate to gossip-driven direct
+		// dials (see its !ns.spec.PartialMesh || en.selfSeed condition). This
+		// is the relay path's missing counterpart.
+		if ns.spec.PartialMesh && !ns.spec.SelfSeed && !ni.selfSeed {
 			continue
 		}
 		wants = append(wants, want{nid, ni.endpoint})
@@ -250,6 +328,12 @@ func (e *Engine) tryRelays(ns *netState) {
 			continue
 		}
 		// Best connected peer that reports knowing the target — see bestRelay.
+		ns.mu.Lock()
+		allowed := ns.relayAttemptAllowed(w.nodeID, now)
+		ns.mu.Unlock()
+		if !allowed {
+			continue
+		}
 		relay, refused := bestRelay(peers, w.nodeID)
 		if relay == nil {
 			if refused > 0 {
@@ -704,4 +788,11 @@ func (e *Engine) repointRelayUsers(ns *netState, old, replacement *peerSession) 
 		// silently and with no diagnosis available.
 		e.log.Infof("mesh: relay %q on net %x went away; %d relayed peer(s) need a new path", old.nodeID, ns.spec.ID, moved)
 	}
+}
+
+// relayAttempt tracks how hard we have been chasing one target with relayed
+// handshakes — see relayAttemptAllowed.
+type relayAttempt struct {
+	n    int       // attempts made in the current run
+	last time.Time // when the last attempt was made
 }

@@ -871,6 +871,10 @@ type netState struct {
 	// mind about is one whose cost model is wrong, and the useful response is
 	// to stop moving it rather than to keep paying for the churn.
 	relayRescoreCount map[string]int
+	// relayAttempts throttles relayed handshake attempts per target — see
+	// relayAttemptAllowed. Keyed by target because the thing being rate-limited
+	// is how hard we chase one unreachable node, not how many relays we try.
+	relayAttempts map[string]*relayAttempt
 
 	lastGossip      time.Time
 	lastGossipSig   string    // content signature of the last full peer-list broadcast (see peerListSig)
@@ -1631,6 +1635,7 @@ func (e *Engine) newNetState(spec NetSpec) *netState {
 		relayDeclinedLog:       make(map[string]time.Time),
 		relayRescored:          make(map[string]time.Time),
 		relayRescoreCount:      make(map[string]int),
+		relayAttempts:          make(map[string]*relayAttempt),
 		self4:                  spec.Self4,
 		self6:                  spec.Self6,
 		subnet4:                spec.Subnet4,

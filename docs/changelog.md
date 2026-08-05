@@ -2,6 +2,54 @@
 
 ---
 
+## v799 — 2026-08-04
+
+**A partial-mesh spoke attempted a relayed handshake to every other spoke it heard about, every 5 seconds, forever. One field log carried 7825 partial-mesh rejections. The attempts could never have succeeded: the policy refuses a peer-to-peer link by design, and `tryRelays` never learned to stop proposing one.**
+
+This was described in v798's closing notes as "the handshake storm, not introduced here, wants its own backoff." Both halves of that were wrong. It wanted a policy gate more than a backoff, and "not introduced here" is not a meaningful distinction in a codebase with one author — the only useful question is which release introduced it, and the answer is v742, where partial mesh landed. That entry states that `learnPeers` was gated "since without it every peer would still attempt (and have refused) a handshake with every other peer it ever heard about" — the exact failure this release fixes, correctly reasoned about for the direct-dial path and never applied to the relay path beside it.
+
+### Why `relayPendingTTL` never throttled it
+
+`relayPendingTTL` (12s) looks like a retry throttle and is not one. It bounds how long an *unanswered* handshake occupies its pending slot, so it governs the silent-target case and nothing else. A target that answers and is then rejected has its pending deleted on receipt — `onHSResp` does exactly that for partial-mesh refusals, bans, hairpin self-dials and key mismatches — which frees the slot immediately, so the next maintenance tick starts over. That is why the field cadence was 5s (`maintInterval`) and not 12s, and the 5s regularity in the log is what gave it away.
+
+### Fixes
+
+**`tryRelays` respects partial-mesh policy.** Partial mesh permits only seed-to-seed and seed-to-peer links; `onHSInit`/`onHSResp` refuse a peer-to-peer one outright, relayed or not, since a relayed session is still a session between those two nodes. `learnPeers` has always applied this gate to gossip-driven direct dials (`!ns.spec.PartialMesh || en.selfSeed`); `tryRelays` now applies the identical one. A spoke still reaches seeds through a relay, and a seed is unrestricted.
+
+**Relayed handshake attempts back off per target.** `relayAttemptAllowed`, base 10s doubling to a 10-minute cap, with a 30-minute quiet period resetting the counter. The policy gate removes the one cause found in the field; this bounds the class, including causes not yet found — every rejection listed above frees its pending slot the same way. Not reset on success, because `install()` removes the target from the wants list anyway and a later teardown re-entering the loop should not earn a fresh unthrottled burst.
+
+An unreachable target now gets attempted a handful of times across ten minutes rather than 120, asserted directly in `TestUnreachableTargetIsNotAttemptedEveryTick`.
+
+### Correcting v798's diagnosis
+
+Two claims in v798's entry were wrong and are corrected here.
+
+`mcfed`'s peer table showing 5 peers where hub nodes showed 13 was cited as evidence of the mesh collapsing. It is not: `mcfed` is a spoke, and 5 is the count a spoke on a partial-mesh network is *supposed* to have. The figure was inferred from what the hubs saw rather than checked against `mcfed`'s own topology.
+
+The storm was also attributed to the v797 churn "killing sessions." The churn made it louder by producing more unreachable targets, but the loop needed no help — a partial-mesh spoke on any release since v742 does this continuously to every spoke it knows about.
+
+Neither correction changes v798's own fixes, which stand.
+
+### Tests
+
+`internal/mesh/relaystorm_test.go`: a spoke does not propose a spoke-to-spoke link but still reaches seeds; a seed and a full-mesh node are both unrestricted; the backoff grows, caps, and its reset window exceeds its cap (or a target sitting at the cap would silently reset itself between attempts and never back off at all); `relayAttemptAllowed` refuses the 5s cadence specifically, since that is the observed one, then allows an attempt once the interval has passed and forgets the counter after a long quiet period.
+
+An off-by-one in `relayAttemptBackoff` — indexed by attempts-made, so `n=1` must be one base interval, not two — was caught by these tests rather than by reading, which is the argument for asserting the arithmetic and not just the shape.
+
+### Verified
+
+`go build ./...`, `go vet ./...`, `gofmt -l` clean (`CGO_ENABLED=0` throughout; `auth_pam.go` not compiled). Full `internal/mesh` suite passes across all nine chunks, `TestDeadSeedRetryDoesNotDegradeOtherPeers` run individually at 181.035s. `internal/transport`, `internal/config`, `internal/webadmin`, `cmd/gravinet` pass.
+
+**On v798's unexplained flake:** chunk R passed again here on the first attempt, at 190.758s, this time with the full log retained. That makes six consecutive clean chunk-R runs since the single failure, whose output remains unrecoverable. Still not explained, still recorded.
+
+### What is still not solved
+
+The direct-dial retry path (`initLoop`, `seedBackoff`) was not examined here. It has its own backoff, but whether that backoff has the same defect — a policy rejection freeing the throttle's state on receipt — is unknown and worth checking; the same shape of bug would look identical from the outside.
+
+Relay selection still sees only latency, not loss or jitter, and the far leg can be up to `gossipFullRefresh` (180s) stale. Broadcast/multicast flooding on a partial mesh remains as documented on `config.Network.Mesh`.
+
+---
+
 ## v798 — 2026-08-04
 
 **v797 took the mesh down. It compared an estimate against a measurement, called the estimate better, and moved the path — over and over, on exactly the throttle interval, until relay chains formed and RTTs climbed from 140ms to 5.9s. This reverts the behaviour to something defensible and makes the two quantities commensurable.**
