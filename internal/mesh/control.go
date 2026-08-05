@@ -923,6 +923,42 @@ func (e *Engine) ResetNetwork(networkID uint64) error {
 	return nil
 }
 
+// relayedTimeoutFactor multiplies the dead-session timeout for a relayed
+// session.
+//
+// The default timeout is 30s against a 10s keepalive cadence, so a session gets
+// exactly three keepalive opportunities before it is reaped. That is a thin
+// margin, and a relayed session has strictly less of it than a direct one at the
+// same per-link loss: its keepalives cross the relay hop as well as its own, so
+// every hop's loss multiplies. At 25% loss on the relay leg a relayed session
+// dies with probability ~0.25^3 per window — around 1.5%, which over a
+// 75-second observation is a roughly one-in-six chance of a spurious teardown,
+// and matches both the rate TestRelayedSessionSurvivesLossOnTheRelayLeg fails at
+// and the field symptom of relayed sessions holding for minutes and then being
+// reaped while every direct session on the node stayed up.
+//
+// Doubling gives six opportunities instead of three, which takes that per-window
+// probability from ~1.5% to ~0.02%. The cost is that a genuinely dead relayed
+// peer takes 60s rather than 30s to notice — acceptable, since a relayed peer is
+// already on a degraded path and the alternative is tearing down working ones.
+//
+// This is a margin fix, not the root fix. The root fix is to stop spending a
+// whole keepalive interval waiting on a pong that is already lost: retrying a
+// keepalive quickly after a missed pong would add attempts *without* extending
+// detection latency at all, which is strictly better than either number here.
+// That touches the keepalive hot path and is not attempted in this release.
+const relayedTimeoutFactor = 2
+
+// sessionTimeoutFor returns how long this session may stay silent before being
+// reaped — see relayedTimeoutFactor for why a relayed session gets longer.
+func (e *Engine) sessionTimeoutFor(ps *peerSession) time.Duration {
+	d := e.peerTimeoutDuration()
+	if ps.getRelay() != nil {
+		return d * relayedTimeoutFactor
+	}
+	return d
+}
+
 // pruneDead drops sessions that have gone silent past peerTimeout, freeing the
 // endpoint so the seed can be re-dialed.
 func (e *Engine) pruneDead(ns *netState, now time.Time) {
@@ -932,7 +968,7 @@ func (e *Engine) pruneDead(ns *netState, now time.Time) {
 		if ps.net != ns {
 			continue
 		}
-		if now.Sub(ps.lastRxTime()) > e.peerTimeoutDuration() {
+		if now.Sub(ps.lastRxTime()) > e.sessionTimeoutFor(ps) {
 			delete(e.sessions, idx)
 			dead = append(dead, ps)
 		}

@@ -496,6 +496,13 @@ func (e *Engine) onHSResp(payload []byte, from netip.AddrPort, via *peerSession)
 		ns.mu.Lock()
 		delete(ns.pending, p.idxI)
 		ns.mu.Unlock()
+		// Cool the address down. Deleting the pending frees the only throttle
+		// this path has — planHandshake arms seedRetryBackoff when an attempt
+		// cycle *exhausts*, which a refusal-on-receipt never reaches — so
+		// without this a banned or disabled peer whose address is an explicit
+		// seed or host candidate is re-dialled every initLoop tick (1s)
+		// indefinitely, and silently. See coolSeedAfterRefusal.
+		e.coolSeedAfterRefusal(ns, p, from, "peer is banned or disabled")
 		return
 	}
 	// Partial-mesh enforcement, the initiator-side counterpart of onHSInit's
@@ -520,11 +527,18 @@ func (e *Engine) onHSResp(payload []byte, from netip.AddrPort, via *peerSession)
 		// We dialed a seed believing it was a peer, and got a response
 		// claiming our own node id — the same NAT-hairpin loopback as in
 		// onHSInit, just discovered from the initiator side instead of the
-		// responder side. Drop the pending handshake so seed backoff can
-		// retry normally instead of installing a session with ourselves.
+		// responder side. Drop the pending handshake and cool the address down.
+		//
+		// The comment here used to say the pending was dropped "so seed backoff
+		// can retry normally" — but nothing armed seed backoff on this path.
+		// planHandshake arms it only when an attempt cycle exhausts by timeout,
+		// and a response that arrives and is rejected never gets there, so the
+		// address was re-dialled every tick. coolSeedAfterRefusal is what makes
+		// that comment true.
 		ns.mu.Lock()
 		delete(ns.pending, p.idxI)
 		ns.mu.Unlock()
+		e.coolSeedAfterRefusal(ns, p, from, "response claims our own node id (NAT hairpin)")
 		e.log.Debugf("mesh: dropping handshake response on net %x that claims our own node id %q (from %s)", hdr.Network, pl.NodeID, from)
 		return
 	}

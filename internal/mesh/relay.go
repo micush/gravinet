@@ -890,3 +890,50 @@ func (e *Engine) seedRefusedByPolicy(ns *netState, seed netip.AddrPort, now time
 	}
 	return false
 }
+
+// coolSeedAfterRefusal arms the ordinary seed cooldown against the address a
+// rejected handshake response came from.
+//
+// This closes a defect shape that has now appeared three times in this codebase:
+// a throttle whose state only advances when an attempt goes *unanswered*, so
+// anything that fails by responding retries unbounded. relayPendingTTL had it
+// (fixed v799), seedBackoff had it for partial-mesh refusals (fixed v800), and
+// it remains for every other refusal-on-receipt in onHSResp — a ban, a disabled
+// peer, a NAT hairpin returning our own node id. planHandshake arms
+// seedRetryBackoff only on the branch where an attempt cycle exhausts by
+// timeout, which a response that arrives and is rejected never reaches.
+//
+// The lesson, taken from the one path that got this right: candstore's TCP
+// fallback backs off on the *outcome* — did a session form within the grace
+// period — not on any particular cause of failure, so every failure mode is
+// covered including ones nobody enumerated. Arming here on refusal is the same
+// idea applied to the paths that enumerate causes.
+//
+// Deliberately the ordinary seedRetryBackoff rather than the long
+// policyRefusedTTL used for partial-mesh refusals. These conditions are all
+// locally revocable — an operator un-bans a peer, re-enables it, or fixes the
+// hairpinning router — so the cost of retrying soon is one wasted handshake,
+// whereas partial-mesh seed status is a remote config fact that will not change
+// on its own.
+//
+// Keyed on the address actually dialed where that is known: seedBackoff is
+// consulted by initLoop against its own seed list, and a response can arrive
+// from a different source address than the one dialed (hairpins especially),
+// which would otherwise cool an address the loop never visits.
+func (e *Engine) coolSeedAfterRefusal(ns *netState, p *pendingHS, from netip.AddrPort, why string) {
+	until := time.Now().Add(seedRetryBackoff)
+	ns.mu.Lock()
+	cooled := 0
+	if p != nil && p.endpoint.IsValid() {
+		ns.seedBackoff[p.endpoint] = until
+		cooled++
+	}
+	if from.IsValid() && (p == nil || from != p.endpoint) {
+		ns.seedBackoff[from] = until
+		cooled++
+	}
+	ns.mu.Unlock()
+	if cooled > 0 {
+		e.log.Debugf("mesh: handshake refused on net %x (%s); not re-dialling for %v", ns.spec.ID, why, seedRetryBackoff)
+	}
+}

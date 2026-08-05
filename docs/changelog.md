@@ -2,6 +2,67 @@
 
 ---
 
+## v801 — 2026-08-05
+
+**The intermittent chunk-R test failure recorded as "unexplained" in v798, v799 and v800 was not a flaky test. It was a repro test correctly detecting a real defect at its natural rate: a relayed session gets exactly three keepalive attempts before being reaped, and a relayed session's keepalives cross one more lossy hop than a direct session's.**
+
+Three releases described this as an unexplained flake and moved on. It reproduced the first time the full log was kept instead of being piped through `tail`.
+
+### The arithmetic
+
+`defaultPeerTimeout` is 30s against a 10s keepalive cadence, so any session has three attempts before `pruneDead` drops it. A relayed session's keepalives traverse the relay hop as well as its own, so per-hop loss multiplies. At the 25% relay-leg loss `TestRelayedSessionSurvivesLossOnTheRelayLeg` injects, three consecutive misses have probability ~0.25³ ≈ 1.5% per window, and across the test's 75-second observation that is roughly one in six. That matches the observed failure rate exactly, and it matches the field symptom the test was written for: relayed sessions holding for minutes, being reaped, coming back, while every direct session on the same node stayed up indefinitely.
+
+The test asserts `teardowns == 0` and fails when the defect fires. Reading its intermittency as noise was the error — a probabilistic repro test failing sometimes is the test working.
+
+### Fix
+
+`relayedTimeoutFactor = 2`, applied through the new `sessionTimeoutFor`, gives a relayed session six keepalive attempts instead of three, taking the per-window probability from ~1.5% to ~0.02%. The factor multiplies the live-configurable `SetPeerTimeout` value rather than replacing it.
+
+The cost is that a genuinely dead relayed peer takes 60s to notice rather than 30s. Acceptable — a relayed peer is already on a degraded path, and the alternative is tearing down working ones. `TestRelayedTimeoutCostIsBounded` pins that price so it cannot drift upward unnoticed.
+
+**This is a margin fix, not the root fix.** The root fix is to stop spending a whole keepalive interval waiting on a pong that is already lost: retrying quickly after a miss would add attempts *without* extending detection latency at all, which is strictly better than either number here. That touches the keepalive hot path and is not attempted.
+
+**A caveat about the test itself,** since it shapes how a future failure should be read: it compares the relayed session against a direct A→R session carrying *zero* loss, so it cannot actually distinguish "relayed paths have less timer margin" from "this path is simply worse." The real finding is the multiplication of per-hop loss, not a relay-specific weakness in the timer.
+
+### The refusal-cooldown audit
+
+v800 closed the partial-mesh case of a defect shape that had by then appeared twice. This release audits the rest of it. The shape: **a throttle whose state advances only when an attempt goes unanswered, so anything that fails by responding retries unbounded.**
+
+`onHSResp` has three refusal-on-receipt paths, each deleting the pending handshake — which is precisely what prevents `planHandshake` from ever reaching the branch that arms `seedRetryBackoff`. Only the partial-mesh one had a throttle before this release:
+
+- **Banned or disabled peer** — no throttle, and no log line at all. A banned peer whose address is an explicit seed or host candidate was re-dialled every `initLoop` tick (1s), silently, forever.
+- **NAT hairpin returning our own node id** — its comment claimed the pending was dropped "so seed backoff can retry normally." Nothing armed seed backoff on that path. The comment asserted a throttle that did not exist.
+
+Both now call `coolSeedAfterRefusal`, which arms the ordinary `seedRetryBackoff` against both the address dialled and the address that answered — a response can arrive from a different source than the one dialled, hairpins especially, and cooling only the responder leaves the address `initLoop` actually consults uncooled.
+
+Deliberately the short revocable cooldown, not v800's 30-minute `policyRefusedTTL`: a ban, a disabled peer and a hairpinning router are all locally fixable, so retrying soon costs one wasted handshake. Partial-mesh seed status is a remote config fact that will not change on its own.
+
+`seedOwnerNeedsUpgrade` was also checked and is affected by the same root cause — its own comment notes that reading `seedBackoff` back "is what keeps this at that pace instead of sending a fresh handshake every second indefinitely," which was only true for timeouts. It is covered now that the refusal paths arm that cooldown.
+
+**What the audit found working, and why it matters more than what it found broken.** `candstore`'s TCP fallback is the one retry path in this codebase that got throttling right, and the reason is transferable: it backs off on the **outcome** — did a session form within the grace period — rather than on any enumerated cause. Every failure mode is therefore covered, including ones nobody listed. The three broken paths all enumerate causes. Outcome-based throttling is the pattern to reach for.
+
+### Tests
+
+`internal/mesh/relaytimeout_test.go`: a relayed session's timeout is the configured value times the factor; a live `SetPeerTimeout` is still respected; the margin is asserted as a *count of keepalive attempts* rather than a raw duration, since either constant could move; and the detection-latency cost is bounded.
+
+`internal/mesh/refusalcooldown_test.go`: a refusal cools the address dialled; both dialled and responding addresses are cooled; the cooldown is the revocable one and not the policy TTL; and `TestRefusedPeerIsNotDialledEveryTick` asserts the rate directly — a handful of dials across five minutes where the unthrottled loop managed 300.
+
+### Verified
+
+`go build ./...`, `go vet ./...`, `gofmt -l` clean (`CGO_ENABLED=0`; `auth_pam.go` not compiled). Full `internal/mesh` suite across all nine chunks. `internal/transport`, `internal/config`, `internal/webadmin`, `cmd/gravinet` pass.
+
+`TestRelayedSessionSurvivesLossOnTheRelayLeg` run 6 times in isolation with the fix: zero teardowns every run, against a pre-fix rate of roughly one in six. Chunk R run twice, clean both times. **The flake carried in the previous three entries is now explained and closed.**
+
+### What is still not solved
+
+The keepalive retry-on-miss described above is the real fix for relayed-session stability and is not done.
+
+PeerCache is still folded into the boot seed list unfiltered (v800); the dials are suppressed rather than the endpoints filtered, and `mergePeerCache` remains the better place. The inbound direction is still untouched — an older spoke will keep dialling this node once a second and being refused, which no change here can stop.
+
+Relay selection still sees only latency, not loss or jitter, and the far leg can be up to `gossipFullRefresh` (180s) stale. The relay cost estimate still understates what a path measures; v798 made the comparison consistent, not accurate.
+
+---
+
 ## v800 — 2026-08-04
 
 **The same defect v799 fixed on the relay path was also on the direct-dial path, where it fires five times more often. A partial-mesh spoke re-dialled every other spoke it had an endpoint for, once per second, forever — roughly 150 refused handshakes a minute across eight peers, surviving restarts.**
