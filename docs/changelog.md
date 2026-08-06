@@ -2,6 +2,78 @@
 
 ---
 
+## v806 — 2026-08-06
+
+**Partial-mesh mode was documented as a property of the network and implemented as a property of one node. It was never advertised, so a node switched to partial mesh refused handshakes its peers had no way to know would be refused — and the only way to stop the resulting refusals was to configure partial mesh on every node whether you wanted it there or not. The mode is now advertised, and a full-mesh node will respect a partial-mesh peer's topology.**
+
+### The gap
+
+`config.Network.Mesh` sits under a network and its documentation says "exactly two kinds of link are permitted." But `ns.spec.PartialMesh` was only ever read as `ns.spec.PartialMesh && !ns.spec.SelfSeed && !pl.SelfSeed` — a node restricting its own links. `SelfSeed` was advertised in both the handshake and gossip; the mode itself went nowhere. Nothing validated that peers agreed, nothing detected disagreement, nothing warned.
+
+The consequence in the field: one node on partial mesh, thirteen on full. The thirteen dialed it exactly as full mesh instructs, it refused every attempt, and because a refusal at `onHSInit` answers nothing, none of them ever learned. ~2230 refused handshakes an hour, indefinitely, with the refusing node helpless — v800's entry had already noted that the inbound direction cannot be fixed from the refusing side. The operator's only recourse was to set the mode on all fourteen, which is not what a network property should require.
+
+### Fix
+
+`hsPayload.PartialMesh` and a matching gossip block (`peerListPartialBlock = 0x08`, emitted last so an older decoder stops before it). Both use the two-bit known/value shape already established by `flagRelayKnown`/`flagAllowRelay`: `flagPartialKnown = 1 << 6`, `flagPartialMesh = 1 << 7`, bits 6 and 7 having been free in both encodings.
+
+Two bits rather than one, for the same reason as the relay flags: a node predating the field sets neither, and "neither set" must decode as *unknown*, not as full mesh. Unknown keeps the existing behaviour — dial, and possibly be refused — so a rolling upgrade cannot silently stop nodes dialing peers that would have accepted them. Only an explicitly-known partial-mesh non-seed is skipped.
+
+`seedRefusedByPolicy` now evaluates the responder's own predicate from the other side, *before* consulting this node's own mode:
+
+```go
+if !ns.spec.SelfSeed {
+    if ni := ns.nodes[ns.seedOwner[seed]]; ni != nil && ni.partialKnown && ni.partialMesh && !ni.selfSeed {
+        return true
+    }
+}
+```
+
+Note what is absent: any requirement that the dialer be in partial mesh itself. That is the whole point — a full-mesh node can decline a dial it would certainly be refused, so one node can be partial while the rest are not and the rest will quietly stop bothering it.
+
+Carried on `nodeInfo` as well as `peerSession` because the suppression has to work for nodes this node has no session with; not opening one is the objective. `learnPeers` only overwrites the mode from an advertiser that actually knows it, so gossip relayed through an older node cannot clear a mode already learned directly.
+
+### The relay dial path
+
+`tryRelays` needed the same rule and did not have it. `onHSInit` refuses a relayed
+handshake exactly as it refuses a direct one — the config doc is explicit that a
+peer-to-peer link is refused "regardless of how the two nodes came to dial each
+other" — so a relayed dial to a partial-mesh non-seed is as pointless as a direct
+one. Its gate now reads `!our.SelfSeed && !peer.SelfSeed && (our.PartialMesh ||
+peer advertises partial mesh)`, covering the case where only the peer restricts
+its topology. Without this a full-mesh node would stop dialing such a peer
+directly and carry on dialing it through a relay.
+
+### Tests
+
+`internal/mesh/peertopology_test.go` covers what the file below does not reach: a
+peer advertising *full* mesh is still dialed (an explicit false is a statement,
+not an absence), the relay path honours the rule, and this node's own
+`PartialMesh` still forbids a peer-to-peer link independently of what the peer
+advertises — the peer's mode is an additional ground for refusal, never a
+replacement.
+
+`internal/mesh/partialadvertise_test.go`: the mode round-trips through both the handshake payload and the peer list, with "not known" surviving as distinct from "full mesh"; the gossip block is omitted when nobody knows anything, matching every other optional block here; a full-mesh node declines to dial a partial-mesh non-seed; a peer whose mode is unknown is still dialed; a partial-mesh *seed* stays dialable, since seed-to-peer is permitted and suppressing it would cut a spoke off from its hub; and a node that is itself a seed dials partial-mesh peers freely.
+
+The three pre-existing partial-mesh tests still pass unchanged.
+
+### Verified
+
+`go build ./...`, `go vet ./...`, `gofmt -l` clean (`CGO_ENABLED=0`; `auth_pam.go` not compiled). Full `internal/mesh` suite across all nine chunks, `TestDeadSeedRetryDoesNotDegradeOtherPeers` individually at 181.038s. `internal/transport`, `internal/config`, `internal/webadmin`, `cmd/gravinet` pass.
+
+### Rolling upgrade
+
+Suppression needs the *target* on v806 or later, since the target is what advertises. Upgrading the dialers first changes nothing; upgrading the partial-mesh node first is what stops the refusals, once its peers have learned the mode by gossip or handshake. On a mixed fleet the unknown case keeps current behaviour, so nothing degrades in the interim.
+
+### What is still not solved
+
+Nothing detects or warns about a mesh that is part-way through a mode change. v805 made the bundle state each node's mode, and v806 makes disagreement harmless, but a node still cannot say "my peers disagree with me about this network's topology." That is now possible to compute and would be worth surfacing.
+
+The fan-out remains the largest source of session churn and is understood well enough to know the cheap fixes make it worse (v804). The keepalive retry-on-miss from v801 is still the real fix for relayed-session stability. PeerCache is still folded into the boot seed list unfiltered. Relay selection still sees only latency, not loss or jitter.
+
+`gn-ionos1` showed 132 session prunes against everyone else's 23-70, and `gn-manjaro` timed out on one collection. Neither is explained.
+
+---
+
 ## v805 — 2026-08-06
 
 **A troubleshooting bundle did not state its own topology, and that cost two rounds of misdiagnosis. One node had been switched to `mesh: partial` while the other thirteen stayed full mesh; the resulting refusals were indistinguishable, in every field the bundle reported, from a partial mesh with a broken dialer-side gate. This release makes the bundle say what mode it is in.**

@@ -64,7 +64,22 @@ type hsPayload struct {
 	// field; it's derived on decode from whether the advertising bit was
 	// present at all.
 	AllowRelay bool
-	RelayKnown bool
+	// PartialMesh mirrors this node's config.Network.Mesh == "partial"
+	// (NetSpec.PartialMesh): whether it restricts links to seed-to-seed and
+	// seed-to-peer only. PartialKnown distinguishes "advertised false" from "the
+	// peer predates this field" — see flagPartialKnown.
+	//
+	// Advertised so a peer can tell, before dialing, that a handshake would be
+	// refused. The responder's own check is
+	// `PartialMesh && !SelfSeed && !peer.SelfSeed`; a dialer holding this field
+	// can evaluate the same predicate from the other side and not send the
+	// handshake at all. Note what is *not* required: the dialer needs no
+	// partial-mesh setting of its own. A full-mesh node can respect a
+	// partial-mesh peer's topology, which is what makes a mixed fleet behave
+	// sanely instead of generating refusals forever.
+	PartialMesh  bool
+	PartialKnown bool
+	RelayKnown   bool
 	// LocalEndpoints are this node's own underlay interface addresses paired
 	// with its primary UDP port — "host candidates" in ICE terms. Until these
 	// existed, a node's endpoint could ONLY ever be learned by observation:
@@ -155,6 +170,27 @@ const (
 	// masks for the bits it knows simply ignores these.
 	flagRelayKnown = 1 << 4
 	flagAllowRelay = 1 << 5
+	// flagPartialKnown / flagPartialMesh advertise hsPayload.PartialMesh, using
+	// the same two-bit shape as flagRelayKnown/flagAllowRelay above and for a
+	// closely related reason.
+	//
+	// Partial-mesh mode is documented as a property of the *network*
+	// (config.Network.Mesh) but was only ever read locally: a node consulted its
+	// own ns.spec.PartialMesh to decide which links it would accept, and told
+	// nobody. So a node switched to partial mesh refused peer-to-peer handshakes
+	// that its full-mesh peers had no way to know would be refused, and they
+	// re-dialed it indefinitely — a field fleet showed ~2230 refusals an hour
+	// continuing for as long as the log ran, with the refusing node unable to
+	// stop it and the dialers unaware anything was wrong. Advertising the mode
+	// lets the dialer decline to dial (see seedRefusedByPolicy), which is the
+	// only side that can.
+	//
+	// Two bits so "neither set" decodes as unknown rather than as full mesh. A
+	// node predating this field says nothing, and unknown must keep today's
+	// behavior — dial and possibly be refused — rather than have an upgraded
+	// peer guess. Only an explicitly-known partial-mesh non-seed is skipped.
+	flagPartialKnown = 1 << 6
+	flagPartialMesh  = 1 << 7
 )
 
 var errBadPayload = errors.New("mesh: malformed handshake payload")
@@ -173,6 +209,10 @@ func encodeHSPayload(p hsPayload) []byte {
 	// Always advertise that we're new enough to have an opinion (flagRelayKnown),
 	// then the opinion itself. See the flag constants for why both bits exist.
 	flags |= flagRelayKnown
+	flags |= flagPartialKnown // this build always states its mode; see flagPartialKnown
+	if p.PartialMesh {
+		flags |= flagPartialMesh
+	}
 	if p.AllowRelay {
 		flags |= flagAllowRelay
 	}
@@ -381,6 +421,8 @@ func decodeHSPayload(b []byte) (hsPayload, error) {
 	// behavior across a mixed-version mesh. See flagRelayKnown.
 	p.RelayKnown = flags&flagRelayKnown != 0
 	p.AllowRelay = flags&flagAllowRelay != 0
+	p.PartialKnown = flags&flagPartialKnown != 0
+	p.PartialMesh = flags&flagPartialMesh != 0
 	if flags&flagHasV4 != 0 {
 		v4, ok := r.take(4)
 		if !ok {

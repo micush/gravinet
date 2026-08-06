@@ -268,7 +268,12 @@ func (e *Engine) tryRelays(ns *netState) {
 		// learnPeers already applies this exact gate to gossip-driven direct
 		// dials (see its !ns.spec.PartialMesh || en.selfSeed condition). This
 		// is the relay path's missing counterpart.
-		if ns.spec.PartialMesh && !ns.spec.SelfSeed && !ni.selfSeed {
+		if !ns.spec.SelfSeed && !ni.selfSeed &&
+			(ns.spec.PartialMesh || (ni.partialKnown && ni.partialMesh)) {
+			// Peer-to-peer, and either end restricts its topology. Includes the
+			// case where only the *peer* is partial mesh: onHSInit refuses a
+			// relayed handshake exactly as it refuses a direct one, so dialing
+			// is as pointless here as in initSeedTick. See seedRefusedByPolicy.
 			continue
 		}
 		wants = append(wants, want{nid, ni.endpoint})
@@ -872,8 +877,30 @@ func (ns *netState) clearSeedPolicyRefused(nodeID string) {
 func (e *Engine) seedRefusedByPolicy(ns *netState, seed netip.AddrPort, now time.Time) bool {
 	ns.mu.RLock()
 	defer ns.mu.RUnlock()
+
+	// The peer's topology, not ours. A partial-mesh non-seed refuses a link with
+	// any other non-seed, so the predicate it applies is
+	// `peer.PartialMesh && !peer.SelfSeed && !our.SelfSeed` — and every term is
+	// available here once the mode is advertised (see hsPayload.PartialMesh).
+	// Evaluating it before our own mode is checked is the whole point of v806: a
+	// *full-mesh* node can now decline to dial a peer it would certainly be
+	// refused by. Without it the refusing node was helpless — it answers nothing
+	// on refusal, so the dialer learned nothing and retried forever, ~2230 times
+	// an hour in the field, and the operator's only recourse was to set partial
+	// mesh on every node whether they wanted it there or not.
+	//
+	// Requires partialKnown: a peer predating the field says nothing, and
+	// unknown keeps the old behavior of dialing rather than guessing.
+	if !ns.spec.SelfSeed {
+		if owner := ns.seedOwner[seed]; owner != "" {
+			if ni, ok := ns.nodes[owner]; ok && ni.partialKnown && ni.partialMesh && !ni.selfSeed {
+				return true
+			}
+		}
+	}
+
 	if !ns.spec.PartialMesh || ns.spec.SelfSeed {
-		return false // full mesh, or we are a seed: every link is permitted
+		return false // full mesh, or we are a seed: our own mode forbids nothing
 	}
 	if at, ok := ns.policyRefusedEP[seed]; ok && now.Sub(at) < policyRefusedTTL {
 		return true

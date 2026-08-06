@@ -75,6 +75,14 @@ type peerEntry struct {
 	// handshake with a peer (ps.selfSeed) always takes precedence over
 	// anything reported about it here.
 	selfSeed bool
+	// partialMesh / partialKnown carry the entry's advertised topology mode
+	// (see hsPayload.PartialMesh). Gossiped as well as handshaked because the
+	// dial suppression this enables (seedRefusedByPolicy) has to work for nodes
+	// we have no session with — not opening one is the point. partialKnown
+	// distinguishes "advertised full mesh" from "the advertiser predates the
+	// field", and unknown must not be read as full mesh.
+	partialMesh  bool
+	partialKnown bool
 	// rttMillis is the advertising node's own most recently measured round
 	// trip to this entry's node, in milliseconds, 0 meaning unknown. This is
 	// the second half of a relay path: a node scoring candidate C as a relay
@@ -289,6 +297,13 @@ func (e *Engine) learnPeers(ps *peerSession, entries []peerEntry) {
 			// non-seed; see learnPeers' doc comment for why that's an
 			// accepted, self-correcting limitation rather than a bug.
 			ni.selfSeed = en.selfSeed
+			if en.partialKnown {
+				// Only overwrite from an advertiser that actually knows. A relay
+				// of gossip from an older node would otherwise clear a mode we
+				// already learned directly.
+				ni.partialMesh = en.partialMesh
+				ni.partialKnown = true
+			}
 		}
 
 		// Address-conflict backstop: if a peer claims an overlay address we hold
@@ -406,6 +421,7 @@ func (e *Engine) floodSinglePeer(ns *netState, ps *peerSession) {
 		nodeID: ps.nodeID, hostname: ps.hostname, overlay4: ps.overlay4, overlay6: ps.overlay6,
 		endpoint: ps.ep(), managed: ps.managed, manager: ps.manager, webPort: ps.webPort, tcpPort: ps.tcpPort,
 		extraTCPPorts: ps.extraTCPPorts, extraUDPPorts: ps.extraUDPPorts, selfSeed: ps.selfSeed,
+		partialMesh: ps.partialMesh, partialKnown: ps.partialKnown,
 		rttMillis: rttMillisOf(ps),
 	}
 	ns.mu.RUnlock()
@@ -470,6 +486,8 @@ func (e *Engine) buildPeerList(ns *netState, exceptNodeID string) []byte {
 			localEndpoints: p.localEndpoints,
 			version:        p.version,
 			selfSeed:       p.selfSeed,
+			partialMesh:    p.partialMesh,
+			partialKnown:   p.partialKnown,
 			rttMillis:      rttMillisOf(p),
 		})
 	}
@@ -1324,6 +1342,24 @@ func encodePeerList(entries []peerEntry) []byte {
 				b = append(b, rt[:]...)
 			}
 		}
+		// Topology mode: the last trailing block, same rules again. One byte per
+		// entry carrying both bits, so "not known" survives the round trip
+		// rather than collapsing to full mesh — a decoder that never sees this
+		// block leaves partialKnown false, which is exactly right for a peer
+		// whose own advertiser predates the field.
+		if peerListHasPartial(entries) {
+			b = append(b, peerListPartialBlock)
+			for _, en := range entries {
+				var v byte
+				if en.partialKnown {
+					v |= 1
+				}
+				if en.partialMesh {
+					v |= 2
+				}
+				b = append(b, v)
+			}
+		}
 	}
 	return b
 }
@@ -1378,6 +1414,17 @@ func peerListHasRTT(entries []peerEntry) bool {
 	return false
 }
 
+// peerListHasPartial reports whether any entry has a known topology mode worth
+// encoding a trailing block for — see encodePeerList.
+func peerListHasPartial(entries []peerEntry) bool {
+	for _, en := range entries {
+		if en.partialKnown {
+			return true
+		}
+	}
+	return false
+}
+
 // peerListHasSeed reports whether any entry is a seed, worth encoding a
 // trailing block for — see encodePeerList. Mirrors peerListHasVersion's
 // all-false-costs-nothing shape.
@@ -1403,6 +1450,7 @@ const (
 	peerListVersionBlock  = 0x05
 	peerListSeedBlock     = 0x06
 	peerListRTTBlock      = 0x07
+	peerListPartialBlock  = 0x08
 )
 
 func appendLenStr(b []byte, s string) []byte {
@@ -1557,6 +1605,15 @@ blocks:
 					break blocks
 				}
 				entries[i].selfSeed = v != 0
+			}
+		case peerListPartialBlock:
+			for i := range entries {
+				v, ok := r.byte()
+				if !ok {
+					break blocks
+				}
+				entries[i].partialKnown = v&1 != 0
+				entries[i].partialMesh = v&2 != 0
 			}
 		case peerListRTTBlock:
 			for i := range entries {

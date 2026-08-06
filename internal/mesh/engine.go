@@ -1134,6 +1134,12 @@ type nodeInfo struct {
 	// selfSeed mirrors peerSession's field of the same name — see hsPayload.
 	// SelfSeed's doc comment. Consulted directly by ManagedPeers.
 	selfSeed bool
+	// partialMesh / partialKnown mirror peerSession's fields of the same name.
+	// Carried on nodeInfo too because the dial suppression in
+	// seedRefusedByPolicy runs for nodes this node has no session with — the
+	// whole point is to not open one.
+	partialMesh  bool
+	partialKnown bool
 	// reconnects counts how many times a session for this node has been torn
 	// down (pruneDead or sweepStuckKeepalive — see teardownSessions) since
 	// this process started. nodeInfo, unlike peerSession, survives the
@@ -1214,6 +1220,11 @@ type peerSession struct {
 	// declaration that they should be treated as a seed. See hsPayload.
 	// SelfSeed's doc comment.
 	selfSeed bool
+	// partialMesh / partialKnown are the peer's advertised topology mode (see
+	// hsPayload.PartialMesh). partialKnown is false for a peer predating the
+	// field, whose mode must be treated as unknown rather than as full mesh.
+	partialMesh  bool
+	partialKnown bool
 	// localEndpoints are the peer's advertised host candidates — see
 	// hsPayload.LocalEndpoints. Kept on the session so buildPeerList can
 	// re-gossip them onward, which is how a node learns the LAN address of a
