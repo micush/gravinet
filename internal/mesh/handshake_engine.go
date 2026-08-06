@@ -337,7 +337,28 @@ func (e *Engine) onHSInit(payload []byte, from netip.AddrPort, via *peerSession)
 	// isn't attacking anything, it's just misconfigured, same treatment as
 	// isBanned/isPeerDisabled just above.
 	if ns.spec.PartialMesh && !ns.spec.SelfSeed && !pl.SelfSeed {
-		e.log.Debugf("mesh: rejecting handshake from %q on net %x: partial mesh — neither this node nor %q is a seed, so a direct link between them isn't allowed", pl.NodeID, hdr.Network, pl.NodeID)
+		// Log the source address and the transport it arrived on, not just the
+		// node id. Without them this line cannot be acted on: v804 added the
+		// dialer-side gate that should stop these, a field bundle showed ~2230
+		// of them an hour continuing unchanged with every node on v804, and
+		// there was no way to tell from here which address the dialer used or
+		// which of its dial paths produced it. A rejection that names only the
+		// peer says a link is forbidden without saying which link.
+		//
+		// Counted per peer as well, so a bundle carries the rate even where the
+		// log has rolled over. Both sides of this loop are cheap; the handshake
+		// that got here was not.
+		arrival := "direct"
+		if via != nil {
+			// Which dial path produced this is the whole question: a relayed
+			// arrival means tryRelays or rescoreRelays, a direct one means
+			// initSeedTick. They have different gates and only one of them is
+			// v804's.
+			arrival = "relayed via " + via.nodeID
+		}
+		n := ns.noteForbiddenLink(pl.NodeID, from)
+		e.log.Debugf("mesh: rejecting handshake from %q at %s (%s) on net %x: partial mesh — neither this node nor %q is a seed, so a direct link between them isn't allowed (%d refused from this peer since start; it is still dialling us, so its own gate is not suppressing this address)",
+			pl.NodeID, from, arrival, hdr.Network, pl.NodeID, n)
 		return
 	}
 	if pl.NodeID == e.nodeID {

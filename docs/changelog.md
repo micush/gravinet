@@ -2,6 +2,52 @@
 
 ---
 
+## v805 — 2026-08-06
+
+**A troubleshooting bundle did not state its own topology, and that cost two rounds of misdiagnosis. One node had been switched to `mesh: partial` while the other thirteen stayed full mesh; the resulting refusals were indistinguishable, in every field the bundle reported, from a partial mesh with a broken dialer-side gate. This release makes the bundle say what mode it is in.**
+
+### What actually happened
+
+v804 predicted that its attribution fix would take `mcfed`'s ~2666 inbound partial-mesh rejections to near zero. A bundle an hour later showed **~2230 an hour, flat across seven hours, unchanged**, with every one of the 13 peers confirmed on v804 from their gossiped versions.
+
+The fix was not broken. It was unreachable. A bundle collected from a hub — the first to include the eight nodes doing the dialing — showed `gn-rocky` holding direct sessions with eight *other non-seed* nodes and logging zero partial-mesh rejections. A node in partial mesh cannot do that: every one of those links is peer-to-peer and would have been refused. `gn-rocky` was still in full mesh, as were the other twelve. `mcfed` alone had `mesh: partial`, and its 5 peers were exactly the seed set.
+
+So the refusals were eight full-mesh nodes dialing `mcfed` exactly as full mesh instructs, and `mcfed` refusing them because it alone was in partial mesh. v804's gate returns false on its first line for a full-mesh node, correctly. Nothing on the refusing side can stop this; it is the inbound direction v800's entry already flagged as unfixable from here.
+
+Two earlier conclusions were wrong the same way and are corrected: "v804's fix didn't work" (it was never reachable), and v804's "v800 works — 12 outbound rejections" (that only ever measured `mcfed`, on a fleet that was never uniformly partial mesh).
+
+The signal was in the first partial-mesh bundle and went unread: six files where a full partial mesh would have produced fourteen, and hub nodes reporting 13 peers while `mcfed` reported 5. That asymmetry was taken for normal hub-and-spoke shape rather than a question about whether the hubs had the mode set at all.
+
+### Fix
+
+`IfaceInfo` gains `PartialMesh` and `SelfSeed`, and the bundle prints a topology block per network before anything that depends on it — the mode, whether this node is a seed, and for a non-seed on a partial mesh an explicit note that a full-mesh peer will keep dialing and nothing local can stop it. Printed unconditionally, so a healthy-looking bundle also states its mode and two bundles can be compared.
+
+`PeerInfo` gains `SelfSeed`, deliberately not `omitempty`: false is the interesting value, and a key that vanishes reads as false to anyone parsing the bundle. That is precisely how the earlier misreading happened — the field was absent entirely, and "no node is a seed" looked like data.
+
+The partial-mesh rejection log line now records the source address and whether the handshake arrived directly or through a relay, plus a per-peer running count that survives log rollover. The arrival path is the discriminator: direct means `initSeedTick` and v804's gate, relayed means `tryRelays` and v799's. The previous line named only the peer — it said a link was forbidden without saying which link, which is why two turns were spent inferring.
+
+### Tests
+
+`internal/webadmin/topologyreport_test.go`: both new fields round-trip; `self_seed` is present and not `omitempty`, asserted against the source because a missing key is the exact failure being prevented; and the bundle prints the topology block and the mixed-mode warning unconditionally.
+
+### Verified
+
+`go build ./...`, `go vet ./...`, `gofmt -l` clean (`CGO_ENABLED=0`; `auth_pam.go` not compiled). Full `internal/mesh` suite across all nine chunks, `TestDeadSeedRetryDoesNotDegradeOtherPeers` individually at 181.037s. `internal/transport`, `internal/config`, `internal/webadmin`, `cmd/gravinet` pass.
+
+### Not a code problem
+
+The mixed-mode fleet needs a configuration decision: all 14 nodes on partial mesh, or `mcfed` back to full. Left as-is, the refusals continue indefinitely and no release can change that.
+
+### What is still not solved
+
+The partial-mesh gates from v799, v800 and v804 have still never been exercised by a uniformly partial-mesh fleet. Every bundle so far has been full mesh or mixed, so those three releases remain unverified in the field.
+
+The fan-out is untouched and remains the largest source of session churn — 14 inbound tunnels to one peer in one second, understood well enough now to know the cheap fixes make it worse (v804). The keepalive retry-on-miss from v801 is still the real fix for relayed-session stability. PeerCache is still folded into the boot seed list unfiltered. Relay selection still sees only latency.
+
+`gn-ionos1` showed 132 session prunes against everyone else's 23-70, and `gn-manjaro` timed out on one collection. Neither is explained.
+
+---
+
 ## v804 — 2026-08-06
 
 **The proactive partial-mesh gate v800 added could never fire on the addresses it was built for. `AddSeedFor` both adds a dial target and records who owns an address, and `learnPeers` skips it for peer-to-peer links — so those addresses were never attributed, and the gate that needed the attribution had nothing to read.**

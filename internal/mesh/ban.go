@@ -28,6 +28,16 @@ type PeerInfo struct {
 	Overlay6 string `json:"overlay6,omitempty"`
 	Endpoint string `json:"endpoint"` // observed underlay source — a NAT'd peer's public mapping
 	Relayed  bool   `json:"relayed"`  // reached via a relay (couldn't connect directly → restrictive NAT/firewall)
+	// SelfSeed is whether this peer advertised itself as a seed. Reported
+	// because on a partial mesh it decides which links are permitted at all,
+	// and its absence cost real diagnostic time: a mesh where one node had been
+	// switched to partial while the other thirteen were still full mesh looked,
+	// from the bundles, exactly like a partial mesh with a broken dialer-side
+	// gate. Two rounds of investigation went into inferring from peer counts and
+	// rejection tallies what this field states outright. Not omitempty: "false"
+	// is the interesting value, and a missing key reads as false, which is how
+	// the wrong conclusion got drawn in the first place.
+	SelfSeed bool `json:"self_seed"`
 	// BGPASN is this peer's current effective BGP AS number, as gossiped in
 	// its handshake and kept fresh live thereafter — see hsPayload.BGPASN's
 	// doc comment. 0 means it has no BGP configured (or predates this
@@ -1005,6 +1015,7 @@ func (e *Engine) ListPeers(networkID uint64) []PeerInfo {
 			transport = "tcp"
 		}
 		pi := PeerInfo{NodeID: ps.nodeID, Hostname: ps.hostname, Endpoint: ps.ep().String(), Relayed: ps.getRelay() != nil,
+			SelfSeed:           ps.selfSeed,
 			Transport:          transport,
 			EstablishedAt:      ps.established.UnixNano(),
 			KeyLabel:           ns.keyLabelFor(ps.keyID),
@@ -1128,6 +1139,20 @@ type IfaceInfo struct {
 	NetworkID uint64
 	Name      string // network name
 	Iface     string // kernel interface name (e.g. mesh0)
+	// PartialMesh and SelfSeed are this node's own topology configuration for
+	// the network (config.Network.Mesh and SelfSeed). Together they decide which
+	// links this node will permit at all, so nearly every connectivity question
+	// on a partial mesh depends on them.
+	//
+	// Reported because their absence was itself the cause of a wrong diagnosis.
+	// A mesh with one node switched to partial while the other thirteen stayed
+	// full mesh produced refusals that looked exactly like a broken
+	// dialer-side gate, and two rounds of bundles were spent inferring the
+	// topology from peer counts and rejection tallies instead of reading it.
+	// A bundle should state its own configuration rather than leave it to be
+	// reconstructed.
+	PartialMesh bool
+	SelfSeed    bool
 }
 
 // Interfaces returns the live overlay-network -> kernel-interface mapping,
@@ -1140,7 +1165,8 @@ func (e *Engine) Interfaces() []IfaceInfo {
 		if ns.spec.Dev != nil {
 			iface = ns.spec.Dev.Name()
 		}
-		out = append(out, IfaceInfo{NetworkID: id, Name: ns.spec.Name, Iface: iface})
+		out = append(out, IfaceInfo{NetworkID: id, Name: ns.spec.Name, Iface: iface,
+			PartialMesh: ns.spec.PartialMesh, SelfSeed: ns.spec.SelfSeed})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].NetworkID < out[j].NetworkID })
 	return out

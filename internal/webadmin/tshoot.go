@@ -119,6 +119,30 @@ func (s *Server) buildTshootText() (string, time.Time) {
 	for _, id := range ids {
 		fmt.Fprintf(&b, "\n\n---------- network %x ----------\n", id)
 
+		// Topology first, before anything that depends on it. On a partial mesh
+		// only seed-to-seed and seed-to-peer links are permitted, so these two
+		// flags decide whether a refused handshake is a bug or the configuration
+		// working — and a mesh part-way through a mode change looks, in every
+		// other field here, exactly like a partial mesh with a broken gate.
+		// Stated per network and per node so comparing two bundles makes a
+		// mixed-mode fleet obvious instead of something to deduce.
+		for _, ifc := range s.be.Interfaces() {
+			if ifc.NetworkID != id {
+				continue
+			}
+			mode := "full"
+			if ifc.PartialMesh {
+				mode = "partial (only seed-to-seed and seed-to-peer links permitted)"
+			}
+			fmt.Fprintf(&b, "mesh topology: %s\nthis node is a seed: %t\n", mode, ifc.SelfSeed)
+			if ifc.PartialMesh && !ifc.SelfSeed {
+				fmt.Fprintf(&b, "  (as a non-seed on a partial mesh, this node permits links only with seeds;\n")
+				fmt.Fprintf(&b, "   handshakes from other non-seeds are refused by design. If peers are still\n")
+				fmt.Fprintf(&b, "   dialing repeatedly, check whether THEY are also configured for partial\n")
+				fmt.Fprintf(&b, "   mesh — a full-mesh peer will keep dialing and nothing here can stop it.)\n")
+			}
+		}
+
 		// Peers first and in full. Every field matters somewhere: reach and
 		// relay identify the path, time distinguishes a stable session from
 		// one being rebuilt on a loop, path_mtu and the fragment counters

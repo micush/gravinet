@@ -993,3 +993,27 @@ func (e *Engine) noteSeedOwnerLockedInner(ns *netState, seed netip.AddrPort, nod
 		ns.seedOwner[seed] = nodeID
 	}
 }
+
+// noteForbiddenLink counts a handshake refused because partial-mesh policy
+// forbids the link, keyed by the peer that sent it, and returns the running
+// total for that peer.
+//
+// Exists because a log line alone was not enough to act on. v804 added the
+// dialer-side gate meant to stop these before they are sent; a field bundle
+// then showed ~2230 refusals an hour continuing unchanged with every node on
+// v804, and nothing in the record said which address the dialer used or which
+// of its dial paths produced it. The count survives log rollover, and a bundle
+// carries it even when the interesting hours have scrolled away.
+func (ns *netState) noteForbiddenLink(nodeID string, from netip.AddrPort) uint64 {
+	ns.mu.Lock()
+	defer ns.mu.Unlock()
+	if ns.forbiddenLinkCount == nil {
+		ns.forbiddenLinkCount = make(map[string]uint64)
+	}
+	ns.forbiddenLinkCount[nodeID]++
+	if ns.forbiddenLinkFrom == nil {
+		ns.forbiddenLinkFrom = make(map[string]netip.AddrPort)
+	}
+	ns.forbiddenLinkFrom[nodeID] = from
+	return ns.forbiddenLinkCount[nodeID]
+}

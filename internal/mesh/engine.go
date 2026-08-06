@@ -899,6 +899,11 @@ type netState struct {
 	// gossip can clear.
 	policyRefusedNode map[string]time.Time
 	policyRefusedEP   map[netip.AddrPort]time.Time
+	// forbiddenLinkCount/forbiddenLinkFrom record handshakes refused by
+	// partial-mesh policy, per sending peer, with the last source address seen
+	// — see noteForbiddenLink.
+	forbiddenLinkCount map[string]uint64
+	forbiddenLinkFrom  map[string]netip.AddrPort
 
 	lastGossip      time.Time
 	lastGossipSig   string    // content signature of the last full peer-list broadcast (see peerListSig)
