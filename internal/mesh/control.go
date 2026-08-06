@@ -319,6 +319,19 @@ func (e *Engine) learnPeers(ps *peerSession, entries []peerEntry) {
 			ns.clearSeedPolicyRefused(en.nodeID)
 			ns.mu.Unlock()
 		}
+		// Attribute the address even when policy forbids dialing it. AddSeedFor
+		// below both adds a dial target and records seedOwner, and skipping it
+		// on a partial mesh left peer-to-peer addresses unattributed — so
+		// seedRefusedByPolicy could not recognise them and initLoop kept
+		// dialing whatever copies it already had. See NoteSeedOwner.
+		if en.endpoint.IsValid() && en.nodeID != "" {
+			e.NoteSeedOwner(ns.spec.ID, en.endpoint, en.nodeID)
+			for _, extra := range en.extraUDPPorts {
+				if extra != en.endpoint.Port() {
+					e.NoteSeedOwner(ns.spec.ID, netip.AddrPortFrom(en.endpoint.Addr(), extra), en.nodeID)
+				}
+			}
+		}
 		if !directlyConnected && en.endpoint.IsValid() && (!ns.spec.PartialMesh || en.selfSeed) {
 			e.AddSeedFor(ns.spec.ID, en.endpoint, en.nodeID) // initLoop dials it next tick
 			// Extra UDP ports (config extra_listen_ports on the peer's end)

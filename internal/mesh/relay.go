@@ -937,3 +937,59 @@ func (e *Engine) coolSeedAfterRefusal(ns *netState, p *pendingHS, from netip.Add
 		e.log.Debugf("mesh: handshake refused on net %x (%s); not re-dialling for %v", ns.spec.ID, why, seedRetryBackoff)
 	}
 }
+
+// NoteSeedOwner records which node an address belongs to *without* adding it as
+// a dial target.
+//
+// AddSeedFor does both jobs at once, and on a partial mesh that conflation cost
+// us the fix v800 thought it had made. learnPeers gates AddSeedFor on
+// `!PartialMesh || selfSeed`, correctly declining to dial a peer-to-peer link —
+// but the same skip meant the address was never attributed either. So
+// seedRefusedByPolicy's proactive branch, which needs seedOwner to know a
+// candidate belongs to a non-seed, could never fire for an address that arrived
+// some other way (PeerCache, an operator's Seeds list, a post-teardown redial).
+// Those addresses stayed unattributed and stayed dialable forever.
+//
+// The field cost: on a partial mesh, eight spokes each dialed one other spoke
+// roughly every 18 seconds for as long as the log ran — ~350 refused handshakes
+// per pair in 94 minutes. The refusal happens at the responder's onHSInit, which
+// answers nothing, so the dialer's pending simply times out, planHandshake arms
+// seedRetryBackoff (15s), and it tries again. v801's cooldown turned a
+// once-a-second storm into a once-every-18-seconds one; it could not stop it,
+// because a silently refused dial teaches the dialer nothing.
+//
+// Attribution is information, not intent. Recording it is always safe: it
+// cannot cause a dial, and it is exactly what lets one be avoided.
+func (e *Engine) NoteSeedOwner(networkID uint64, seed netip.AddrPort, nodeID string) {
+	if nodeID == "" || !seed.IsValid() {
+		return
+	}
+	ns := e.network(networkID)
+	if ns == nil {
+		return
+	}
+	ns.mu.Lock()
+	e.noteSeedOwnerLockedInner(ns, seed, nodeID)
+	ns.mu.Unlock()
+}
+
+// noteSeedOwnerLocked is NoteSeedOwner against an already-resolved netState,
+// taking ns.mu itself. Used by callers that already hold a *netState.
+func (e *Engine) noteSeedOwnerLocked(ns *netState, seed netip.AddrPort, nodeID string) {
+	if nodeID == "" || !seed.IsValid() {
+		return
+	}
+	ns.mu.Lock()
+	e.noteSeedOwnerLockedInner(ns, seed, nodeID)
+	ns.mu.Unlock()
+}
+
+// noteSeedOwnerLockedInner assumes ns.mu is held.
+func (e *Engine) noteSeedOwnerLockedInner(ns *netState, seed netip.AddrPort, nodeID string) {
+	if ns.seedOwner == nil {
+		ns.seedOwner = make(map[netip.AddrPort]string)
+	}
+	if cur, ok := ns.seedOwner[seed]; !ok || cur == "" {
+		ns.seedOwner[seed] = nodeID
+	}
+}

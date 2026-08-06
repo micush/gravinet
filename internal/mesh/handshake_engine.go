@@ -382,6 +382,30 @@ func (e *Engine) onHSInit(payload []byte, from netip.AddrPort, via *peerSession)
 	// gate the smaller id would refuse inbound handshakes it has no
 	// counterpart for, which is not a tie to break — it is just dropping a
 	// peer's only attempt to reach us.
+	// Do NOT try to decline "redundant" inbound handshakes here. A peer with
+	// many configured addresses for us dials all of them at once — thirteen
+	// ports for one peer in the field bundles — and behind a symmetric NAT each
+	// arrives from a different source port, so fourteen inbound tunnels can come
+	// up in the same second and fourteen sessions get reaped together ~30s later,
+	// with path MTU reset to 1280 in between. It looks exactly like waste to
+	// suppress. It is not.
+	//
+	// The fan-out is load-bearing. onHSResp attributes each address to its node
+	// (ns.seedOwner[p.endpoint]) only when that address's handshake completes,
+	// and that attribution is the only thing that later stops initSeedTick
+	// re-dialing the address. Decline the extra handshakes and those addresses
+	// stay unattributed and get re-dialed forever — strictly worse than the
+	// duplicate sessions being avoided. TestMultiPortSeedsConvergeAndStopRedialing
+	// says so in as many words: every address must be dialed once to be
+	// attributed, so this is a bounded burst, not a steady state.
+	//
+	// Two attempts were made and reverted. Refusing when the existing session is
+	// direct and receiving broke TestKeyDisableReconnects and TestNetworkReset,
+	// because key rotation and network reset legitimately re-handshake a healthy
+	// session. Rate-limiting to one accept per peer per handshakeRetry broke
+	// attribution as described above. A real fix has to let the dialer learn the
+	// address works *without* installing a second session, which is a protocol
+	// change, not a filter here.
 	if peer := pl.NodeID; peer != "" {
 		ns.mu.Lock()
 		// Matching a pending handshake to a peer id is not direct.

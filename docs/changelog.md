@@ -2,6 +2,69 @@
 
 ---
 
+## v804 — 2026-08-06
+
+**The proactive partial-mesh gate v800 added could never fire on the addresses it was built for. `AddSeedFor` both adds a dial target and records who owns an address, and `learnPeers` skips it for peer-to-peer links — so those addresses were never attributed, and the gate that needed the attribution had nothing to read.**
+
+First release in this arc driven by field evidence rather than reasoning from the code. Two bundles: 14 nodes full mesh for 74 minutes, then partial mesh for 94 minutes.
+
+### What v800 got right
+
+`mcfed` logged **12** outbound-dial rejections in 94 minutes, against 7825 in four hours before. The refusal record and the suppression work.
+
+### What it missed
+
+Eight spokes each dialed `mcfed` about every 18 seconds for the entire window — ~2666 inbound rejections. That cadence is `seedRetryBackoff` plus a handshake cycle, so v801's cooldown bought an 18x slowdown and nothing more.
+
+The reason a cooldown cannot finish the job: a refusal at `onHSInit` answers *nothing*. The dialer's pending times out, `planHandshake` arms `seedRetryBackoff`, and it tries again forever, having learned nothing. Only the dialer's own knowledge can stop it, and `seedRefusedByPolicy`'s proactive branch is exactly that knowledge — this node is not a seed, the address belongs to a node we know about, that node is not a seed either, so do not dial.
+
+It could not reach that conclusion, because `ns.seedOwner` was empty for those addresses. Attribution and intent were the same call:
+
+```go
+if !directlyConnected && en.endpoint.IsValid() && (!ns.spec.PartialMesh || en.selfSeed) {
+    e.AddSeedFor(ns.spec.ID, en.endpoint, en.nodeID)
+```
+
+`AddSeedFor` adds a dial target *and* records `seedOwner[endpoint]`. Declining to call it on a partial mesh correctly avoids the dial and silently discards the attribution, so any peer-to-peer address that arrived another way — PeerCache, an operator's `Seeds` list, a post-teardown redial — stayed unattributed and stayed dialable.
+
+`NoteSeedOwner` records attribution without adding a dial target, and `learnPeers` now calls it unconditionally for every gossiped endpoint and extra UDP port. Attribution is information, not intent: recording it cannot cause a dial, and it is precisely what lets one be avoided.
+
+### The fan-out: two attempts, both reverted
+
+The full-mesh bundle showed 14 inbound tunnels to one peer inside the same second — `gn-rocky` dialing 13 configured ports of `gn-ionos1`, each arriving from a different NAT source port — then 14 sessions reaped together ~30s later, with path MTU repeatedly reset to 1280 in between. (Nine of the fourteen nodes share one NAT at `174.64.247.165`, which is why this mesh finds every NAT edge.)
+
+v803's simultaneous-open tie-break cannot help here, and the logs prove it: three `abandoning our in-flight handshake` lines, correctly suppressing the one handshake *we* initiated, immediately followed by fourteen inbound ones completing. It only ever governed one session of the pair. v803's test showed convergence because two nodes with one address each is the only shape it covers.
+
+**Attempt one:** decline an inbound handshake when the existing session is direct and receiving. Broke `TestKeyDisableReconnects` and `TestNetworkReset` — key rotation and network reset legitimately re-handshake a perfectly healthy session, and the set of valid reasons cannot be enumerated from the responder.
+
+**Attempt two:** rate-limit to one accepted handshake per peer per `handshakeRetry`, cause-agnostic. Broke `TestMultiPortSeedsConvergeAndStopRedialing`, and that failure is the real finding: **the fan-out is load-bearing.** `onHSResp` attributes each address to its node only when that address's handshake completes, and that attribution is the only thing that later stops `initSeedTick` re-dialing it. Suppressing the extra handshakes leaves those addresses unattributed and dialed forever — strictly worse than the duplicate sessions being avoided. That test says so in as many words: every address must be dialed once to be attributed, so this is a bounded burst, not a steady state.
+
+Both attempts are recorded as a do-not-retry note in `onHSInit`, with the failure mode of each, because both looked obviously correct. A real fix has to let the dialer learn an address works *without* installing a second session, which is a protocol change and not a filter at the accept path.
+
+All three failures were baselined against shipped v803 before attributing them here: all three pass there, so all three were introduced by this work.
+
+### Tests
+
+`internal/mesh/attribution_test.go`: attribution alone suppresses a forbidden dial, with no refusal needed and no dial spent learning the owner; recording attribution never creates a dial target; a seed's address stays dialable however it was attributed; and a later claim does not displace an established owner, since a wrong owner suppresses a legitimate dial and that is worse than a missing one.
+
+### Verified
+
+`go build ./...`, `go vet ./...`, `gofmt -l` clean (`CGO_ENABLED=0`; `auth_pam.go` not compiled). Full `internal/mesh` suite across all nine chunks, `TestDeadSeedRetryDoesNotDegradeOtherPeers` individually at 181.216s. `internal/transport`, `internal/config`, `internal/webadmin`, `cmd/gravinet` pass.
+
+### What the bundles could not settle
+
+**v803's effect on duplicate sessions is unknown.** 54 same-second multi-prune bursts in the full-mesh window against v801's 37 — but `gn-rocky` restarted mid-window and `gn-ionos2` and `gn-win11` both timed out on collection, so that is not a clean comparison in either direction. v803's ship note implied an improvement it did not measure.
+
+`gn-ionos2` and `gn-win11` are worth investigating as hosts, independently of anything here: both unreachable to the collector, both among the most-pruned peers.
+
+### What is still not solved
+
+The fan-out, as above — the largest remaining source of session churn, and now understood well enough to know that the cheap fixes make it worse.
+
+The keepalive retry-on-miss described in v801 remains the real fix for relayed-session stability. PeerCache is still folded into the boot seed list unfiltered (v800). Relay selection still sees only latency, not loss or jitter, and the cost estimate is consistent but not accurate (v798).
+
+---
+
 ## v803 — 2026-08-05
 
 **Two nodes that seed each other both dialed, both handshakes completed, and each side kept two sessions for the same peer — one it initiated, one it answered. Nothing resolved that. It is the root cause behind v802's investigation, and this fixes it instead of accommodating it.**
