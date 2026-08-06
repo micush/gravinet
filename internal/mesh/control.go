@@ -923,6 +923,30 @@ func (e *Engine) ResetNetwork(networkID uint64) error {
 	return nil
 }
 
+// A session superseded by a newer one for the same peer is NOT garbage, and
+// must not be reaped early. This was tried and reverted; the note is here so it
+// is not tried again.
+//
+// install() replaces ns.byNode but leaves the predecessor in e.sessions, where
+// it lives out the full peer timeout. That looks like a leak — field bundles
+// showed 24 superseded sessions for one peer reaped in the same second — and
+// reaping them on a short grace was the obvious fix. It breaks path MTU
+// discovery outright: with the predecessor reaped after 3s, a live session
+// climbs to 7160 bytes over loopback and then stops permanently, where it
+// otherwise converges to the 8000 ceiling in about twelve seconds.
+//
+// The reason is that the peer is still sending to the superseded index. Both
+// ends seeding each other produces two sessions per pair, and which of the two
+// each side treats as live is independent. onData looks up e.sessions[RecvSession]
+// and returns silently when it is absent (no counter, which is why this was
+// invisible), so reaping one end of the pair black-holes whatever the peer was
+// still sending through it.
+//
+// The duplicates are bounded — peerTimeout, and they self-clean — so this is
+// log noise rather than a resource leak. The real fixes, neither attempted
+// here, are to make a handshake pair converge on one session per peer, and to
+// count the silent drop above so a black-holed index is visible at all.
+
 // relayedTimeoutFactor multiplies the dead-session timeout for a relayed
 // session.
 //
@@ -1102,9 +1126,33 @@ func (e *Engine) teardownSessions(ns *netState, dead []*peerSession, reason stri
 		}
 	}
 	ns.publishFwd()
+	// Which of these nodes still have a live session. A superseded session
+	// (see retiredSessionGrace) is reaped while its node remains connected
+	// through the session that replaced it, and the cleanup below is keyed on
+	// *peer* identity, not session identity: removeOverlayGuardRoutes takes
+	// ps.overlay4/overlay6, which are the same addresses the live session
+	// serves. Running it for a duplicate therefore withdraws the live peer's
+	// overlay guard host routes and degrades a working path — observed as path
+	// MTU discovery no longer converging, because the probes were taking a
+	// route the guard exists to prevent.
+	//
+	// The byNode deletion above is already identity-checked, so this is the
+	// same discipline extended to the peer-scoped half of teardown, which
+	// predates duplicates being reaped promptly and so never needed it.
+	stillLive := make(map[string]bool, len(dead))
+	for _, ps := range dead {
+		if live, ok := ns.byNode[ps.nodeID]; ok && live != ps {
+			stillLive[ps.nodeID] = true
+		}
+	}
 	ns.mu.Unlock()
 	for _, ps := range dead {
+		// Per-session state: safe either way, since bypassAddr is tracked on
+		// the peerSession itself rather than on the peer.
 		e.removePeerBypassRoute(ns, ps)
+		if stillLive[ps.nodeID] {
+			continue // the node is still connected; its peer-scoped state belongs to the live session
+		}
 		e.removeOverlayGuardRoutes(ns, ps)
 		// A relay that is going away leaves every peer behind it pointing at
 		// a session that no longer exists; clear those rather than let them

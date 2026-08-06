@@ -2,6 +2,102 @@
 
 ---
 
+## v803 — 2026-08-05
+
+**Two nodes that seed each other both dialed, both handshakes completed, and each side kept two sessions for the same peer — one it initiated, one it answered. Nothing resolved that. It is the root cause behind v802's investigation, and this fixes it instead of accommodating it.**
+
+The consequences ran through several releases before the cause was named:
+
+- `ns.byNode` holds whichever session installed last, while the peer keeps sending to the other index. So a "superseded" session is load-bearing, and `onData` discarded packets for a missing index in silence (v802 added the counter).
+- Field bundles showed up to 24 sessions for a single peer reaped in the same second, across 37 bursts on 14 nodes in half an hour. Read as a leak; it was a pair per handshake, multiplied by re-handshakes.
+- Reaping the "duplicates" on a short grace broke path MTU discovery outright — a live session climbing to 7160 bytes and stopping permanently, where it otherwise converges to 8000 in about twelve seconds — precisely because the pair is asymmetric. Built, tested, reverted (v802).
+
+### Fix
+
+Resolved the way a simultaneous TCP open is: an ordering both ends compute identically from data they already have. The node whose id sorts first wins the initiator role. On receiving an HS_INIT while our own handshake to that peer is in flight, we ignore theirs if we sort first (ours completes), and abandon ours and answer theirs if we sort second. Exactly one session per pair, and both ends agree which one without exchanging anything new.
+
+Gated on actually having a pending handshake to that node. Without that gate the smaller id would refuse inbound handshakes it has no counterpart for, which is not a tie to break — it is dropping a peer's only attempt to reach us.
+
+**Matching the pending handshake to the peer id is the part that needed care.** `pendingHS.targetNode` is set only for *relayed* handshakes: a direct seed dial knows an address, not who is behind it. The first attempt matched on `targetNode` alone and silently did nothing — sessions still came up in pairs, and the diagnostic showed it immediately. Matching also on the source address the init arrived from, or an address gossip has already attributed to that node, is what makes it fire.
+
+Measured before and after on the same fixture: two sessions per side becoming one, with path MTU still converging 1280 → 6320 → 7580 → 7895 → 7987 → 7999 → 8000.
+
+### Tests
+
+`internal/mesh/simopen_test.go`: mutual seeding converges on exactly one session per side, and is held for a further twelve seconds so a later re-dial cannot quietly reintroduce the duplicate; the converged session actually carries traffic in both directions, since convergence must not cost connectivity; and the ordering is exercised in both directions, with node names chosen so the second-created engine sorts first, covering the branch where the local node abandons its own in-flight handshake.
+
+### Verified
+
+`go build ./...`, `go vet ./...`, `gofmt -l` clean (`CGO_ENABLED=0`; `auth_pam.go` not compiled). Full `internal/mesh` suite across all nine chunks, `TestDeadSeedRetryDoesNotDegradeOtherPeers` individually at 181.037s. `internal/transport`, `internal/config`, `internal/webadmin`, `cmd/gravinet` pass. Chunk P–Q, holding the PMTU test that exposed the pairing, passes.
+
+This touches the core handshake path, so the whole suite is load-bearing here rather than the relay chunks alone.
+
+### What is still not solved
+
+The tie-break only fires when the two handshakes overlap in time. Two nodes whose dials are far enough apart still produce a second session — the later dial should be suppressed by `connectedToSeedOwner`, but that depends on the seed being attributed to a node, which is not true at cold start. Sequential duplicates are therefore still possible; they are bounded by `peerTimeout` and self-clean, and `noSessionDrop` now makes them visible.
+
+The keepalive retry-on-miss described in v801 remains the real fix for relayed-session stability. PeerCache is still folded into the boot seed list unfiltered (v800). Relay selection still sees only latency, not loss or jitter, and the cost estimate is consistent but not accurate (v798).
+
+**None of v796–v803 has been confirmed on real hardware.** The two bundles so far covered 9 and 31 minutes of v801 uptime, and the network was reconfigured out of partial mesh between them, which leaves the v799/v800 partial-mesh fixes with no field evidence at all.
+
+---
+
+## v802 — 2026-08-05
+
+**A superseded session is not garbage. Reaping one early breaks path MTU discovery outright, because the peer is still sending to that index and `onData` discarded those packets without a counter or a log. This release adds the counter, keeps the sessions, and records why — the "fix" was built, tested against the field data, and reverted.**
+
+### What the field data looked like, and why the obvious reading was wrong
+
+Bundles showed up to 24 sessions for a single peer pruned in the same second, 37 such bursts across 14 nodes in half an hour, with `gn-ionos3` and `mcfed` each holding 24 of the other. `install()` writes `e.sessions[ps.localIdx] = ps` and never removes the session it replaced, so a superseded session lives out the full peer timeout — doubled again for relayed sessions by v801. That reads as a leak, and v797's own changelog claim that `install()` "replaces the session for a node wholesale" was true of `ns.byNode` and false of `e.sessions`.
+
+Marking the predecessor retired and reaping it on a 3-second grace made `TestPMTULiveClimbsOverLoopback` fail 3/3 deterministically. The v801 tree passed it 3/3. So the regression was unambiguously introduced, and worth chasing rather than tuning away.
+
+Two wrong hypotheses, both discarded on evidence rather than argument:
+
+- **A slow probe ladder.** No: a 120-second window passes, but v801 converges in ~14 seconds and the changed tree does not converge in 30. Something was breaking the climb, not slowing it.
+- **Withdrawn overlay guard routes.** `removeOverlayGuardRoutes` is keyed on the peer's overlay addresses, not the session, so reaping a duplicate withdrew the live peer's host routes. That is a genuine latent bug — the identity check for it is kept below — but fixing it did not fix the test.
+
+Instrumenting the sessions directly settled it. With the predecessor kept, the live session climbs 1280 → 6320 → 7580 → 7895 → 7974 → 7994 → 7999 → 8000: textbook convergence. With it reaped at 3s, the same session climbs to 7160 and stops permanently. The predecessor itself never rises above the floor, so it is not receiving the acks — but its *existence* is required.
+
+The reason is in `onData`:
+
+```go
+ps := e.sessions[h.RecvSession]
+if ps == nil {
+    return
+}
+```
+
+Both ends seeding each other produces two sessions per pair, and which of the two each side treats as live is decided independently. The peer keeps sending to the index it chose. Reaping our end black-holes that traffic, and the silent return meant no counter, no log, and no trace anywhere — which is why a broken PMTU climb was the first visible symptom of a discarded index.
+
+So the duplicates are bounded by `peerTimeout` and self-clean. They are log noise, not a resource leak, and the diagnosis behind v802's original premise was wrong.
+
+### What this release actually changes
+
+**`onData` counts and occasionally logs an unknown session index.** `Engine.noSessionDrop`, engine-level rather than per-session because there is no session to attribute it to — which is the whole point. Rate-limited at 30s by `noSessionLogInterval`, since a re-handshake produces a legitimate burst and logging each one would rebuild exactly the unbounded log storm v799–v801 were spent removing. A small nonzero rate is normal; this is a diagnostic, not an alarm.
+
+**`teardownSessions` identity-checks its peer-scoped half.** The `ns.byNode` deletion was already identity-checked; `removeOverlayGuardRoutes` and `repointRelayUsers` were not, and both are keyed on peer identity rather than session identity. Running them for a session whose node is still connected withdraws the live session's state. Nothing reaped duplicates promptly before, so this never had to be right — it does now, and it is a latent bug fixed on its own merits regardless of the reverted change.
+
+**A note above `pruneDead` explaining why superseded sessions are kept**, with the PMTU numbers, so this is not "fixed" again. `TestPruneDeadHasNoSeparateRetiredPath` fails if a separate lifetime reappears or if the note is deleted.
+
+### Tests
+
+`internal/mesh/nosessiondrop_test.go`: the unknown-index path records rather than returning silently; the log interval is long enough that a re-handshake burst stays quiet; and the revert is guarded, because a PMTU regression caused by session lifetimes is not something any PMTU test names.
+
+### Verified
+
+`go build ./...`, `go vet ./...`, `gofmt -l` clean (`CGO_ENABLED=0`; `auth_pam.go` not compiled). Full `internal/mesh` suite across all nine chunks, `TestDeadSeedRetryDoesNotDegradeOtherPeers` individually at 181.051s. `internal/transport`, `internal/config`, `internal/webadmin`, `cmd/gravinet` pass. Chunk P–Q, which holds the PMTU test, passes.
+
+### What is still not solved
+
+**Two sessions per peer is the real defect and is untouched.** Both ends seeding each other handshake in both directions and neither side converges on a single session. Everything above is accommodation. Making a handshake pair converge is the fix, and it is the right next piece of work in this subsystem.
+
+The keepalive retry-on-miss described in v801 remains the real fix for relayed-session stability. PeerCache is still folded into the boot seed list unfiltered (v800). Relay selection still sees only latency, not loss or jitter, and the cost estimate is consistent but not accurate (v798).
+
+**None of v796–v802 has been confirmed on real hardware.** The two bundles collected so far covered 9 and 31 minutes of v801 uptime, and the network was reconfigured out of partial mesh between them, which makes the zero partial-mesh rejections in both no evidence at all for the v799/v800 fixes.
+
+---
+
 ## v801 — 2026-08-05
 
 **The intermittent chunk-R test failure recorded as "unexplained" in v798, v799 and v800 was not a flaky test. It was a repro test correctly detecting a real defect at its natural rate: a relayed session gets exactly three keepalive attempts before being reaped, and a relayed session's keepalives cross one more lossy hop than a direct session's.**

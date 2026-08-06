@@ -362,6 +362,57 @@ func (e *Engine) onHSInit(payload []byte, from netip.AddrPort, via *peerSession)
 	}
 	ns.throttle.Reset(src) // valid auth clears the source's failure history
 
+	// Simultaneous open. Two nodes that seed each other both dial, so both
+	// handshakes complete and each side ends up with two sessions for the same
+	// peer: one it initiated, one it answered. Nothing resolved that, and the
+	// consequences ran through everything above — ns.byNode holds whichever
+	// installed last while the peer keeps sending to the other index, so a
+	// discarded session is load-bearing (see the note above pruneDead), field
+	// bundles showed 24 sessions for one peer, and the pair's asymmetry is why
+	// reaping duplicates broke path MTU discovery.
+	//
+	// Resolve it the way simultaneous TCP opens are resolved: deterministically,
+	// by an ordering both ends compute identically from data both already have.
+	// The node with the lexicographically smaller id wins the right to be
+	// initiator. So if we are the smaller id and we have our own handshake in
+	// flight to this peer, we ignore theirs — ours will complete. If we are the
+	// larger, we abandon ours and answer theirs.
+	//
+	// Gated on actually having a pending handshake to this node. Without that
+	// gate the smaller id would refuse inbound handshakes it has no
+	// counterpart for, which is not a tie to break — it is just dropping a
+	// peer's only attempt to reach us.
+	if peer := pl.NodeID; peer != "" {
+		ns.mu.Lock()
+		// Matching a pending handshake to a peer id is not direct.
+		// pendingHS.targetNode is set only for relayed handshakes: a direct
+		// seed dial knows an address, not who is behind it. So match on the
+		// address as well — either the source this init arrived from, or an
+		// address gossip has already attributed to this node.
+		var mine *pendingHS
+		for _, p := range ns.pending {
+			if p.targetNode == peer ||
+				(p.endpoint.IsValid() && (p.endpoint == from || ns.seedOwner[p.endpoint] == peer)) {
+				mine = p
+				break
+			}
+		}
+		if mine != nil {
+			if e.nodeID < peer {
+				ns.mu.Unlock()
+				e.log.Debugf("mesh: ignoring handshake init from %q on net %x: our own handshake to it is in flight and %q sorts first, so ours is the one that completes", peer, hdr.Network, e.nodeID)
+				return
+			}
+			// We sort second: drop our attempt and answer theirs, so exactly
+			// one session exists for this pair.
+			delete(ns.pending, mine.idxI)
+			ns.mu.Unlock()
+			e.log.Debugf("mesh: abandoning our in-flight handshake to %q on net %x and answering theirs instead: %q sorts first", peer, hdr.Network, peer)
+		} else {
+			ns.mu.Unlock()
+		}
+	}
+
 	respEph, err := crypto.NewEphemeral()
 	if err != nil {
 		return

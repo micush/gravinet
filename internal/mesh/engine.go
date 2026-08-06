@@ -348,6 +348,23 @@ type Options struct {
 
 // Engine is the running mesh for one node.
 type Engine struct {
+	// noSessionDrop counts inbound data packets naming a session index this
+	// node no longer holds, and noSessionLogNanos rate-limits the warning.
+	//
+	// Engine-level rather than per-session because there is no session to
+	// attribute it to — which is the whole point. onData returned silently
+	// here, and that silence hid a genuine black hole: a peer that keeps
+	// sending to an index we have discarded gets no error, no counter and no
+	// log, and the symptom surfaces somewhere unrelated. It cost a full
+	// investigation to find that reaping a superseded session broke path MTU
+	// discovery, because the dropped acks left no trace anywhere (see the note
+	// above pruneDead in control.go).
+	//
+	// A small nonzero rate is normal — in-flight packets after a re-handshake
+	// land here — so this is a diagnostic, not an alarm.
+	noSessionDrop     atomic.Uint64
+	noSessionLogNanos atomic.Int64
+
 	nodeID   string
 	hostname string
 	log      *logx.Logger
@@ -1475,6 +1492,11 @@ const (
 
 	defaultKeepaliveInterval = 10 * time.Second // NAT keepalive cadence
 	defaultPeerTimeout       = 30 * time.Second // drop a session after this much silence
+	// noSessionLogInterval rate-limits the unknown-session-index warning. A
+	// re-handshake produces a burst of these legitimately, and logging each one
+	// would reproduce exactly the kind of unbounded log storm the v799-v801
+	// entries were spent removing.
+	noSessionLogInterval = 30 * time.Second
 
 	defaultRouteAdvInterval = 10 * time.Second // route re-advertisement cadence
 
@@ -2355,6 +2377,16 @@ func (e *Engine) onData(payload []byte, from netip.AddrPort, via *peerSession, d
 	ps := e.sessions[h.RecvSession]
 	e.mu.RUnlock()
 	if ps == nil {
+		// No session under that index. Count it and say so occasionally: a peer
+		// still sending to an index we have discarded is being black-holed, and
+		// silence here is what made that undiagnosable. See
+		// Engine.noSessionDrop.
+		n := e.noSessionDrop.Add(1)
+		now := time.Now().UnixNano()
+		if last := e.noSessionLogNanos.Load(); now-last > int64(noSessionLogInterval) &&
+			e.noSessionLogNanos.CompareAndSwap(last, now) {
+			e.log.Debugf("mesh: dropped data packet from %s naming session index %d, which this node no longer holds (%d such drops so far); a peer re-handshaked and is still using the old index, or this is stale in-flight traffic", from, h.RecvSession, n)
+		}
 		return
 	}
 	ps.recvMu.Lock()
