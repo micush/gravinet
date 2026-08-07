@@ -70,9 +70,12 @@ control plane, relay fallback, and broadcast/multicast:
   other interfaces. Best-effort per family — a missing IPv6 knob or
   insufficient privilege doesn't block the other — and restored to its
   prior value on clean shutdown.
-- **NAT** — IPv4-only: stateful source NAT/masquerade (with port translation)
-  and destination NAT/port-forward on the overlay data path, with connection
-  tracking that reverse-translates replies; checksums recomputed.
+- **NAT** — stateful source NAT/masquerade (with port translation) and
+  destination NAT/port-forward, with connection tracking that reverse-translates
+  replies; checksums recomputed. Two paths share one rule list: the kernel path
+  (nft/iptables/pf) translates gateway traffic leaving a physical interface and
+  handles IPv4 and IPv6; the overlay data path translates between overlay peers
+  and is IPv4-only. A rule cannot mix address families.
 - **Web admin** — an HTTPS UI + JSON API over the running engine (peers, bans,
   routes, firewall) with session login and a 3-fails/minute → 15-minute lockout.
   **Enabled by default** on `127.0.0.1:8443` with self-signed TLS. Authenticates

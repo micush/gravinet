@@ -29,7 +29,8 @@ func TestNATRuleSpecToRuleDetectsMode(t *testing.T) {
 		{"port-forward with whitespace", NATRuleSpec{Translate: "port-forward: 10.0.0.5 "}, true, dnatAction, "10.0.0.5"},
 		{"port-forward missing target", NATRuleSpec{Translate: "port-forward:"}, false, 0, ""},
 		{"port-forward bad target", NATRuleSpec{Translate: "port-forward:not-an-ip"}, false, 0, ""},
-		{"port-forward IPv6 target rejected", NATRuleSpec{Translate: "port-forward:fd00::1"}, false, 0, ""},
+		{"port-forward IPv6 target", NATRuleSpec{Translate: "port-forward:fd00::1"}, true, dnatAction, "fd00::1"},
+		{"port-forward IPv6 target bracketed with port", NATRuleSpec{Translate: "port-forward:[fd00::1]:443"}, true, dnatAction, "fd00::1"},
 		{"masquerade needs interface to resolve", NATRuleSpec{Translate: "masquerade"}, false, 0, ""},
 	}
 	for _, c := range cases {
@@ -67,7 +68,7 @@ func makeUDP(src, dst netip.Addr, sport, dport uint16, payload []byte) []byte {
 	ulen := uint16(8 + len(payload))
 	p[ihl+4], p[ihl+5] = byte(ulen>>8), byte(ulen)
 	copy(p[ihl+8:], payload)
-	fixChecksums(p, ihl)
+	fixChecksums(p, ipHdr{l4off: ihl, proto: p[9]})
 	return p
 }
 

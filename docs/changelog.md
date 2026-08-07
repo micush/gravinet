@@ -2,6 +2,80 @@
 
 ---
 
+## v809 — 2026-08-07
+
+**NAT accepted IPv4 only, and the restriction was in one place while three layers underneath it had been dual-stack all along. This release removes the restriction and completes the one layer that genuinely wasn't: the overlay data path, which needed real IPv6 packet handling rather than a relaxed family check.**
+
+### What was actually blocking it
+
+`validNATCIDR` rejected any non-IPv4 source or dest with "NAT is IPv4-only", and `buildNATRule` applied the same `Is4()` gate to static-SNAT and port-forward targets. Below that, everything was already prepared for both families and had been unreachable: `nftScript` emits a separate table per family, the Linux backend resolves `ip6tables` and applies IPv6 rules through it, `pfScript` writes `inet6`, and `winNATScript` routes IPv6 rules to its `unsupported` list rather than mis-programming them. `netfilter.Rule.V6` existed, `splitFamily` existed, and `kernelNATRules` computed `V6` from the addresses — a computation that could never yield true, because config had rejected every IPv6 address long before.
+
+So the kernel path needed nothing but permission. The overlay path in `internal/mesh/nat.go` needed to be written.
+
+### The overlay path
+
+`ipv4Fields` returned `ihl`, and every rewrite downstream took that as the offset of the upper-layer header. For IPv6 that assumption does not hold: the fixed header is 40 bytes followed by however many extension headers the sender chained, so the offset has to be walked to. `ipFields` now returns an `ipHdr` carrying `l4off`, the resolved upper-layer protocol, and the family; `setSrc`, `setDst`, and `fixChecksums` take that instead of a bare integer. `ipv4Fields` survives with its original signature over the new parser, which keeps the existing tests and the fuzz target as regression cover on the rewrite.
+
+Three IPv6 chains are refused rather than translated. AH (51) authenticates the very addresses NAT rewrites, so translating one invalidates it by construction. ESP (50) and "no next header" (59) leave no locatable checksum. Refusing means the packet passes through untouched, which is the safe direction — a NAT that declines to act costs that flow its connectivity, while one that rewrites blind corrupts packets that would otherwise have worked. The extension-header walk is bounded at eight, because RFC 8200 sets no limit and a crafted chain should not be trusted to terminate.
+
+### ICMPv6 is where an IPv4-shaped implementation goes wrong
+
+`fixChecksums` returned early for anything that wasn't TCP or UDP. That is correct for ICMPv4, whose checksum spans only the ICMP message and survives an address rewrite untouched. ICMPv6's checksum covers the pseudo-header, so a translated packet keeps a checksum that no longer matches and every receiving stack discards it — with the NAT looking correct from both ends and the conntrack entry sitting there as if the flow were live. Protocol 58 is now recomputed alongside TCP and UDP.
+
+The pseudo-header itself is one expression for both families: IPv6 spells the upper-layer length and next-header as 32-bit fields where IPv4 uses 16 and 8, but a ones-complement sum folds the zero high halves away.
+
+### One rule, one family
+
+A `natRule` now carries `is6`, taken from its translation target, and matches only packets of that family. Without it a v4 rule with no source prefix would claim IPv6 packets — `prefixMatch` treats an unset prefix as "any", which is family-agnostic, so the gate cannot come from the prefixes. It would then rewrite a v6 address with `As4` and produce a packet made of the wrong sixteen bytes.
+
+`natFamilyAgreement` enforces the same rule at config time, and `toRule` re-checks it at load for a config that arrived some other way. This matters more than it looks: a `netfilter.Rule` carries a single `V6` flag and `kernelNATRules` derives it from one field, rendering every *other* field with that family's keyword. A v4 source with a v6 target does not fail loudly — it emits `ip6 saddr 192.168.203.0/24`, which nft rejects and which the iptables backend simply hands to `ip6tables`. Neither is diagnosable by the time it gets there.
+
+### The colon problem
+
+Both the config layer and `kernelNATRules` split a port-forward target on its first colon. An IPv6 address is mostly colons, so `port-forward:fd00:203::5` decomposed into the address `fd00` with `203::5` offered as its port. `config.SplitNATTarget` is exported precisely so the three call sites — config validation, kernel rules, and the overlay path's `toRule` — cannot drift: brackets are required when a remap port follows (`port-forward:[fd00:203::5]:443`) and optional without one, since an unbracketed string that parses whole as an address is unambiguous.
+
+IPv4-mapped forms (`::ffff:a.b.c.d`) are rejected outright. `netip.Addr.Is6` answers true for them, so one would be sorted into the `ip6` table and emitted as a match that can never fire — a silently dead rule rather than an error.
+
+### Masquerade and the "any" source
+
+Masquerade has no target address, so its source prefix is the only field that can name a family, and a blank source cannot name one. Rather than program IPv4 and leave the operator to discover that half their traffic was untouched, `buildNATRule` now refuses that combination with a message saying so and pointing at the fix: name an explicit prefix, one rule per family. Existing stored configs are unaffected — they load and behave exactly as before; only adding or editing such a rule prompts.
+
+This keeps the model coherent: every NAT rule has exactly one address family, always, whether it got it from a source, a dest, or a target.
+
+### Also fixed
+
+Ports were read out of later IP fragments, where those bytes are payload that happens to sit where a port would be. Both families now read ports only from a first fragment, so a fragment no longer invents a flow that was never there.
+
+### Tests
+
+`internal/config/nat_v6_test.go` and `internal/mesh/nat_v6_test.go`.
+
+The overlay tests build real IPv6 packets and verify the recomputed checksum the way a receiving stack does — summing the upper-layer header with its pseudo-header and requiring zero — rather than asserting that some function was called. SNAT and DNAT are checked in both directions, since a reverse translation that leaves a stale checksum fails in exactly the same invisible way as a forward one. ICMPv6 has its own case for the reason above.
+
+Family gating is tested from both sides: a v4-only table must leave an IPv6 packet byte-identical, and a v6-only table must leave an IPv4 packet byte-identical. There are cases for an extension-header chain (asserting `l4off` lands at 48, not 40), for AH/ESP/no-next-header being refused, for a later fragment yielding no ports, and for a bracketed v6 port-forward surviving the round trip from stored config into a runtime rule.
+
+Two existing assertions were updated rather than deleted: `nat_rules_test.go`'s "IPv6 source" and "port-forward target must be IPv4" rejection cases now assert the mixed-family and unclosed-bracket rejections that replaced them, and `nat_test.go`'s "port-forward IPv6 target rejected" case now asserts it is accepted, with a bracketed-with-port companion.
+
+### Verified
+
+`go build ./...` clean at `CGO_ENABLED=0`. `go vet` and `gofmt -l` clean across the changed packages.
+
+Full `internal/mesh` suite run to completion in ten chunks: **616 tests, 616 passed, 0 failed**, with chunk membership verified against `-test.list` so a pattern matching nothing could not pass as a green chunk. `internal/config`, `internal/netfilter`, and `internal/webadmin` all pass. The NAT paths in `internal/mesh` and `internal/config` also pass under `-race`.
+
+The generated nft ruleset was inspected directly for a dual-stack rule set, confirming a separate `ip6 gravinet_nat` table, `ip6 saddr` matches, and a bracketed IPv6 DNAT target (`dnat to [fd00:203::9]:443`).
+
+### Not verified
+
+No IPv6 NAT has moved a real packet. The container has IPv6 disabled, so the overlay path is covered by unit tests that construct packets and check checksums arithmetically, and the kernel path by inspecting the generated script — not by loading it into a kernel. The checksum arithmetic is the part most likely to be right or wrong in a way tests catch; the part tests cannot catch is whether `nft` accepts the script on a given kernel and whether conntrack behaves as expected under load. Worth a live check on one node before relying on it.
+
+The pf backends (macOS, FreeBSD, OpenBSD) emit `inet6` rules and always could; that path is unchanged here and equally untested against a live pf. WinNAT remains IPv4-only by its own limitation, and reports IPv6 rules as unsupported rather than dropping them silently.
+
+### Rolling upgrade
+
+No wire format change and nothing advertised; NAT is local to the node applying it. An existing IPv4 config behaves identically on v809.
+
+---
+
 ## v808 — 2026-08-07
 
 **v807's self-address rejection was placed on the two functions a configured seed never calls. A whole-mesh collection an hour after the fleet upgraded shows the other three fixes holding on all thirteen nodes and this one working only where it was never needed: `gn-ionos3`, whose own address is a seed with a twelve-port fallback list and whose `tcp_ports` covers every one of those ports, handshaked itself 793 times in nineteen minutes.**

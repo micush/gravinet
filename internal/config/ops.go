@@ -1088,18 +1088,81 @@ func validNATCIDR(field, s string) (string, error) {
 		return "", nil
 	}
 	if ip, err := netip.ParseAddr(s); err == nil {
-		if !ip.Is4() {
-			return "", fmt.Errorf("%s %q: NAT is IPv4-only", field, s)
+		if ip.Is4In6() {
+			return "", fmt.Errorf("%s %q: write an IPv4-mapped address in plain IPv4 form (%s)", field, s, ip.Unmap())
 		}
 		return s, nil
 	}
 	if p, err := netip.ParsePrefix(s); err == nil {
-		if !p.Addr().Is4() {
-			return "", fmt.Errorf("%s %q: NAT is IPv4-only", field, s)
+		if p.Addr().Is4In6() {
+			return "", fmt.Errorf("%s %q: write an IPv4-mapped prefix in plain IPv4 form", field, s)
 		}
 		return s, nil
 	}
-	return "", fmt.Errorf("%s %q: not an IPv4 address or CIDR", field, s)
+	return "", fmt.Errorf("%s %q: not an IP address or CIDR", field, s)
+}
+
+// natFieldFamily reports the address family of an already-normalized NAT
+// field, and whether the field names an address at all. A blank field (the
+// "any" match) has no family of its own and contributes nothing to the
+// agreement check below.
+//
+// IPv4-mapped forms never reach here — validNATCIDR and buildNATRule reject
+// them at the door, because netip.Addr.Is6 answers true for ::ffff:a.b.c.d
+// while the address is semantically IPv4. Left alone it would be sorted into
+// the ip6 table and emitted as an "ip6 saddr ::ffff:..." match that can never
+// fire, which is a silently dead rule rather than an error.
+func natFieldFamily(s string) (is6, set bool) {
+	if s == "" {
+		return false, false
+	}
+	if ip, err := netip.ParseAddr(s); err == nil {
+		return !ip.Is4(), true
+	}
+	if p, err := netip.ParsePrefix(s); err == nil {
+		return !p.Addr().Is4(), true
+	}
+	return false, false
+}
+
+// natFamilyAgreement checks that every address-bearing field of one rule names
+// the same family. fields is (label, value) pairs in the order they should be
+// reported.
+//
+// This has to be enforced here because nothing downstream can catch it. A
+// Rule carries a single V6 flag, and cmd/gravinet's kernelNATRules derives it
+// from one field only — the source for masquerade, the translate target for
+// SNAT and DNAT. Every other field is then rendered with that family's
+// keyword. So a v4 source with a v6 translate target does not fail; it
+// produces "ip6 saddr 192.168.203.0/24", which nft rejects outright, or worse
+// under the iptables backend where the v4 match is simply passed to ip6tables.
+// Neither is a diagnosable failure by the time it gets there.
+func natFamilyAgreement(fields ...[2]string) (is6 bool, err error) {
+	var have bool
+	var firstLabel, firstValue string
+	for _, f := range fields {
+		label, value := f[0], f[1]
+		v6, set := natFieldFamily(value)
+		if !set {
+			continue
+		}
+		if !have {
+			is6, have, firstLabel, firstValue = v6, true, label, value
+			continue
+		}
+		if v6 != is6 {
+			return false, fmt.Errorf("%s %q is IPv%s but %s %q is IPv%s — one NAT rule cannot mix address families; write one rule per family",
+				firstLabel, firstValue, natFamilyDigit(is6), label, value, natFamilyDigit(v6))
+		}
+	}
+	return is6, nil
+}
+
+func natFamilyDigit(is6 bool) string {
+	if is6 {
+		return "6"
+	}
+	return "4"
 }
 
 // validNATPortSpec parses a DestPort value: "" (any), "N" (a single port,
@@ -1181,22 +1244,30 @@ func buildNATRule(source, dest, destPort, proto, translate, iface string) (NATRu
 	translate = strings.TrimSpace(translate)
 	iface = strings.TrimSpace(iface)
 	if rest, ok := cutNATPortForwardPrefix(translate); ok {
-		addrPart, portPart, hasPort := strings.Cut(strings.TrimSpace(rest), ":")
-		addrPart = strings.TrimSpace(addrPart)
-		ip, perr := netip.ParseAddr(addrPart)
-		if perr != nil || !ip.Is4() {
-			return NATRule{}, fmt.Errorf("port-forward target %q: must be an IPv4 address", addrPart)
+		addrPart, portPart, hasPort, perr := SplitNATTarget(rest)
+		if perr != nil {
+			return NATRule{}, perr
 		}
-		out := natPortForwardPrefix + addrPart
+		ip, aerr := netip.ParseAddr(addrPart)
+		if aerr != nil {
+			return NATRule{}, fmt.Errorf("port-forward target %q: must be an IP address", addrPart)
+		}
+		if ip.Is4In6() {
+			return NATRule{}, fmt.Errorf("port-forward target %q: write an IPv4-mapped address in plain IPv4 form (%s)", addrPart, ip.Unmap())
+		}
+		out := natPortForwardPrefix + natTargetText(ip, 0)
 		if hasPort {
-			toPort, perr := strconv.Atoi(strings.TrimSpace(portPart))
-			if perr != nil || toPort < 1 || toPort > 65535 {
+			toPort, nerr := strconv.Atoi(strings.TrimSpace(portPart))
+			if nerr != nil || toPort < 1 || toPort > 65535 {
 				return NATRule{}, fmt.Errorf("port-forward remap port %q: must be 1-65535", portPart)
 			}
 			if dpLo == 0 || dpLo != dpHi {
 				return NATRule{}, fmt.Errorf("port-forward remap (%s:%d) needs a single dest-port, not a range or \"any\" — a range/any can't remap to one fixed port", addrPart, toPort)
 			}
-			out = fmt.Sprintf("%s%s:%d", natPortForwardPrefix, addrPart, toPort)
+			out = natPortForwardPrefix + natTargetText(ip, uint16(toPort))
+		}
+		if _, ferr := natFamilyAgreement([2]string{"source", src}, [2]string{"dest", dst}, [2]string{"port-forward target", addrPart}); ferr != nil {
+			return NATRule{}, ferr
 		}
 		// Port-forwarding is a fixed rewrite target, not a per-interface
 		// masquerade, so it carries no interface — same as any other literal
@@ -1212,14 +1283,85 @@ func buildNATRule(source, dest, destPort, proto, translate, iface string) (NATRu
 			return NATRule{}, fmt.Errorf("masquerade needs an interface (translate=masquerade requires iface)")
 		}
 		translate = "masquerade"
+		// Masquerade has no target address, so the source prefix is the only
+		// thing that can name a family — see kernelNATRules, which sets V6
+		// from it alone. A blank source therefore cannot mean "both": it
+		// resolves to IPv4, exactly as it always has. Say so rather than
+		// programming half of what the operator asked for in silence.
+		if _, set := natFieldFamily(src); !set {
+			return NATRule{}, fmt.Errorf("masquerade with source \"any\" covers IPv4 only — a rule takes its family from its source, and there is nothing else here to take it from; give an explicit source prefix (one rule per family) if you want IPv6 masqueraded too")
+		}
 	} else {
 		ip, perr := netip.ParseAddr(translate)
-		if perr != nil || !ip.Is4() {
-			return NATRule{}, fmt.Errorf("translate %q: must be an IPv4 address, \"masquerade\", or \"port-forward:<ipv4>[:<port>]\"", translate)
+		if perr != nil {
+			return NATRule{}, fmt.Errorf("translate %q: must be an IP address, \"masquerade\", or \"port-forward:<addr>[:<port>]\" (bracket an IPv6 address when a port follows)", translate)
+		}
+		if ip.Is4In6() {
+			return NATRule{}, fmt.Errorf("translate %q: write an IPv4-mapped address in plain IPv4 form (%s)", translate, ip.Unmap())
 		}
 		iface = ""
 	}
+	if _, err := natFamilyAgreement([2]string{"source", src}, [2]string{"dest", dst}, [2]string{"translate", translate}); err != nil {
+		return NATRule{}, err
+	}
 	return NATRule{Source: src, Dest: dst, Translate: translate, Interface: iface}, nil
+}
+
+// SplitNATTarget separates a port-forward target into its address and optional
+// remap port. Exported because cmd/gravinet's kernelNATRules has to reach the
+// identical decomposition when it turns stored config back into kernel rules,
+// and this is too easy to get subtly wrong twice: the naive strings.Cut on the
+// first colon that both sides used while NAT was IPv4-only silently truncates
+// "fd00:203::5" to "fd00" and hands "203::5" over as a port.
+//
+// An IPv6 address must be bracketed when a remap port follows it, since its
+// own colons are otherwise indistinguishable from the ":<port>" separator.
+// Without a port the brackets are optional: an unbracketed string that parses
+// whole as an address is unambiguous, so "port-forward:fd00:203::5" is
+// accepted and means what it looks like.
+func SplitNATTarget(s string) (addr, port string, hasPort bool, err error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", "", false, fmt.Errorf("port-forward target is empty")
+	}
+	if strings.HasPrefix(s, "[") {
+		end := strings.Index(s, "]")
+		if end < 0 {
+			return "", "", false, fmt.Errorf("port-forward target %q: unclosed \"[\"", s)
+		}
+		addr = strings.TrimSpace(s[1:end])
+		switch remainder := strings.TrimSpace(s[end+1:]); {
+		case remainder == "":
+			return addr, "", false, nil
+		case strings.HasPrefix(remainder, ":"):
+			return addr, strings.TrimSpace(remainder[1:]), true, nil
+		default:
+			return "", "", false, fmt.Errorf("port-forward target %q: expected \":<port>\" after \"]\"", s)
+		}
+	}
+	// Unbracketed: a string that parses whole as an address carries no port,
+	// which is what lets an IPv6 target skip the brackets when it doesn't
+	// need one.
+	if _, e := netip.ParseAddr(s); e == nil {
+		return s, "", false, nil
+	}
+	a, p, ok := strings.Cut(s, ":")
+	if !ok {
+		return s, "", false, nil
+	}
+	return strings.TrimSpace(a), strings.TrimSpace(p), true, nil
+}
+
+// natTargetText renders a port-forward target for storage, bracketing an IPv6
+// address whenever a port follows so SplitNATTarget can read it back.
+func natTargetText(ip netip.Addr, port uint16) string {
+	if port == 0 {
+		return ip.String()
+	}
+	if ip.Is6() {
+		return fmt.Sprintf("[%s]:%d", ip, port)
+	}
+	return fmt.Sprintf("%s:%d", ip, port)
 }
 
 func (c *Config) NATRuleAdd(netName, source, dest, destPort, proto, translate, iface string) error {

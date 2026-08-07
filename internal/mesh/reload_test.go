@@ -77,7 +77,7 @@ func TestNATMasqueradeInterface(t *testing.T) {
 	ifaces, _ := net.Interfaces()
 	var name string
 	for _, ifc := range ifaces {
-		if ip, ok := interfaceIPv4(ifc.Name); ok && ip.IsValid() {
+		if ip, ok := interfaceAddr(ifc.Name, false); ok && ip.IsValid() {
 			name = ifc.Name
 			break
 		}

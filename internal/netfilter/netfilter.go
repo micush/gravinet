@@ -174,9 +174,7 @@ func nftDport(r Rule) string {
 
 // nftDnatTo renders the dnat target: the bare address, or "address:port"
 // when ToPort remaps it (IPv6 targets get bracketed, nft's own requirement
-// for disambiguating the address's colons from the port separator — not
-// reachable today since config.NATRule is IPv4-only, but this stays correct
-// if that ever changes).
+// for disambiguating the address's colons from the port separator).
 func nftDnatTo(r Rule) string {
 	if r.ToPort == 0 {
 		return r.To.String()

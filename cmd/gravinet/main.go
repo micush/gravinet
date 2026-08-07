@@ -48,7 +48,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "808"
+	version = "809"
 	commit  = "none"
 )
 
@@ -2857,7 +2857,14 @@ func kernelNATRules(cfg *config.Config) []netfilter.Rule {
 			// config.buildNATRule's.
 			if len(t) >= len(natPortForwardPrefix) && strings.EqualFold(t[:len(natPortForwardPrefix)], natPortForwardPrefix) {
 				rest := strings.TrimSpace(t[len(natPortForwardPrefix):])
-				addrPart, portPart, hasPort := strings.Cut(rest, ":")
+				// Must use config's own splitter, not a strings.Cut on the
+				// first colon: an IPv6 target's address contains colons of its
+				// own, and cutting on the first one truncates the address and
+				// feeds its tail in as a port. See config.SplitNATTarget.
+				addrPart, portPart, hasPort, perr := config.SplitNATTarget(rest)
+				if perr != nil {
+					continue
+				}
 				to, err := netip.ParseAddr(strings.TrimSpace(addrPart))
 				if err != nil || !to.IsValid() {
 					continue // DNAT needs a literal IPv4/IPv6 target
@@ -2882,7 +2889,10 @@ func kernelNATRules(cfg *config.Config) []netfilter.Rule {
 				continue
 			}
 			if t == "" || strings.EqualFold(t, "masquerade") {
-				// Family comes from the source prefix; default IPv4 when unspecified.
+				// Masquerade has no target address, so the source prefix is the
+				// only field that can name a family; a blank source means IPv4.
+				// config.buildNATRule refuses to save that combination without
+				// saying so, so this default is never a silent one.
 				out = append(out, netfilter.Rule{Kind: netfilter.Masquerade, Source: src, OutIface: r.Interface, V6: src.IsValid() && src.Addr().Is6()})
 			} else if to, err := netip.ParseAddr(t); err == nil && to.IsValid() {
 				out = append(out, netfilter.Rule{Kind: netfilter.SNAT, Source: src, OutIface: r.Interface, To: to, V6: to.Is6()})

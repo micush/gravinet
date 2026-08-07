@@ -759,11 +759,16 @@ translated then sent — so the filter always sees the internal address view.
 - **DNAT / port-forward** (underlay→overlay): rewrite the destination of matching
   ingress packets to an internal host; replies leaving on egress have their
   source restored.
-- IPv4 + TCP/UDP checksums are recomputed after every rewrite; conntrack entries
-  time out after two minutes of silence. NAT is IPv4-only and, like a router's
-  masquerade, the *forwarding* of translated traffic onto a non-mesh physical
-  interface (true exit-node operation) is a host/OS concern — the daemon does
-  the translation and tracking.
+- Checksums are recomputed after every rewrite and conntrack entries time out
+  after two minutes of silence. Both address families are translated: IPv4
+  needs its header checksum redone where IPv6 has none, and ICMPv6's checksum
+  covers the pseudo-header where ICMPv4's does not. A rule's family comes from
+  its translation target and matches only packets of that family, so a
+  dual-stack overlay takes one rule per family. IPv6 packets carrying AH or ESP
+  pass through untranslated — AH authenticates the addresses NAT would rewrite.
+  Like a router's masquerade, the *forwarding* of translated traffic onto a
+  non-mesh physical interface (true exit-node operation) is a host/OS concern —
+  the daemon does the translation and tracking.
 
 ## Status
 Steps 1–12 complete. Checksum correctness, SNAT and DNAT round-trips, and PAT
@@ -772,7 +777,8 @@ is verified across two live engines (a LAN-sourced packet is source-translated,
 reaches the peer, and the peer's reply is reverse-translated back to the
 original host with valid checksums). The tree passes `-race` and cross-compiles
 to linux/windows/darwin on amd64/arm64. (Container IPv6 stays disabled, so v6
-paths are validated by review and v4-equivalent tests; NAT itself is IPv4-only.)
+paths — NAT's included — are validated by review and by unit tests that build
+IPv6 packets and verify the recomputed checksums, rather than by live traffic.)
 
 ## Firewalling (step 11)
 

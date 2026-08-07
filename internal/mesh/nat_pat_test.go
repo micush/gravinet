@@ -166,7 +166,7 @@ func makeTCP(src, dst netip.Addr, sport, dport uint16) []byte {
 	p[ihl], p[ihl+1] = byte(sport>>8), byte(sport)
 	p[ihl+2], p[ihl+3] = byte(dport>>8), byte(dport)
 	p[ihl+12] = 5 << 4 // data offset: 5 words (20 bytes), no options
-	fixChecksums(p, ihl)
+	fixChecksums(p, ipHdr{l4off: ihl, proto: p[9]})
 	return p
 }
 

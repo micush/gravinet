@@ -46,10 +46,10 @@ func TestNATRuleAddRejectsBadInput(t *testing.T) {
 		{"not-an-ip", "", "", "", "masquerade", "eth0"},                // bad source
 		{"", "10.0.0.0/24", "", "", "masquerade", ""},                  // masquerade without iface
 		{"", "", "", "", "999.1.1.1", ""},                              // bad translate
-		{"fd00::/8", "", "", "", "masquerade", "eth0"},                 // IPv6 source
+		{"fd00::/8", "", "", "", "192.168.1.1", ""},                    // v6 source with v4 target: families must agree
 		{"", "", "", "", "port-forward:", ""},                          // port-forward with no target
 		{"", "", "", "", "port-forward:not-an-ip", ""},                 // port-forward with a bad target
-		{"", "", "", "", "port-forward:fd00::1", ""},                   // port-forward target must be IPv4
+		{"", "", "", "", "port-forward:[fd00::1", ""},                  // port-forward target with an unclosed bracket
 		{"", "", "32400", "", "port-forward:10.0.0.9", ""},             // dest-port without proto
 		{"", "", "abc", "tcp", "port-forward:10.0.0.9", ""},            // unparseable dest-port
 		{"", "", "0", "tcp", "port-forward:10.0.0.9", ""},              // dest-port out of range

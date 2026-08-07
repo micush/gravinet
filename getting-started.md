@@ -208,7 +208,9 @@ A separate, node-global **Allow List** — management, BGP, OSPF, and RIP by def
 
 ## 12. NAT
 
-Go to **Traffic → NAT**. This rewrites IPv4 addresses (IPv4-only) as traffic crosses the tunnel. **Source** and **dest** pick which packets a rule matches (blank = any); **translate** is either _masquerade_ (rewrite to whatever address the chosen physical interface currently has — many overlay addresses map to one outside address) or a literal IPv4 address to translate to instead.
+Go to **Traffic → NAT**. This rewrites addresses as traffic crosses the tunnel. **Source** and **dest** pick which packets a rule matches (blank = any); **translate** is either _masquerade_ (rewrite to whatever address the chosen physical interface currently has — many overlay addresses map to one outside address) or a literal address to translate to instead.
+
+IPv4 and IPv6 are both supported, but one rule cannot mix families — write one per family. _masquerade_ takes its family from **source** alone, so a blank (any) source means IPv4; give an explicit IPv6 prefix (e.g. `fd00:203::/64`) to masquerade IPv6 as well. IPv6 rules apply to gateway traffic leaving a physical interface; translation *between overlay peers* remains IPv4-only.
 
 Click **+** to add a rule, double-click any field to edit it or the state tag to toggle it, tick rows and **−** to remove.
 
