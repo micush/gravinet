@@ -668,6 +668,7 @@ func (e *Engine) maintLoop(ns *netState) {
 		// localEndpoints). This picks up an interface coming up or going down,
 		// a DHCP lease change, or a port change, within one maintenance tick.
 		e.refreshLocalCandidates()
+		e.sweepOwnAddressSeeds(ns)
 		e.maybeAssignAddress(ns)
 		e.reconcileDataplane(ns, now)
 		e.pruneDead(ns, now)

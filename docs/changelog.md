@@ -2,6 +2,68 @@
 
 ---
 
+## v808 — 2026-08-07
+
+**v807's self-address rejection was placed on the two functions a configured seed never calls. A whole-mesh collection an hour after the fleet upgraded shows the other three fixes holding on all thirteen nodes and this one working only where it was never needed: `gn-ionos3`, whose own address is a seed with a twelve-port fallback list and whose `tcp_ports` covers every one of those ports, handshaked itself 793 times in nineteen minutes.**
+
+### What v807 got right
+
+From `gravinet-tshoot-mesh-20260807041621`, counted after each node's own v807 restart line rather than across the whole tail:
+
+- `?ambiguous` seed skips: **0 on all thirteen nodes**, against 449–8,187 beforehand.
+- `mcfed` ↔ `gn-ionos2`: direct in both directions, `tx`/`rx` matching within a few hundred bytes each way, RTT measured on both sides, no reconnects. `mcfed` is dialing `66.179.240.44:65432` — the exact address it refused for hours.
+- EMSGSIZE: first rejection 20:56:54 on `gn-ionos2`, last 21:14:07, then silence for the following seven hours. `mcfed` and `gn-cush2` converge in the same window. Path MTU discovery now runs once and stays converged instead of sawtoothing indefinitely.
+
+The escape hatch fired three times across the fleet (`gn-freebsd` twice, `gn-rocky` once) and is doing what it exists for.
+
+### The gap
+
+`isOwnUnderlaySeed` was called from `addSeed` and `addTCPSeed`. A network's configured seeds reach neither: `buildOneNetSpec` resolves them into `NetSpec.Seeds`/`TCPSeeds` and `newNetState` copies both lists verbatim — the arrangement `multiport_seed_test` already documents, and the reason a configured seed historically had no `seedOwner` entry.
+
+So the filter covered every address learned at runtime and missed the one an operator is most likely to have wrong: their own node, in the seed list they share across the fleet.
+
+It could not have been fixed by filtering in `newNetState` either. That runs before the first `refreshLocalCandidates`, so `ownAddrs` is nil and `isOwnAddr` answers false for everything.
+
+### Why only gn-ionos3 showed it
+
+`gn-ionos2` has the identical defect — `tcp://66.179.240.44:65432,23,70,…` naming itself — and got away with one connection at boot, because it listens on 65432 alone and the other twelve dials came back `connection refused`. Its 1,176 `ignoring endpoint … this host holds that address` lines are v807 correctly blocking the *re-additions* while the original config entry sailed past.
+
+`gn-ionos3` has `tcp_ports: [65432, 23, 70, 79, 513, 21, 7, 11, 13, 15, 17, 19, 443]`. Every self-dial connected, each established a TCP fallback to this daemon, and each handshaked into `onHSInit`'s own-node-id drop. The severity of the same bug was set entirely by how many ports the node happens to listen on.
+
+### Fix
+
+`sweepOwnAddressSeeds` removes self-addressed entries from `ns.seeds` and `ns.tcpSeeds`, clearing the seed's owner, backoff and fallback records with it. Called once in `NewEngine` after the priming `refreshLocalCandidates` — the earliest point the enumeration exists — and again on each maintenance tick, immediately after the refresh that could have changed the answer.
+
+A sweep rather than a filter, and that is the point: it catches the configured seeds no constructor-time filter could see, and it also catches a node that *later* acquires an address some existing seed already names. Logged at Info, once, because the entries are gone after the first pass and `addSeed`/`addTCPSeed` refuse to put them back.
+
+Existing self-connections are not torn down. They carry no session — every handshake over them is dropped — and removing the seed stops `primeTCPSeeds` re-establishing them, so they idle out.
+
+### Tests
+
+`TestConfiguredSelfSeedIsSweptFromBothLists` builds the engine through `NetSpec.Seeds`/`TCPSeeds`, which is the path that bypassed v807, using `gn-ionos3`'s real shape: own address on the primary port and on a fallback port, in both lists, alongside a genuine peer seed. Both self entries must go from both lists and the peer seed must stay.
+
+`TestSweepIsInertWithoutEnumeration` stores a nil `ownAddrs` and asserts the seed list survives. "Unknown" must never read as "ours" — a sweep that got that backwards would empty the seed list at boot and take the node off the mesh entirely, which is a considerably worse failure than the one being fixed.
+
+The v807 cases and the three v791 cross-dial cases pass unchanged.
+
+### Verified
+
+`go build ./...` clean at `CGO_ENABLED=0`; `go vet ./internal/mesh/` clean; `gofmt -l` reports nothing under `internal/mesh` or `cmd`.
+
+The full `internal/mesh` suite now runs to completion: **607 tests, 607 passed, 0 failed, 0 skipped**, in ten chunks against a single v808 build. Chunk membership was verified with `-test.list` against the same regexes used to run them, all ten matching their intended count exactly and summing to 607 — without that check a chunk whose pattern matched nothing would also have printed `PASS`, which is the way this particular verification fails quietly. `internal/webadmin` still needs `pam_appl.h` for a CGO build; absent on this host, pre-existing, unrelated to these changes.
+
+### Rolling upgrade
+
+Local to the node, nothing advertised, no wire format change. Upgrade the nodes whose seed list names themselves; `gn-ionos3` is the one presently affected, `gn-ionos2` the one that would be on a different port configuration.
+
+### What is still not solved
+
+`gn-ionos1` did not respond to the collection (`context deadline exceeded` on its `/api/tshoot`) and is the one node in the fleet with no evidence either way.
+
+The endpoint flapping and the `explicitSeedSet` layering issue both stand as written in v807. Nothing yet warns an operator that a seed names the local machine at config-validation time, which is where it belongs — the sweep is a runtime repair of a config that could have been rejected on load.
+
+---
+
 ## v807 — 2026-08-07
 
 **A guard added in v791 to stop a cross-owner dial could reach its verdict from evidence that one ordinary node produces on its own, and once it did, nothing could ever lift it. `mcfed` spent from 16:31 onward refusing to dial `gn-ionos2` — a seed it had been reaching directly all afternoon — because the suppression destroyed the only evidence that would have cleared it. Three further faults in the same pair of bundles are fixed alongside it.**
@@ -72,7 +134,7 @@ The reverted-fix check was run explicitly: with `ambiguousSeedAddrLocked` restor
 
 ### Verified
 
-`go build ./internal/mesh/ ./internal/config/`, `go vet ./internal/mesh/` clean including the new test file. All nine new cases pass. Full `internal/mesh` suite was still running at the time of writing with zero failures across ~210KB of output; it is not yet complete and this entry should not be read as claiming it is. `internal/webadmin` was not built — `auth_pam.go` needs `pam_appl.h`, absent from the build host, which is a pre-existing condition of that environment and not a change here.
+`go build ./internal/mesh/ ./internal/config/`, `go vet ./internal/mesh/` clean including the new test file. All nine new cases pass. The full `internal/mesh` suite was incomplete when this entry was first written; it has since been run to completion on the v808 tree that carries these changes — 607 tests, all passing — and the result is recorded in v808's Verified section. `internal/webadmin` was not built: `auth_pam.go` needs `pam_appl.h`, absent from the build host, a pre-existing condition of that environment and not a change here.
 
 ### Rolling upgrade
 

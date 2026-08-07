@@ -1642,6 +1642,12 @@ func NewEngine(o Options) *Engine {
 	// rather than lazily on first use, because the only caller of
 	// localEndpoints runs under ns.mu and must never do the enumeration itself.
 	e.refreshLocalCandidates()
+	// Now that the enumeration exists, drop any configured seed naming this
+	// host. Cannot be done in newNetState: it runs before the refresh above, so
+	// ownAddrs is nil there and the check answers false for everything.
+	for _, ns := range e.netSnapshot() {
+		e.sweepOwnAddressSeeds(ns)
+	}
 	return e
 }
 

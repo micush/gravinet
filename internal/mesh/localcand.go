@@ -293,6 +293,66 @@ func (e *Engine) isOwnUnderlaySeed(seed netip.AddrPort) bool {
 	return e.isOwnAddr(ip)
 }
 
+// sweepOwnAddressSeeds removes seeds pointing at this host itself, from both
+// dial lists.
+//
+// v807 added the same rejection to addSeed and addTCPSeed, which covers every
+// address learned at runtime — but not the ones that matter most. A network's
+// configured seeds never pass through either function: buildOneNetSpec resolves
+// them into NetSpec.Seeds/TCPSeeds and newNetState copies both lists verbatim,
+// which is exactly the arrangement multiport_seed_test documents. So the one
+// self-address an operator is most likely to have (their own node, in the seed
+// list they share across the fleet) was the one case still not filtered.
+//
+// It could not have been filtered at construction anyway: newNetState runs
+// before the first refreshLocalCandidates, so ownAddrs is nil and isOwnAddr
+// answers false for everything. The check has to happen once the enumeration
+// exists, which is why this is a sweep rather than a filter — and being a sweep
+// is what makes it right for the other case too, a node that later acquires an
+// address some seed already names.
+//
+// gn-ionos3 is what this costs when it is missing. Its own address was a seed,
+// with a twelve-port fallback list, and its tcp_ports covered every one of those
+// ports — so all thirteen self-dials connected, each established a TCP fallback
+// to this daemon, and each then handshaked into onHSInit's "claims our own node
+// id" drop, 793 times in nineteen minutes. gn-ionos2 had the identical seed
+// entry and got away with one connection at boot only because it listens on a
+// single port and the rest were refused.
+func (e *Engine) sweepOwnAddressSeeds(ns *netState) {
+	ns.mu.Lock()
+	defer ns.mu.Unlock()
+	var dropped []netip.AddrPort
+	kept := ns.seeds[:0]
+	for _, s := range ns.seeds {
+		if e.isOwnUnderlaySeed(s) {
+			dropped = append(dropped, s)
+			delete(ns.seedOwner, s)
+			delete(ns.seedBackoff, s)
+			delete(ns.seedFallback, s)
+			continue
+		}
+		kept = append(kept, s)
+	}
+	ns.seeds = kept
+	keptTCP := ns.tcpSeeds[:0]
+	for _, s := range ns.tcpSeeds {
+		if e.isOwnUnderlaySeed(s) {
+			dropped = append(dropped, s)
+			continue
+		}
+		keptTCP = append(keptTCP, s)
+	}
+	ns.tcpSeeds = keptTCP
+	if len(dropped) > 0 {
+		// Info, not Debug: this is an operator-visible statement that a line in
+		// their config names this machine, and it is the only notice they get.
+		// It cannot repeat on every tick — the entries are gone after the first
+		// sweep, and addSeed/addTCPSeed refuse to put them back.
+		e.log.Infof("mesh: dropped %d seed(s) on net %016x that name this host's own address — a seed must be a peer, "+
+			"and dialing these reaches only this daemon: %v", len(dropped), ns.spec.ID, dropped)
+	}
+}
+
 // clearDeadHostCands forgets every written-off host candidate on every network.
 // Called when this node's own candidate set changes — a new DHCP lease, an
 // interface up/down, a move from Wi-Fi to cellular. Reachability is a property

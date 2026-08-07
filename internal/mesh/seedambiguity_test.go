@@ -255,3 +255,72 @@ func TestLoopbackSeedsSurviveOwnAddressCheck(t *testing.T) {
 	}
 	t.Fatal("a loopback seed was rejected as this host's own address; peers on one host share it by design")
 }
+
+// A network's configured seeds never pass through addSeed or addTCPSeed —
+// buildOneNetSpec resolves them into NetSpec.Seeds/TCPSeeds and newNetState
+// copies both verbatim. v807's rejection therefore missed the one self-address
+// an operator is most likely to have: their own node, in the seed list shared
+// across the fleet. gn-ionos3 handshaked itself 793 times in nineteen minutes
+// on v807 because of it.
+func TestConfiguredSelfSeedIsSweptFromBothLists(t *testing.T) {
+	self := netip.MustParseAddr("77.68.127.174")
+	mine := netip.AddrPortFrom(self, 65432)
+	minAlt := netip.AddrPortFrom(self, 23) // the multi-port fallback list
+	peer := netip.MustParseAddrPort("74.208.225.216:65432")
+
+	e := NewEngine(Options{NodeID: "self", Nets: []NetSpec{{
+		ID: 1, Name: "n", Dev: newFakeDev("d"),
+		Subnet4:  netip.MustParsePrefix("10.0.0.0/24"),
+		Seeds:    []netip.AddrPort{mine, minAlt, peer},
+		TCPSeeds: []netip.AddrPort{mine, minAlt},
+	}}})
+	ns := e.netSnapshot()[1]
+
+	// Stand in for the interface enumeration, then sweep as the tick does.
+	own := map[netip.Addr]bool{self: true}
+	e.ownAddrs.Store(&own)
+	e.sweepOwnAddressSeeds(ns)
+
+	ns.mu.RLock()
+	defer ns.mu.RUnlock()
+	for _, s := range ns.seeds {
+		if s.Addr() == self {
+			t.Errorf("configured UDP seed %v names this host; every dial to it reaches this daemon", s)
+		}
+	}
+	for _, s := range ns.tcpSeeds {
+		if s.Addr() == self {
+			t.Errorf("configured TCP seed %v names this host; primeTCPSeeds dials ns.tcpSeeds every tick", s)
+		}
+	}
+	found := false
+	for _, s := range ns.seeds {
+		if s == peer {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the sweep removed a genuine peer seed; only this host's own addresses may go")
+	}
+}
+
+// The sweep must be a no-op before the interface enumeration has run. ownAddrs
+// is nil at newNetState time, and a check that treated "unknown" as "ours"
+// would delete the whole seed list at boot.
+func TestSweepIsInertWithoutEnumeration(t *testing.T) {
+	seed := netip.MustParseAddrPort("74.208.225.216:65432")
+	e := NewEngine(Options{NodeID: "self", Nets: []NetSpec{{
+		ID: 1, Name: "n", Dev: newFakeDev("d"),
+		Subnet4: netip.MustParsePrefix("10.0.0.0/24"),
+		Seeds:   []netip.AddrPort{seed},
+	}}})
+	ns := e.netSnapshot()[1]
+	e.ownAddrs.Store(nil)
+	e.sweepOwnAddressSeeds(ns)
+
+	ns.mu.RLock()
+	defer ns.mu.RUnlock()
+	if len(ns.seeds) == 0 {
+		t.Fatal("seeds were swept with no enumeration on record; unknown must never read as ours")
+	}
+}
