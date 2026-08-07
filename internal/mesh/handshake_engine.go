@@ -53,6 +53,50 @@ func (e *Engine) seedPeerPMTUFromHistory(ns *netState, ps *peerSession) {
 	}
 }
 
+// rememberLinkCapOfReplaced preserves the link cap discovered by the session
+// install() is about to replace, so the incoming session can inherit it via
+// seedPeerPMTUFromHistory instead of restarting discovery from the ceiling.
+//
+// pruneDead already does this when a session is *reaped* — but a re-handshake
+// does not go through pruneDead. install() overwrites ns.byNode[nodeID] and the
+// old session is simply dropped, taking everything its PMTU search learned with
+// it. On a stable link nobody notices. On a peer that re-handshakes every few
+// seconds — an endpoint flapping between two underlay paths, say — nothing is
+// ever reaped, so nothing is ever remembered, and every replacement starts the
+// climb again from the configured MTU. The result is a permanent sawtooth: an
+// oversized packet is refused by the kernel, eff collapses to the floor, the
+// search climbs partway back, the session is replaced, and the identical
+// oversized packet is sent again. Thousands of EMSGSIZE rejections that carry
+// no new information, and a peer whose effective MTU never settles.
+//
+// Runs before ns.mu is taken, and reads the outgoing session's pmtuMu only
+// after releasing it, because nothing in this package holds pmtuMu and ns.mu at
+// once (see seedPeerPMTUFromHistory's own note). Reading prev outside the lock
+// that install() later retakes is safe: this is advisory history, and the worst
+// a lost race costs is one un-inherited cap.
+func (e *Engine) rememberLinkCapOfReplaced(ns *netState, ps *peerSession) {
+	ns.mu.RLock()
+	prev := ns.byNode[ps.nodeID]
+	ns.mu.RUnlock()
+	if prev == nil || prev == ps {
+		return
+	}
+	lc := prev.currentLinkCap()
+	if lc <= 0 {
+		// Same contract as pruneDead's: no rejection this session is not
+		// evidence that an older, real constraint has lifted. Leave whatever
+		// is on record alone.
+		return
+	}
+	now := time.Now()
+	ns.mu.Lock()
+	if ni := ns.nodes[ps.nodeID]; ni != nil {
+		ni.lastLinkCap = lc
+		ni.lastLinkCapAt = now
+	}
+	ns.mu.Unlock()
+}
+
 func (e *Engine) install(ns *netState, ps *peerSession) {
 	if ps.nodeID == e.nodeID {
 		// Belt-and-suspenders: onHSInit/onHSResp already reject a handshake
@@ -66,6 +110,9 @@ func (e *Engine) install(ns *netState, ps *peerSession) {
 		return
 	}
 	ps.initPMTU(e.pmtuFloor, e.pmtuCeil)
+	// Order matters: harvest the outgoing session's cap into nodeInfo first, so
+	// the lookup immediately below can hand it straight to the incoming one.
+	e.rememberLinkCapOfReplaced(ns, ps)
 	e.seedPeerPMTUFromHistory(ns, ps)
 	ns.mu.Lock()
 	// A re-handshake for a peer we're already connected to (e.g. its endpoint
@@ -1283,9 +1330,34 @@ func (ns *netState) seedOwnerOfProto(seed netip.AddrPort, proto Proto) string {
 	return ns.seedOwner[seed]
 }
 
-// ambiguousSeedAddrLocked reports whether this exact host:port is configured
-// for more than one transport, which is precisely when the address-only owner
-// map cannot be trusted. Caller holds ns.mu.
+// ambiguousSeedAddrLocked reports whether this exact host:port is claimed by
+// two *different* nodes across the two transports, which is precisely when the
+// address-only owner map cannot be trusted. Caller holds ns.mu.
+//
+// Appearing in both seed lists is the precondition, not the proof. An earlier
+// version stopped at the precondition — "in tcpSeeds, and also in seeds with a
+// known owner" — and that is satisfied by the overwhelmingly common case this
+// guard is not for: ONE node listening on UDP and TCP at the same port, which
+// is the default config shape (udp_ports and tcp_ports both [65432]). Any node
+// configured as a "tcp://host:port" seed that also answers UDP there trips it
+// the moment its UDP address is learned and attributed, because explicitSeed
+// is a union over both lists (and over PeerCache, which resolveSeeds folds
+// into the UDP list), so the same host:port is "explicitly configured on both
+// transports" without any operator having configured two peers at all.
+//
+// The consequence was not a mis-dial but a permanent refusal to dial: owner
+// became ownerAmbiguous, ConflictsWith matched every candidate for that peer,
+// and the direct path was suppressed on every tick from then on, with no event
+// that could ever clear it. A node that had been reaching its seed directly for
+// hours dropped to relay-only after one attribution and stayed there.
+//
+// Two peers means two node IDs. That is the fact to test, and it is knowable:
+// seedOwnerProto holds a per-transport attribution, and configuredSeedOwnerUDP/
+// TCP hold ManagedPeers.IsSeed's own split-by-transport record. If every source
+// that has an opinion names the same node, this address belongs to that node on
+// both transports and the address-only map is exactly right. Only genuine
+// disagreement — the cush1(tcp)/cush2(udp)-behind-one-NAT topology this exists
+// for — makes it unusable.
 func (ns *netState) ambiguousSeedAddrLocked(seed netip.AddrPort) bool {
 	tcp := false
 	for _, t := range ns.tcpSeeds {
@@ -1297,15 +1369,40 @@ func (ns *netState) ambiguousSeedAddrLocked(seed netip.AddrPort) bool {
 	if !tcp {
 		return false
 	}
-	// It is a TCP seed; ambiguous only if a UDP seed shares the address too.
+	// It is a TCP seed; a UDP seed must share the address before the
+	// address-only map could be conflating anything at all.
+	shared := false
 	for _, u := range ns.seeds {
 		if u == seed && ns.explicitSeed[u] {
-			// Present in both lists at the same host:port.
-			udpOwner, hasUDP := ns.seedOwner[seed]
-			return hasUDP && udpOwner != ""
+			shared = true
+			break
 		}
 	}
-	return false
+	if !shared {
+		return false
+	}
+	return ns.distinctSeedOwnersLocked(seed) > 1
+}
+
+// distinctSeedOwnersLocked counts how many different node IDs are on record as
+// owning this host:port, across every attribution this network keeps. Sources
+// with no opinion contribute nothing; a count of 0 or 1 means no source
+// contradicts any other. Caller holds ns.mu.
+func (ns *netState) distinctSeedOwnersLocked(seed netip.AddrPort) int {
+	addr := seed.Addr().Unmap()
+	port := seed.Port()
+	seen := make(map[string]struct{}, 2)
+	note := func(owner string) {
+		if owner != "" {
+			seen[owner] = struct{}{}
+		}
+	}
+	note(ns.seedOwnerProto[CandKey{Addr: addr, Port: port, Proto: ProtoTCP}])
+	note(ns.seedOwnerProto[CandKey{Addr: addr, Port: port, Proto: ProtoUDP}])
+	note(ns.seedOwner[seed])
+	note(ns.configuredSeedOwnerTCP[seed])
+	note(ns.configuredSeedOwnerUDP[seed])
+	return len(seen)
 }
 
 // seedCandidates is the operator-configured seed set as candidates, for
@@ -1507,6 +1604,15 @@ func (e *Engine) addTCPSeed(networkID uint64, seed netip.AddrPort) {
 	if ns == nil || !seed.Addr().IsValid() {
 		return
 	}
+	if e.isOwnUnderlaySeed(seed) {
+		// Same rejection addSeed makes, for the same reason — see
+		// isOwnUnderlaySeed. It has to be repeated here because primeTCPSeeds
+		// dials ns.tcpSeeds directly and never consults ns.seeds, so a
+		// self-address reaching only this list would still be dialed on every
+		// tick.
+		e.log.Debugf("mesh: ignoring tcp seed %s on net %016x — this host holds that address, so dialing it reaches this daemon", seed, networkID)
+		return
+	}
 	ns.mu.Lock()
 	defer ns.mu.Unlock()
 	ns.explicitSeed[seed] = true
@@ -1620,6 +1726,7 @@ func (e *Engine) ensureFallback(ns *netState, seed netip.AddrPort) {
 	owner := ns.seedOwnerOf(seed)
 	cands := e.fallbackCandidates(ns, seed, fp, owner)
 	seeds := ns.seedCandidates()
+	connected := owner != "" && e.hasDirectSession(ns, owner)
 	for _, c := range cands {
 		// A candidate landing exactly on a different peer's configured seed is
 		// known-wrong before a socket opens. Only seeds disqualify, and only
@@ -1627,11 +1734,77 @@ func (e *Engine) ensureFallback(ns *netState, seed netip.AddrPort) {
 		// contradict and must stay dialable, because refusing to dial is worse
 		// than a wrong guess — no answer means no connectivity.
 		if c.ConflictsWith(seeds) {
-			e.log.Debugf("mesh: skipping %s for %q — it is %q's configured seed", c, owner, seedOwnerAt(seeds, c))
-			continue
+			if !e.conflictSkipAllowed(ns, c, connected) {
+				e.log.Debugf("mesh: skipping %s for %q — it is %q's configured seed", c, owner, seedOwnerAt(seeds, c))
+				continue
+			}
+			e.log.Warnf("mesh: dialing %s for %q anyway — it looks like %q's configured seed, but that verdict has "+
+				"suppressed every direct path to %q for over %s with no session to show for it; probing rather than "+
+				"staying relayed on an attribution that may be wrong",
+				c, owner, seedOwnerAt(seeds, c), owner, conflictSkipEscape)
 		}
 		e.dialCandidate(ns, tr, seed, int(c.Port))
 	}
+}
+
+// conflictSkipEscape bounds how long ConflictsWith may suppress a candidate
+// before one dial is let through anyway.
+//
+// The conflict guard is a heuristic about who answers at an address, and every
+// input it reads — seed attribution, protocol splits, gossip — can be wrong or
+// merely stale. A wrong "yes" costs one dial to a host that ignores it. A wrong
+// "no" costs the direct path entirely, forever, because nothing about being
+// suppressed generates the evidence that would lift the suppression: the dial
+// never happens, so no handshake completes, so no attribution is corrected, so
+// the dial never happens. That loop has no exit, which is what turned a bad
+// attribution into a peer permanently pinned to relay.
+//
+// So the guard is allowed to be confident, but not permanent. Once a candidate
+// has been continuously suppressed for this long *and* its owner still has no
+// direct session, one dial goes out. If the guard was right, the dial is
+// ignored and costs a packet; if it was wrong, the peer reconnects directly and
+// the whole state clears. Cheap to be wrong, expensive to be stuck.
+const conflictSkipEscape = 5 * time.Minute
+
+// conflictSkipAllowed reports whether a conflicting candidate should be dialed
+// regardless, and maintains the per-candidate suppression clock that decides
+// it. A candidate whose owner is connected has its clock cleared: the guard is
+// costing nothing while a session exists, so it never accrues toward an escape.
+func (e *Engine) conflictSkipAllowed(ns *netState, c Candidate, ownerConnected bool) bool {
+	k := c.Key()
+	now := time.Now()
+	ns.mu.Lock()
+	defer ns.mu.Unlock()
+	if ownerConnected {
+		delete(ns.conflictSkipSince, k)
+		return false
+	}
+	if ns.conflictSkipSince == nil {
+		ns.conflictSkipSince = make(map[CandKey]time.Time)
+	}
+	since, seen := ns.conflictSkipSince[k]
+	if !seen {
+		ns.conflictSkipSince[k] = now
+		return false
+	}
+	if now.Sub(since) < conflictSkipEscape {
+		return false
+	}
+	// Escaping now. Restart the clock rather than deleting the entry, so this
+	// paces one probe per window instead of dialing on every tick from here on.
+	ns.conflictSkipSince[k] = now
+	return true
+}
+
+// hasDirectSession reports whether this node currently holds a non-relayed
+// session with nodeID. Used to decide whether a suppressed direct candidate is
+// costing anything: a peer reachable only through a relay is exactly the peer
+// whose direct path must not stay suppressed on a guess.
+func (e *Engine) hasDirectSession(ns *netState, nodeID string) bool {
+	ns.mu.RLock()
+	ps := ns.byNode[nodeID]
+	ns.mu.RUnlock()
+	return ps != nil && ps.ep().IsValid()
 }
 
 // fallbackCandidates builds the ordered candidate set for one seed.

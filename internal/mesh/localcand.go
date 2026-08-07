@@ -265,6 +265,34 @@ func (e *Engine) isOwnAddr(ip netip.Addr) bool {
 	return false
 }
 
+// isOwnUnderlaySeed reports whether a seed address belongs to this host, and so
+// could only ever dial this daemon.
+//
+// The same judgement addLocalCandidates already makes about a peer's advertised
+// candidates, applied to seeds — which is where it was missing. A seed list is
+// usually the operator's, and an operator maintaining one file across a fleet
+// naturally lists every node in it, including the node the file is on. Nothing
+// rejected that entry, so each node dialed itself on every tick: the handshake
+// arrives, onHSInit sees an init claiming our own node id, and drops it. Correct
+// but endless — tens of thousands of self-dials over a long uptime, a permanent
+// "dropping handshake init that claims our own node id" stream burying real
+// events in the log, and a dial budget spent on a socket that can never carry a
+// peer. Dropping it at registration costs one map lookup and is the same
+// belt-and-suspenders shape install() already uses for its own node id.
+//
+// Gated on usableLocalCandidate for the same reason addLocalCandidates is: the
+// ownAddrs set deliberately includes loopback and link-local, which are exactly
+// the addresses several distinct nodes legitimately share when they run on one
+// host (every peer on 127.0.0.1, differing only by port). Those must stay
+// dialable; a global or ULA address this host holds must not.
+func (e *Engine) isOwnUnderlaySeed(seed netip.AddrPort) bool {
+	ip := seed.Addr().Unmap()
+	if !usableLocalCandidate(ip) {
+		return false
+	}
+	return e.isOwnAddr(ip)
+}
+
 // clearDeadHostCands forgets every written-off host candidate on every network.
 // Called when this node's own candidate set changes — a new DHCP lease, an
 // interface up/down, a move from Wi-Fi to cellular. Reachability is a property

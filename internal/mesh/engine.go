@@ -780,6 +780,14 @@ type netState struct {
 	// This is the general form.
 	seedOwnerProto map[CandKey]string
 
+	// conflictSkipSince records, per candidate, when ConflictsWith first
+	// suppressed it without interruption. See conflictSkipEscape: the guard is
+	// permitted to be confident but not permanent, and this is the clock that
+	// makes the difference. Cleared the moment the candidate's owner has a
+	// direct session (the guard is costing nothing) or the candidate stops
+	// conflicting.
+	conflictSkipSince map[CandKey]time.Time
+
 	seedFallback map[netip.AddrPort]netip.AddrPort
 	// seedOwner records, for a seed entry, the node ID it's known to belong to
 	// — populated only where that's cheaply known at add time (currently:
@@ -1663,6 +1671,7 @@ func (e *Engine) newNetState(spec NetSpec) *netState {
 		seedFallback:           make(map[netip.AddrPort]netip.AddrPort),
 		seedOwner:              make(map[netip.AddrPort]string),
 		seedOwnerProto:         make(map[CandKey]string),
+		conflictSkipSince:      make(map[CandKey]time.Time),
 		configuredSeedOwnerUDP: make(map[netip.AddrPort]string),
 		configuredSeedOwnerTCP: make(map[netip.AddrPort]string),
 		explicitSeed:           explicitSeedSet(spec.Seeds, spec.TCPSeeds),
@@ -2060,6 +2069,10 @@ func (e *Engine) addSeed(networkID uint64, seed netip.AddrPort, nodeID string, e
 		// overlay subnet is a mesh address, not a real underlay endpoint. Dialing
 		// it would tunnel one network's traffic through another's overlay. Drop it.
 		e.log.Debugf("mesh: ignoring endpoint %s on net %016x — overlay (mesh) address, not a reachable underlay endpoint", seed, networkID)
+		return false
+	}
+	if e.isOwnUnderlaySeed(seed) {
+		e.log.Debugf("mesh: ignoring endpoint %s on net %016x — this host holds that address, so dialing it reaches this daemon", seed, networkID)
 		return false
 	}
 	ns := e.network(networkID)

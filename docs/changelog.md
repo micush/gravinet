@@ -2,6 +2,92 @@
 
 ---
 
+## v807 — 2026-08-07
+
+**A guard added in v791 to stop a cross-owner dial could reach its verdict from evidence that one ordinary node produces on its own, and once it did, nothing could ever lift it. `mcfed` spent from 16:31 onward refusing to dial `gn-ionos2` — a seed it had been reaching directly all afternoon — because the suppression destroyed the only evidence that would have cleared it. Three further faults in the same pair of bundles are fixed alongside it.**
+
+### The gap
+
+`ambiguousSeedAddrLocked` decided whether the address-only `seedOwner` map could be trusted for a host:port. It answered yes-it-is-ambiguous on this test:
+
+```go
+// in tcpSeeds, and also in seeds with explicitSeed set and a known owner
+udpOwner, hasUDP := ns.seedOwner[seed]
+return hasUDP && udpOwner != ""
+```
+
+Every clause of that is satisfied by one node listening on UDP and TCP at the same port. That is not an exotic arrangement; it is the default (`udp_ports: [65432]`, `tcp_ports: [65432]`). A node configured as a `tcp://` seed lands in `tcpSeeds`; the moment it connects over UDP and `AddSeedForProto` attributes the address, it is in `seeds` too; `explicitSeed` is a union over both lists, so the mark is already there. `resolveSeeds` folding `PeerCache` into the UDP list supplies the same address a second way, independently of whether the peer ever connected.
+
+The premise the guard needed was "two peers share this host:port." What it actually tested was "this host:port appears twice," which one peer produces unaided.
+
+### Why it could not recover
+
+`ownerAmbiguous` is a sentinel no node ID can equal, so `ConflictsWith` matched every candidate for the real owner and `maybeFallbackDial` skipped them all. That is a closed loop: the dial does not happen, so no handshake completes, so no attribution is recorded, so the dial does not happen. `mcfed`'s log has 105 skips of `66.179.240.44:65432` and `[2607:f1c0:f00c:db01::1]:65432` — both `gn-ionos2`, both `tcp://` in config, both answering UDP — against five successful direct dials to the first of them earlier the same day. The two nodes ended in the state the bundle header warns about: `gn-ionos2` holding a direct session with 2 packets sent and none received, `mcfed` holding a relayed one via `gn-ionos1` with 9 received and none sent.
+
+### Fix
+
+Two peers means two node IDs, and that is now what is tested. `distinctSeedOwnersLocked` polls every attribution the network keeps — `seedOwnerProto` for both transports, `seedOwner`, and `configuredSeedOwnerUDP`/`configuredSeedOwnerTCP` — and ambiguity requires disagreement among the sources that have an opinion:
+
+```go
+return ns.distinctSeedOwnersLocked(seed) > 1
+```
+
+Presence in both seed lists remains the precondition; it is no longer the proof. When every source names one node, that node owns the address on both transports and the address-only map is exactly right. The `cush1`(tcp)/`cush2`(udp)-behind-one-NAT case that v791 was written for still disagrees, still returns `ownerAmbiguous`, and is still blocked.
+
+### The guard may be confident, but not permanent
+
+Narrowing the test fixes this instance. It does not fix the shape of the failure, which is that a suppression can starve the evidence that would end it. Every input `ConflictsWith` reads can be stale or wrong; a wrong *yes* costs one dial to a host that ignores it, and a wrong *no* costs the direct path forever.
+
+`conflictSkipSince` on `netState` records when a candidate was first suppressed without interruption. After `conflictSkipEscape` (5 minutes) with the owner still holding no direct session, one dial goes out anyway, logged at Warn with the reason. The clock is cleared whenever the owner is connected — while a session exists the guard costs nothing and must not accrue toward an escape — and restarted rather than deleted on each probe, so this paces one attempt per window instead of dialing every tick. `hasDirectSession` supplies the connected test.
+
+This is deliberately not a repair of any particular attribution. It is the assertion that no verdict in this path gets to be terminal.
+
+### Path MTU was forgotten on every re-handshake
+
+`pruneDead` preserves a dying session's discovered link cap into `nodeInfo.lastLinkCap`, and `seedPeerPMTUFromHistory` hands it to the next session so discovery resumes inside the known-safe region. A *re-handshake* never goes through `pruneDead`: `install()` overwrites `ns.byNode[nodeID]` and the previous `peerSession` is dropped with everything its search learned.
+
+On a stable link this is invisible. On a peer being replaced every few seconds nothing is ever reaped, so nothing is ever remembered, and each new session restarts the climb from the configured MTU — 8915 here, against a 1500-byte underlay. `gn-ionos2` logged 3,940 `sendto: message too long` rejections and a path MTU to `mcfed` that oscillated between the 1280 floor and ~1520 continuously without settling.
+
+`rememberLinkCapOfReplaced` harvests the outgoing session's cap into `nodeInfo` before `seedPeerPMTUFromHistory` runs, so the incoming session inherits it immediately. It reads `ns.byNode` under `ns.mu`, releases it, then takes `pmtuMu` — this package never holds both, and `seedPeerPMTUFromHistory` documents why. A session that learned nothing reports 0 and leaves any existing record alone, matching `pruneDead`'s contract: no new rejection is not evidence that an old constraint lifted.
+
+### A node dialing itself
+
+An operator maintaining one seed list across a fleet lists every node in it, including the node the file is on. `gn-ionos2`'s own config named `tcp://66.179.240.44:65432` — its own address — and nothing rejected it. It dialed itself on every tick and `onHSInit` dropped the result as an init claiming our own node id, 3,201 times in one log tail.
+
+`isOwnUnderlaySeed` applies to seeds the judgement `addLocalCandidates` already applies to a peer's advertised candidates: an address this host holds cannot be a way to reach somebody else. Rejection happens in `addSeed` and, separately, in `addTCPSeed` — `primeTCPSeeds` dials `ns.tcpSeeds` directly and never consults `ns.seeds`, so a self-address reaching only that list would still be dialed every tick.
+
+Gated on `usableLocalCandidate` for the reason `addLocalCandidates` is: `ownAddrs` deliberately includes loopback and link-local, and those are exactly the addresses several distinct nodes legitimately share when they run on one host. Loopback seeds stay dialable.
+
+### Tests
+
+`internal/mesh/seedambiguity_test.go`. The reproduction is driven from the operator's real seed list through the real registration path, both address families: a `tcp://` config entry plus the same host:port attributed to one node over UDP must not be ambiguous, must not carry `ownerAmbiguous` into `seedCandidates`, and must leave the peer's own seed dialable.
+
+The guard's original case is asserted separately — `cush1`/`cush2` at `174.64.247.165:65432` still counts two distinct owners and still refuses the cross-dial — as is a disagreement visible only through `configuredSeedOwnerTCP`, since the sources are polled independently and any one of them can be the one that knows.
+
+The escape hatch is tested for all three of its properties: it does not fire on first suppression or inside the window, it does fire once the window has passed with no session, and it paces itself afterward rather than dialing every tick. A separate case ages the clock past the window and then reports the owner connected, asserting both that no probe is issued and that the entry is deleted — suppression has to be continuous to count.
+
+Self-address rejection is asserted against both `ns.seeds` and `ns.tcpSeeds`, with a companion case confirming a loopback seed survives.
+
+The reverted-fix check was run explicitly: with `ambiguousSeedAddrLocked` restored to its v806 body the new test fails on both address families with the diagnosis above, and passes on the fix. The three v791 tests in `internal/mesh/natcrossdial_test.go` pass unchanged.
+
+### Verified
+
+`go build ./internal/mesh/ ./internal/config/`, `go vet ./internal/mesh/` clean including the new test file. All nine new cases pass. Full `internal/mesh` suite was still running at the time of writing with zero failures across ~210KB of output; it is not yet complete and this entry should not be read as claiming it is. `internal/webadmin` was not built — `auth_pam.go` needs `pam_appl.h`, absent from the build host, which is a pre-existing condition of that environment and not a change here.
+
+### Rolling upgrade
+
+All four fixes are local to the node running them; nothing is advertised and no wire format changed. A node on v807 stops suppressing its own direct dials, stops re-climbing PMTU from scratch, and stops dialing itself, regardless of what its peers run. Upgrading the node whose log shows the skips is what clears them — in the pair above, that is `mcfed`.
+
+### What is still not solved
+
+The endpoint flapping is untouched. `mcfed` sits behind the Cox Phoenix NAT with `gn-cush1` and `gn-cush2`, and `gn-ionos2` saw it arrive 62 times from `174.64.247.165:65432` — `gn-cush1`'s endpoint — and 56 times from `[2001:579:...]:7495`, alternating every few seconds, each handshake replacing the last. v807 makes that survivable, by carrying the link cap across the replacements, rather than absent. Whether `install()` should rate-limit how often one node's session may be repointed at a new endpoint is a real question and is not answered here.
+
+`explicitSeedSet` still reads the `PeerCache`-inflated `spec.Seeds`/`spec.TCPSeeds` rather than the clean `ConfiguredSeeds`/`ConfiguredTCPSeeds`. Marking a cached address as operator-configured is wrong on its face and was one of the two ways `66.179.240.44:65432` reached the UDP list. It is left alone because `explicitSeed` also drives `install()`'s prune exemption, where v374 and v780 both record what happens when that set is wrong in the other direction. The ambiguity fix removes the harm without touching it; the layering is still worth correcting deliberately.
+
+Nothing yet warns that a peer's direct path has been suppressed. The escape hatch logs at Warn when it fires, which is five minutes late and only visible in the log — a node cannot report "I am relayed to this peer because I refuse to dial it."
+
+---
+
 ## v806 — 2026-08-06
 
 **Partial-mesh mode was documented as a property of the network and implemented as a property of one node. It was never advertised, so a node switched to partial mesh refused handshakes its peers had no way to know would be refused — and the only way to stop the resulting refusals was to configure partial mesh on every node whether you wanted it there or not. The mode is now advertised, and a full-mesh node will respect a partial-mesh peer's topology.**
