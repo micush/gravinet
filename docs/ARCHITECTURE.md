@@ -156,6 +156,19 @@ channel marker, so the same session crypto protects them.
   tie-break: among equally specific prefixes the lowest metric wins. All of it
   applies live with no restart.
 
+- A receiver-side **origin preference** (`route_prefer`, per network) overrides
+  that tie-break from the other end: an ordered list of node IDs per prefix,
+  consulted ahead of metric but after specificity. It is applied as a comparison
+  key rather than a filter, and `bestRedistOrigins` has already discarded
+  origins with no live session or a dark address family before ranking runs —
+  so a preferred origin becoming unreachable removes it from the candidates and
+  the next-ranked one takes over on the following lookup, with no timeout and no
+  intermediate withdrawal. `bestRedistMetric` ranks the same way, so the metric
+  programmed into the OS table describes the advertisement actually being
+  followed; it deliberately does not apply the liveness filter, since it answers
+  "is this advertised at all" and withdrawing a kernel route on every blink
+  would churn the table.
+
 - For a node to actually *route* between the overlay and its other interfaces
   (forward packets for redistributed routes, or NAT a LAN onto the mesh), the
   host kernel must have IP forwarding on. The daemon enables IPv4 and IPv6

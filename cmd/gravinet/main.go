@@ -48,7 +48,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "810"
+	version = "818"
 	commit  = "none"
 )
 
@@ -2662,6 +2662,26 @@ func fillRuntimeSpec(spec *mesh.NetSpec, n config.Network, exempts []config.Fire
 		} else {
 			logx.Errorf("network %s: bad route-reject %q: %v", n.ID, rj.CIDR, err)
 		}
+	}
+	for _, pr := range n.RoutePrefer {
+		if pr.Disabled {
+			continue // disabled prefer entries stay in config but aren't applied
+		}
+		p, err := netip.ParsePrefix(pr.CIDR)
+		if err != nil {
+			logx.Errorf("network %s: bad route-prefer %q: %v", n.ID, pr.CIDR, err)
+			continue
+		}
+		if len(pr.Origins) == 0 {
+			continue
+		}
+		if spec.RoutePrefer == nil {
+			spec.RoutePrefer = map[netip.Prefix][]string{}
+		}
+		// Masked to match how advertised prefixes are keyed everywhere else,
+		// so "10.0.0.1/24" in config still ranks the 10.0.0.0/24 peers
+		// advertise rather than silently matching nothing.
+		spec.RoutePrefer[p.Masked()] = append([]string(nil), pr.Origins...)
 	}
 
 	// Locally-disabled peers (local-only blocklist; applied live on reload).

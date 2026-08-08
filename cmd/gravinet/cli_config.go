@@ -772,6 +772,35 @@ func cmdRoute(args []string) {
 		}
 		fmt.Printf("%sd advertised route %s on %s\n", sub, cidr, n.Name)
 
+	case "prefer":
+		if len(rest) < 2 {
+			fatal("usage: gravinet route prefer CIDR NODEID [NODEID...]   (most preferred first)")
+		}
+		cidr := rest[0]
+		if err := cfg.RoutePrefer(netName, cidr, rest[1:]); err != nil {
+			fatal("%v", err)
+		}
+		fmt.Printf("preferring %s for %s on %s, in that order — falls back automatically when one is unreachable\n",
+			strings.Join(rest[1:], ", "), cidr, n.Name)
+
+	case "prefer-clear", "prefer-remove":
+		if len(rest) == 0 {
+			fatal("usage: gravinet route prefer-clear CIDR")
+		}
+		if err := cfg.RoutePreferRemove(netName, rest[0]); err != nil {
+			fatal("%v", err)
+		}
+		fmt.Printf("cleared origin preference for %s on %s — lowest advertised metric wins again\n", rest[0], n.Name)
+
+	case "prefer-enable", "prefer-disable":
+		if len(rest) == 0 {
+			fatal("usage: gravinet route %s CIDR", sub)
+		}
+		if err := cfg.RoutePreferSetEnabled(netName, rest[0], sub == "prefer-enable"); err != nil {
+			fatal("%v", err)
+		}
+		fmt.Printf("%sd origin preference for %s on %s\n", strings.TrimPrefix(sub, "prefer-"), rest[0], n.Name)
+
 	case "reject-enable", "reject-disable":
 		if len(rest) == 0 {
 			fatal("usage: gravinet route %s CIDR", sub)

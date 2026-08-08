@@ -78,6 +78,7 @@ func (ns *netState) bestRedistOrigins(dst netip.Addr) ([]string, *fwdSnap) {
 	now := time.Now()
 	bestBits := -1
 	bestMetric := 0
+	bestRank := preferRankUnlisted
 	var origins []string
 	for _, re := range snap.redist {
 		if !re.prefix.Contains(dst) {
@@ -102,20 +103,45 @@ func (ns *netState) bestRedistOrigins(dst netip.Addr) ([]string, *fwdSnap) {
 			continue
 		}
 		bits := re.prefix.Bits()
+		// Operator preference outranks the advertised metric, but only among
+		// origins that got this far — everything above has already discarded
+		// origins with no live session or a dark address family for dst. That
+		// is what makes this a preference rather than a pin, and why the
+		// fallback needs no timeout and no separate withdrawal path: a
+		// preferred peer that goes away is simply not a candidate, and the
+		// next comparison picks whoever is.
+		//
+		// Specificity still comes first. A preference is a choice between
+		// peers offering the same prefix, not licence to send traffic
+		// somewhere less specific — preferring an origin for 0.0.0.0/0 must
+		// not pull traffic away from a /24 another peer advertises.
+		rank := ns.preferRank(re.prefix, re.origin)
 		switch {
 		case bits > bestBits:
 			// Strictly more specific: it alone defines the new best; any
 			// previously collected (less specific) ties are discarded.
-			bestBits, bestMetric = bits, re.metric
+			bestBits, bestMetric, bestRank = bits, re.metric, rank
 			origins = append(origins[:0], re.origin)
 		case bits < bestBits:
 			// Less specific than the best seen; ignore.
+		case rank < bestRank:
+			// Same specificity, better-ranked origin: new sole winner
+			// regardless of metric.
+			bestMetric, bestRank = re.metric, rank
+			origins = append(origins[:0], re.origin)
+		case rank > bestRank:
+			// Worse-ranked origin; its metric is irrelevant.
 		case re.metric < bestMetric:
-			// Same specificity, strictly better metric: new sole winner.
+			// Same specificity and rank, strictly better metric: new sole
+			// winner.
 			bestMetric = re.metric
 			origins = append(origins[:0], re.origin)
 		case re.metric == bestMetric:
-			// Same specificity and metric: a co-equal ECMP sibling.
+			// Same specificity, rank and metric: a co-equal ECMP sibling.
+			// Two origins only tie here if both are unlisted (or, harmlessly,
+			// impossible: a rank is unique per prefix since duplicates are
+			// rejected at config load), so naming an origin also takes it out
+			// of the ECMP set and pins its flows — which is the point.
 			origins = append(origins, re.origin)
 		}
 	}
@@ -230,7 +256,7 @@ func (e *Engine) withdrawRoutes(ns *netState, prefixes []netip.Prefix) {
 // route takes effect immediately rather than only blocking future
 // advertisements. This is what makes redistributing (or un-redistributing, or
 // rejecting) a route apply without a restart.
-func (e *Engine) reloadRoutes(ns *netState, newRoutes []netip.Prefix, newReject []RejectRule, newMetric map[netip.Prefix]int) {
+func (e *Engine) reloadRoutes(ns *netState, newRoutes []netip.Prefix, newReject []RejectRule, newMetric map[netip.Prefix]int, newPrefer map[netip.Prefix][]string) {
 	var old []netip.Prefix
 	if oldp := ns.advRoutes.Load(); oldp != nil {
 		old = *oldp
@@ -245,6 +271,8 @@ func (e *Engine) reloadRoutes(ns *netState, newRoutes []netip.Prefix, newReject 
 	ns.advReject.Store(&rj)
 	mm := cloneMetricMap(newMetric)
 	ns.advMetric.Store(&mm)
+	pm := clonePreferMap(newPrefer)
+	ns.advPrefer.Store(&pm)
 
 	// Purge any already-learned routes the (possibly new) reject set now covers,
 	// so rejecting a route drops it immediately — removed from the forwarding
@@ -646,11 +674,37 @@ func (ns *netState) bestRedistMetric(p netip.Prefix) (int, bool) {
 	ns.mu.RLock()
 	defer ns.mu.RUnlock()
 	best, found := 0, false
+	bestRank := preferRankUnlisted
 	for _, re := range ns.redist {
-		if re.prefix == p {
-			if !found || re.metric < best {
-				best, found = re.metric, true
-			}
+		if re.prefix != p {
+			continue
+		}
+		// Ranked the same way bestRedistOrigins ranks, so the metric programmed
+		// into the OS table describes the advertisement this node actually
+		// follows. Without this the two disagree the moment a preference is
+		// set: forwarding would leave via the preferred origin while the kernel
+		// route carried some other peer's number.
+		//
+		// "Consistent" here means the same rule over the same candidates, not
+		// an identical winner. This deliberately does not apply
+		// bestRedistOrigins' liveness filtering — that function is choosing a
+		// next hop right now and must skip a peer that cannot carry the packet,
+		// whereas this one is answering "is this prefix advertised at all",
+		// and withdrawing a kernel route every time an advertiser blinks would
+		// churn the routing table for no gain. A momentarily-dead preferred
+		// origin therefore still supplies the metric while forwarding has
+		// already moved on, which was equally true of the lowest-metric rule
+		// before preferences existed.
+		rank := ns.preferRankLocked(p, re.origin)
+		switch {
+		case !found:
+			best, found, bestRank = re.metric, true, rank
+		case rank < bestRank:
+			best, bestRank = re.metric, rank
+		case rank > bestRank:
+			// Worse-ranked origin; its metric is irrelevant.
+		case re.metric < best:
+			best = re.metric
 		}
 	}
 	return best, found
@@ -1208,3 +1262,51 @@ func (e *Engine) shouldLogRejectedRoute(origin string, prefix netip.Prefix) bool
 	e.rejectLogAt[key] = now
 	return true
 }
+
+// clonePreferMap deep-copies a prefix→ordered-origins map. The slices are
+// copied too: advPrefer is published by atomic swap and read without a lock,
+// so a caller retaining the map it passed in must not be able to reorder a
+// live ranking underneath the data path.
+func clonePreferMap(m map[netip.Prefix][]string) map[netip.Prefix][]string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[netip.Prefix][]string, len(m))
+	for p, origins := range m {
+		out[p] = append([]string(nil), origins...)
+	}
+	return out
+}
+
+// preferRank returns the position of origin in the preference list for the
+// prefix that was matched, and whether it is listed at all. Lower is more
+// preferred. Unlisted origins all share a rank below every listed one, so they
+// continue to be ordered among themselves by metric exactly as before.
+// Safe to call with or without ns.mu held: advPrefer is an atomic pointer and
+// this takes no locks. preferRankLocked is the same function under a name that
+// documents the callers which already hold ns.mu.
+func (ns *netState) preferRankLocked(p netip.Prefix, origin string) int {
+	return ns.preferRank(p, origin)
+}
+
+func (ns *netState) preferRank(p netip.Prefix, origin string) int {
+	pm := ns.advPrefer.Load()
+	if pm == nil {
+		return preferRankUnlisted
+	}
+	origins, ok := (*pm)[p]
+	if !ok {
+		return preferRankUnlisted
+	}
+	for i, o := range origins {
+		if o == origin {
+			return i
+		}
+	}
+	return preferRankUnlisted
+}
+
+// preferRankUnlisted sorts after every explicitly listed origin. Any value
+// above the largest realistic list length works; this is not compared
+// arithmetically against anything but other ranks.
+const preferRankUnlisted = 1 << 30

@@ -178,6 +178,9 @@ type NetSpec struct {
 	Routes      []netip.Prefix       // CIDRs this node advertises to the mesh
 	RouteMetric map[netip.Prefix]int // per-route metric (0 if unset)
 	RouteReject []RejectRule         // advertised routes matching these are ignored
+	// RoutePrefer ranks origins per prefix, most preferred first. Consulted
+	// ahead of metric in bestRedistOrigins; see config.PreferRoute.
+	RoutePrefer map[netip.Prefix][]string
 
 	// Hosts sync (step 6).
 	HostsSync bool
@@ -1034,6 +1037,10 @@ type netState struct {
 	advHosts  atomic.Pointer[[]hostRecord]         // custom hosts records this node advertises
 	advDNS    atomic.Pointer[[]dnsForward]         // conditional-forward domains this node advertises
 	advMetric atomic.Pointer[map[netip.Prefix]int] // metric for each advertised route
+	// advPrefer ranks origins per prefix for routes this node *learns* — the
+	// mirror of advMetric, which sets the metric on routes it advertises.
+	// Swapped whole by reloadRoutes like the rest.
+	advPrefer atomic.Pointer[map[netip.Prefix][]string]
 
 	// bgpRoutes is this node's current BGP-into-mesh redistribution set (see
 	// config.Network.RedistributeBGPRoutes) — the CIDRs pulled from FRR's RIB and
@@ -1763,6 +1770,8 @@ func (e *Engine) newNetState(spec NetSpec) *netState {
 		ns.advReject.Store(&rj)
 		mm := cloneMetricMap(spec.RouteMetric)
 		ns.advMetric.Store(&mm)
+		pm := clonePreferMap(spec.RoutePrefer)
+		ns.advPrefer.Store(&pm)
 		hr := toHostRecords(spec.AdvHosts)
 		ns.advHosts.Store(&hr)
 		hrj := lowerAll(spec.HostReject)

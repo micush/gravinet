@@ -149,7 +149,17 @@ Go to **Traffic → Routes**. Same per-network, two-table layout as Hosts:
 - **Advertise** — click **+**, enter a CIDR to redistribute into the mesh (e.g. `10.1.1.0/24`, or `0.0.0.0/0` to advertise a default route and send everyone's internet-bound traffic through this node). Double-click the metric to change route preference (lower wins) or the cidr to edit it; double-click the state tag to stop advertising it without deleting it.
 - **Reject** — refuse a route a peer advertises. Tick **inclusive** to also reject every more-specific network inside that CIDR, not just an exact match.
 
-Routing uses longest-prefix-match, same as any router — a more specific route a peer advertises wins over a broader one you're also carrying.
+Routing uses longest-prefix-match, same as any router — a more specific route a peer advertises wins over a broader one you're also carrying. Among peers advertising the *same* prefix, the lowest metric wins.
+
+That leaves the choice with whoever is advertising, which isn't always what you want: if four peers each offer `0.0.0.0/0` and you want the one that isn't cheapest, you'd otherwise have to ask those operators to renumber their metrics. A **preference** settles it from this end instead:
+
+```
+gravinet route prefer 0.0.0.0/0 <nodeC> <nodeB>
+```
+
+Listed origins outrank everything else, in the order given, whatever metric they advertise. It's a preference and not a pin — an origin that has no live session (or whose IPv4/IPv6 half has gone dark) isn't a candidate at all, so if `<nodeC>` drops, `<nodeB>` takes over immediately, and if both are gone selection falls back to plain lowest-metric. Nothing has to time out and no route is withdrawn in between. `gravinet route prefer-clear CIDR` removes it.
+
+Two things to know: a preference never beats a more specific prefix (preferring an origin for `0.0.0.0/0` won't pull traffic off a `/24` someone else advertises), and naming an origin takes it out of the equal-cost multipath set — it now outranks its siblings rather than sharing flows with them.
 
 ---
 

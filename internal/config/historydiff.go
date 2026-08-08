@@ -266,6 +266,9 @@ var networkAreas = []networkArea{
 	{"route_reject", "rejected routes", func(old, new any) string {
 		return diffItems(itemsFrom(asArray(old), "cidr", "cidr"), itemsFrom(asArray(new), "cidr", "cidr"))
 	}},
+	{"route_prefer", "route origin preferences", func(old, new any) string {
+		return diffItems(itemsFrom(asArray(old), "cidr", "cidr"), itemsFrom(asArray(new), "cidr", "cidr"))
+	}},
 	{"hosts_advertise", "custom hosts", func(old, new any) string {
 		return diffItems(itemsFrom(asArray(old), "name", "name"), itemsFrom(asArray(new), "name", "name"))
 	}},

@@ -2541,3 +2541,80 @@ func (c *Config) KeyReveal(netName string, slot int) (string, error) {
 	}
 	return n.Keys[slot].Key, nil
 }
+
+// RoutePrefer sets (or replaces) the ordered origin preference for a prefix.
+// Origins are node IDs, most preferred first. Passing an empty list removes the
+// entry, so selection reverts to plain lowest-metric.
+//
+// Replaces rather than merges: the list is positional, and appending to an
+// existing one would silently change what everything after the insertion point
+// ranks against. An operator setting a preference is stating the whole order.
+func (c *Config) RoutePrefer(netName, cidr string, origins []string) error {
+	n, err := c.routeTarget(netName, cidr)
+	if err != nil {
+		return err
+	}
+	clean := make([]string, 0, len(origins))
+	seen := make(map[string]bool, len(origins))
+	for _, o := range origins {
+		o = strings.TrimSpace(o)
+		if o == "" {
+			return fmt.Errorf("route_prefer %s: empty origin node id", cidr)
+		}
+		if seen[o] {
+			return fmt.Errorf("route_prefer %s: origin %q listed twice", cidr, o)
+		}
+		seen[o] = true
+		clean = append(clean, o)
+	}
+	if len(clean) == 0 {
+		n.RoutePrefer = removePrefer(n.RoutePrefer, cidr)
+		return nil
+	}
+	for i := range n.RoutePrefer {
+		if n.RoutePrefer[i].CIDR == cidr {
+			n.RoutePrefer[i].Origins = clean
+			return nil
+		}
+	}
+	n.RoutePrefer = append(n.RoutePrefer, PreferRoute{CIDR: cidr, Origins: clean})
+	return nil
+}
+
+// RoutePreferRemove drops the preference for a prefix entirely.
+func (c *Config) RoutePreferRemove(netName, cidr string) error {
+	n, err := c.PickNetwork(netName)
+	if err != nil {
+		return err
+	}
+	n.RoutePrefer = removePrefer(n.RoutePrefer, cidr)
+	return nil
+}
+
+// RoutePreferSetEnabled enables or disables a preference entry by CIDR. A
+// disabled entry stays in config with its order intact but stops applying, so
+// selection falls back to lowest-metric — the same convention as reject
+// entries and firewall rules.
+func (c *Config) RoutePreferSetEnabled(netName, cidr string, on bool) error {
+	n, err := c.PickNetwork(netName)
+	if err != nil {
+		return err
+	}
+	for i := range n.RoutePrefer {
+		if n.RoutePrefer[i].CIDR == cidr {
+			n.RoutePrefer[i].Disabled = !on
+			return nil
+		}
+	}
+	return fmt.Errorf("no route_prefer entry for %s", cidr)
+}
+
+func removePrefer(s []PreferRoute, cidr string) []PreferRoute {
+	out := s[:0]
+	for _, x := range s {
+		if x.CIDR != cidr {
+			out = append(out, x)
+		}
+	}
+	return out
+}

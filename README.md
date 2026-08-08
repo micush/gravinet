@@ -368,6 +368,8 @@ gravinet network list
 gravinet route add 10.1.1.0/24                     # redistribute a local route
 gravinet route redistribute 0.0.0.0/0              # advertise a default route
 gravinet route reject 10.99.0.0/16                 # refuse a peer's advertisement
+gravinet route prefer 0.0.0.0/0 <nodeC> <nodeB>   # pick which peer's copy to follow
+gravinet route prefer-clear 0.0.0.0/0             # back to lowest-metric wins
 gravinet route delete 10.1.1.0/24
 gravinet route list
 

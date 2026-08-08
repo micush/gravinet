@@ -969,6 +969,9 @@ type Network struct {
 
 	Routes   []Route       `json:"routes"`       // local routes to redistribute
 	RouteRej []RejectRoute `json:"route_reject"` // advertised routes to reject (see RejectRoute)
+	// RoutePrefer picks which peer's advertisement of a prefix this node
+	// follows, when several advertise the same one. See PreferRoute.
+	RoutePrefer []PreferRoute `json:"route_prefer,omitempty"`
 	// RedistributeBGPRoutes selects exactly which of this node's current
 	// BGP-learned routes (FRR's RIB) get gossiped to this network's mesh
 	// peers alongside its own Route entries above — the reverse direction
@@ -2287,6 +2290,35 @@ type RejectRoute struct {
 	Disabled bool `json:"disabled,omitempty"`
 }
 
+// PreferRoute expresses a receiver-side preference between peers advertising
+// the same prefix.
+//
+// Ordinarily the lowest advertised metric wins, which puts the choice entirely
+// in the advertisers' hands. That is the right default — an exit node knows
+// its own cost better than its peers do — but it leaves a node with no way to
+// say "several of you offer 0.0.0.0/0 and I want that one", short of asking
+// the other operators to renumber their metrics.
+//
+// Origins is ordered, most preferred first, and holds node IDs. Preference is
+// applied as a comparison key ahead of metric, not as a filter, so it is a
+// preference and not a pin: bestRedistOrigins has already discarded any origin
+// with no live session or a dark address family by the time ranking happens,
+// so a preferred peer going away simply removes it from the candidates and the
+// next-ranked one — or, if none are named, the lowest metric — takes over on
+// its own. Nothing has to time out and no route is withdrawn in between.
+//
+// Origins not listed here rank below every listed one, and among themselves by
+// metric as before. Listing an origin that never advertises the prefix is
+// harmless: it can never win a comparison it is not part of.
+type PreferRoute struct {
+	CIDR    string   `json:"cidr"`
+	Origins []string `json:"origins"`
+	// Disabled follows the same convention as RejectRoute: zero value is
+	// enabled, and a disabled entry stays in config but stops applying, so
+	// selection reverts to plain lowest-metric.
+	Disabled bool `json:"disabled,omitempty"`
+}
+
 func (r *RejectRoute) UnmarshalJSON(b []byte) error {
 	var s string
 	if err := json.Unmarshal(b, &s); err == nil { // legacy bare-string form
@@ -2690,6 +2722,29 @@ func (c *Config) Validate() error {
 		for _, r := range n.RouteRej {
 			if _, err := netip.ParsePrefix(r.CIDR); err != nil {
 				return fmt.Errorf("network %s: route_reject %q: %w", n.ID, r.CIDR, err)
+			}
+		}
+		for _, r := range n.RoutePrefer {
+			if _, err := netip.ParsePrefix(r.CIDR); err != nil {
+				return fmt.Errorf("network %s: route_prefer %q: %w", n.ID, r.CIDR, err)
+			}
+			if len(r.Origins) == 0 {
+				return fmt.Errorf("network %s: route_prefer %q: needs at least one origin node id", n.ID, r.CIDR)
+			}
+			seen := make(map[string]bool, len(r.Origins))
+			for _, o := range r.Origins {
+				o = strings.TrimSpace(o)
+				if o == "" {
+					return fmt.Errorf("network %s: route_prefer %q: empty origin node id", n.ID, r.CIDR)
+				}
+				if seen[o] {
+					// A duplicate is always a mistake and never a harmless
+					// one: the ranking is positional, so the second copy is
+					// unreachable and silently changes what every origin
+					// after it ranks against.
+					return fmt.Errorf("network %s: route_prefer %q: origin %q listed twice", n.ID, r.CIDR, o)
+				}
+				seen[o] = true
 			}
 		}
 		for _, h := range n.HostsAdvertise {

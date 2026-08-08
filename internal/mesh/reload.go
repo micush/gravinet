@@ -132,7 +132,7 @@ func (e *Engine) ReloadRuntime(networkID uint64, spec NetSpec) error {
 
 	// Redistributed routes: swap the advertised/reject sets and flood the delta
 	// (advertise new routes, withdraw removed ones) so changes apply live.
-	e.reloadRoutes(ns, spec.Routes, spec.RouteReject, spec.RouteMetric)
+	e.reloadRoutes(ns, spec.Routes, spec.RouteReject, spec.RouteMetric, spec.RoutePrefer)
 	e.reloadHosts(ns, toHostRecords(spec.AdvHosts), spec.HostReject)
 	e.reloadDNS(ns, toDNSForwards(spec.AdvDNS), spec.DNSReject)
 	sd := append([]string(nil), spec.SearchDomains...)

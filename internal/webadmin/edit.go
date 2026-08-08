@@ -297,15 +297,19 @@ func (s *Server) handleSeed(w http.ResponseWriter, r *http.Request) {
 	s.editResult(w, err, false)
 }
 
-// handleRoute: add / redistribute / delete / reject, plus enable / disable (an
-// advertised route) and reject-enable / reject-disable (a reject entry), all by
-// CIDR. Applied live by the reload — added routes are advertised and removed or
+// handleRoute: add / redistribute / delete / reject / prefer, plus enable /
+// disable (an advertised route), reject-enable / reject-disable (a reject
+// entry) and prefer-enable / prefer-disable / prefer-remove (an origin
+// preference), all by CIDR. Applied live by the reload — added routes are advertised and removed or
 // disabled ones withdrawn without a restart.
 func (s *Server) handleRoute(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Op, Net, CIDR string
 		Metric        int
 		Inclusive     bool
+		// Origins is the ordered node-id preference list for the "prefer" op,
+		// most preferred first. Empty clears the preference.
+		Origins []string
 	}
 	if !decode(w, r, &req) {
 		return
@@ -334,6 +338,14 @@ func (s *Server) handleRoute(w http.ResponseWriter, r *http.Request) {
 			return cfg.RouteRejectSetEnabled(req.Net, req.CIDR, true)
 		case "reject-disable":
 			return cfg.RouteRejectSetEnabled(req.Net, req.CIDR, false)
+		case "prefer":
+			return cfg.RoutePrefer(req.Net, req.CIDR, req.Origins)
+		case "prefer-remove":
+			return cfg.RoutePreferRemove(req.Net, req.CIDR)
+		case "prefer-enable":
+			return cfg.RoutePreferSetEnabled(req.Net, req.CIDR, true)
+		case "prefer-disable":
+			return cfg.RoutePreferSetEnabled(req.Net, req.CIDR, false)
 		default:
 			return fmt.Errorf("unknown op %q", req.Op)
 		}

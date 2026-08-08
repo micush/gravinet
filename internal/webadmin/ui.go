@@ -334,6 +334,35 @@ const indexHTML = `<!doctype html>
   .modal-body pre { white-space:pre-wrap; word-break:break-word; background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:10px; font-size:12px; max-height:280px; overflow-y:auto; margin:0; }
   .pick-cat-empty { padding:8px 4px; color:var(--mut); font-size:12px; }
   .subcard { background:var(--bg); border:1px solid var(--line); border-radius:7px; padding:12px 14px; margin-top:14px; }
+  /* Preferred peers (Mesh Routes): one draggable list per contested prefix.
+     .pref-item is a grid rather than flex so the rank number, peer label and
+     metric line up down the column across every block on the page, the same
+     way routes-table's colgroup keeps Advertise and Reject aligned. */
+  .pref-blocks { margin-top:12px; }
+  .pref-block { margin-top:10px; }
+  .pref-block:first-of-type { margin-top:2px; }
+  .pref-head { display:flex; align-items:center; gap:9px; margin-bottom:5px; }
+  .pref-cidr { font-weight:600; }
+  .pref-unset { color:var(--mut); font-size:12px; }
+  .pref-clear { padding:2px 8px; font-size:12px; }
+  .pref-none { margin:2px 0 0; }
+  .pref-list { list-style:none; margin:0; padding:0; }
+  .pref-item { display:grid; grid-template-columns:16px 22px 1fr auto; align-items:center; gap:9px;
+               background:var(--panel); border:1px solid var(--line); border-radius:6px;
+               padding:6px 10px; margin-bottom:4px; cursor:grab; }
+  .pref-item:active { cursor:grabbing; }
+  /* The dragged row keeps its space in the flow (so the list does not jump as
+     it is picked up) and just fades, while the insertion point is shown by the
+     live reordering of the rows around it. */
+  .pref-item.dragging { opacity:.4; }
+  .pref-grip { color:var(--mut); cursor:grab; }
+  .pref-rank { color:var(--mut); font-size:12px; text-align:right; }
+  /* Ranked rows are the ones an explicit preference names; the rest are shown
+     below them in the order they would be used anyway, so the whole list reads
+     as the actual precedence rather than only the part that was configured. */
+  .pref-item.ranked { border-color:var(--acc); }
+  .pref-item.ranked .pref-rank { color:var(--fg); }
+  .pref-metric { color:var(--mut); font-size:12px; }
   .subcard:first-of-type { margin-top:10px; }
   .subcard h4 { margin:0 0 8px; font-size:11px; text-transform:uppercase; letter-spacing:1px; color:var(--mut); }
   .info-kv { display:grid; grid-template-columns:max-content 1fr; gap:8px 18px; align-items:baseline; }
@@ -4676,8 +4705,247 @@ function secRoutes(c) {
     rt.querySelectorAll('tr[data-cidr] .cidr-cell').forEach(cell => routeCidrEdit(cell, cf, 'reject'));
     card.appendChild(xsub);
 
+    // --- Preferred peers sub-card ---
+    card.appendChild(buildPreferredPeers(cf));
+
     c.appendChild(card);
   }
+}
+
+// buildPreferredPeers renders Traffic > Routes' "Preferred peers" sub-card:
+// pick the routes you want to choose an exit for, then drag that route's peers
+// into the order you want them tried.
+//
+// The set it draws from is live learned state (state.status' routes \u2014 what this
+// node has actually received) rather than config, because the thing an operator
+// needs to see is who is offering the prefix right now. A preference naming a
+// peer that never advertises it is inert; one omitting a peer that does still
+// leaves that peer ranked last. Config supplies only the saved order, applied
+// over the live set.
+//
+// SHAPE. A mesh can carry thousands of routes, so this cannot be a block per
+// contested prefix \u2014 that is both unusable to scroll and, on a page that
+// re-renders every status poll, tens of thousands of DOM nodes. Two earlier
+// attempts got this wrong in opposite directions: rendering everything, then
+// rendering only what was already configured (which capped the DOM but left
+// every unconfigured route unreachable, since you cannot filter for a route you
+// have no way of knowing exists).
+//
+// A search-to-add picker resolves both at once, and is the same control
+// "Redistribute from BGP" uses directly above. Every contested prefix is
+// reachable by typing part of it; only the ones picked get a draggable list; the
+// picker itself renders a bounded option list with its own "keep typing to
+// narrow" overflow. Picking a route is what makes it editable, so nothing is
+// hidden and nothing is unbounded.
+function buildPreferredPeers(cf){
+  const sub = $('<div class="subcard"></div>');
+  sub.appendChild($('<h4>Preferred peers</h4>'));
+  sub.appendChild($('<div class="hint">Pick the routes you want to choose an exit for, then drag that route\u2019s peers into the order you want them tried. The one nearest the top wins, whatever metric it advertises \u2014 and if it goes away the next one takes over on its own, so this is a preference, not a pin. Peers you have not ranked sit below the ranked ones and keep competing on metric. A more specific route always beats a less specific one, whoever advertises it. Only routes advertised by more than one peer can be picked; anything else has nothing to choose between.</div>'));
+
+  const status = state.status.find(x => x.id === cf.id) || {};
+  const learned = status.routes || [];
+
+  // node id -> label, built once. Scanning the peer list per row instead would
+  // make the render quadratic in a mesh with many peers and many routes.
+  const labels = new Map();
+  for (const p of (status.peers||[])){
+    const id = p.NodeID||p.node_id;
+    const h = p.Hostname||p.hostname;
+    if (id) labels.set(id, h || id);
+  }
+  // Hostname alone. The node id is what the API is keyed on and what gets
+  // saved, but it is not what an operator reads a list by, and repeating a
+  // 16-char hex string on every row crowds out the name it sits next to. An
+  // origin with no live session has no hostname to fall back on, so it still
+  // shows its id \u2014 rankable, just not winning today.
+  const label = (id) => labels.get(id) || id;
+  // The id stays reachable on hover, appended to any peer note rather than
+  // replacing it: dropping it from the row should not make it undiscoverable
+  // when someone needs to match a row against config or a log line.
+  const rowTitle = (id) => {
+    const notes = nodeNotesTitle(cf.id, id, '');
+    return notes ? (notes + ' \u2014 ' + esc(id)) : esc(id);
+  };
+
+  // Group advertisers by prefix. One pass; only prefixes with more than one
+  // advertiser can be ordered at all.
+  const byCidr = new Map();
+  for (const r of learned){
+    const cidr = r.CIDR||r.cidr, via = r.Via||r.via;
+    if (!cidr || !via) continue;
+    let list = byCidr.get(cidr);
+    if (!list){ list = []; byCidr.set(cidr, list); }
+    if (!list.some(e => e.via === via)) list.push({via:via, metric:(r.Metric!==undefined?r.Metric:r.metric)||0});
+  }
+  const saved = new Map();
+  for (const e of (cf.route_prefer||[])) saved.set(e.cidr, e);
+
+  const contested = [];
+  for (const [cidr, l] of byCidr) if (l.length > 1) contested.push(cidr);
+  contested.sort();
+
+  // Already-configured prefixes are selected on arrival, so the card opens
+  // showing exactly the decisions that are in force. A configured prefix whose
+  // advertisers have since dropped below two still appears \u2014 as a stale chip,
+  // which is the picker's own convention for "selected but not currently
+  // present" \u2014 rather than vanishing along with the setting it represents.
+  const configured = [...saved.keys()];
+  const pickable = contested.slice();
+  for (const c of configured) if (!pickable.includes(c)) pickable.push(c);
+
+  if (!contested.length && !configured.length){
+    sub.appendChild($('<div class="hint pref-none">No route is advertised by more than one peer right now, so there is nothing to choose between.</div>'));
+    return sub;
+  }
+
+  const body = $('<div class="pref-blocks"></div>');
+  let picker = null;
+
+  const renderBlocks = () => {
+    body.innerHTML = '';
+    const chosen = picker ? picker.get() : configured;
+    if (!chosen.length){
+      body.appendChild($('<div class="hint pref-none">'+contested.length+' route'+(contested.length===1?' is':'s are')+' advertised by more than one peer. Search above to pick one.</div>'));
+      return;
+    }
+    chosen.slice().sort().forEach(cidr => {
+      const adv = byCidr.get(cidr);
+      if (!adv || adv.length < 2){
+        body.appendChild($('<div class="pref-block"><div class="pref-head"><span class="pref-cidr">'+esc(cidr)+'</span>'
+          + '<span class="pref-unset">not currently advertised by more than one peer</span></div></div>'));
+        return;
+      }
+      body.appendChild(buildPreferBlock(cf, cidr, adv, saved.get(cidr), label, rowTitle));
+    });
+  };
+
+  picker = buildRouteChipPicker(pickable, configured, (chosen) => {
+    // Deselecting a route clears its stored preference: the chip is the
+    // preference, so leaving one behind after its chip is gone would be a
+    // setting still in force with nothing on screen representing it.
+    const now = new Set(chosen);
+    const dropped = configured.filter(c => !now.has(c));
+    renderBlocks();
+    dropped.forEach(cidr => { edit('/api/route', {op:'prefer-remove', net:cf.name, cidr:cidr}, false); });
+  }, {
+    // Kept short deliberately: .route-search is a fixed 280px shared with the
+    // BGP redistribution picker, so a longer string is clipped rather than
+    // wrapped, and widening it here would move that control too.
+    placeholder: 'set route preference\u2026',
+    noneText: 'no route is advertised by more than one peer',
+    loadingText: 'reading learned routes\u2026',
+    staleTitle: 'not currently advertised by more than one peer',
+  });
+  sub.appendChild(picker.wrap);
+  sub.appendChild(body);
+  renderBlocks();
+  return sub;
+}
+
+// buildPreferBlock renders one prefix's draggable list. Split out of
+// buildPreferredPeers so picking or unpicking a route builds only the blocks
+// that changed.
+function buildPreferBlock(cf, cidr, advertisers, entry, label, rowTitle){
+  const order = (entry && !entry.disabled && entry.origins) ? entry.origins : [];
+  // Ranked origins first in their saved order, then the rest by metric and node
+  // id \u2014 so the list shown top to bottom is the precedence actually in force,
+  // not just the configured part of it.
+  const ranked = order.filter(o => advertisers.some(a => a.via === o));
+  const rest = advertisers.filter(a => !ranked.includes(a.via))
+    .sort((x,y) => (x.metric - y.metric) || (x.via < y.via ? -1 : 1)).map(a => a.via);
+  const rows = ranked.concat(rest);
+  // Metric by origin, built once per block: the row loop below would otherwise
+  // rescan the advertiser list for every row it emits.
+  const metricOf = new Map(advertisers.map(a => [a.via, a.metric]));
+
+  const block = $('<div class="pref-block"></div>');
+  const head = $('<div class="pref-head"></div>');
+  head.appendChild($('<span class="pref-cidr">'+esc(cidr)+'</span>'));
+  if (entry){
+    // "pill tag-toggle", not bare "tag-toggle": .tag-toggle only supplies the
+    // cursor and hover affordance, and .pill is what draws the rounded badge.
+    // A block head reads as a card header rather than a table row, so it takes
+    // the same pill the network card headers use (see netCardHead) — the bare
+    // form is for state cells inside tables, where a pill would fight the row.
+    const st = $('<span class="pill tag-toggle '+(entry.disabled?'off':'on')+'" title="double-click to '+(entry.disabled?'enable':'disable')+' this preference">'+(entry.disabled?'disabled':'enabled')+'</span>');
+    st.ondblclick = (e) => { e.stopPropagation();
+      edit('/api/route', {op:(entry.disabled?'prefer-enable':'prefer-disable'), net:cf.name, cidr:cidr}, false); };
+    head.appendChild(st);
+  } else {
+    head.appendChild($('<span class="pref-unset">unranked \u2014 drag to set an order</span>'));
+  }
+  block.appendChild(head);
+
+  // Built as one markup string parsed inside its own <ul>, rather than
+  // appending each row separately: $() parses its argument as innerHTML on a
+  // plain <div>, so a list row constructed on its own has no list parent at
+  // parse time. See ui_dom_helper_test.go for what that costs when it goes
+  // wrong \u2014 the row evaluates to null and the next call aborts the render.
+  let lh = '';
+  rows.forEach((via, i) => {
+    const m = metricOf.get(via) || 0;
+    const isRanked = i < ranked.length && !!entry && !entry.disabled;
+    const ttl = rowTitle ? rowTitle(via) : esc(via);
+    lh += '<li class="pref-item'+(isRanked?' ranked':'')+'" draggable="true" data-via="'+esc(via)+'"'
+      + (ttl ? ' title="'+ttl+'"' : '') + '>'
+      + '<span class="pref-grip" aria-hidden="true">\u2261</span>'
+      + '<span class="pref-rank">'+(i+1)+'</span>'
+      + '<span class="pref-peer">'+esc(label(via))+'</span>'
+      + '<span class="pref-metric">metric '+esc(m)+'</span></li>';
+  });
+  const listWrap = $('<div></div>');
+  listWrap.innerHTML = '<ul class="pref-list">'+lh+'</ul>';
+  const list = listWrap.querySelector('ul');
+  wirePreferDrag(list, () => {
+    const origins = [...list.querySelectorAll('.pref-item')].map(li => li.dataset.via);
+    return api('/api/route', {method:'POST', body:JSON.stringify({op:'prefer', net:cf.name, cidr:cidr, origins:origins})});
+  });
+  block.appendChild(list);
+  return block;
+}
+
+// wirePreferDrag makes a <ul> of .pref-item rows reorderable by dragging, and
+// calls save() once a drop actually changed the order.
+//
+// Plain HTML5 drag-and-drop, no library: the rest of this UI is dependency-free
+// and one list of a handful of rows does not justify changing that. The drop
+// target is computed from the pointer's position relative to each row's
+// midpoint, which is what makes a drag feel like it inserts rather than swaps.
+function wirePreferDrag(list, save){
+  let dragging = null;
+  const before = (y) => {
+    // The row the dragged item should be inserted before: the first one whose
+    // midpoint is below the pointer. Excludes the dragged row itself so it
+    // does not push against its own position.
+    const rows = [...list.querySelectorAll('.pref-item:not(.dragging)')];
+    return rows.find(r => { const b = r.getBoundingClientRect(); return y < b.top + b.height/2; }) || null;
+  };
+  list.addEventListener('dragstart', (e) => {
+    const li = e.target.closest('.pref-item');
+    if (!li) return;
+    dragging = li; li.classList.add('dragging');
+    // Required for Firefox to start a drag at all.
+    try { e.dataTransfer.setData('text/plain', li.dataset.via); } catch(_){}
+    e.dataTransfer.effectAllowed = 'move';
+  });
+  list.addEventListener('dragover', (e) => {
+    if (!dragging) return;
+    e.preventDefault(); e.dataTransfer.dropEffect = 'move';
+    const ref = before(e.clientY);
+    if (ref === dragging) return;
+    list.insertBefore(dragging, ref);
+  });
+  list.addEventListener('dragend', async () => {
+    if (!dragging) return;
+    dragging.classList.remove('dragging'); dragging = null;
+    const now = [...list.querySelectorAll('.pref-item')].map(li => li.dataset.via).join(',');
+    if (now === list._lastOrder) return; // dropped where it started
+    list._lastOrder = now;
+    const r = await save();
+    if (r && !r.ok){ alert((r.body&&r.body.error)||'could not save the order'); }
+    refresh();
+  });
+  list._lastOrder = [...list.querySelectorAll('.pref-item')].map(li => li.dataset.via).join(',');
 }
 
 // routeCidrEdit makes a route/reject cidr cell editable in place. Because the

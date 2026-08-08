@@ -2,6 +2,346 @@
 
 ---
 
+## v818 — 2026-08-08
+
+**Preferred peers listed each row as "gn-ionos1 · 95e8beedf767fe66". The node id is what the API is keyed on and what gets saved, but it is not what an operator reads a list by, and a 16-char hex string on every row crowds out the name beside it. Rows now show the hostname alone.**
+
+### Where the id went
+
+Not away. It is appended to each row's hover title, after any peer note rather than replacing one, so a row can still be matched against config or a log line without the id occupying half the row's width permanently.
+
+An origin with no live session has no hostname to fall back on and still shows its id — such a peer is rankable, it just cannot win today, and rendering a blank there would be worse than rendering the id.
+
+### Tests
+
+`TestPreferredPeersLabelsByHostname` asserts the id is no longer concatenated into the label, that the label falls back to the id when no hostname is known, and that a hover title still carries it. The last of those is the one worth pinning: dropping a field from a row is easy to do and easy to over-do, and "the id is gone entirely" would pass a test that only checked it was absent from the label.
+
+### Verified
+
+`go build ./...` clean at `CGO_ENABLED=0`; `go vet` and `gofmt -l` clean. Full `internal/webadmin` suite passes.
+
+### Not verified
+
+Not seen in a browser.
+
+### Rolling upgrade
+
+UI-only. No wire format change, no behaviour change — the preference is still stored and sent by node id.
+
+---
+
+## v817 — 2026-08-08
+
+**Preferred peers' route picker was labelled "search routes to set a preference for…", which is clipped in the box rather than wrapped. Shortened to "set route preference…".**
+
+### Why shorten rather than widen
+
+`.route-search` is a fixed `280px` and is shared with the "Redistribute from BGP" picker in the sub-card directly above. Widening it to fit a longer placeholder would move that control too, for the sake of one label — so the contained fix is the label.
+
+Noted in a comment at the call site, because the constraint is not visible from there: the placeholder is passed as an option to `buildRouteChipPicker`, and nothing about that call suggests the width it lands in is fixed and shared.
+
+### Verified
+
+`go build ./...` clean at `CGO_ENABLED=0`; `go vet` and `gofmt -l` clean. Full `internal/webadmin` suite passes.
+
+### Not verified
+
+Not seen in a browser — the fit is reasoned from the fixed width rather than measured, and text width depends on the rendered font. If it still clips, the string can go shorter or the picker can take its own width class rather than sharing `.route-search`.
+
+### Rolling upgrade
+
+UI-only. No wire format change, no behaviour change.
+
+---
+
+## v816 — 2026-08-08
+
+**Preferred peers' enabled/disabled badge was styled with a bare `tag-toggle`, which supplies only the cursor and hover affordance. `.pill` is what draws the rounded badge, so the state rendered as plain coloured text and read nothing like the rest of the UI.**
+
+### The two forms
+
+`.tag-toggle` and `.pill` are separate classes that get combined at some call sites and not others, and which one applies is a real distinction rather than an oversight in the existing code:
+
+- **`pill tag-toggle`** is for card and section headers — `netCardHead`'s network enabled/disabled badge, the BGP and cluster header toggles. A rounded badge sitting next to a heading.
+- **bare `tag-toggle`** is for state cells inside tables, where a pill would fight the row's own alignment. Every `data-*state` cell in the routes, hosts, DNS, firewall, NAT and QoS tables uses this form.
+
+A Preferred peers block head is a heading with a state badge beside it, not a table row, so it takes the pill form. Fixed.
+
+### Tests
+
+`TestPreferredPeersStateBadgeIsAPill` asserts the pill class is present and that no bare `tag-toggle` remains in the card. Worth pinning: the two forms differ by one word, the wrong one still renders and still toggles, and the only symptom is that it looks unlike everything around it — which is exactly the kind of thing that gets reintroduced by a later edit and noticed by a person rather than a test.
+
+### Verified
+
+`go build ./...` clean at `CGO_ENABLED=0`; `go vet` and `gofmt -l` clean. Full `internal/webadmin` suite passes.
+
+### Not verified
+
+Not opened in a browser. `.pill` is an existing class used unchanged here, so what it draws is not in question, but the result has been read rather than seen.
+
+### Rolling upgrade
+
+UI-only. No wire format change, no behaviour change.
+
+---
+
+## v815 — 2026-08-08
+
+**Preferred peers is now a route picker plus a peer order, the same search-to-add control "Redistribute from BGP" uses directly above it. Pick the routes you want to choose an exit for; each one gets its own draggable peer list.**
+
+### Why the previous two shapes both failed
+
+v812 rendered a draggable block for every prefix more than one peer advertised. On a mesh with thousands of routes that is unusable to scroll and, on a page that re-renders every status poll, tens of thousands of DOM nodes.
+
+v813 capped it and showed only prefixes with a preference already set, with everything else behind a filter box. That bounded the DOM and broke discovery instead: the card reported "9 more contested" and named none of them, and a filter is no use for finding a route you have no way of knowing exists. v814 removed the hiding but kept the block-per-route layout, so the cap could still put routes out of reach on a large mesh — a wall of blocks with a truncation notice is not meaningfully better than a wall of blocks.
+
+Both attempts treated "how much do we render" as the only question. The actual problem is that rendering is the wrong default: on a mesh with thousands of contested routes an operator wants to set an order for a handful of them, not to be shown all of them and asked to scroll.
+
+### The shape
+
+A picker resolves both constraints at once, which is why the BGP redistribution sub-card already works this way. Every contested prefix is reachable by typing part of it; only picked routes get a draggable list; the picker renders a bounded option list with its own "keep typing to narrow" overflow. Nothing is hidden and nothing is unbounded, because picking is what makes a route editable rather than something that merely reveals it.
+
+Prefixes already configured arrive selected, so the card opens showing exactly the decisions currently in force. Deselecting a route clears its stored preference — the chip *is* the preference, and leaving one behind after its chip is gone would be a setting still applying with nothing on screen representing it.
+
+A configured route whose advertisers have since dropped below two stays pickable, rendering as the picker's existing "stale" chip. It would otherwise become uneditable at exactly the moment an operator would want to look at it.
+
+Routes advertised by a single peer are never offered: there is nothing to choose between.
+
+### Tests
+
+`TestPreferredPeersUsesRoutePicker` covers the four properties the shape depends on — that the shared picker is used, that rendered blocks follow the selection, that configured prefixes are preselected, and that deselecting clears the preference. `TestPreferredPeersOffersEveryContestedRoute` asserts the pool is seeded from the full contested set, which is the property v813 lacked. `TestPreferredPeersKeepsConfiguredRoutesPickable` covers the stale-chip case.
+
+`TestPreferredPeersSortsConfiguredFirst` was removed rather than adapted: it asserted a render-ordering property of a layout that no longer exists, and preselection is what replaces it.
+
+### Verified
+
+`go build ./...` clean at `CGO_ENABLED=0`; `go vet` and `gofmt -l` clean. Full `internal/webadmin` suite passes.
+
+### Not verified
+
+Not opened in a browser. The picker is a control already in use on this page, so its behaviour is not new here, but the combination — picking a route and getting a drag list under it — has only been read, not used.
+
+### Still open
+
+`/api/status` carries every learned route on every poll, and this card depends on it. That predates the card and applies to the Routes page generally, but it is the remaining unbounded piece: the render is bounded by the picker, the payload feeding it is not.
+
+A rejected prefix is still invisible here with no explanation, and `NewNetworkDefaults` seeds `route_reject` with `0.0.0.0/0` and `::/0` — so a mesh whose nodes advertise default routes shows nothing to pick on a receiver running stock config.
+
+### Rolling upgrade
+
+UI-only. No wire format change, and no change to route selection itself.
+
+---
+
+## v814 — 2026-08-08
+
+**v813's Preferred peers card rendered only the prefixes an operator had already ranked, unless a filter was typed. That made every other contested route undiscoverable: the count line said "9 more contested" and named none of them, and you cannot filter for a route you have no way of knowing exists.**
+
+### What was wrong with it
+
+v813 capped the render at 50 blocks *and* restricted the unfiltered view to configured prefixes. Only the cap was doing the work of keeping a large mesh usable. The hiding was a second, independent restriction that bought nothing and cost discovery — the one path to an unranked route was a filter box whose contents you would have to guess.
+
+The failure is quiet in the way UI failures usually are. Nothing is broken, nothing errors; a card simply shows two routes on a mesh that has eleven contested ones, with a count in the corner that reads as a status line rather than as "there are nine things here you cannot see".
+
+### Now
+
+Every contested prefix renders, configured ones still sorted first so a decision already made stays at the top and never falls off the end of the window. The cap is unchanged at `prefPeersMaxBlocks` (50), and the count line now says what to do about it — "12 of 380 shown — narrow the filter to see the rest" — rather than only that truncation happened.
+
+The unfiltered count reports both halves of the picture: "11 contested, 2 ranked". A route with a single advertiser is still never rendered; it cannot be ordered.
+
+### Tests
+
+`TestPreferredPeersRendersBoundedWindow` now asserts the inverse of what it did in v813: that the unfiltered view is *not* restricted to configured prefixes, and that it falls through to the full contested set. Written to fail against v813's own source, so the regression cannot come back quietly.
+
+### Verified
+
+`go build ./...` clean at `CGO_ENABLED=0`; `go vet` and `gofmt -l` clean. Full `internal/webadmin` suite passes.
+
+### Not verified
+
+Not opened in a browser, and not measured against a mesh large enough to reach the cap. Both bounds are still argued from the code rather than observed.
+
+### Rolling upgrade
+
+UI-only. No wire format change, and no change to route selection itself — this only affects which of the existing choices the card puts in front of you.
+
+---
+
+## v813 — 2026-08-08
+
+**v812's Preferred peers card rendered a draggable block for every prefix more than one peer advertised. On a mesh carrying thousands of routes that is tens of thousands of DOM nodes, rebuilt on every status poll — unusable long before it is merely slow. The card now renders a bounded window, and its preparation is linear rather than quadratic.**
+
+### Three separate failures
+
+The block count was unbounded: one per contested prefix, no cap, no filter, all of it rebuilt whenever the page re-rendered.
+
+Preparation was quadratic in the wrong two dimensions. Each row resolved its peer label with a linear scan of the peer list, and each row inside a block rescanned that block's advertiser list for its metric. Neither is visible at fourteen peers and nine routes; both bite as soon as a mesh has many peers *and* many routes, which is the case this card exists for.
+
+And nothing precomputed the text a filter would match against, so filtering — had there been any — would have rebuilt those strings on every keystroke.
+
+### The window
+
+- Prefixes with a preference already configured always render, and sort first. A decision the operator has made can never fall off the end of the window.
+- Everything else renders only when a filter narrows it. The filter reuses `parseFilterQuery`/`evalFilterAst`, the same parser the table filter boxes use, so AND/OR/NOT, `-term`, quoted phrases and parentheses all work, matched against the prefix and its advertisers' labels.
+- At most `prefPeersMaxBlocks` (50) blocks render at once. The remainder is reported as a count — "12 of 380 shown — narrow the filter" — rather than silently dropped.
+- Prefixes with a single advertiser never render at all. They cannot be ordered, and they are the overwhelming majority.
+
+Unfiltered, the card deliberately shows only what is configured. An operator arriving at the page wants the decisions they have made, not every contested prefix in the mesh; the count line reports how many others exist so the rest are discoverable rather than hidden.
+
+`buildPreferBlock` was split out of `buildPreferredPeers` so that re-filtering constructs only the blocks now visible, instead of building every block and hiding most with CSS.
+
+### Linear preparation
+
+Peer labels, filter haystacks, and per-block metrics are each built into a `Map` once per render. Grouping advertisers by prefix is one pass over the learned routes, and only prefixes with more than one advertiser are kept.
+
+### Tests
+
+Four cases in `internal/webadmin/routeprefer_ui_test.go`, asserted against the embedded UI source and written to fail on v812's version: that a cap exists and is actually applied, that the unfiltered view is restricted to configured prefixes, that truncation is reported, that labels/haystacks/metrics are precomputed and no linear scan runs per row, that single-advertiser prefixes are excluded, and that configured prefixes sort first.
+
+The per-row-scan assertion earned its place immediately: it caught an `advertisers.find()` still running per row inside `buildPreferBlock` after the rest of the rewrite was done.
+
+### Verified
+
+`go build ./...` clean at `CGO_ENABLED=0`; `go vet` and `gofmt -l` clean. Full `internal/webadmin` suite passes.
+
+### Not verified
+
+Still not opened in a browser. The cap, the filter wiring and the absence of per-row scans are structural properties a test can read out of the source; how the filtered list actually feels to use is not, and neither is the drag interaction itself.
+
+No measurement against a real large mesh. The bounds are argued from the code, not observed — this mesh has nine learned routes, so the window has never been reached.
+
+### Still unbounded
+
+`/api/status` carries every learned route — one entry per (prefix, origin) — on every poll, and this card depends on it. That predates the card and already applied to the Routes page generally, but it is the piece that remains: the render is capped, the payload feeding it is not. The fix is a dedicated endpoint returning only contested prefixes, computed server-side. Not done here because it makes the card asynchronous, and that is a change worth verifying in a browser rather than by reading.
+
+### Unrelated but adjacent
+
+A rejected prefix is invisible in this card with no explanation, and `NewNetworkDefaults` seeds `route_reject` with `0.0.0.0/0` and `::/0` — so a mesh with five nodes advertising a default route still shows an empty card on every receiver running stock config, because those advertisements are purged in `reloadRoutes` before they ever reach `ns.redist`. This is not specific to default routes: `rejected()` matches any configured CIDR, and an `inclusive` entry silently removes every more-specific prefix inside it too, which is the harder case to spot. The card holds both the learned routes and `route_reject` and could grey the prefix with the responsible entry named. It does not yet.
+
+### Rolling upgrade
+
+UI-only. No wire format change, no behaviour change to route selection itself.
+
+---
+
+## v812 — 2026-08-08
+
+**v811 added route origin preferences but left them reachable only from the CLI and the API. This adds the Preferred peers card to Traffic → Routes, with drag-and-drop ordering.**
+
+### What it shows
+
+One block per prefix, listing every peer currently advertising it, in the order this node will follow them.
+
+The list is built from live learned state — `state.status`' routes, what this node has actually received — not from config. That distinction is the point of the card. A preference naming a peer that never advertises the prefix is inert, and one that omits a peer still advertising it silently leaves that peer ranked last; neither is visible if the card only renders what was configured. Config supplies the saved order, which is then applied over the live set.
+
+Unranked advertisers are shown too, below the ranked ones and sorted the way selection would actually order them (metric, then node id). So the list reads top to bottom as the real precedence, not just the configured part of it. Ranked rows carry an accent border so the boundary between "chosen" and "whatever the metric says" stays visible.
+
+Prefixes advertised by only one peer are skipped. There is nothing to choose between, and including them would bury the handful of rows that matter under every route in the mesh.
+
+Each block also gets an enable/disable tag and a clear button, matching how reject entries already behave: a disabled preference keeps its order but stops applying, so selection reverts to lowest-metric.
+
+### Dragging
+
+Plain HTML5 drag-and-drop, no library — the rest of this UI is dependency-free and one list of a handful of rows does not justify changing that.
+
+The drop target is computed from the pointer's position against each row's midpoint rather than from which row it happens to be over, which is what makes a drag feel like it inserts rather than swaps. The dragged row keeps its space in the flow and fades, so the list does not jump as it is picked up; the insertion point is shown by the rows reordering live around it. A drop that lands where it started posts nothing.
+
+A drop posts the whole ordered list, which is what `RoutePrefer` expects — it replaces rather than merges, because the list is positional and appending would silently change what everything after the insertion point ranks against.
+
+### One bug caught on the way in
+
+The first version built each row with `$('<li …>')`. The `$()` helper parses its argument as innerHTML on a plain `<div>`, so a list row constructed on its own has no list parent at parse time — the same class of failure `ui_dom_helper_test.go` documents for bare `<tr>`/`<td>`, where the element evaluates to null and the next call aborts the whole render with nothing on screen to indicate why. Rows are now built as one markup string parsed inside their own `<ul>`. `TestPreferredPeersBuildsNoBareListItems` is what caught it and is kept to keep catching it.
+
+### Also
+
+`route_prefer` is now surfaced in `/api/config`, alongside `route_reject` rather than folded into `routes` — it describes routes this node *learns*, not ones it advertises.
+
+### Tests
+
+`internal/webadmin/routeprefer_ui_test.go`. The four ops the card posts are exercised end to end through the real server and session handling: setting an order, reordering it (asserting replace-not-append, since that is what a drag sends), disable and re-enable — checking the order survives a disable, because the card re-enables in place and expects it intact — and remove. A duplicate origin must be refused rather than silently reordered. The third test is the DOM-shape guard above.
+
+### Verified
+
+`go build ./...` clean at `CGO_ENABLED=0`; `go vet` and `gofmt -l` clean. Full `internal/webadmin` and `internal/config` suites pass.
+
+### Not verified
+
+Not opened in a browser. The handler wiring, the payload shape and the DOM-construction constraint are covered by tests, but the drag interaction itself — the pointer maths, the grab cursor, how it feels on a touch screen — is asserted only by reading. HTML5 drag-and-drop notably does not work on touch devices without a shim, so this is mouse-only for now.
+
+The card is also untested against a mesh where a prefix genuinely has several advertisers, since this one has a single default-route origin: what renders there is the empty state, not the list.
+
+---
+
+## v811 — 2026-08-08
+
+**Route selection between peers advertising the same prefix was lowest-metric-wins, full stop, which puts the choice entirely in the advertisers' hands. When four peers each offer `0.0.0.0/0` and you want the one that isn't cheapest, the only lever was asking those operators to renumber. `route_prefer` settles it from the receiving end.**
+
+### What it is
+
+An ordered list of node IDs per prefix, per network:
+
+```json
+"route_prefer": [
+  { "cidr": "0.0.0.0/0", "origins": ["<nodeC>", "<nodeB>"] }
+]
+```
+
+Listed origins outrank everything else, in the order given, whatever metric they advertise. Unlisted origins rank below every listed one and continue to be ordered among themselves by metric exactly as before.
+
+### Preference, not a pin
+
+The ranking is applied as a comparison key inside `bestRedistOrigins`, ordered specificity → preference → metric. That placement is the whole design, because by the time ranking runs that function has already discarded every origin with no live session and every origin whose relevant address family has gone dark (see familyprobe.go). A preferred origin becoming unreachable therefore isn't a case anything has to handle — it simply stops being a candidate, and the next comparison picks whoever is left: the next-ranked origin, or if none are listed, the lowest metric. No timeout, no withdrawal, no interval where the prefix is unreachable because the preference outlived the peer.
+
+Three deliberate constraints:
+
+Specificity still comes first. A preference chooses between peers offering the *same* prefix; preferring an origin for `0.0.0.0/0` must not pull traffic off a `/24` another peer advertises.
+
+Naming an origin takes it out of the equal-cost multipath set. It outranks its siblings rather than sharing flows with them, since two origins can only tie on rank if both are unlisted. That is the point of naming one, but it is a behaviour change for anyone currently relying on an ECMP tie between exits they are about to name.
+
+Duplicate origins are refused at config load and by the ops layer. The list is positional, so a second copy is unreachable at its own position and silently shifts what every origin after it ranks against — always a mistake, never a harmless one.
+
+### The metric the kernel sees
+
+`bestRedistMetric` now ranks the same way, so the metric programmed into the OS route describes the advertisement this node actually follows. Left alone it would have disagreed with forwarding the moment a preference was set — traffic leaving via the preferred origin while the kernel route carried some other peer's number.
+
+"Consistent" there means the same rule over the same candidates, not an identical winner. `bestRedistMetric` deliberately does *not* apply the liveness filtering: it answers "is this prefix advertised at all", and withdrawing a kernel route every time an advertiser blinks would churn the table for no gain. So a momentarily-dead preferred origin still supplies the metric while forwarding has already moved on — which was equally true of the lowest-metric rule before preferences existed, just less visible.
+
+### Reaching it
+
+CLI: `route prefer CIDR NODEID [NODEID...]`, `route prefer-clear CIDR`, `route prefer-enable|prefer-disable CIDR`.
+
+Web admin API: the `prefer`, `prefer-remove`, `prefer-enable` and `prefer-disable` ops on the existing route endpoint, taking an `origins` array.
+
+Config ops: `RoutePrefer`, `RoutePreferRemove`, `RoutePreferSetEnabled`. Setting a preference replaces rather than merges, for the positional reason above — an operator setting one is stating the whole order. A disabled entry keeps its order but stops applying, so selection reverts to lowest-metric; the same convention reject entries and firewall rules already use. `route_prefer` is tracked in config history diffs.
+
+### Tests
+
+`internal/mesh/routeprefer_test.go` and `internal/config/routeprefer_test.go`.
+
+The forwarding tests build the four-peer case from the question that prompted this: four origins advertising `0.0.0.0/0` at different metrics, with a preference naming one that isn't cheapest. Fallback is exercised as a sequence rather than a state — the preferred origin's session is removed and the second-ranked must take over, then that one is removed too and selection must land on plain lowest-metric — because the interesting property is that each step needs no intervention, not that any single arrangement resolves correctly.
+
+Separately: a preference on `0.0.0.0/0` must not beat a `/24` from another peer; naming one of two equal-cost siblings must collapse the ECMP set to it; no preference at all must leave metric ordering byte-for-byte unchanged; and an origin named for a prefix it never advertises must be inert. `clonePreferMap` is tested for deep-copying, since `advPrefer` is published by atomic swap and read without a lock — a retained caller slice must not be able to reorder a live ranking underneath the data path.
+
+Three cases cover the kernel metric: that it follows the preferred origin, that it is unchanged without a preference, and that it ignores session liveness where `bestRedistOrigins` does not — asserting both halves of that asymmetry in one test so the divergence is deliberate on the record rather than discovered later.
+
+### Verified
+
+`go build ./...` clean at `CGO_ENABLED=0`; `go vet` and `gofmt -l` clean.
+
+Full `internal/mesh` suite run to completion in twelve chunks: **630 tests, 630 passed, 0 failed**, with chunk membership verified against `-test.list`. `internal/config` and `internal/netfilter` pass. The new selection and config paths also pass under `-race`.
+
+### Not verified
+
+No live use. The mesh this was written for has one node advertising a default route, not four, so the multi-origin case is covered by unit tests over a constructed forwarding snapshot rather than by traffic. The fallback path in particular deserves a live check: the tests remove a session from `byNode` directly, which is the state a dropped peer produces but not the sequence of events that produces it.
+
+There is no web admin *UI* for this yet — the ops exist on the API and in the CLI, but the Traffic → Routes page has no control for them, so setting a preference from the browser is not yet possible.
+
+### Rolling upgrade
+
+Local to the node applying it, no wire format change, nothing advertised. A node with no `route_prefer` entries selects exactly as it did on v810.
+
+---
+
 ## v810 — 2026-08-08
 
 **A handshake pending entry could outlive every path that deletes it, and onHSInit's simultaneous-open tie-break treats any pending as proof that our own handshake is about to complete. On the node whose id sorted lowest in the mesh, that meant permanently ignoring some peers' handshake inits — silently, one-directionally, and on a different arbitrary subset of peers after every restart.**

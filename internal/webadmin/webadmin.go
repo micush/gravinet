@@ -1051,6 +1051,12 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		Seeds    config.SeedList      `json:"seeds"`
 		Routes   []config.Route       `json:"routes"`
 		RouteRej []config.RejectRoute `json:"route_reject"`
+		// RoutePrefer mirrors config.Network.RoutePrefer verbatim — the
+		// ordered per-prefix origin preference Traffic > Routes' "Preferred
+		// peers" card edits. Surfaced alongside RouteRej rather than folded
+		// into Routes because it describes routes this node *learns*, not
+		// ones it advertises.
+		RoutePrefer []config.PreferRoute `json:"route_prefer"`
 		// AllowRelay/SelfSeed mirror config.Network's own fields verbatim —
 		// see their doc comments. Neither is currently hot-reloadable (see
 		// NetworkSetAllowRelay/NetworkSetSelfSeed); a toggle in Settings >
@@ -1098,7 +1104,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		out = append(out, cfgNet{
 			ID: id, Name: n.Name, Enabled: n.Enabled, Notes: n.Notes,
 			Subnet4: n.Subnet4, Subnet6: n.Subnet6, Address4: n.Address4, Address6: n.Address6, MTU: n.MTU, Seeds: n.Seeds,
-			Routes: n.Routes, RouteRej: n.RouteRej, AllowRelay: n.AllowRelay, SelfSeed: n.SelfSeed, Mesh: meshMode,
+			Routes: n.Routes, RouteRej: n.RouteRej, RoutePrefer: n.RoutePrefer, AllowRelay: n.AllowRelay, SelfSeed: n.SelfSeed, Mesh: meshMode,
 			RedistributeBGPRoutes: n.RedistributeBGPRoutes, RedistributeBGPMetric: n.RedistributeBGPMetric,
 			NAT: n.NAT, QoS: n.QoS, Throttle: n.Throttle, Firewall: n.Firewall, Hosts: n.HostsAdvertise, HostsRej: n.HostsReject,
 			DNS: n.DNSAdvertise, DNSRej: n.DNSReject, Keys: keys,
