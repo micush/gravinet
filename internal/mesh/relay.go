@@ -235,9 +235,31 @@ func (e *Engine) tryRelays(ns *netState) {
 
 	// Snapshot what we need under the lock.
 	ns.mu.Lock()
-	// prune stale relay pendings so we can retry / pick another relay
+	// Prune stale pendings so we can retry / pick another relay.
+	//
+	// This used to sweep only relayed attempts (p.relay != nil), which left
+	// direct ones with no time-based cleanup at all. Every other exit for a
+	// direct pending needs something to arrive or something to be called
+	// again: onHSResp deletes it when a response comes back, and planHandshake
+	// deletes it after exhausting the key order — but planHandshake only ever
+	// finds it by scanning for pp.endpoint == seed, so it has to be called
+	// again *for that same address*. An address that stops being dialed (the
+	// peer roamed, gossip replaced its endpoint, attribution moved it out of
+	// the candidate set) takes its pending with it, and nothing ever removes
+	// it.
+	//
+	// An orphan is not inert. onHSInit's simultaneous-open tie-break matches a
+	// pending by p.endpoint == from or ns.seedOwner[p.endpoint] == peer, so a
+	// leaked entry keeps answering "we already have a handshake in flight to
+	// that node" forever. On a node whose id sorts below its peers' that means
+	// permanently ignoring their inits — see the freshness check there.
+	//
+	// Direct attempts are managed on a much shorter cycle than this TTL
+	// (handshakeRetry per key), so a live one is never reaped out from under
+	// planHandshake; this is a backstop for the ones planHandshake can no
+	// longer see.
 	for idx, p := range ns.pending {
-		if p.relay != nil && now.Sub(p.started) > relayPendingTTL {
+		if now.Sub(p.started) > relayPendingTTL {
 			delete(ns.pending, idx)
 		}
 	}

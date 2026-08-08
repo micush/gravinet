@@ -1477,7 +1477,20 @@ func ClockSkewTolerance() time.Duration { return clockSkew }
 const (
 	handshakeRetry   = 2 * time.Second
 	handshakeBackoff = 5 * time.Second
-	clockSkew        = 120 * time.Second
+
+	// handshakeStaleForTieBreak bounds how long onHSInit's simultaneous-open
+	// tie-break will keep deferring to our own in-flight handshake. Past this,
+	// ours is treated as not going to complete and the peer's init is answered
+	// instead, whatever the id ordering says.
+	//
+	// Sized to cover a full planHandshake cycle with room to spare: that cycle
+	// re-sends once per handshakeRetry for each key in the order, so a genuine
+	// attempt working through three or four keys finishes well inside this and
+	// never loses a tie it was going to win. Anything still pending afterwards
+	// has either exhausted its keys (and should have been deleted) or lost the
+	// caller that would delete it.
+	handshakeStaleForTieBreak = 10 * time.Second
+	clockSkew                 = 120 * time.Second
 
 	gossipInterval = 10 * time.Second // how often we check whether to share our peer list
 	// gossipFullRefresh is the baseline resend floor for broadcastGossip: even

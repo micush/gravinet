@@ -490,16 +490,43 @@ func (e *Engine) onHSInit(payload []byte, from netip.AddrPort, via *peerSession)
 			}
 		}
 		if mine != nil {
-			if e.nodeID < peer {
+			// Only a handshake that is actually still in flight gets to win
+			// the tie. "In flight" has to mean something time-bounded, because
+			// the whole branch rests on the premise that ours will complete —
+			// and a pending that has outlived its retry window is evidence
+			// that it will not.
+			//
+			// Without this check the smaller id suppresses inbound inits for
+			// as long as the pending exists, and a pending can outlive every
+			// path that would delete it (see tryRelays' sweep). The failure is
+			// silent and one-directional: our own session stays up and answers
+			// keepalives, so the peer looks connected from here, while the peer
+			// re-inits every few seconds because from its side nothing ever
+			// completed. It lands on an arbitrary subset of peers per boot —
+			// whichever ones happened to leave an orphan — and a restart moves
+			// it rather than fixing it.
+			//
+			// It also falls entirely on the lowest-id node in a mesh, which is
+			// the one node that never takes the self-healing branch below.
+			// Deferring to the peer when our own attempt has stalled is the
+			// same resolution that branch already applies, just triggered by
+			// staleness instead of by ordering.
+			stale := time.Since(mine.started) > handshakeStaleForTieBreak
+			if e.nodeID < peer && !stale {
 				ns.mu.Unlock()
 				e.log.Debugf("mesh: ignoring handshake init from %q on net %x: our own handshake to it is in flight and %q sorts first, so ours is the one that completes", peer, hdr.Network, e.nodeID)
 				return
 			}
-			// We sort second: drop our attempt and answer theirs, so exactly
-			// one session exists for this pair.
+			// We sort second, or ours has stalled: drop our attempt and answer
+			// theirs, so exactly one session exists for this pair.
 			delete(ns.pending, mine.idxI)
 			ns.mu.Unlock()
-			e.log.Debugf("mesh: abandoning our in-flight handshake to %q on net %x and answering theirs instead: %q sorts first", peer, hdr.Network, peer)
+			if stale && e.nodeID < peer {
+				e.log.Infof("mesh: our in-flight handshake to %q on net %x has not completed in %v — answering their init instead of holding the tie-break open",
+					peer, hdr.Network, handshakeStaleForTieBreak)
+			} else {
+				e.log.Debugf("mesh: abandoning our in-flight handshake to %q on net %x and answering theirs instead: %q sorts first", peer, hdr.Network, peer)
+			}
 		} else {
 			ns.mu.Unlock()
 		}

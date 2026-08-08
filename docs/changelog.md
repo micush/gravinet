@@ -2,6 +2,76 @@
 
 ---
 
+## v810 — 2026-08-08
+
+**A handshake pending entry could outlive every path that deletes it, and onHSInit's simultaneous-open tie-break treats any pending as proof that our own handshake is about to complete. On the node whose id sorted lowest in the mesh, that meant permanently ignoring some peers' handshake inits — silently, one-directionally, and on a different arbitrary subset of peers after every restart.**
+
+### The shape of it
+
+`mcfed` showed 13 direct sessions with RTT measured on all of them, and could not ping four of them. Its counters said why:
+
+```
+gn-cush1   307 tx / 47 rx      gn-openbsd  304 tx / 53 rx
+gn-ionos1  297 tx / 47 rx      gn-rocky    307 tx / 47 rx
+```
+
+1594 bytes across 47 packets is a keepalive stream and nothing else. Every other node in the mesh had healthy bidirectional traffic with all four at the same moment — `gn-cush2` had 6320/6240 with `gn-cush1`, `gn-ionos2` had 1166/6885 — so the four were fine and only `mcfed` was starved. Its log named the mechanism, repeating every few seconds:
+
+```
+ignoring handshake init from "246abd66908957b7" — our own handshake to it is in flight
+  and "0916a3a70b1d5f4c" sorts first, so ours is the one that completes
+```
+
+The peers re-initiating at that rate is itself the evidence that from their side nothing had completed. `mcfed` meanwhile held a session that answered keepalives, so from its side they looked connected.
+
+### Why it never cleared
+
+A direct pending (`relay == nil`) has exactly two exits. `onHSResp` deletes it when a response comes back. `planHandshake` deletes it after exhausting the key order — but `planHandshake` finds it only by scanning for `pp.endpoint == seed`, so it has to be called again *for that same address*. When an address stops being dialed — the peer roamed, gossip replaced its endpoint, attribution moved it out of the candidate set — nothing is ever called for it again and the entry stays.
+
+`tryRelays` did sweep stale pendings, but only relayed ones: `if p.relay != nil && now.Sub(p.started) > relayPendingTTL`. Direct pendings had no time-based cleanup at all.
+
+An orphan is not inert, because the tie-break matches on `p.endpoint == from` or `ns.seedOwner[p.endpoint] == peer`. It keeps answering "we already have a handshake in flight to that node" for the life of the process.
+
+### Why only one node
+
+The tie-break's two branches are not symmetric in their failure modes. A node that sorts *second* abandons its own attempt and answers the peer's — self-healing, and an orphaned pending is harmless there. A node that sorts *first* suppresses.
+
+`mcfed`'s id, `0916a3a70b1d5f4c`, was the lowest in a fourteen-node mesh. It took the suppressing branch against every peer it had and never once took the other. The bug had presumably been latent for a long time and needed a node that both sorted lowest and roamed constantly — churning its candidate set, and with it the addresses `planHandshake` would never revisit — to become visible.
+
+That also explains the tell that identified it: restarting `mcfed` cleared `ns.pending` and fixed three of the four peers, then broke four different ones. The affected set is whichever addresses happened to orphan on that boot. A restart moves the outage rather than clearing it.
+
+### Fix
+
+Two changes, either of which would have prevented this; both are here because they fail differently.
+
+`tryRelays` now sweeps **every** pending past `relayPendingTTL`, not only relayed ones. Direct attempts are managed on a far shorter cycle (`handshakeRetry` per key), so a live one is never reaped out from under `planHandshake`; this is a backstop for the ones `planHandshake` can no longer see.
+
+More importantly, the tie-break no longer treats an arbitrarily old pending as in flight. `handshakeStaleForTieBreak` (10s) bounds it: past that, our attempt is taken as not going to complete, and the peer's init is answered whatever the id ordering says. That is the same resolution the second-sorting branch already applies, triggered by staleness instead of by ordering — which is what removes the asymmetry that made this a single-node failure. The window covers a full `planHandshake` cycle with room to spare (four keys at `handshakeRetry` each is 8s), so a genuine attempt never loses a tie it was going to win.
+
+### Not the other thing
+
+The comment above this branch records two previous attempts, reverted for breaking `TestKeyDisableReconnects`, `TestNetworkReset`, and seed attribution. Both of those attempted to suppress *more* inbound handshakes — declining ones judged redundant. This change suppresses strictly *less*, so it cannot reintroduce those failures: the fan-out that attribution depends on needs inbound handshakes to be answered, and answering more of them is the direction that helps. All three named tests pass unchanged, as does `TestTryRelaysWaitsWhileADirectDialIsStillPending`, which is the case the widened sweep could plausibly have broken.
+
+### Tests
+
+`internal/mesh/pendingdeadlock_test.go`. A fresh pending must still win the tie — without that a genuine simultaneous open installs two sessions for one pair — and one aged past the window must not. The sweep is tested from both sides: a stale *direct* pending must go (the leak), a live one must stay (`planHandshake` is still managing it), and a stale *relayed* one must still go, since widening the sweep must not have narrowed it. A fourth case asserts the staleness window exceeds a four-key handshake cycle, so tuning `handshakeRetry` later cannot quietly start cutting off live attempts.
+
+### Verified
+
+`go build ./...` clean at `CGO_ENABLED=0`; `go vet` and `gofmt -l` clean.
+
+Full `internal/mesh` suite run to completion in ten chunks: **620 tests, 620 passed, 0 failed**, with chunk membership verified against `-test.list`. The changed handshake paths also pass under `-race`.
+
+### Not verified
+
+No live confirmation. The diagnosis is from one node's counters and log against nine other nodes' view of the same four peers, which is strong on *what* was happening and inferential on the orphan's exact provenance — the specific dial that leaked each pending is not in the log. If `mcfed` shows this again on v810, the next thing to capture is `ns.pending` at the moment of failure rather than after a restart has cleared it.
+
+### Rolling upgrade
+
+Local to the node, no wire format change. The node to upgrade is the one being starved — in this mesh, `mcfed`. Nothing about its peers needs to change.
+
+---
+
 ## v809 — 2026-08-07
 
 **NAT accepted IPv4 only, and the restriction was in one place while three layers underneath it had been dual-stack all along. This release removes the restriction and completes the one layer that genuinely wasn't: the overlay data path, which needed real IPv6 packet handling rather than a relaxed family check.**
