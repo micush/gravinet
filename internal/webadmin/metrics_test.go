@@ -15,7 +15,7 @@ import (
 
 func TestMetricsCollectorSample(t *testing.T) {
 	be := &stubBackend{}
-	mc := newMetricsCollector(be, logx.Default())
+	mc := newMetricsCollector(be, logx.Default(), "")
 	// Two samples produce at least one CPU/iface rate point (rates need a delta).
 	mc.sample()
 	mc.sample()
@@ -68,7 +68,7 @@ func TestMetricsCollectorSample(t *testing.T) {
 }
 
 func TestMetricsWindowClamp(t *testing.T) {
-	mc := newMetricsCollector(&stubBackend{}, logx.Default())
+	mc := newMetricsCollector(&stubBackend{}, logx.Default(), "")
 	mc.sample()
 	// snapshot() should accept any window; the handler clamps 1..1440.
 	if got := mc.snapshot(1); got["sample_interval"].(int) != 2 {
@@ -83,7 +83,7 @@ func TestMetricsWindowClamp(t *testing.T) {
 // TestLatencyCollectorRetention, exercised directly against sample()'s trim
 // path rather than waiting on the real ticker.
 func TestMetricsRetentionAllows24h(t *testing.T) {
-	mc := newMetricsCollector(&stubBackend{}, logx.Default())
+	mc := newMetricsCollector(&stubBackend{}, logx.Default(), "")
 	now := time.Now().Unix()
 	// appendTrim's prefix-scan assumes ascending time order, same as real
 	// history — oldest point first.
@@ -124,7 +124,7 @@ func TestHandleMetricsClampAllows24h(t *testing.T) {
 	wcfg := config.WebAdmin{AuthMode: "local", Users: []config.AdminUser{cred},
 		LoginBan: config.BanPolicy{MaxFailures: 3, WindowSeconds: 60, BanSeconds: 900}}
 	srv := New(wcfg, &stubBackend{}, logx.Default())
-	srv.metrics = newMetricsCollector(srv.be, srv.log)
+	srv.metrics = newMetricsCollector(srv.be, srv.log, "")
 	now := time.Now().Unix()
 	srv.metrics.cpu = []metricPoint{{T: now - int64(20*time.Hour/time.Second), V: 42}}
 	ts := httptest.NewServer(srv.handler())
@@ -173,7 +173,7 @@ func TestHandleMetrics(t *testing.T) {
 	srv := New(wcfg, &stubBackend{}, logx.Default())
 	srv.SetConfigPath(cfgPath)
 	// The collector is normally started by Start(); set it up directly for the test.
-	srv.metrics = newMetricsCollector(srv.be, srv.log)
+	srv.metrics = newMetricsCollector(srv.be, srv.log, "")
 	srv.metrics.sample()
 	srv.metrics.sample()
 	ts := httptest.NewServer(srv.handler())
@@ -243,7 +243,7 @@ func TestSampleRunsReadersConcurrently(t *testing.T) {
 		return map[string]devCounters{}
 	}
 
-	mc := newMetricsCollector(&stubBackend{}, logx.Default())
+	mc := newMetricsCollector(&stubBackend{}, logx.Default(), "")
 	start := time.Now()
 	mc.sample()
 	if elapsed := time.Since(start); elapsed >= 2*delay {
@@ -272,7 +272,7 @@ func TestSampleCarriesLastValueForwardOnFailure(t *testing.T) {
 		return 0, false
 	}
 
-	mc := newMetricsCollector(&stubBackend{}, logx.Default())
+	mc := newMetricsCollector(&stubBackend{}, logx.Default(), "")
 	mc.sample()
 	if len(mc.mem) != 1 || mc.mem[0].V != 55 {
 		t.Fatalf("expected one 55%% point after the first successful sample, got %v", mc.mem)
@@ -333,7 +333,7 @@ func TestSampleTimestampsPointsAfterReadersFinish(t *testing.T) {
 		return tick, tick / 4, true // ever-increasing total so a CPU point is produced
 	}
 
-	mc := newMetricsCollector(&stubBackend{}, logx.Default())
+	mc := newMetricsCollector(&stubBackend{}, logx.Default(), "")
 	mc.sample() // primes CPU delta state (no point yet)
 
 	before := time.Now().Unix()

@@ -646,7 +646,7 @@ func (s *Server) Start() error {
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 	}
-	s.metrics = newMetricsCollector(s.be, s.log)
+	s.metrics = newMetricsCollector(s.be, s.log, metricsHistoryPath(s.configPath))
 	go s.metrics.run()
 	s.latencyHist = newLatencyCollector(s.be, s.log, latencyHistoryPath(s.configPath))
 	go s.latencyHist.run()
@@ -716,6 +716,13 @@ func (s *Server) Close() error {
 	}
 	if s.latencyHist != nil {
 		s.latencyHist.close()
+	}
+	// Was missing entirely before metrics history was persisted: the collector
+	// goroutine outlived Close(), which was merely untidy while it held only
+	// in-memory state. Now it is also what writes the final checkpoint, so a
+	// clean shutdown has to reach it.
+	if s.metrics != nil {
+		s.metrics.close()
 	}
 	if s.httpSrv != nil {
 		return s.httpSrv.Close()

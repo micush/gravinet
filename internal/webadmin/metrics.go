@@ -1,7 +1,11 @@
 package webadmin
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"sync"
@@ -20,6 +24,19 @@ import (
 const (
 	metricSampleInterval = 2 * time.Second
 	metricRetention      = 24 * time.Hour
+	// metricCheckpointInterval bounds how much history an unclean stop can
+	// cost — the same tradeoff latencyCheckpointInterval already makes, and
+	// the same 5 minutes, for the same reason: a clean shutdown saves
+	// synchronously in close(), so this only covers a crash or a kill -9.
+	//
+	// The write is larger than latency's. 2s sampling over 24h is ~43,200
+	// points per series, and there are three host series plus two per live
+	// interface, so a single-network host checkpoints a few megabytes. That is
+	// a bigger periodic write than latency-history.json but the same shape of
+	// cost, and the alternative — a shorter retention on disk than in memory —
+	// would mean the graph silently shortens across a restart, which is the
+	// thing this exists to stop.
+	metricCheckpointInterval = 5 * time.Minute
 )
 
 // metricPoint is one timestamped sample (unix seconds, value).
@@ -53,6 +70,11 @@ type ifaceMetrics struct {
 type metricsCollector struct {
 	be  Backend
 	log *logx.Logger // may be nil in tests; always nil-checked before use
+	// path is where history is checkpointed and restored from — empty
+	// disables persistence entirely (an embedding or test context with no
+	// configPath to anchor it to; see metricsHistoryPath), in which case this
+	// collector behaves exactly as it did before persistence existed.
+	path string
 
 	mu     sync.Mutex
 	cpu    []metricPoint
@@ -89,8 +111,121 @@ type metricsCollector struct {
 	stop      chan struct{}
 }
 
-func newMetricsCollector(be Backend, log *logx.Logger) *metricsCollector {
-	return &metricsCollector{be: be, log: log, ifaces: map[string]*ifaceMetrics{}, stop: make(chan struct{})}
+func newMetricsCollector(be Backend, log *logx.Logger, path string) *metricsCollector {
+	m := &metricsCollector{be: be, log: log, path: path, ifaces: map[string]*ifaceMetrics{}, stop: make(chan struct{})}
+	if path != "" {
+		m.load()
+	}
+	return m
+}
+
+// metricsHistoryPath returns where the metrics checkpoint lives — next to the
+// config file, the same convention latencyHistoryPath and selfSignedPaths
+// already use for their own restart-durable files. An empty configPath (some
+// embedding/test contexts genuinely have none) means persistence is simply
+// unavailable, not an error.
+func metricsHistoryPath(configPath string) string {
+	if configPath == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(configPath), "metrics-history.json")
+}
+
+// metricsSnapshot is the on-disk shape: the four rolling series and nothing
+// else. The collector's sampler state (CPU totals, per-interface byte counters
+// and their timestamps) is deliberately excluded — those are deltas against a
+// reading taken moments ago by *this* process, and carrying them across a
+// restart would compute a rate spanning the downtime, i.e. one enormous
+// fabricated spike at the exact moment the graph resumes. Leaving them zero
+// makes the first tick after a restart prime the deltas and emit no rate point,
+// which is what a fresh start already does.
+//
+// uptimeSecs is excluded for a simpler reason: it is a current value, not a
+// history, and a stale one restored from disk would be wrong the instant it
+// loaded.
+type metricsSnapshot struct {
+	CPU    []metricPoint            `json:"cpu"`
+	Mem    []metricPoint            `json:"mem"`
+	Disk   []metricPoint            `json:"disk"`
+	Ifaces map[string]*ifaceMetrics `json:"ifaces"`
+}
+
+// save writes the collector's current history to m.path as JSON, via the same
+// atomic temp-file-then-rename write every other piece of durable state in this
+// package uses (writeAtomicFile, frr.go) — a partial write would corrupt the
+// one copy a restart depends on, at exactly the moment (shutdown, or
+// mid-checkpoint) when there is no later tick to self-heal it. m.path == "" is
+// the caller's responsibility to check first; both call sites do.
+func (m *metricsCollector) save() error {
+	m.mu.Lock()
+	snap := metricsSnapshot{CPU: m.cpu, Mem: m.mem, Disk: m.disk, Ifaces: m.ifaces}
+	body, err := json.Marshal(snap)
+	m.mu.Unlock()
+	if err != nil {
+		return fmt.Errorf("marshal metrics history: %w", err)
+	}
+	return writeAtomicFile(m.path, string(body))
+}
+
+// load restores previously-checkpointed history, called once from
+// newMetricsCollector before run() starts, so no locking is needed — nothing
+// else can be touching these fields yet. Points already past metricRetention
+// are dropped immediately, the same trim sample() applies on every write, so a
+// daemon that was down longer than the retention window does not resurrect data
+// normal operation would already have aged out; an interface left with no
+// points after that trim is dropped rather than kept as an empty entry that
+// nothing ever cleans up.
+//
+// A missing file is not logged (first run, or an upgrade from before this
+// existed — expected and silent); a corrupt or unreadable one is logged and
+// treated identically: start empty, exactly as this collector did before
+// persistence existed. This is a convenience cache of a signal the host
+// regenerates on its own, not a source of truth anything depends on.
+func (m *metricsCollector) load() {
+	data, err := os.ReadFile(m.path)
+	if err != nil {
+		if !os.IsNotExist(err) && m.log != nil {
+			m.log.Warnf("webadmin: could not read metrics history from %s: %v (starting empty)", m.path, err)
+		}
+		return
+	}
+	var snap metricsSnapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		if m.log != nil {
+			m.log.Warnf("webadmin: could not parse metrics history at %s: %v (starting empty)", m.path, err)
+		}
+		return
+	}
+	cutoff := time.Now().Unix() - int64(metricRetention/time.Second)
+	m.cpu = trimPoints(snap.CPU, cutoff)
+	m.mem = trimPoints(snap.Mem, cutoff)
+	m.disk = trimPoints(snap.Disk, cutoff)
+	for name, ifm := range snap.Ifaces {
+		if ifm == nil {
+			continue
+		}
+		ifm.Rx = trimPoints(ifm.Rx, cutoff)
+		ifm.Tx = trimPoints(ifm.Tx, cutoff)
+		if len(ifm.Rx) == 0 && len(ifm.Tx) == 0 {
+			continue
+		}
+		// have/lastRx/lastTx/lastT stay at their zero values: see
+		// metricsSnapshot on why the deltas must not survive a restart.
+		m.ifaces[name] = ifm
+	}
+}
+
+// trimPoints drops points older than cutoff. appendTrim does the same thing on
+// the append path; this is the load-time equivalent with nothing to append.
+func trimPoints(s []metricPoint, cutoff int64) []metricPoint {
+	i := 0
+	for i < len(s) && s[i].T < cutoff {
+		i++
+	}
+	if i == 0 {
+		return s
+	}
+	return append(s[:0:0], s[i:]...)
 }
 
 // noteReaderHealth logs (Warnf, then Infof on recovery) only on the
@@ -120,10 +255,23 @@ func (m *metricsCollector) run() {
 	m.sample() // prime CPU/iface deltas (produces no rate points yet)
 	t := time.NewTicker(metricSampleInterval)
 	defer t.Stop()
+	// A nil channel is never selectable, so leaving ckpt nil when persistence
+	// is off (m.path == "") disables the checkpoint case below without needing
+	// a second branch in the loop — same shape as latencyCollector.run.
+	var ckpt <-chan time.Time
+	if m.path != "" {
+		ct := time.NewTicker(metricCheckpointInterval)
+		defer ct.Stop()
+		ckpt = ct.C
+	}
 	for {
 		select {
 		case <-m.stop:
 			return
+		case <-ckpt:
+			if err := m.save(); err != nil && m.log != nil {
+				m.log.Warnf("webadmin: could not checkpoint metrics history to %s: %v", m.path, err)
+			}
 		case <-t.C:
 			// sample() can block for ~1s on macOS (top -l 1's startup
 			// delay). Running it inline here would stretch the effective
@@ -144,7 +292,21 @@ func (m *metricsCollector) run() {
 	}
 }
 
-func (m *metricsCollector) close() { close(m.stop) }
+// close stops the sampling loop and, if persistence is enabled, saves the final
+// state synchronously before returning — the clean-shutdown half of the
+// checkpointing described on metricCheckpointInterval. Does not wait for run()'s
+// goroutine to exit (matching latencyCollector.close and bgpRedis/autoBGP);
+// save() takes m.mu itself, so it is safe whether or not a last sample() is
+// still in flight.
+func (m *metricsCollector) close() {
+	close(m.stop)
+	if m.path == "" {
+		return
+	}
+	if err := m.save(); err != nil && m.log != nil {
+		m.log.Warnf("webadmin: could not save metrics history to %s: %v", m.path, err)
+	}
+}
 
 // Swappable via package vars (rather than calling the platform readers
 // directly), purely for testability: TestSampleRunsReadersConcurrently

@@ -2,6 +2,50 @@
 
 ---
 
+## v819 — 2026-08-08
+
+**Monitor → Latency's history survived a restart; Monitor → Metrics did not. CPU, memory, disk and per-interface throughput were in-memory only, so every restart blanked half the Monitor page. They now checkpoint to `metrics-history.json` the same way latency already does.**
+
+### The same shape as latency
+
+`metrics-history.json` sits next to the config file, the convention `latency-history.json`, `webadmin-cert.pem` and `webadmin-session.key` already share. Loaded once at construction, checkpointed every `metricCheckpointInterval` (5 minutes, matching latency's), and saved synchronously on clean shutdown — so a `systemctl restart` loses nothing and a crash loses at most one checkpoint.
+
+A missing file is silent (first run, or an upgrade from before this existed). A corrupt or unreadable one logs and starts empty. Persistence disables itself entirely when there is no config path to anchor to, and the collector then behaves exactly as it did before this existed.
+
+### What is deliberately not persisted
+
+The sampler deltas. `lastRx`, `lastTx`, `lastT` and the CPU totals are readings taken moments ago by *this* process; restoring them would make the first tick after a restart compute a rate spanning the entire downtime — one enormous fabricated spike at the exact moment the graph resumes. Leaving them zero makes that first tick prime the deltas and emit no rate point, which is what a fresh start already does. `metricsSnapshot` exists to make that exclusion explicit rather than incidental to which fields happen to carry JSON tags.
+
+`uptimeSecs` is excluded for a simpler reason: it is a current value, not a history, and a stale one restored from disk would be wrong the instant it loaded.
+
+### A bug this uncovered
+
+`Server.Close()` never called `s.metrics.close()`. The collector's goroutine outlived shutdown — untidy but harmless while it held only in-memory state, and a lost final checkpoint now. Added.
+
+### Size, stated plainly
+
+This writes more than latency does. 2s sampling over 24h is ~43,200 points per series, and there are three host series plus two per live interface, so a single-network host checkpoints a few megabytes every five minutes. The alternative — a shorter retention on disk than in memory — would mean the graph silently shortens across a restart, which is the thing this exists to stop. Noted on `metricCheckpointInterval` so the tradeoff is visible at the constant rather than discovered from a file size.
+
+### Tests
+
+`internal/webadmin/metrics_persist_test.go`. Round-trip through the real `load()` path a startup takes; the path convention; retention trimming at load, including that an interface left with no in-window points is dropped rather than kept as an empty entry; missing and corrupt files both starting empty; persistence-off writing nothing at all; and `close()` writing synchronously.
+
+The delta case has its own test rather than being folded into the round-trip: "the history came back" and "the history came back without a fabricated spike attached" are different claims, and only the second one describes what a graph will actually look like after a restart.
+
+### Verified
+
+`go build ./...` clean at `CGO_ENABLED=0`; `go vet` and `gofmt -l` clean. Full `internal/webadmin` suite passes.
+
+### Not verified
+
+No restart of a real daemon. The save/load cycle is exercised through the same constructor a startup uses, but nothing here has watched an actual graph survive `systemctl restart`, and the multi-megabyte checkpoint has not been written on a busy host with 24h of accumulated history — only on the small fixtures the tests build.
+
+### Rolling upgrade
+
+Local to the node. First start after upgrading finds no `metrics-history.json` and begins accumulating one; nothing else changes.
+
+---
+
 ## v818 — 2026-08-08
 
 **Preferred peers listed each row as "gn-ionos1 · 95e8beedf767fe66". The node id is what the API is keyed on and what gets saved, but it is not what an operator reads a list by, and a 16-char hex string on every row crowds out the name beside it. Rows now show the hostname alone.**
