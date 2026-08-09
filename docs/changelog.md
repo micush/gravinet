@@ -2,6 +2,30 @@
 
 ---
 
+## v823 — 2026-08-09
+
+**Traffic › NAT's section hint cut from 1,453 characters to 152. UI copy only — no config, API, or behaviour change.**
+
+It had grown into a wall of text above the table: the address-family rule stated twice in four clauses, every `translate` mode re-explained in a parenthetical, "leave both blank to match all ports" restating the "blank = any" from the sentence before it, and a full walkthrough of the add/edit/remove buttons that every other section states in half a line or not at all. A hint that long stops being read, which costs more than the detail it was carrying.
+
+It now reads, in full:
+
+> Network address translation rewrites addresses as traffic crosses the tunnel. IPv4 and IPv6 are both supported — write one rule per family.
+
+The per-field detail is not lost: the column headers and the `translate` dropdown carry their own tooltips, which is where it belongs — reachable on the field it describes rather than in a preamble covering all of them at once.
+
+One judgement worth recording, since it was made deliberately rather than by omission. The removed text included a genuine footgun: masquerade takes its address family from **source** alone, so a blank (any) source silently means IPv4, and masquerading IPv6 needs an explicit IPv6 prefix. That is the one thing on this page that does something other than what a reader would assume. It is gone from the hint. If it turns out to bite someone, the right home for it is the `translate` column's own tooltip or an inline warning on the rule editor when a masquerade rule is saved with a blank source — next to the mistake, not in a paragraph above the table that the same wall of text was stopping anyone from reading.
+
+### Verified
+
+`go build ./...` clean at `CGO_ENABLED=0`; `go vet` and `gofmt` clean. `internal/webadmin` passes in full. The change is one string literal in `internal/webadmin/ui.go`.
+
+### Not verified
+
+No other suite was re-run, which is proportionate: nothing outside that one string changed. Note that no test asserts on this hint's text either — `internal/webadmin`'s UI guards check wiring and structure, not section copy — so its passing is evidence the edit broke nothing, not that the new copy is what shipped. That was confirmed by rendering the string. v822's own open gap is unchanged: the seed/peer coupling still has no two-node test against a real session.
+
+---
+
 ## v822 — 2026-08-09
 
 **Corrects v821: seed state and peer state now mirror each other in all four directions, not two. Disable or enable either one and the other follows.**
