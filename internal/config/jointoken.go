@@ -107,7 +107,13 @@ func (c *Config) NetworkToken(ref string, extraSeeds []string, ttl time.Duration
 	for _, s := range extraSeeds {
 		addSeed(s)
 	}
+	// Disabled seeds are skipped: a token is a promise that these addresses
+	// are worth dialing, and handing a joiner an address this node has itself
+	// taken out of service makes it spend its cold start on a dead endpoint.
 	for _, s := range n.Seeds {
+		if s.Disabled {
+			continue
+		}
 		addSeed(s.Address)
 	}
 	for _, s := range n.PeerCache {
@@ -131,7 +137,11 @@ func (c *Config) TokenSeedCount(ref string, extra []string) int {
 		return 0
 	}
 	seen := map[string]bool{}
-	for _, group := range [][]string{extra, n.Seeds.Addrs(), n.PeerCache} {
+	// EnabledAddrs, not Addrs — this counts what a token would actually carry
+	// (JoinToken skips disabled seeds), and it is what the "no bootstrap seed
+	// is embedded" warning keys off. Counting a parked seed here would
+	// suppress that warning on a token that carries nothing.
+	for _, group := range [][]string{extra, n.Seeds.EnabledAddrs(), n.PeerCache} {
 		for _, s := range group {
 			if s = strings.TrimSpace(s); s != "" {
 				seen[s] = true

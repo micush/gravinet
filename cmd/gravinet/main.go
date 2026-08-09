@@ -48,7 +48,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "819"
+	version = "822"
 	commit  = "none"
 )
 
@@ -1147,16 +1147,10 @@ func cmdRun(args []string) {
 					fillRuntimeSpec(&spec, n, newCfg.EffectiveFirewallExempt(), newCfg.NATStateTimeout, newCfg.FirewallServices)
 					// fillRuntimeSpec doesn't resolve seeds (only buildOneNetSpec does
 					// at startup); resolve them here so a seed added at runtime is
-					// dialed live via ReloadRuntime's seed merge.
-					boot := append(append([]string{}, n.Seeds.Addrs()...), n.PeerCache...)
-					spec.Seeds = resolveSeeds(boot, udpPrimary(newCfg), overlays)
-					spec.TCPSeeds = resolveTCPSeeds(boot, newCfg.AdvertisedTCPPort(), overlays)
-					// Clean counterparts: exactly the operator's configured Seeds,
-					// none of PeerCache folded in -- see NetSpec.ConfiguredSeeds'
-					// doc comment. Same resolver, same expansion rules (multi-port
-					// lists, tcp:// scheme), just without boot's extra addresses.
-					spec.ConfiguredSeeds = resolveSeeds(n.Seeds.Addrs(), udpPrimary(newCfg), overlays)
-					spec.ConfiguredTCPSeeds = resolveTCPSeeds(n.Seeds.Addrs(), newCfg.AdvertisedTCPPort(), overlays)
+					// dialed live via ReloadRuntime's seed merge, and one just
+					// disabled is dropped from the dial set and its session torn
+					// down rather than lingering until the next restart.
+					applySeedState(&spec, n, udpPrimary(newCfg), newCfg.AdvertisedTCPPort(), overlays)
 					if ks, kerr := crypto.NewKeySet(keyStrings(n)); kerr == nil {
 						spec.Keys = ks
 						spec.KeyLabels = keyLabelMap(n)
@@ -2560,13 +2554,7 @@ func buildOneNetSpec(n config.Network, cfg *config.Config, overlays []netip.Pref
 			}
 		}
 	}
-	boot := append(append([]string{}, n.Seeds.Addrs()...), n.PeerCache...)
-	spec.Seeds = resolveSeeds(boot, udpPrimary(cfg), overlays)
-	spec.TCPSeeds = resolveTCPSeeds(boot, cfg.AdvertisedTCPPort(), overlays)
-	// Clean counterparts: exactly the operator's configured Seeds, none of
-	// PeerCache folded in -- see NetSpec.ConfiguredSeeds' doc comment.
-	spec.ConfiguredSeeds = resolveSeeds(n.Seeds.Addrs(), udpPrimary(cfg), overlays)
-	spec.ConfiguredTCPSeeds = resolveTCPSeeds(n.Seeds.Addrs(), cfg.AdvertisedTCPPort(), overlays)
+	applySeedState(&spec, n, udpPrimary(cfg), cfg.AdvertisedTCPPort(), overlays)
 
 	spec.HostsSync = n.HostsSync.Enabled
 	spec.HostsPath = n.HostsSync.Path
@@ -3133,6 +3121,57 @@ func clearStaleDNSForwards(cfg *config.Config) {
 			logx.Debugf("startup: clearing stale dns forwards (tag %s, iface %s): %v", tag, iface, err)
 		}
 	}
+}
+
+// applySeedState fills the seed-related half of a NetSpec from a network's
+// configured seed list: the dial set, its clean configured-only counterpart,
+// and the endpoints of any seed the operator has disabled.
+//
+// Disabled seeds are resolved and then subtracted from the dial set rather
+// than merely left out of it. Leaving them out is not enough: the dial set
+// folds PeerCache in on purpose (a wider bootstrap list reconnects faster
+// after a restart), and PeerCache is where a seed this node has actually
+// connected to before will be sitting — so a disabled seed would flow
+// straight back in through it and the off switch would do nothing for exactly
+// the seeds it is most likely to be used on.
+//
+// The subtraction is by resolved endpoint, not by configured string, so it
+// still holds when one address expands into several (a bare host across the
+// fallback port set, or a multi-port seed) and when the same host is reached
+// by two spellings.
+func applySeedState(spec *mesh.NetSpec, n config.Network, udpPort, tcpPort int, overlays []netip.Prefix) {
+	retired := resolveSeeds(n.Seeds.DisabledAddrs(), udpPort, overlays)
+	retiredTCP := resolveTCPSeeds(n.Seeds.DisabledAddrs(), tcpPort, overlays)
+
+	boot := append(append([]string{}, n.Seeds.EnabledAddrs()...), n.PeerCache...)
+	spec.Seeds = withoutEndpoints(resolveSeeds(boot, udpPort, overlays), retired)
+	spec.TCPSeeds = withoutEndpoints(resolveTCPSeeds(boot, tcpPort, overlays), retiredTCP)
+
+	// Clean counterparts: exactly the operator's configured Seeds, none of
+	// PeerCache folded in -- see NetSpec.ConfiguredSeeds' doc comment.
+	spec.ConfiguredSeeds = resolveSeeds(n.Seeds.EnabledAddrs(), udpPort, overlays)
+	spec.ConfiguredTCPSeeds = resolveTCPSeeds(n.Seeds.EnabledAddrs(), tcpPort, overlays)
+
+	spec.RetiredSeeds = retired
+	spec.RetiredTCPSeeds = retiredTCP
+}
+
+// withoutEndpoints returns src minus every endpoint in drop, preserving order.
+func withoutEndpoints(src, drop []netip.AddrPort) []netip.AddrPort {
+	if len(drop) == 0 || len(src) == 0 {
+		return src
+	}
+	gone := make(map[netip.AddrPort]bool, len(drop))
+	for _, d := range drop {
+		gone[d] = true
+	}
+	out := src[:0]
+	for _, s := range src {
+		if !gone[s] {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func resolveSeeds(seeds []string, primaryPort int, overlays []netip.Prefix) []netip.AddrPort {

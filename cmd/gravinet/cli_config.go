@@ -619,7 +619,7 @@ func cmdQuickstart(args []string) {
 // peers, seeds persist whether or not anyone is currently connected.
 func cmdSeed(args []string) {
 	if len(args) == 0 {
-		fatal("usage: gravinet seed <list|add|remove|notes> [ADDR] [-net NAME] [-notes N]")
+		fatal("usage: gravinet seed <list|add|remove|enable|disable|notes> [ADDR] [-net NAME] [-notes N]")
 	}
 	sub := args[0]
 	netName, rest := extractOpt(args[1:], "net")
@@ -627,7 +627,7 @@ func cmdSeed(args []string) {
 	cfg, path, rest := openCfg(rest)
 	n := pickNetwork(cfg, netName)
 
-	sub = expandVerb(sub, v("list"), v("add"), v("remove", "delete", "del"), v("notes"))
+	sub = expandVerb(sub, v("list"), v("add"), v("remove", "delete", "del"), v("enable", "disable"), v("notes"))
 	switch sub {
 	case "list":
 		fmt.Printf("network %s seeds:\n", n.Name)
@@ -636,9 +636,9 @@ func cmdSeed(args []string) {
 		}
 		for _, s := range n.Seeds {
 			if s.Notes != "" {
-				fmt.Printf("  %-30s %s\n", s.Address, s.Notes)
+				fmt.Printf("  %-30s %-8s %s\n", s.Address, onOff(!s.Disabled), s.Notes)
 			} else {
-				fmt.Printf("  %s\n", s.Address)
+				fmt.Printf("  %-30s %s\n", s.Address, onOff(!s.Disabled))
 			}
 		}
 		return
@@ -665,6 +665,18 @@ func cmdSeed(args []string) {
 			fatal("%v", err)
 		}
 		fmt.Printf("removed seed %s from %s\n", rest[0], n.Name)
+
+	case "enable", "disable":
+		if len(rest) == 0 {
+			fatal("usage: gravinet seed %s ADDR", sub)
+		}
+		if err := cfg.SeedSetEnabled(netName, rest[0], sub == "enable"); err != nil {
+			fatal("%v", err)
+		}
+		fmt.Printf("%sd seed %s on %s\n", sub, rest[0], n.Name)
+		if sub == "disable" {
+			fmt.Println("note: this stops the address being dialed and drops any session standing on it, but it does not keep the node behind it away — on a full mesh another peer usually gossips it back within seconds. To keep a node disconnected, disable the peer itself under Mesh > Peers in the web admin.")
+		}
 
 	case "notes":
 		if len(rest) == 0 {

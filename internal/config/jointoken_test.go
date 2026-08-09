@@ -189,3 +189,66 @@ func TestJoinTokenOmitsTCPPortWhenDisabled(t *testing.T) {
 		t.Fatalf("expected no seed hint when issuer disabled fallback, got %v", n)
 	}
 }
+
+// A token is a promise that the addresses in it are worth dialing, so a seed
+// the issuer has taken out of service must not be in one — a joiner would
+// otherwise spend its cold start on an endpoint the issuer already knows is
+// no good. TokenSeedCount has to agree, since it's what the "no bootstrap
+// seed is embedded" warning keys off; counting a parked seed there would
+// suppress the warning on a token that carries nothing.
+func TestJoinTokenSkipsDisabledSeeds(t *testing.T) {
+	src := memberConfig(t) // Seeds = [203.0.113.5:65432]
+	if err := src.SeedAdd("lan", "198.51.100.9:65432"); err != nil {
+		t.Fatal(err)
+	}
+	if err := src.SeedSetEnabled("lan", "203.0.113.5:65432", false); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := src.TokenSeedCount("lan", nil), 1; got != want {
+		t.Fatalf("TokenSeedCount = %d, want %d (the disabled seed shouldn't count)", got, want)
+	}
+
+	tok, err := src.NetworkToken("lan", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst := &Config{UDPPorts: []int{65432}, EnableIPv4: true}
+	if _, _, err := dst.NetworkJoinToken(tok); err != nil {
+		t.Fatal(err)
+	}
+	n := dst.FindNetwork("00000000feedface")
+	if n == nil {
+		t.Fatal("network not joined")
+	}
+	if containsSeedAddr(n.Seeds, "203.0.113.5:65432") {
+		t.Fatalf("a disabled seed must not be carried into the joiner: %v", n.Seeds)
+	}
+	if !containsSeedAddr(n.Seeds, "198.51.100.9:65432") {
+		t.Fatalf("the enabled seed must still be carried: %v", n.Seeds)
+	}
+	// The joiner takes it enabled — this is a fresh seed on a different node,
+	// not an inherited off switch.
+	for _, s := range n.Seeds {
+		if s.Disabled {
+			t.Fatalf("seeds must arrive enabled on the joiner: %#v", s)
+		}
+	}
+}
+
+// Every seed disabled means a token with nothing to bootstrap from. That's
+// allowed to be generated (PeerCache may still carry candidates) but the
+// count must report zero so the caller can warn.
+func TestTokenSeedCountAllSeedsDisabled(t *testing.T) {
+	src := memberConfig(t)
+	if err := src.SeedSetEnabled("lan", "203.0.113.5:65432", false); err != nil {
+		t.Fatal(err)
+	}
+	if got := src.TokenSeedCount("lan", nil); got != 0 {
+		t.Fatalf("TokenSeedCount = %d, want 0", got)
+	}
+	// An explicitly-passed extra address still counts — it isn't a seed on
+	// this node and isn't subject to this node's off switch.
+	if got := src.TokenSeedCount("lan", []string{"198.51.100.7:65432"}); got != 1 {
+		t.Fatalf("TokenSeedCount with an extra = %d, want 1", got)
+	}
+}

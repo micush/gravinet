@@ -173,3 +173,138 @@ func TestSeedUpdateAddr(t *testing.T) {
 		t.Fatal("expected error for invalid new address")
 	}
 }
+
+// A disabled seed keeps everything about itself — address, notes, and its
+// position in the list — and differs only in being absent from EnabledAddrs.
+// The two accessors are the whole point of the field, so they're asserted
+// against each other rather than in isolation: Addrs is what the operator
+// wrote down, EnabledAddrs is what gets dialed, and a change that quietly
+// collapsed one into the other would pass any test that only checked one.
+func TestSeedSetEnabled(t *testing.T) {
+	c := seedCfg()
+	for _, a := range []string{"a.example.com", "b.example.com", "c.example.com"} {
+		if err := c.SeedAdd("corp", a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := c.SeedSetNotes("corp", "b.example.com", "branch office"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SeedSetEnabled("corp", "b.example.com", false); err != nil {
+		t.Fatal(err)
+	}
+
+	seeds := c.Networks[0].Seeds
+	// Position preserved: still the middle entry, not moved or dropped.
+	if want := (SeedList{
+		{Address: "a.example.com"},
+		{Address: "b.example.com", Notes: "branch office", Disabled: true},
+		{Address: "c.example.com"},
+	}); !reflect.DeepEqual(seeds, want) {
+		t.Fatalf("seeds = %#v, want %#v", seeds, want)
+	}
+	if got, want := seeds.Addrs(), []string{"a.example.com", "b.example.com", "c.example.com"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Addrs must still list every configured seed: %v", got)
+	}
+	if got, want := seeds.EnabledAddrs(), []string{"a.example.com", "c.example.com"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("EnabledAddrs = %v, want %v", got, want)
+	}
+
+	// Re-enabling restores it without disturbing the note.
+	if err := c.SeedSetEnabled("corp", "b.example.com", true); err != nil {
+		t.Fatal(err)
+	}
+	if s := c.Networks[0].Seeds[1]; s.Disabled || s.Notes != "branch office" {
+		t.Fatalf("re-enable should clear Disabled and leave notes alone: %#v", s)
+	}
+	if n := len(c.Networks[0].Seeds.EnabledAddrs()); n != 3 {
+		t.Fatalf("all three seeds should be enabled again, got %d", n)
+	}
+}
+
+// Every seed disabled is a legitimate state, not an error — a site parked
+// while it's down, with the network still reachable through PeerCache.
+// EnabledAddrs must say so with an empty list rather than falling back to
+// the full one, which would make disabling the last seed a silent no-op.
+func TestSeedEnabledAddrsAllDisabled(t *testing.T) {
+	c := seedCfg()
+	if err := c.SeedAdd("corp", "only.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SeedSetEnabled("corp", "only.example.com", false); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Networks[0].Seeds.EnabledAddrs(); len(got) != 0 {
+		t.Fatalf("EnabledAddrs with everything disabled = %v, want empty", got)
+	}
+	if got := c.Networks[0].Seeds.Addrs(); len(got) != 1 {
+		t.Fatalf("the seed itself must still be configured: %v", got)
+	}
+}
+
+// Re-adding a disabled address puts it back in service rather than doing
+// nothing, matching HostRejectAdd/DNSRejectAdd. The entry is updated in
+// place, so its notes and position survive.
+func TestSeedAddReEnables(t *testing.T) {
+	c := seedCfg()
+	if err := c.SeedAdd("corp", "a.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SeedAdd("corp", "b.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SeedSetNotes("corp", "a.example.com", "keep me"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SeedSetEnabled("corp", "a.example.com", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SeedAdd("corp", "a.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if want := (SeedList{
+		{Address: "a.example.com", Notes: "keep me"},
+		{Address: "b.example.com"},
+	}); !reflect.DeepEqual(c.Networks[0].Seeds, want) {
+		t.Fatalf("re-add should re-enable in place, keeping notes and position: %#v", c.Networks[0].Seeds)
+	}
+}
+
+func TestSeedSetEnabledUnknown(t *testing.T) {
+	c := seedCfg()
+	if err := c.SeedSetEnabled("corp", "nope.example.com", false); err == nil {
+		t.Fatal("expected an error for a seed that isn't configured")
+	}
+}
+
+// The Disabled field is omitempty, so an enabled seed serializes exactly as
+// it did before the field existed, and a config written by an older version
+// loads with every seed enabled. Both directions matter on a rolling upgrade.
+func TestSeedDisabledJSONCompat(t *testing.T) {
+	var sl SeedList
+	if err := json.Unmarshal([]byte(`[{"address":"a.example.com"},{"address":"b.example.com","disabled":true}]`), &sl); err != nil {
+		t.Fatal(err)
+	}
+	if sl[0].Disabled {
+		t.Fatal("a seed with no disabled key must load enabled")
+	}
+	if !sl[1].Disabled {
+		t.Fatal("disabled:true must load disabled")
+	}
+	// Legacy bare-string form: every seed enabled.
+	var legacy SeedList
+	if err := json.Unmarshal([]byte(`["a.example.com"]`), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if legacy[0].Disabled {
+		t.Fatal("a legacy string seed must load enabled")
+	}
+	// An enabled seed must not emit the key at all.
+	b, err := json.Marshal(SeedList{{Address: "a.example.com"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != `[{"address":"a.example.com"}]` {
+		t.Fatalf("enabled seed should serialize unchanged, got %s", b)
+	}
+}

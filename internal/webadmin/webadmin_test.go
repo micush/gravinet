@@ -53,6 +53,7 @@ func TestLocalAuthRoundTrip(t *testing.T) {
 // ---- server ----
 
 type stubBackend struct {
+	seedOwners              map[string]string
 	banned                  []string
 	editedBan               string
 	editedNotes             string
@@ -148,6 +149,10 @@ func (s *stubBackend) ListPeers(id uint64) []mesh.PeerInfo {
 func (s *stubBackend) ListBans(uint64) []mesh.BanInfo { return nil }
 func (s *stubBackend) DisabledPeers(uint64) []mesh.DisabledPeerInfo {
 	return s.disabledPeers
+}
+
+func (s *stubBackend) SeedNodeOwners(uint64) map[string]string {
+	return s.seedOwners
 }
 func (s *stubBackend) Routes(uint64) []mesh.RouteInfo { return nil }
 func (s *stubBackend) SetBGPRoutes(id uint64, routes []netip.Prefix, metric int) bool {

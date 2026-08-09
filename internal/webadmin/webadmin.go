@@ -47,6 +47,10 @@ type Backend interface {
 	ListPeers(networkID uint64) []mesh.PeerInfo
 	ListBans(networkID uint64) []mesh.BanInfo
 	DisabledPeers(networkID uint64) []mesh.DisabledPeerInfo
+	// SeedNodeOwners reports which node currently sits behind each seed
+	// address, keyed by "ip:port" and bare "ip" (see mesh's own doc
+	// comment). Feeds the seed/peer state coupling in seedpeercouple.go.
+	SeedNodeOwners(networkID uint64) map[string]string
 	Routes(networkID uint64) []mesh.RouteInfo
 	// SetBGPRoutes updates networkID's BGP-into-mesh redistribution set (see
 	// config.Network.RedistributeBGPRoutes and mesh's SetBGPRoutes) — the reverse
@@ -1232,6 +1236,7 @@ func (s *Server) handlePeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var err error
+	var woken []string
 	if req.Op == "notes" {
 		err = s.mutateConfig(r, func(cfg *config.Config) error {
 			return cfg.PeerSetNotes(req.Net, req.Node, req.Notes)
@@ -1239,10 +1244,27 @@ func (s *Server) handlePeer(w http.ResponseWriter, r *http.Request) {
 	} else {
 		on := req.Op == "enable"
 		err = s.mutateConfig(r, func(cfg *config.Config) error {
-			return cfg.PeerSetEnabled(req.Net, req.Node, on)
+			syncSeedNodes(cfg, s.seedOwnersByNet())
+			if e := cfg.PeerSetEnabled(req.Net, req.Node, on); e != nil {
+				return e
+			}
+			// The seeds that reach this node move with it, in both
+			// directions, so a peer's state and its addresses' states can
+			// never disagree about the same decision.
+			seeds, e := couplePeerState(cfg, req.Net, req.Node, on)
+			woken = seeds
+			return e
 		})
 	}
 	// The reload applies the change to the running engine live, so no restart.
+	if err == nil && len(woken) > 0 {
+		verb := "enabled"
+		if req.Op == "disable" {
+			verb = "disabled"
+		}
+		s.editResultNote(w, nil, false, "also "+verb+" seed "+strings.Join(woken, ", "))
+		return
+	}
 	s.editResult(w, err, false)
 }
 

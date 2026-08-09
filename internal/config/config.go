@@ -1114,6 +1114,31 @@ type KeySlot struct {
 type Seed struct {
 	Address string `json:"address"`
 	Notes   string `json:"notes,omitempty"`
+	// Disabled follows the firewall-rule convention: the zero value is
+	// enabled, so every config written before this field existed keeps every
+	// seed it had. A disabled seed stays in the list with its address and
+	// notes intact — it is simply not dialed, not counted as one of this
+	// node's configured seeds, and not embedded in a join token. See
+	// SeedList.EnabledAddrs for the list every one of those consumers reads.
+	Disabled bool `json:"disabled,omitempty"`
+	// Node is the node id last confirmed reachable at this address by a
+	// completed handshake. It exists so a seed's state can be coupled to
+	// that node's own enabled state (see SeedSetEnabled): an operator
+	// disabling a seed means "stop talking to the machine behind this", and
+	// which machine that is happens to be a runtime fact the config layer
+	// has no other way to know.
+	//
+	// Learned, never authored. Filled in from the engine's own seed
+	// attribution while a session is live, and deliberately kept when the
+	// seed is disabled — that is precisely when it is needed, and the
+	// handshake that would re-establish it cannot happen while the seed is
+	// parked. An address that has never completed a handshake has no Node
+	// and therefore no coupling: a real gap, but a visible one rather than
+	// a silent mis-association.
+	//
+	// One address can front several nodes behind a NAT. This records the
+	// most recent, which is the one an operator reading the row means.
+	Node string `json:"node,omitempty"`
 }
 
 // SeedList is a network's configured bootstrap seeds. Its custom
@@ -1153,9 +1178,16 @@ func (sl *SeedList) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// Addrs returns just the addresses, in order — the shape most callers that
-// only care about where to dial actually want (resolving, de-duplicating,
-// joining into a boot list alongside PeerCache, etc.).
+// Addrs returns every configured address, in order, disabled ones included.
+// This is the list to read when the question is "what has the operator
+// written down" — displaying the table, de-duplicating an add, matching a
+// live peer's endpoint back to its seed row.
+//
+// It is NOT the list to dial. Anything that resolves seeds to actually
+// connect, counts this node's seeds, or hands them to another node wants
+// EnabledAddrs below; using Addrs there is exactly the bug the Disabled
+// field exists to prevent, and it fails silently — a disabled seed dials
+// perfectly well, which is the whole problem.
 func (sl SeedList) Addrs() []string {
 	if len(sl) == 0 {
 		return nil
@@ -1163,6 +1195,70 @@ func (sl SeedList) Addrs() []string {
 	out := make([]string, len(sl))
 	for i, s := range sl {
 		out[i] = s.Address
+	}
+	return out
+}
+
+// EnabledAddrs returns the addresses of the seeds that are actually in
+// service, in order — Addrs minus anything an operator has disabled. Every
+// consumer that dials a seed, resolves one into a NetSpec, or embeds one in
+// a join token reads this. Returns nil when nothing is enabled, which is a
+// legitimate state (a network can be reached entirely through PeerCache, or
+// have its whole seed list parked while a site is down) and not an error at
+// this layer.
+func (sl SeedList) EnabledAddrs() []string {
+	var out []string
+	for _, s := range sl {
+		if !s.Disabled {
+			out = append(out, s.Address)
+		}
+	}
+	return out
+}
+
+// DisabledAddrs is EnabledAddrs' complement: the addresses of seeds the
+// operator has taken out of service. The daemon needs these named explicitly
+// rather than inferred, because "not in the enabled list" cannot distinguish
+// a seed that was disabled from one that was deleted, or from a gossip-learned
+// address that was never a configured seed at all — and those three want
+// different handling. See mesh.NetSpec.RetiredSeeds.
+func (sl SeedList) DisabledAddrs() []string {
+	var out []string
+	for _, s := range sl {
+		if s.Disabled {
+			out = append(out, s.Address)
+		}
+	}
+	return out
+}
+
+// NodeFor returns the node id attributed to a seed address, or "" when that
+// address has never completed a handshake and so has no known owner. Callers
+// must treat "" as "unknown", never as "no peer to couple to" — the
+// difference matters, because silently doing nothing is what makes an
+// operator think the toggle is broken.
+func (sl SeedList) NodeFor(addr string) string {
+	addr = strings.TrimSpace(addr)
+	for _, s := range sl {
+		if s.Address == addr {
+			return s.Node
+		}
+	}
+	return ""
+}
+
+// AddrsForNode is NodeFor's reverse: every configured seed address attributed
+// to a node, in order. Used to re-enable a node's seeds when the node itself
+// is re-enabled.
+func (sl SeedList) AddrsForNode(nodeID string) []string {
+	if nodeID == "" {
+		return nil
+	}
+	var out []string
+	for _, s := range sl {
+		if s.Node == nodeID {
+			out = append(out, s.Address)
+		}
 	}
 	return out
 }

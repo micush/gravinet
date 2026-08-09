@@ -4187,7 +4187,7 @@ function openPeerShellFromSel(n, sec) {
 }
 
 function secPeers(c) {
-  c.appendChild($('<div class="hint" style="margin:0 0 10px">Peers connected to this node, grouped by network. This node is listed too (<b>this node</b>), tickable to look up or shell into. Double-click a peer state to enable/disable it; double-click <b>notes</b> for a local, permanent note on its node id. Select peers and click Ban to block them mesh-wide.</div>'));
+  c.appendChild($('<div class="hint" style="margin:0 0 10px">Peers connected to this node, grouped by network. This node is listed too (<b>this node</b>), tickable to look up or shell into. Double-click a peer state to enable/disable it \u2014 any seed addresses proven to reach it are set to match, so a peer\u2019s state and its addresses\u2019 states never disagree. Double-click <b>notes</b> for a local, permanent note on its node id. Select peers and click Ban to block them mesh-wide.</div>'));
   if (state.nat && state.nat.class && state.nat.class !== 'unknown') {
     const m = {
       open: ['directly reachable (no NAT)', 'on'],
@@ -5013,20 +5013,26 @@ function portLabel(min, max){ if(!min && !max) return 'any'; if(min===max) retur
 // secSeeds renders, per network, the configured bootstrap seed addresses
 // (host or host:port). Unlike connected peers — which are discovered and vanish
 // when they disconnect — seeds persist in config, so this is where you view and
-// change the addresses the node dials. Adding applies live; removing takes
-// effect on the next restart.
+// change the addresses the node dials. Adding and toggling state both apply
+// live; deleting a seed still leaves an already-dialed address in the engine's
+// (deliberately additive) live set until restart, which is why the state
+// column exists as the thing to reach for when you want a seed to stop being
+// used now.
 function secSeeds(c, nets){
   const cfgs = state.cfg;
-  c.appendChild($('<div class="hint" style="margin:0 0 10px">Seed addresses (host, host:port, or host:port,port,... for more than one) this node dials to find each network; persist whether or not a peer is connected. <b>udp</b> bootstraps over UDP with automatic TCP/TLS fallback; <b>tcp</b> goes straight over TCP/TLS, for cold-starting when UDP\u2019s blocked entirely. Double-click <b>address</b>, <b>transport</b>, or <b>notes</b> to edit. + to add, tick rows and \u2212 to remove, or tick one and \ud83d\udec8 for DNS/WHOIS.</div>'));
+  c.appendChild($('<div class="hint" style="margin:0 0 10px">Seed addresses (host, host:port, or host:port,port,... for more than one) this node dials to find each network; persist whether or not a peer is connected. <b>udp</b> bootstraps over UDP with automatic TCP/TLS fallback; <b>tcp</b> goes straight over TCP/TLS, for cold-starting when UDP\u2019s blocked entirely. Double-click <b>address</b>, <b>transport</b>, or <b>notes</b> to edit, or <b>state</b> to park a seed without deleting it \u2014 a disabled seed keeps its address and notes but isn\u2019t dialed and isn\u2019t embedded in a join token. State applies immediately and is mirrored on the peer behind that address \u2014 disable a seed and its peer is disabled too, enable it and the peer comes back, and the same in reverse from <b>Peers</b>. A seed that has never completed a handshake has no known peer, so nothing moves with it; you\u2019ll be told when that happens. + to add, tick rows and \u2212 to remove, or tick one and \ud83d\udec8 for DNS/WHOIS.</div>'));
   if (!cfgs.length){ emptyCard(c, 'no networks — create one under Networks first'); return; }
   for (const cf of cfgs){
     const card = $('<div class="card"></div>');
     card.appendChild($('<h3><span class="net-name">'+esc(cf.name)+'</span> <span class="net-id">'+esc(cf.id)+'</span></h3>'));
     const seeds = cf.seeds||[];
-    let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>address</th><th title="how this seed is dialed. Seeds bootstrap over UDP; if UDP is blocked the node automatically falls back to the TCP/TLS port. Double-click this cell to switch a seed between udp and tcp.">transport</th><th>notes</th></tr>';
-    if (!seeds.length) h += '<tr><td colspan="4" class="empty">no seeds — click + to add one</td></tr>';
+    let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th title="whether this node dials this seed. A disabled seed keeps its address and notes but is not dialed, not counted as one of this node\u2019s seeds, and not embedded in a join token. State is mirrored on the peer behind it, both ways. Applies immediately \u2014 no restart. Double-click to toggle.">state</th><th>address</th><th title="how this seed is dialed. Seeds bootstrap over UDP; if UDP is blocked the node automatically falls back to the TCP/TLS port. Double-click this cell to switch a seed between udp and tcp.">transport</th><th>notes</th></tr>';
+    if (!seeds.length) h += '<tr><td colspan="5" class="empty">no seeds — click + to add one</td></tr>';
     else for (const s of seeds) { const addr = s.address||s.Address||''; const notes = s.notes||s.Notes||'';
-      h += '<tr data-addr="'+esc(addr)+'"><td class="selcol"><input type="checkbox" class="selbox"></td>'
+      const enabled = !(s.disabled||s.Disabled);
+      const stTag = '<span class="tag-toggle '+(enabled?'on':'off')+'" data-seedstate="1" title="double-click to '+(enabled?'disable':'enable')+'">'+(enabled?'enabled':'disabled')+'</span>';
+      h += '<tr'+(enabled?'':' class="fw-disabled"')+' data-addr="'+esc(addr)+'" data-enabled="'+(enabled?1:0)+'"><td class="selcol"><input type="checkbox" class="selbox"></td>'
+      + '<td class="seed-state">'+stTag+'</td>'
       + '<td class="seed-addr" data-addr="'+esc(addr)+'" style="cursor:pointer" title="double-click to edit this seed\u2019s address">'+esc(stripScheme(addr))+'</td>'
       + '<td class="seed-proto" data-addr="'+esc(addr)+'" style="cursor:pointer" title="double-click to switch transport (udp \u2194 tcp) without opening the full editor">'+seedProtoBadge(addr)+'</td>'
       + '<td class="seed-notes" data-addr="'+esc(addr)+'" title="double-click to edit">'+esc(notes)+'</td></tr>'; }
@@ -5037,6 +5043,19 @@ function secSeeds(c, nets){
       { label:'\ud83d\udec8', cls:'tbar-btn', gap:true, title:'info', onclick: () => seedInfoRow(table, cf.name) },
     ];
     table._rowRemove = () => removeCheckedRows(table, tr => api('/api/seed',{method:'POST',body:JSON.stringify({op:'remove',net:cf.name,addr:tr.dataset.addr})}), false);
+    // Double-click the state tag to park or resume a seed. Applied live by the
+    // reload in both directions: disabling drops the address from the dial set
+    // and tears down a session standing on it (mesh.applyRetiredSeeds),
+    // enabling puts it back to be dialed on the next tick. Either way the peer
+    // behind the address is set to match (webadmin/seedpeercouple.go), so
+    // gossip can't undo a disable and a re-enabled seed isn't dialing into a
+    // still-blocked node.
+    t.querySelectorAll('[data-seedstate]').forEach(tag => {
+      tag.ondblclick = (e) => {
+        e.stopPropagation();
+        toggleTagState(tag, '/api/seed', on => ({op:(on?'enable':'disable'), net:cf.name, addr:tag.closest('tr').dataset.addr}));
+      };
+    });
     t.querySelectorAll('.seed-addr').forEach(td => { td.ondblclick = () => seedEdit(td, cf.name, td.dataset.addr); });
     t.querySelectorAll('.seed-proto').forEach(td => { td.ondblclick = () => seedSetProto(cf.name, td.dataset.addr); });
     t.querySelectorAll('.seed-notes').forEach(td => { td.ondblclick = () =>

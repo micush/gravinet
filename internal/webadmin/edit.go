@@ -34,6 +34,30 @@ func (s *Server) editResult(w http.ResponseWriter, err error, restart bool) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "restart": restart})
 }
 
+// editResultNote is editResult plus an advisory the UI surfaces before any
+// restart prompt (the same "note" convention the MTU editor established in
+// v661). Used where a change did something correct but wider than what the
+// operator literally clicked, which would otherwise look like a bug.
+func (s *Server) editResultNote(w http.ResponseWriter, err error, restart bool, note string) {
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "restart": restart, "note": note})
+}
+
+// seedOwnersByNet collects the engine's live seed attribution for every
+// network, keyed by network id — the input syncSeedNodes folds into config.
+func (s *Server) seedOwnersByNet() map[uint64]map[string]string {
+	out := map[uint64]map[string]string{}
+	for _, id := range s.be.NetworkIDs() {
+		if owners := s.be.SeedNodeOwners(id); len(owners) > 0 {
+			out[id] = owners
+		}
+	}
+	return out
+}
+
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	// Admin API requests are small JSON objects; bound the body so a client can't
 	// stream an unbounded request.
@@ -280,7 +304,20 @@ func (s *Server) handleSeed(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
+	// Set by the enable/disable branch so the response can name the peer that
+	// moved with the seed. Silence there would read as the toggle not
+	// working — which is exactly the complaint this coupling exists to
+	// answer.
+	var alsoChanged string
+	unattributed := false
+
 	err := s.mutateConfig(r, func(cfg *config.Config) error {
+		// Refresh learned attribution first, so a seed connected right now
+		// carries its node id before anything below needs it. Must happen
+		// before the disable: the handshake that proves who is behind an
+		// address cannot run once the address is parked.
+		syncSeedNodes(cfg, s.seedOwnersByNet())
+
 		switch req.Op {
 		case "add":
 			return cfg.SeedAdd(req.Net, req.Addr)
@@ -290,10 +327,42 @@ func (s *Server) handleSeed(w http.ResponseWriter, r *http.Request) {
 			return cfg.SeedSetNotes(req.Net, req.Addr, req.Notes)
 		case "update-addr":
 			return cfg.SeedUpdateAddr(req.Net, req.Addr, req.NewAddr)
+		case "enable", "disable":
+			on := req.Op == "enable"
+			if err := cfg.SeedSetEnabled(req.Net, req.Addr, on); err != nil {
+				return err
+			}
+			// The node behind the address moves with it, in both
+			// directions: a parked seed whose node stays enabled is
+			// gossiped back within seconds, and a resumed seed whose node
+			// stays blocked is an address that dials into a refusal.
+			node, err := coupleSeedState(cfg, req.Net, req.Addr, on)
+			if err != nil {
+				return err
+			}
+			alsoChanged = node
+			unattributed = node == "" && n0SeedOwner(cfg, req.Net, req.Addr)
+			return nil
 		default:
 			return fmt.Errorf("unknown op %q", req.Op)
 		}
 	})
+	// The coupling is invisible in the table until it refreshes, so say what
+	// else changed rather than leaving the operator to notice on their own.
+	if err == nil && (req.Op == "disable" || req.Op == "enable") {
+		verb := "disabled"
+		if req.Op == "enable" {
+			verb = "enabled"
+		}
+		switch {
+		case alsoChanged != "":
+			s.editResultNote(w, nil, false, "also "+verb+" peer "+alsoChanged)
+			return
+		case unattributed:
+			s.editResultNote(w, nil, false, "this seed has no confirmed node behind it yet, so no peer was "+verb+" with it \u2014 set the matching peer under Peers too")
+			return
+		}
+	}
 	s.editResult(w, err, false)
 }
 

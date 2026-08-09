@@ -248,6 +248,14 @@ A seed's address can carry more than one port, comma-separated (e.g. `203.0.113.
 
 Each seed has a transport: **udp** seeds bootstrap over UDP, with automatic TCP/TLS fallback if UDP turns out to be blocked; **tcp** seeds are dialed straight over the TCP/TLS fallback, which is useful for cold-starting a node onto the mesh when UDP is blocked end to end and there's no point trying it first. Double-click an address to edit it, or the transport cell to flip udp/tcp. Click **+** to add a seed, tick rows and **−** to remove one — both apply live.
 
+Each seed also has a **state**, `enabled` or `disabled` — double-click it to toggle. A disabled seed stays on the page with its address, transport, and notes intact, but this node stops dialing it, stops counting it as one of its own seeds, and stops embedding it in join tokens. It's the thing to reach for when a seed is down for maintenance or you're testing whether a node can bootstrap without it, since deleting the row and retyping it later loses the notes and the transport setting.
+
+Toggling state applies immediately, in both directions: disabling drops the address from the dial set and tears down a session standing on it, and enabling puts it back and dials it about a second later. Neither needs a restart.
+
+Toggling state is mirrored onto the peer behind the address, in every direction: disable a seed and that peer is disabled too, enable it and the peer comes back, and the same in reverse from **Mesh → Peers**. Neither switch is a half-truth — a bootstrap address on its own can't keep a node away (any other peer gossips it back within seconds), and a node switched on whose addresses are still parked is allowed but unreachable. The response tells you what else changed.
+
+A seed that has never completed a handshake has no known node behind it, so nothing moves with it — the response says so rather than leaving you to notice. That includes seeds written as hostnames rather than IP addresses, which aren't resolved here on purpose: a stale or split-horizon DNS answer would attribute a seed to the wrong node and disable an unrelated peer.
+
 ---
 
 ## 16. Peers

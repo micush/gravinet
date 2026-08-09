@@ -375,6 +375,8 @@ gravinet route list
 
 gravinet seed add 198.51.100.7 -net corp -notes "office gateway"  # bootstrap address
 gravinet seed remove 198.51.100.7 -net corp
+gravinet seed disable 198.51.100.7 -net corp       # stop dialing it, keep the row
+gravinet seed enable 198.51.100.7 -net corp
 gravinet seed list -net corp
 
 gravinet key list -net corp                        # show the 8 join-key slots

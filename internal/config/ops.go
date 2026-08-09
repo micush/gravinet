@@ -666,6 +666,12 @@ func validateSeedAddr(addr string) error {
 // network, de-duplicated. Seeds persist in config regardless of whether any peer
 // is currently connected. The new entry starts with empty Notes; use
 // SeedSetNotes to attach one.
+//
+// Re-adding an address that is already present but disabled re-enables it,
+// matching HostRejectAdd/DNSRejectAdd. Without that, "add the seed" on a
+// disabled seed would be a silent no-op — the operator asks for the address
+// to be in service, and the address stays parked with nothing said about it.
+// Its notes and position survive, since the entry is not replaced.
 func (c *Config) SeedAdd(netName, addr string) error {
 	n, err := c.PickNetwork(netName)
 	if err != nil {
@@ -675,10 +681,75 @@ func (c *Config) SeedAdd(netName, addr string) error {
 	if err := validateSeedAddr(addr); err != nil {
 		return err
 	}
-	if !containsSeedAddr(n.Seeds, addr) {
-		n.Seeds = append(n.Seeds, Seed{Address: addr})
+	for i := range n.Seeds {
+		if n.Seeds[i].Address == addr {
+			n.Seeds[i].Disabled = false // re-adding re-enables
+			return nil
+		}
+	}
+	n.Seeds = append(n.Seeds, Seed{Address: addr})
+	return nil
+}
+
+// SeedSetNode records the node id confirmed to be behind a seed address, or
+// clears it with "". Learned state, not operator input: called from the
+// reconciler that reads the engine's own handshake attribution, never from a
+// form field. Unknown addresses are ignored rather than erroring — the
+// reconciler runs against whatever the engine currently knows, which routinely
+// includes addresses no longer configured here.
+func (c *Config) SeedSetNode(netName, addr, nodeID string) error {
+	n, err := c.PickNetwork(netName)
+	if err != nil {
+		return err
+	}
+	addr = strings.TrimSpace(addr)
+	for i := range n.Seeds {
+		if n.Seeds[i].Address == addr {
+			n.Seeds[i].Node = nodeID
+			return nil
+		}
 	}
 	return nil
+}
+
+// SeedSetEnabled enables or disables a single bootstrap seed by address. A
+// disabled seed keeps its address, notes, and row position (so re-enabling
+// costs one double-click and loses nothing) but is dropped from
+// SeedList.EnabledAddrs, which means it is not resolved into the dial set,
+// not counted among this node's configured seeds for upgrade sequencing, and
+// not embedded in a join token.
+//
+// Applied live in both directions, unlike SeedRemove. Disabling is the one
+// subtractive operation on the seed set: the reload carries the address in
+// NetSpec.RetiredSeeds, which drops it from the live dial set and tears down
+// any session standing on it (mesh.applyRetiredSeeds); enabling returns it
+// and it is dialed on the next tick, about a second later.
+//
+// On its own this is only an address-level control, and an address-level
+// control cannot keep a node away: on a full mesh the peer behind a disabled
+// seed is an ordinary member and another peer gossips it back within a gossip
+// round, reconnecting as a learned candidate rather than as this node's seed.
+// So the callers that own an operator's intent — the web admin's seed handler
+// today — mirror this onto PeerSetEnabled for the node recorded in Seed.Node,
+// and mirror the reverse when a peer's state changes, in every direction. See
+// webadmin/seedpeercouple.go.
+//
+// The pairing lives there, not here, because it needs to know which node is
+// behind an address — a runtime fact this package only ever sees second-hand,
+// cached in Seed.Node by a reconciler reading the engine's own attribution.
+func (c *Config) SeedSetEnabled(netName, addr string, on bool) error {
+	n, err := c.PickNetwork(netName)
+	if err != nil {
+		return err
+	}
+	addr = strings.TrimSpace(addr)
+	for i := range n.Seeds {
+		if n.Seeds[i].Address == addr {
+			n.Seeds[i].Disabled = !on
+			return nil
+		}
+	}
+	return fmt.Errorf("no seed %q on network %q", addr, netName)
 }
 
 // SeedRemove deletes a bootstrap endpoint from a network. The running daemon

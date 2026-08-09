@@ -121,6 +121,13 @@ func (e *Engine) ReloadRuntime(networkID uint64, spec NetSpec) error {
 		e.addTCPSeed(networkID, s)
 	}
 
+	// The one subtractive step, and it runs after the merge above so a seed
+	// that is both re-added and retired in the same reload cannot survive by
+	// ordering: disabling wins. Removes seeds the operator has just disabled
+	// from the live dial set and drops any session standing on one, so a
+	// state change applies now rather than at the next restart.
+	e.applyRetiredSeeds(ns, spec.RetiredSeeds, spec.RetiredTCPSeeds)
+
 	// configuredSeeds/configuredTCPSeeds: unlike the merge just above, this is
 	// a wholesale replace, not additive -- see netState.configuredSeeds' doc
 	// comment for why a removed seed needs to stop counting here immediately

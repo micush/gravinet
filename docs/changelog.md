@@ -2,6 +2,172 @@
 
 ---
 
+## v822 — 2026-08-09
+
+**Corrects v821: seed state and peer state now mirror each other in all four directions, not two. Disable or enable either one and the other follows.**
+
+v821 coupled exactly two directions — seed-disable to peer-disable, peer-enable to seed-enable — and argued in its own changelog that the other two should stay uncoupled, on the grounds that one address can front several nodes behind a NAT and that a node might be blocked for reasons unrelated to how it is reached.
+
+That reasoning was not wrong on its own terms and it was not the reasoning to apply. The operator had described the behavior they wanted; implementing half of it and documenting a justification for the missing half is not a design decision, it is a refusal dressed as one. The asymmetry also produced exactly the confusion the whole feature exists to remove: enabling a seed left its peer disabled, so the row read `enabled` while the node stayed unreachable — a half-truth of precisely the kind v820 and v821 were both written to eliminate.
+
+### The rule, now
+
+	enable/disable a seed  → the node behind it is set to match
+	enable/disable a node  → the seeds proven to reach it are set to match
+
+`coupleSeedState` and `couplePeerState` replace `coupleSeedDisable`/`couplePeerEnable`, each taking the new state rather than implying one. A row whose state already matches is left alone and reported as unchanged, so an ordinary toggle stays quiet and the response speaks up only when something wider actually moved.
+
+The NAT case that motivated the old asymmetry has not gone away and is not solved by this — one address can genuinely front several nodes. What changed is what to do about it: the mapping used is the one the engine has proven by handshake, one node per address, and an address with no proven owner couples to nothing and says so. Where the truth is ambiguous the operator gets an outcome they can see and correct, rather than a rule that silently declines to act.
+
+### Tests
+
+`TestSeedPeerCouplingIsSymmetric` walks all four directions against one config, including the two v821 omitted, and checks the blast radius each way — an unrelated node doesn't move with a seed, another node's seed and an unattributed seed don't move with a peer. `TestSeedPeerCouplingRoundTrip` now drives the round trip from both entry points and asserts it lands exactly where it started with no residue, which is what fails if the four directions disagree about the coupled state. `TestCouplingReportsOnlyRealChanges` pins the already-matching no-op. `TestSeedStateWithoutAttributionReportsUnknown` additionally pins that the unattributed case stays distinguishable from a no-op, since both now return empty and mean opposite things.
+
+### Verified
+
+`go build ./...` clean at `CGO_ENABLED=0`; `go vet` and `gofmt` clean on everything touched. `internal/webadmin` passes in full, including the nine coupling tests.
+
+### Not verified
+
+`internal/mesh` is unchanged from v821 and was not re-run for this release; the diff is confined to `internal/webadmin`, `internal/config` doc text, and the UI copy. v821's substantive gap is also unchanged and is still the one worth closing next: no two-node test drives the coupling against a real session, and nothing exercises the v4-seed/v6-session shape that the attribution design was built around.
+
+---
+
+## v821 — 2026-08-09
+
+**A seed's off switch now means what an operator reading it thinks it means. Disabling a seed disables the node behind it, and re-enabling that node brings its seeds back — so a parked seed can no longer be quietly undone ten seconds later by another peer gossiping the node back.**
+
+### The report
+
+v820 shipped the state column and made disabling apply live, then documented, at length and in five places, that it governs an address rather than a node and that the peer would return via gossip. That documentation was accurate and it was still the wrong answer: the first operator to use the feature disabled a seed, watched the peer reconnect, and reasonably concluded the toggle was broken.
+
+The field evidence was unusually clean. In Mesh > Peers every peer's session age read 1m 45s except the one whose seed had just been disabled, which read 1m 24s — the teardown had worked exactly as built, and the node had come back twenty-one seconds later. Three separate doors were open: gossip from any other peer, a sibling seed to the same provider that was still enabled, and the fact that the disabled seed was an IPv4 literal while the live session was on IPv6.
+
+### The rule
+
+Two rules, which are contrapositives of each other and therefore maintain a single invariant — **a disabled seed never coexists with an enabled peer behind it**:
+
+- disabling a seed disables the node behind it
+- enabling a node enables its seeds
+
+The two directions deliberately left uncoupled are the ones that would take away something the operator did not ask about. Enabling a seed does not enable the node, since a node may be blocked for reasons unrelated to how it is reached. Disabling a node does not disable its seeds, since one address can front several nodes behind a NAT and parking it would slow their bootstrap over a decision that was not about them. Those two omissions are what keep "seed enabled, peer disabled" reachable, which is the state a bare `PeerSetEnabled(false)` has always produced.
+
+### Knowing which node is behind an address
+
+This is the whole difficulty, and the reported case demonstrates why an obvious implementation fails. The configured seed was `74.208.225.216` and the live session was at `2607:f1c0:f00c:db00::1` — matching a seed string against a peer's current endpoint would have found nothing at all, on precisely the case that prompted the change.
+
+What does hold the link is the engine's own handshake attribution: `ns.seedOwner` and `configuredSeedOwnerUDP/TCP` record the node id proven to have answered at a dialed address, and survive that peer roaming to another address or family afterwards. That the reported session was torn down at all is direct evidence the attribution was present — `applyRetiredSeeds` found it there.
+
+`Engine.SeedNodeOwners` exposes that, keyed both by `ip:port` and by bare `ip`. The bare-address key is load-bearing: a seed written `host:65432,443` expands into several dial candidates and the handshake completes on whichever answers, while a bare host expands across the entire built-in fallback set — keying on `host:port` would miss all of them.
+
+`config.Seed.Node` caches the result, because the timing is unforgiving in one direction: the handshake that proves who is behind an address cannot run once the address is parked, so learning the association lazily at disable time is already too late. `syncSeedNodes` refreshes it from the engine at the top of every seed and peer edit, while sessions are live. It only ever fills in or corrects an attribution and never clears one — forgetting a node the engine currently knows nothing about would destroy the association exactly when the re-enable path needs it, since a disabled seed is precisely the case the engine has nothing to say about.
+
+Seeds written as hostnames are skipped rather than resolved. A DNS lookup inside a request handler is bad enough; a stale or split-horizon answer attributing a seed to the wrong node would disable an unrelated peer, which is a worse failure than no attribution at all.
+
+### Saying so
+
+An unattributed seed disables nothing, and that case is reported rather than swallowed — silently doing nothing is the exact shape of the original complaint. Both couplings ride back on the response's `note` field (the convention v661 established for the MTU editor) and surface before any restart prompt: "also disabled peer X, so it can't be gossiped back", or the explanation that no node is known behind this address yet and the peer should be disabled under Peers too.
+
+### Upgrading
+
+A seed disabled under v820 carries no `Node`, so re-enabling its peer will not wake it. Enable that seed once by hand; the handshake attributes it and every cycle after that is coupled. This affects exactly the seeds already parked at upgrade time.
+
+### Tests
+
+`internal/webadmin/seedpeercouple_test.go`: the round trip asserted as a round trip, since each rule is the other's contrapositive and anything less would let the two directions disagree about what the coupled state is; the blast radius, that neither rule touches an unrelated node or seed; the unattributed seed reporting unknown rather than quietly disabling nothing; `couplePeerEnable` reporting only seeds it actually woke rather than claiming credit for ones already in service; the deliberately-uncoupled direction, that disabling a peer leaves seeds alone; `syncSeedNodes` learning an attribution through the bare-address key, being idempotent, and preserving an existing attribution a sync doesn't mention; and `seedHostKey` across every shape an operator can legitimately write — multi-port lists, schemes, bracketed and bare IPv6, v4-mapped, and hostnames correctly declining.
+
+### Verified
+
+`go build ./...` clean at `CGO_ENABLED=0`; `go vet` and `gofmt` clean on everything touched. `internal/config`, `internal/webadmin` and `cmd/gravinet` pass in full.
+
+`internal/mesh` was run in full and reported one failure: `TestRelayedSessionSurvivesLossOnTheRelayLeg`, at 80.13s, one relayed teardown 1m5s into a 75-second 25%-loss window. It is attributed to load rather than to this change, on three pieces of evidence. Run in isolation it passed 5/5 (400s). The entire `internal/mesh` diff for this release is one added function, `SeedNodeOwners`, with zero call sites inside the package — it is reachable only from the web admin through the `Backend` interface, so no mesh test can execute it. And v820, whose data plane is byte-identical here, ran the same suite green at 675 tests.
+
+That attribution is worth stating rather than assuming, because this test is not supposed to be flaky any more: the `relayedTimeoutFactor` doubling was recorded as having closed exactly this flake, taking the per-window spurious-teardown probability from ~1.5% to ~0.02%. A recurrence at that rate on a single-core box running the whole suite concurrently is plausible — the timeout is a wall-clock budget and starving the keepalive path eats it — but "plausible" is the honest word. Anyone seeing this again on real hardware, or under lighter load, should treat it as a live question rather than a known-good flake.
+
+### Not verified
+
+v820's own gap is unchanged: no two-node test disables a seed that a real session was established over, and no real daemon has exercised the coupling end to end. `SeedNodeOwners` is asserted only through its consumers — the map it builds from live engine state has no direct test, and in particular nothing proves the attribution survives the specific v4-seed/v6-session shape that motivated the whole design. That case is the one worth building a two-node test for next, because it is the one a reasoned argument is weakest about.
+
+---
+
+## v820 — 2026-08-09
+
+**Mesh › Seeds was the only per-network table in the web admin without a state column. Routes, reject entries, host records, DNS forwards, firewall rules and NAT rules all have one; `config.Seed` simply never got the `Disabled` field the rest of them carry. It has one now, and toggling it applies live — the address leaves the dial set and a session standing on it is torn down, without a restart.**
+
+### The field
+
+`Seed.Disabled bool`, `omitempty`, zero value enabled — the same convention as `FirewallRule.Disabled` and everything that followed it. An existing config keeps every seed it had, an enabled seed serializes byte-identically to before, and the legacy bare-string seed form still loads with everything enabled.
+
+`SeedList` grew two accessors beside `Addrs`. `EnabledAddrs` is what gets dialed, resolved, counted, and embedded in a token; `DisabledAddrs` is its complement. `Addrs` still returns everything and is now documented as the display/de-duplication list specifically — the one thing it must not be used for is dialing, and that mistake compiles cleanly and fails silently, so `cmd/gravinet` has a source-level guard test asserting no seed resolution site reaches for it.
+
+Re-adding an address that is present but disabled re-enables it in place, keeping its notes and row position, matching `HostRejectAdd`/`DNSRejectAdd`. The alternative was for `seed add` on a parked seed to be a silent no-op.
+
+### Making it apply now
+
+Seed handling is additive everywhere by design: `ReloadRuntime` merges new seeds in and never removes one, because a seed vanishing from config usually means it was edited or superseded, and dropping a live session over that is worse than carrying a stale address for a while. `SeedRemove` has always inherited that — delete a seed and the daemon keeps dialing it until restart.
+
+A disable is different in kind. It is not the absence of a seed; it is an operator pointing at a row still in front of them and saying stop using this one. So it is named explicitly rather than inferred from what's missing — `NetSpec.RetiredSeeds`/`RetiredTCPSeeds` — because absence cannot tell a disabled seed from a deleted one, or from a gossip-learned address that was never configured at all. `applyRetiredSeeds` removes exactly those addresses and drops any session on one. It runs after the additive merge, so an address appearing in both lists ends up out: an off switch should fail closed.
+
+It finds the session two ways, and needs both. Owner attribution (`ns.seedOwner`) catches a peer that connected via the seed and then roamed to a different endpoint, which an endpoint comparison would miss entirely. An endpoint scan catches a peer dialed straight from the seed before any gossip arrived to name its owner.
+
+Enabling needs no counterpart. Retiring deletes the address's backoff and first-seen bookkeeping along with the entry, so the next reload puts it through `AddExplicitSeed` as genuinely new and `initLoop` dials it on its next tick, about a second later, instead of waiting out backoff it accumulated before being parked. Without that deletion a seed disabled mid-backoff would come back enabled and then sit there not being dialed for minutes — present, correct-looking, and doing nothing.
+
+### The subtraction that is easy to get wrong
+
+The dial set folds `PeerCache` in on purpose: a wider bootstrap list reconnects faster after a restart. `PeerCache` is also exactly where a seed this node has actually connected to before will be sitting. So leaving a disabled seed out of `EnabledAddrs` is not enough — it flows straight back in through the cache, and the off switch does nothing for precisely the seeds most likely to be switched off.
+
+`applySeedState` therefore resolves the disabled addresses and subtracts them from the dial set after the fold, rather than merely omitting them before it. The subtraction is by resolved endpoint, not configured string, so it still holds when one address expands into several — a bare host across the fallback port set, or a multi-port seed — and when the same host is reached by two spellings. It also replaces the two hand-rolled copies of the seed-resolution block (startup and live reload), which had drifted into subtly different comments already.
+
+### What a seed's state does not do
+
+It governs an address, not a node, and this is the part worth reading twice.
+
+Disabling a seed tears down the tunnel, but it does not keep the machine behind it away. On a full mesh that machine is an ordinary peer; some other peer gossips it back within a gossip round (10s), `learnPeers` redials, and the session returns — as an ordinary learned candidate rather than as this node's configured seed.
+
+That is the correct behavior rather than a leak. Turning off a bootstrap address is not a claim that the node behind it should be unreachable, and making it one would quietly convert an address-level control into a node blocklist that already exists. One seed address can front several nodes behind a NAT; one node can be reachable at several addresses. The control that means "this node stays away" is Peers → disable (`applyDisabledPeers`), keyed on node id and enforced on the handshake, relay, and gossip paths alike — that one already applied live and is unchanged here. Where disabling a seed *does* durably disconnect: a partial mesh, where the seed link is the only one permitted to exist, and any peer with no other path.
+
+Said plainly in the section hint, the column tooltip, the CLI's disable output, and getting-started §15, because the failure mode otherwise is an operator disabling a seed, watching the peer come back ten seconds later, and concluding the toggle is broken.
+
+### Join tokens
+
+A token is a promise that the addresses in it are worth dialing, so disabled seeds are skipped when one is generated. `TokenSeedCount` counts the same set — it is what the "no bootstrap seed is embedded" warning keys off, and counting a parked seed there would suppress the warning on a token carrying nothing. Seeds arrive enabled on the joiner: a fresh seed on a different node, not an inherited off switch.
+
+### Surface
+
+Web admin: a `state` column, first after the selection box, matching every other table's placement and its `tag-toggle` gesture. CLI: `gravinet seed enable|disable ADDR`, and `seed list` now shows state per row.
+
+### A test suite that had stopped running
+
+`internal/config/udp_disable_test.go` referenced `Config.PrimaryPort`, removed in v789's fold of `primary_port`/`extra_listen_ports` into flat `udp_ports`/`tcp_ports` lists. A test file that does not compile takes its whole package's tests down with it, so **every test in `internal/config` has been silently not running since v789** — not failing, not reported, just absent. Migrated to the current shape, asserting the same five things it always meant to (the sentinel moved from `primary_port == 0` to an empty list, and the rule generalized from "UDP off needs TCP on" to "not both empty"), plus the port-0 case the new spelling makes reachable. The package's tests run again and pass.
+
+### Tests
+
+`internal/config/seed_test.go`: the Addrs/EnabledAddrs split asserted against each other rather than in isolation, since a change collapsing one into the other passes any test that checks only one; position and notes surviving a toggle; every-seed-disabled as a legitimate empty result rather than a fallback to the full list; re-add re-enabling in place; and the JSON compatibility in both directions.
+
+`internal/config/jointoken_test.go`: a disabled seed absent from a generated token and from `TokenSeedCount`, arriving enabled on the joiner.
+
+`internal/mesh/seedretire_test.go`: retirement removing the address live and re-enabling restoring it; the bookkeeping cleared so a re-enable dials promptly; teardown via owner attribution *and* via endpoint, as separate tests because they are different claims about different peers; the blast radius — peers on other seeds and on gossip-learned addresses untouched; a reload with no retirements disconnecting nobody; and retire beating a same-reload re-add.
+
+`cmd/gravinet/seedenabled_test.go`: the PeerCache overlap, which is the case the whole subtraction exists for; the disabled tcp:// seed retiring on the TCP side; and the source-level guard against a future `Seeds.Addrs()` at a dial site.
+
+Each new behavioral test was checked by reverting the implementation and confirming it fails — `applyRetiredSeeds` removed from the reload path, and `EnabledAddrs` swapped back to `Addrs` in `main.go`.
+
+### Verified
+
+`go build ./...` clean at `CGO_ENABLED=0`; `go vet` and `gofmt` clean on everything touched. Every package passes, `internal/mesh` included — 675 tests, no failures, 790s. `TestPeerLocalDisable` — the existing two-node integration test proving peer disable/enable already applied live — re-run and passing within that suite.
+
+### Not verified
+
+No real daemon was restarted and no live tunnel was watched go down. The seed teardown is exercised through the same `ReloadRuntime` path a config change takes, but with sessions placed into `ns.byNode` directly rather than established over a socket — `TestPeerLocalDisable` is the only genuinely two-node test here, and it covers the peer half, which was already working. A two-node test of the seed half, disabling a seed that a real session was established over, is the gap worth closing next.
+
+The ten-second gossip-return window described above is read off `gossipInterval` and the `learnPeers` path, not measured. The claim that a disabled seed's peer comes back on a full mesh is reasoned from the code, not observed.
+
+### Rolling upgrade
+
+Local to the node, and safe in both directions. The field is `omitempty` with an enabled zero value, so an older binary reading a config written by this one sees every seed — including any disabled one — as enabled and dials it, which is the pre-upgrade behavior rather than a new failure. Nothing about `Disabled` crosses the wire; no peer needs to agree.
+
+---
+
 ## v819 — 2026-08-08
 
 **Monitor → Latency's history survived a restart; Monitor → Metrics did not. CPU, memory, disk and per-interface throughput were in-memory only, so every restart blanked half the Monitor page. They now checkpoint to `metrics-history.json` the same way latency already does.**

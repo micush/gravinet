@@ -142,7 +142,7 @@ type NetSpec struct {
 	// resolved from exactly the operator's configured Seed list (config.Config's
 	// Network.Seeds), with none of PeerCache folded in the way the caller does
 	// for Seeds/TCPSeeds themselves (see cmd/gravinet's boot :=
-	// append(n.Seeds.Addrs()..., n.PeerCache...) — deliberate there, since a
+	// append(n.Seeds.EnabledAddrs()..., n.PeerCache...) — deliberate there, since a
 	// broader bootstrap list makes reconnecting after a restart faster and
 	// that's Seeds/TCPSeeds' actual job). These exist purely so something
 	// wanting to know "is this address one the operator actually configured
@@ -154,7 +154,29 @@ type NetSpec struct {
 	// seen (anything in PeerCache) as a seed, not just the real ones.
 	ConfiguredSeeds    []netip.AddrPort
 	ConfiguredTCPSeeds []netip.AddrPort
-	AllowRelay         bool
+	// RetiredSeeds/RetiredTCPSeeds are the endpoints resolved from seeds the
+	// operator has disabled — the one part of the seed set that is
+	// subtractive. Everything else about seed handling is deliberately
+	// additive (see ReloadRuntime): an address, once dialed, is kept until
+	// restart, because a seed vanishing from config usually means it was
+	// edited or superseded and dropping a working session over that would be
+	// worse than carrying a stale address.
+	//
+	// A disable is different in kind. It is not the absence of a seed, it is
+	// an operator saying "stop using this one" about a seed still sitting in
+	// front of them in the table, so it has to be named rather than inferred
+	// from what's missing — absence cannot tell a disabled seed apart from a
+	// deleted one or from a gossip-learned address that was never configured.
+	// ApplyRetiredSeeds removes exactly these from the live dial set and
+	// drops any session standing on one.
+	//
+	// These are subtracted from Seeds/TCPSeeds by the caller before they get
+	// here, so a disabled address cannot be re-admitted by also happening to
+	// sit in PeerCache — otherwise disabling a seed the node has actually
+	// connected to before, which is most of them, would do nothing at all.
+	RetiredSeeds    []netip.AddrPort
+	RetiredTCPSeeds []netip.AddrPort
+	AllowRelay      bool
 	// SelfSeed is config.Network.SelfSeed: an explicit operator declaration
 	// that this node should be treated as a seed for this network by peers
 	// that connect to it — see hsPayload.SelfSeed's doc comment for why this
