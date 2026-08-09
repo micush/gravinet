@@ -253,7 +253,7 @@ main() {
             esac
             ;;
 
-        fedora|centos|rhel|rocky|alma)
+        fedora|centos|rhel|rocky|alm*)
             case "${action}" in
                 update)
                     sudo dnf upgrade -y > "${output}" 2>&1
