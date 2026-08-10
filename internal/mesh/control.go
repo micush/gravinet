@@ -693,6 +693,20 @@ func (e *Engine) maintLoop(ns *netState) {
 			e.refreshBans(ns, now)
 			ns.lastBanRefresh = now
 		}
+		// Refresh the host routing table's view of peer-reachable prefixes.
+		// Polled rather than event-driven: a netlink route monitor would be
+		// tighter, but this runs every maintInterval against a table of tens
+		// of entries, and polling cannot wedge the data plane if the socket
+		// dies.
+		if f := ns.spec.OSRoutes; f != nil {
+			if rs := f(); !sameOSRoutes(ns.osRoutesSnapshot(), rs) {
+				ns.mu.Lock()
+				ns.osRoutes = rs
+				ns.publishFwd()
+				ns.mu.Unlock()
+				e.log.Debugf("mesh: host routing table now offers %d peer-reachable prefix(es) on net %x", len(rs), ns.spec.ID)
+			}
+		}
 		if now.Sub(ns.lastGossip) >= gossipInterval {
 			if sig := ns.peerListSig(); sig != ns.lastGossipSig || now.Sub(ns.lastGossipFull) >= gossipFullRefresh {
 				e.broadcastGossip(ns)
@@ -1685,4 +1699,28 @@ func (r *reader) endpoint() (netip.AddrPort, bool) {
 		return netip.AddrPortFrom(netip.AddrFrom16(a), p), true
 	}
 	return netip.AddrPort{}, false
+}
+
+// osRoutesSnapshot copies the current OS-route set under the lock so the
+// comparison in the maintenance loop doesn't hold it while allocating.
+func (ns *netState) osRoutesSnapshot() []OSRoute {
+	ns.mu.RLock()
+	defer ns.mu.RUnlock()
+	return append([]OSRoute(nil), ns.osRoutes...)
+}
+
+// sameOSRoutes reports whether two route sets are identical in content and
+// order. Order is stable across dumps from the same kernel state, so this is
+// a cheap way to avoid republishing the forwarding snapshot every few seconds
+// on a box whose routing table isn't changing.
+func sameOSRoutes(a, b []OSRoute) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

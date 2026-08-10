@@ -2,6 +2,167 @@
 
 ---
 
+## v828 — 2026-08-10
+
+**Host-route learning now works on FreeBSD, so BGP-learned prefixes forward there the same way v826 made them forward on Linux.**
+
+FRR runs on FreeBSD (net/frr9), so a FreeBSD node in a mesh has exactly the situation v826 fixed: a routing table full of prefixes pointing at peers' overlay addresses, and a data plane that could not use any of them. v826 shipped Linux-only with a stub elsewhere, which was the honest thing to do at the time but left FreeBSD nodes falling back to explicit Mesh Routes for no better reason than that the code had not been written.
+
+`internal/tun/routeread_freebsd.go` dumps the routing table over `PF_ROUTE` (`NET_RT_DUMP`), filtering to `RTF_UP|RTF_GATEWAY` routes whose interface index is this network's mesh device. Everything above it is unchanged: the same `ListRoutesVia` signature, the same `NetSpec.OSRoutes` supplier, the same third-and-last lookup in the forwarding path.
+
+Two differences from Linux worth recording:
+
+- **No nexthop objects.** Those are a Linux kernel construct, so every gatewayed route on FreeBSD carries its gateway inline and there is no second dump to resolve. The part of the Linux path that was hardest to get right simply does not exist here.
+- **Truncated netmasks.** BSD sends a netmask sockaddr cut to its significant bytes — a `/8` arrives carrying one byte, not four — so the prefix length has to be counted out of whatever bytes actually arrived rather than read from a field. `maskBits` counts leading one-bits, which gives the same answer for the truncated and whole forms.
+
+A gateway that parses as a link-layer sockaddr rather than an address is skipped: that is an interface-scoped route, not a path to a peer.
+
+### Tests
+
+`maskBits` is covered for whole and truncated masks, partial bytes (`/12`, `/25`), `/0`, `/32`, IPv6 `/64`, the clamp against a mask longer than the family allows, and a link-layer sockaddr falling back to a host route.
+
+### Verified
+
+`go build ./...` and `go vet` clean for both `GOOS=linux` and `GOOS=freebsd`. The mask-counting algorithm was executed against the table of known values above, including the truncated forms BSD actually sends.
+
+### Not verified
+
+**Nothing here has run on a FreeBSD kernel.** The test compiles and type-checks under `GOOS=freebsd` but cannot execute on the build host, so only the mask arithmetic has genuinely run — and it ran as a transcription of the function, not the function itself. The syscall path around it (`RouteRIB`, `ParseRoutingMessage`, `ParseRoutingSockaddr`) has never seen a real reply.
+
+That path also deserves a specific warning. Those three functions are marked deprecated in the standard library, and `golang.org/x/net/route` exists precisely because the `syscall` versions were frozen and have known trouble on newer FreeBSD releases. gravinet takes no external dependencies, so the stdlib is what is available — but if host-route learning misbehaves on FreeBSD, suspect `ParseRoutingMessage` before suspecting anything in this file.
+
+Only FreeBSD is covered. macOS and OpenBSD are also PF_ROUTE systems and would likely work with the same code, but the netmask and sockaddr handling differ in small ways between the BSDs and neither was tested, so they keep the stub. Windows still needs `GetIpForwardTable2`.
+
+---
+
+## v827 — 2026-08-10
+
+**Fixes a silent NAT bug: masquerade and SNAT rules dropped their destination match on every backend, translating exactly the traffic an operator had written a rule to exempt.**
+
+### The bug
+
+A rule of `source 10.0.0.0/8`, `dest !10.0.0.0/8`, masquerade — "share one address on the way out, but leave mesh-internal traffic alone" — installed as:
+
+	ip saddr 10.0.0.0/8 oifname "eth0" masquerade
+
+The destination clause was gone. `kernelNATRules` never passed `Dest`/`DestNeg` for masquerade or SNAT, and neither did the nft, pf, or iptables renderers emit one. Only DNAT carried a destination, because that is the one kind where the destination is the thing being rewritten and its absence would have been obvious immediately.
+
+This predates the negation work in v824 — a plain positive `dest` was dropped the same way — but v824 made it far easier to hit, because negating the destination is the natural way to write a NAT exemption and there was no other way to express one.
+
+The failure is silent in the worst way. The UI shows the rule with its destination. The config stores it. `nft list ruleset` shows a rule that looks plausible on its own. Nothing reports a discrepancy; the two only disagree when read side by side.
+
+### The fix
+
+`Dest`/`DestNeg` now flow through to masquerade and SNAT, and every backend renders them: nft `ip daddr [!=] P`, iptables `[!] -d P`, pf `to [!] P` in place of the hardcoded `to any`. DNAT gained the symmetric `Source` match it was also missing.
+
+The iptables source-match code was duplicated across the masquerade and SNAT cases, and that duplication is how this happened — DNAT grew a `-d` and the other two silently never did. It is now one `iptSrcDst` helper used by all three.
+
+WinNAT's masquerade equivalent has no destination selector at all, so a dest-scoped rule there is reported through the existing unsupported-rule path rather than rendered without its scope. That distinction matters more on Windows than anywhere else: on nft the bug was a missing clause that can be added, but on WinNAT rendering it regardless would be permanently wrong with no syntax available to fix it.
+
+### Tests
+
+`internal/netfilter/natnegate_test.go` asserts the exact rendered output on all three expressible backends for both masquerade and SNAT, using the rule from the report that surfaced this; that a rule with no destination still renders byte-identically to before (including pf keeping `to any`); and that WinNAT reports rather than approximates a dest-scoped rule.
+
+### Verified
+
+`go build ./...` clean at `CGO_ENABLED=0`; `go vet` and `gofmt` clean on everything touched. `internal/netfilter`, `cmd/gravinet` and `internal/config` pass in full.
+
+### Not verified
+
+Still no rendered ruleset loaded into a real nft, iptables or pfctl — these tests assert the string gravinet emits, not that the kernel accepts it. That gap has been carried since v824 and now covers more syntax than it did then: `pf`'s `nat ... to <prefix>` form in particular is newly emitted here and has never been through `pfctl -n`.
+
+v826's untested nexthop-object path is also unchanged, and remains the first thing to check if BGP-learned routes do not appear.
+
+---
+
+## v826 — 2026-08-10
+
+**BGP routes now just work. A prefix the host routing table points at a peer's overlay address is forwarded, with nothing advertised into the mesh and nothing restated under Mesh › Routes.**
+
+v825 made *redistributed* prefixes work by folding them into the mesh's own advertisements. That still only covered prefixes this node originates, and it still routed them the long way round — through gravinet's advertisement machinery — when the kernel had already worked out the answer. This does the direct thing instead.
+
+### The idea
+
+A TUN carries no next-hop. The kernel decides `10.3.3.0/24 via 10.255.255.248 dev mesh0` and hands over a bare packet; the gateway that made the decision is discarded at the device boundary. But that gateway *is* a peer's overlay address — the exact fact needed to pick a session. Reading it back out of the routing table recovers it.
+
+So the forwarding path gained a third and final lookup, after the overlay map and gravinet's own redistributed routes have both missed: longest matching prefix in the host routing table, gateway resolved as a peer overlay address. Ordering is deliberate — an explicitly advertised mesh route always wins, and this only fills the gap beneath it. A gateway that isn't a peer resolves to nothing rather than guessing.
+
+Because the source is the kernel table rather than any protocol, this covers routes from any daemon — BGP, OSPF, RIP, or a hand-written static route — and prefixes learned from *external* routers, which v825 explicitly could not do.
+
+### Nexthop objects
+
+`internal/tun/routeread_linux.go` dumps `RTM_GETROUTE` over raw rtnetlink, matching the existing installation path (no `ip` binary, no cgo).
+
+The wrinkle worth naming: modern FRR installs routes referencing a **nexthop object**, so the route arrives with `RTA_NH_ID` set and `RTA_GATEWAY` absent entirely. `ip route` renders it as `nhid 81 via 10.255.255.248`, which reads as though the gateway were in the route when it is not. A parser looking only for `RTA_GATEWAY` would find no gateway on precisely the routes a BGP daemon installs — the whole case this feature is for. So a second `RTM_GETNEXTHOP` dump resolves ids to gateways, taken only when a route actually referenced one.
+
+Refreshed on the maintenance tick against `NetSpec.OSRoutes`, a supplier function so the engine never imports the tun package or knows an interface index. Polling rather than a netlink monitor: it runs every few seconds over tens of entries, republishes only when the set actually changes, and cannot wedge the data plane if a socket dies.
+
+### The silent drop, finally counted
+
+A packet no peer owned was discarded on a bare `return` — no log, no counter. That is why the original report needed a full troubleshooting bundle to diagnose: a routing table that looked perfect, sessions that looked perfect, and packets that simply vanished. It now increments `noRouteDrop`.
+
+### Platforms
+
+Linux only. The stub returns no routes elsewhere, degrading to exactly the pre-v826 behaviour rather than failing. The BSDs need a `PF_ROUTE` sysctl walk and Windows `GetIpForwardTable2`; neither is written.
+
+### Tests
+
+`internal/mesh/osroute_test.go` reproduces the reported topology directly — kernel route to `10.3.3.0/24` via `10.255.255.248`, that address being grav3's overlay, resolving to grav3 with nothing advertised — plus a non-peer gateway resolving to nothing, longest-prefix precedence between a `/8` and a `/24` pointing at different peers, IPv6 resolving through the v6 map, and change detection for the refresh.
+
+The netlink parser was run against this machine's live kernel routing table and correctly recovered a default route with its gateway and an on-link prefix without one.
+
+### Verified
+
+`go build ./...` clean at `CGO_ENABLED=0`; `go vet` and `gofmt` clean on everything touched. `cmd/gravinet` and `internal/tun` pass in full, plus the new mesh tests.
+
+### Not verified
+
+The nexthop-object path is the one thing here with no test behind it and the one thing the reported setup actually needs: this machine's routing table has no `nhid` routes, so `dumpNextHops` has been compiled and reasoned about but never once seen a real reply. If host-route learning does not pick up FRR's routes, that function is the first place to look.
+
+Nothing was run against a live mesh. `internal/mesh` and `internal/webadmin` were not re-run in full. The v824 masquerade gap is also still open — kernel masquerade rules silently drop their `dest` match, so a `dest !10.0.0.0/8` exemption is not enforced by nftables, which will start mattering the moment LAN-to-LAN traffic actually flows.
+
+---
+
+## v825 — 2026-08-10
+
+**A prefix redistributed into BGP is now advertised into the mesh automatically. Naming a LAN subnet once, in the BGP config, is enough to make it reachable — it no longer has to be typed a second time under Mesh › Routes.**
+
+### The failure this closes
+
+Reported from a three-node mesh: `ping 10.1.1.1 -> 10.3.3.1` failed while everything that could be inspected looked correct. Direct UDP session up, 2.6ms RTT, ~9,000 packets each way, no spoof drops, forwarding on, overlay firewall empty, and the far end answering every echo it received (424 in, 424 replies out). Both kernel routing tables were symmetric and correct — `10.3.3.0/24 via 10.255.255.248 dev mesh0 proto bgp` on one side, the mirror on the other.
+
+The packets were being dropped by gravinet itself, silently. A TUN carries no next-hop, so once the kernel hands over a packet the data plane only sees a destination address and has to work out which peer owns it. It looks in `routes4`, which holds peer overlay addresses only, then `ns.redist`, the prefix table built from routes peers flood over the mesh. BGP populates neither: it installs routes in the *kernel* table, which the data plane never consults. `redistRouteFlow` returned nil and the packet was discarded on a `return` with no log line and no counter — nothing in a full troubleshooting bundle recorded it, and there were zero `learned route` lines on any of the three nodes to hint at the absence.
+
+The operator had configured `redistribute_connected_routes`, which is a perfectly reasonable way to say "this subnet lives behind me". It just wasn't the way the data plane listened.
+
+### What changed
+
+`fillRuntimeSpec` now folds each prefix in `BGPConfig.RedistributeConnectedRoutes` and `RedistributeStaticRoutes` into `NetSpec.Routes`, so it floods to peers and lands in their `ns.redist` exactly as a hand-entered Mesh Route does. Hot-reloadable like the rest of that spec.
+
+Narrow on purpose, in three ways, each of which would have caused real damage if taken wider:
+
+- **`BGPConfig.Networks` is not included.** It is the "originate into BGP" list and routinely holds aggregates and defaults this node cannot itself deliver. The reporting bundle had `0.0.0.0/0` in it.
+- **Default routes are refused from either redistribute list.** Flooding one into the mesh tells every peer to send this node all their unmatched traffic.
+- **An explicit Mesh Routes entry always wins**, enabled or disabled. Enabled ones are already handled by the caller's own loop, with their configured metric; disabled ones stay disabled rather than being resurrected through a back door. Silently overriding an operator's off switch is the specific failure this codebase has already shipped once, in v821's asymmetric seed/peer coupling.
+
+### What this does not do
+
+Only prefixes *this node* redistributes are advertised. A prefix learned from an external BGP router — a downstream device announcing a subnet into FRR — still installs a kernel route the data plane cannot use, and still needs a Mesh Routes entry. Closing that means importing the OS or FRR RIB and mapping next-hops back to peer overlay addresses, which is a much larger change (`internal/tun/route_linux.go` has the raw-netlink groundwork on Linux; the BSDs and Windows have nothing equivalent yet, and Linux nexthop objects — `nhid` — mean `RTA_GATEWAY` is often absent and a second dump is needed to resolve it). That is the honest remaining gap, and it is bigger than it looks.
+
+### Tests
+
+`cmd/gravinet/autobgproutes_test.go`: the reported case (a redistributed v4 and v6 LAN prefix both become mesh routes); defaults refused from both redistribute lists and `Networks` ignored entirely, using the exact values from the bundle; explicit entries winning, with the disabled case asserted separately since that is the one where getting it wrong overrides an operator decision; and dedupe across the two lists, whitespace, unmasked prefixes matching canonical explicit entries, and unparseable entries being skipped rather than panicking.
+
+### Verified
+
+`go build ./...` clean at `CGO_ENABLED=0`; `go vet` and `gofmt` clean on everything touched. `cmd/gravinet` and `internal/config` pass in full.
+
+### Not verified
+
+Not tested against a live mesh, which is what this change is ultimately a claim about — the assertion is that a prefix reaching `NetSpec.Routes` behaves exactly as a hand-entered one, which is true by construction (same field, same flood path) but unobserved end to end here. `internal/mesh` and `internal/webadmin` were not re-run; neither was touched. The silent drop in `routeTo`/`redistRouteFlow` is still silent — a packet with no owning peer is discarded with no counter and no log, which is why this took a full bundle to find, and adding a counter there would be worth doing on its own.
+
+---
+
 ## v824 — 2026-08-09
 
 **Traffic › NAT rules can now negate source and dest: match everything EXCEPT a prefix. Same Ø toggle, same semantics, and the same refusal to negate a blank field as the firewall's existing src/dst negation.**

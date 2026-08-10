@@ -23,7 +23,7 @@ func TestDisabledHostNotAdvertised(t *testing.T) {
 		},
 	}
 	var spec mesh.NetSpec
-	fillRuntimeSpec(&spec, n, nil, 0, nil)
+	fillRuntimeSpec(&spec, n, nil, 0, nil, config.BGPConfig{})
 
 	got := map[string]bool{}
 	for _, h := range spec.AdvHosts {
@@ -51,7 +51,7 @@ func TestHostRejectSpec(t *testing.T) {
 		},
 	}
 	var spec mesh.NetSpec
-	fillRuntimeSpec(&spec, n, nil, 0, nil)
+	fillRuntimeSpec(&spec, n, nil, 0, nil, config.BGPConfig{})
 	if len(spec.HostReject) != 1 || spec.HostReject[0] != "bad.local" {
 		t.Fatalf("expected only the enabled reject in spec, got %+v", spec.HostReject)
 	}

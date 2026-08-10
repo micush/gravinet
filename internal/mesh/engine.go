@@ -176,7 +176,22 @@ type NetSpec struct {
 	// connected to before, which is most of them, would do nothing at all.
 	RetiredSeeds    []netip.AddrPort
 	RetiredTCPSeeds []netip.AddrPort
-	AllowRelay      bool
+	// OSRoutes, when set, is polled to discover prefixes the host routing
+	// table points at a mesh peer — routes some other daemon installed
+	// (FRR/BGP, OSPF, a static route) rather than anything gravinet was
+	// told about.
+	//
+	// It exists because a TUN carries no next-hop. The kernel decides
+	// "10.3.3.0/24 via 10.255.255.248 dev mesh0", and by the time the packet
+	// reaches the data plane the gateway that made that decision — which is
+	// exactly a peer's overlay address, the one fact needed to pick a
+	// session — has been discarded. Reading it back is the only recovery.
+	//
+	// A supplier function rather than a value so the engine never has to
+	// import the tun package or know an interface index, and so tests can
+	// drive it without a kernel.
+	OSRoutes   func() []OSRoute
+	AllowRelay bool
 	// SelfSeed is config.Network.SelfSeed: an explicit operator declaration
 	// that this node should be treated as a seed for this network by peers
 	// that connect to it — see hsPayload.SelfSeed's doc comment for why this
@@ -755,7 +770,16 @@ type netState struct {
 	// transport) or plain UDP.
 	configuredSeedOwnerUDP map[netip.AddrPort]string
 	configuredSeedOwnerTCP map[netip.AddrPort]string
-	seedBackoff            map[netip.AddrPort]time.Time // don't retry a seed before this time
+	// osRoutes is the host routing table's view of prefixes reachable via a
+	// mesh peer, refreshed on the maintenance tick from NetSpec.OSRoutes.
+	// Guarded by ns.mu, published into fwdSnap.
+	osRoutes []OSRoute
+	// noRouteDrop counts packets discarded because no peer owned their
+	// destination. This used to be a bare return: the exact failure it
+	// represents cost a full troubleshooting bundle to find precisely
+	// because nothing anywhere recorded it.
+	noRouteDrop atomic.Uint64
+	seedBackoff map[netip.AddrPort]time.Time // don't retry a seed before this time
 	// cands holds every dial candidate for this network and paces each one:
 	// in-flight claims, failure backoff, success. It replaces what used to be
 	// three separate maps keyed by bare netip.AddrPort — fallbackBackoff,
@@ -3121,7 +3145,16 @@ func (e *Engine) processOutbound(ns *netState, buf []byte) {
 		ps = e.redistRouteFlow(ns, dst, pkt) // redistributed CIDR routes, ECMP across equal-cost exits
 	}
 	if ps == nil {
-		return // no peer for this destination yet (relay later)
+		// Last resort: a prefix the host routing table points at a peer,
+		// installed by BGP or any other daemon. Deliberately after the two
+		// above so gravinet's own advertisements always win.
+		if s := ns.fwd.Load(); s != nil {
+			ps = s.osRouteFlow(dst)
+		}
+	}
+	if ps == nil {
+		ns.noRouteDrop.Add(1)
+		return // no peer for this destination
 	}
 	if eg := ns.egress.Load(); eg != nil {
 		if !eg.enqueue(ps, append([]byte(nil), pkt...)) {
@@ -3133,20 +3166,58 @@ func (e *Engine) processOutbound(ns *netState, buf []byte) {
 	}
 }
 
+// OSRoute is one host-routing-table entry whose traffic leaves via this
+// network's mesh device, with the gateway the kernel would have used.
+type OSRoute struct {
+	Prefix  netip.Prefix
+	Gateway netip.Addr
+}
+
 type fwdSnap struct {
-	routes4 map[netip.Addr]*peerSession
-	routes6 map[netip.Addr]*peerSession
-	byNode  map[string]*peerSession
-	redist  []routeEntry
+	routes4  map[netip.Addr]*peerSession
+	routes6  map[netip.Addr]*peerSession
+	byNode   map[string]*peerSession
+	redist   []routeEntry
+	osRoutes []OSRoute
+}
+
+// osRouteFlow resolves a destination through the host routing table: longest
+// matching prefix wins, and its gateway is then looked up as a peer overlay
+// address. Consulted only after the overlay map and gravinet's own
+// redistributed routes have both missed, so it can never override a route the
+// mesh itself advertised — an explicitly advertised route stays authoritative.
+//
+// A gateway that isn't a peer's overlay address resolves to nothing, which is
+// the desired outcome: a route out the mesh device via some other next-hop is
+// not ours to carry.
+func (s *fwdSnap) osRouteFlow(dst netip.Addr) *peerSession {
+	best := -1
+	var gw netip.Addr
+	for _, r := range s.osRoutes {
+		if !r.Prefix.Contains(dst) {
+			continue
+		}
+		if r.Prefix.Bits() > best {
+			best, gw = r.Prefix.Bits(), r.Gateway
+		}
+	}
+	if !gw.IsValid() {
+		return nil
+	}
+	if gw.Is4() {
+		return s.routes4[gw]
+	}
+	return s.routes6[gw]
 }
 
 // Caller must hold ns.mu.
 func (ns *netState) publishFwd() {
 	ns.fwd.Store(&fwdSnap{
-		routes4: maps.Clone(ns.routes4),
-		routes6: maps.Clone(ns.routes6),
-		byNode:  maps.Clone(ns.byNode),
-		redist:  append([]routeEntry(nil), ns.redist...),
+		routes4:  maps.Clone(ns.routes4),
+		routes6:  maps.Clone(ns.routes6),
+		byNode:   maps.Clone(ns.byNode),
+		redist:   append([]routeEntry(nil), ns.redist...),
+		osRoutes: append([]OSRoute(nil), ns.osRoutes...),
 	})
 }
 

@@ -90,3 +90,77 @@ func TestWinNATRejectsNegatedRules(t *testing.T) {
 		t.Errorf("the ordinary rule should still render:\n%s", script)
 	}
 }
+
+// The v824 gap: a masquerade or SNAT rule's dest match was dropped by every
+// backend, so an exemption like "masquerade 10/8 except when going to 10/8"
+// rendered as "masquerade 10/8" and translated exactly the traffic it was
+// written to leave alone. Silent, and visible only by reading the installed
+// ruleset against the config that produced it.
+func TestMasqueradeAndSNATCarryDestMatch(t *testing.T) {
+	// The rule from the reported bundle.
+	masq := Rule{
+		Kind:   Masquerade,
+		Source: netip.MustParsePrefix("10.0.0.0/8"),
+		Dest:   netip.MustParsePrefix("10.0.0.0/8"), DestNeg: true,
+		OutIface: "eth0",
+	}
+	snat := Rule{
+		Kind:   SNAT,
+		Source: netip.MustParsePrefix("10.0.0.0/8"),
+		Dest:   netip.MustParsePrefix("192.168.0.0/16"),
+		To:     netip.MustParseAddr("203.0.113.9"), OutIface: "eth0",
+	}
+
+	nft := nftScript([]Rule{masq, snat})
+	if !strings.Contains(nft, "ip saddr 10.0.0.0/8 ip daddr != 10.0.0.0/8 oifname \"eth0\" masquerade") {
+		t.Errorf("nft masquerade lost its dest match:\n%s", nft)
+	}
+	if !strings.Contains(nft, "ip daddr 192.168.0.0/16") {
+		t.Errorf("nft snat lost its dest match:\n%s", nft)
+	}
+
+	if a := strings.Join(iptablesRuleArgs(masq), " "); !strings.Contains(a, "-s 10.0.0.0/8 ! -d 10.0.0.0/8") {
+		t.Errorf("iptables masquerade: %s", a)
+	}
+	if a := strings.Join(iptablesRuleArgs(snat), " "); !strings.Contains(a, "-d 192.168.0.0/16") {
+		t.Errorf("iptables snat: %s", a)
+	}
+
+	pf := pfScript([]Rule{masq, snat})
+	if !strings.Contains(pf, "from 10.0.0.0/8 to ! 10.0.0.0/8") {
+		t.Errorf("pf masquerade:\n%s", pf)
+	}
+	if !strings.Contains(pf, "to 192.168.0.0/16") {
+		t.Errorf("pf snat:\n%s", pf)
+	}
+}
+
+// A rule with no dest still renders exactly as before — "to any" on pf, no
+// daddr clause on nft, no -d on iptables.
+func TestNoDestRendersUnchanged(t *testing.T) {
+	r := Rule{Kind: Masquerade, Source: netip.MustParsePrefix("10.0.0.0/8"), OutIface: "eth0"}
+	if nft := nftScript([]Rule{r}); !strings.Contains(nft, "ip saddr 10.0.0.0/8 oifname \"eth0\" masquerade") {
+		t.Errorf("nft:\n%s", nft)
+	}
+	if a := strings.Join(iptablesRuleArgs(r), " "); strings.Contains(a, "-d ") {
+		t.Errorf("iptables should emit no -d: %s", a)
+	}
+	if pf := pfScript([]Rule{r}); !strings.Contains(pf, "to any") {
+		t.Errorf("pf should keep \"to any\":\n%s", pf)
+	}
+}
+
+// WinNAT has no destination selector on its masquerade equivalent, so a
+// dest-scoped rule must be reported rather than rendered without the scope —
+// which is the bug this release fixes, and would be worse on Windows because
+// there is no syntax to fix it with.
+func TestWinNATRejectsDestScopedMasquerade(t *testing.T) {
+	r := Rule{Kind: Masquerade, Source: netip.MustParsePrefix("10.0.0.0/8"), Dest: netip.MustParsePrefix("10.0.0.0/8"), DestNeg: true}
+	script, unsupported := winNATScript([]Rule{r})
+	if len(unsupported) != 1 {
+		t.Fatalf("dest-scoped masquerade should be unsupported, got %+v", unsupported)
+	}
+	if strings.Contains(script, "10.0.0.0/8") {
+		t.Errorf("must not render the rule without its dest scope:\n%s", script)
+	}
+}

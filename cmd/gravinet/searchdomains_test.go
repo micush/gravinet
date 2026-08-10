@@ -25,7 +25,7 @@ func TestSearchDomainsRequireValidServer(t *testing.T) {
 		},
 	}
 	var spec mesh.NetSpec
-	fillRuntimeSpec(&spec, n, nil, 0, nil)
+	fillRuntimeSpec(&spec, n, nil, 0, nil, config.BGPConfig{})
 
 	if len(spec.AdvDNS) != 1 || spec.AdvDNS[0].Domain != "good.internal" {
 		t.Fatalf("expected only good.internal in AdvDNS, got %+v", spec.AdvDNS)

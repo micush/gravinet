@@ -48,7 +48,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "824"
+	version = "828"
 	commit  = "none"
 )
 
@@ -1144,7 +1144,7 @@ func cmdRun(args []string) {
 					// Already up: apply the hot-reloadable runtime settings + keys.
 					var spec mesh.NetSpec
 					spec.ID = id
-					fillRuntimeSpec(&spec, n, newCfg.EffectiveFirewallExempt(), newCfg.NATStateTimeout, newCfg.FirewallServices)
+					fillRuntimeSpec(&spec, n, newCfg.EffectiveFirewallExempt(), newCfg.NATStateTimeout, newCfg.FirewallServices, newCfg.BGP)
 					// fillRuntimeSpec doesn't resolve seeds (only buildOneNetSpec does
 					// at startup); resolve them here so a seed added at runtime is
 					// dialed live via ReloadRuntime's seed merge, and one just
@@ -2556,6 +2556,31 @@ func buildOneNetSpec(n config.Network, cfg *config.Config, overlays []netip.Pref
 	}
 	applySeedState(&spec, n, udpPrimary(cfg), cfg.AdvertisedTCPPort(), overlays)
 
+	// Let the data plane resolve destinations through the host routing table,
+	// so a prefix BGP (or anything else) points at a peer's overlay address is
+	// forwardable without being restated to gravinet. Errors are swallowed to
+	// "no routes this cycle": a mesh that forwards only what it was explicitly
+	// told is strictly better than one that stops forwarding because a
+	// netlink dump failed.
+	if idx, err := dev.IfIndex(); err == nil {
+		spec.OSRoutes = func() []mesh.OSRoute {
+			var out []mesh.OSRoute
+			for _, fam := range []int{syscall.AF_INET, syscall.AF_INET6} {
+				rs, err := tun.ListRoutesVia(fam, idx)
+				if err != nil {
+					logx.Debugf("network %s: reading host routes: %v", n.ID, err)
+					continue
+				}
+				for _, r := range rs {
+					out = append(out, mesh.OSRoute{Prefix: r.Prefix, Gateway: r.Gateway})
+				}
+			}
+			return out
+		}
+	} else {
+		logx.Debugf("network %s: no interface index, host-route learning disabled: %v", n.ID, err)
+	}
+
 	spec.HostsSync = n.HostsSync.Enabled
 	spec.HostsPath = n.HostsSync.Path
 	if n.HostsSync.TTLSeconds > 0 {
@@ -2572,7 +2597,7 @@ func buildOneNetSpec(n config.Network, cfg *config.Config, overlays []netip.Pref
 	spec.MulticastPPS = n.StormControl.MulticastPPS
 	spec.StormBurst = n.StormControl.Burst
 
-	fillRuntimeSpec(&spec, n, cfg.EffectiveFirewallExempt(), cfg.NATStateTimeout, cfg.FirewallServices)
+	fillRuntimeSpec(&spec, n, cfg.EffectiveFirewallExempt(), cfg.NATStateTimeout, cfg.FirewallServices, cfg.BGP)
 	return spec, dev, nil
 }
 
@@ -2622,7 +2647,44 @@ func toMeshFirewallServices(svcs []config.FirewallService) []mesh.FirewallServic
 	return out
 }
 
-func fillRuntimeSpec(spec *mesh.NetSpec, n config.Network, exempts []config.FirewallExempt, natStateTimeout int, fwServices []config.FirewallService) {
+// autoMeshRoutesFromBGP returns the prefixes this node redistributes into BGP
+// that should also be advertised into the mesh — see the call site for why
+// only the redistribute lists feed this and why defaults are refused.
+//
+// Prefixes already present on the Mesh Routes page are skipped whether they
+// are enabled or disabled there: enabled ones are handled by the caller's own
+// loop (with their configured metric), and disabled ones represent an
+// operator decision this must not override.
+func autoMeshRoutesFromBGP(n config.Network, bgp config.BGPConfig) []netip.Prefix {
+	explicit := make(map[netip.Prefix]bool, len(n.Routes))
+	for _, rt := range n.Routes {
+		if p, err := netip.ParsePrefix(rt.CIDR); err == nil {
+			explicit[p.Masked()] = true
+		}
+	}
+	seen := map[netip.Prefix]bool{}
+	var out []netip.Prefix
+	for _, list := range [][]string{bgp.RedistributeConnectedRoutes, bgp.RedistributeStaticRoutes} {
+		for _, cidr := range list {
+			p, err := netip.ParsePrefix(strings.TrimSpace(cidr))
+			if err != nil {
+				continue // the BGP editor validates these; a bad one is simply not advertised
+			}
+			p = p.Masked()
+			if p.Bits() == 0 {
+				continue // default route: never flooded into the mesh
+			}
+			if explicit[p] || seen[p] {
+				continue
+			}
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func fillRuntimeSpec(spec *mesh.NetSpec, n config.Network, exempts []config.FirewallExempt, natStateTimeout int, fwServices []config.FirewallService, bgp config.BGPConfig) {
 	// Redistributed routes (hot-reloadable; applied live on reload). Disabled
 	// route entries are skipped.
 	for _, rt := range n.Routes {
@@ -2640,6 +2702,36 @@ func fillRuntimeSpec(spec *mesh.NetSpec, n config.Network, exempts []config.Fire
 		} else {
 			logx.Errorf("network %s: bad route %q: %v", n.ID, rt.CIDR, err)
 		}
+	}
+	// Prefixes this node redistributes into BGP are also advertised into the
+	// mesh, so a subnet an operator has already named once in the BGP config
+	// doesn't have to be named a second time under Mesh > Routes to become
+	// reachable.
+	//
+	// This closes a gap that produced no error anywhere: BGP would install a
+	// kernel route pointing at a peer's overlay next-hop, the kernel would
+	// hand the packet to the mesh device, and the data plane would then have
+	// no idea which peer owned the destination and drop it silently — no log
+	// line, no counter, a routing table that looked completely correct, and
+	// pings that simply vanished.
+	//
+	// Deliberately narrow about which BGP lists feed this:
+	//
+	//   - RedistributeConnectedRoutes and RedistributeStaticRoutes name
+	//     prefixes that are actually reachable through this node, which is
+	//     exactly the claim advertising one into the mesh makes.
+	//   - BGPConfig.Networks is NOT included. It is the "originate into BGP"
+	//     list and routinely holds aggregates and default routes that this
+	//     node cannot itself deliver — the bundle that prompted this had
+	//     0.0.0.0/0 in it, and flooding that into the mesh would tell every
+	//     peer to send this node all their unmatched traffic.
+	//
+	// A default route is refused from either list for the same reason, and an
+	// explicit entry on the Mesh Routes page always wins: a prefix already
+	// listed there keeps its own metric, and one listed there but disabled
+	// stays disabled rather than being quietly resurrected through this path.
+	for _, p := range autoMeshRoutesFromBGP(n, bgp) {
+		spec.Routes = append(spec.Routes, p)
 	}
 	for _, rj := range n.RouteRej {
 		if rj.Disabled {
@@ -2893,7 +2985,7 @@ func kernelNATRules(cfg *config.Config) []netfilter.Rule {
 					}
 				}
 				out = append(out, netfilter.Rule{
-					Kind: netfilter.DNAT, Dest: dst, DestNeg: r.DestNegate, InIface: r.Interface, To: to, V6: to.Is6(),
+					Kind: netfilter.DNAT, Source: src, SourceNeg: r.SourceNegate, Dest: dst, DestNeg: r.DestNegate, InIface: r.Interface, To: to, V6: to.Is6(),
 					Proto: r.Proto, DPortLo: dpLo, DPortHi: dpHi, ToPort: toPort,
 				})
 				continue
@@ -2903,9 +2995,9 @@ func kernelNATRules(cfg *config.Config) []netfilter.Rule {
 				// only field that can name a family; a blank source means IPv4.
 				// config.buildNATRule refuses to save that combination without
 				// saying so, so this default is never a silent one.
-				out = append(out, netfilter.Rule{Kind: netfilter.Masquerade, Source: src, SourceNeg: r.SourceNegate, OutIface: r.Interface, V6: src.IsValid() && src.Addr().Is6()})
+				out = append(out, netfilter.Rule{Kind: netfilter.Masquerade, Source: src, SourceNeg: r.SourceNegate, Dest: dst, DestNeg: r.DestNegate, OutIface: r.Interface, V6: src.IsValid() && src.Addr().Is6()})
 			} else if to, err := netip.ParseAddr(t); err == nil && to.IsValid() {
-				out = append(out, netfilter.Rule{Kind: netfilter.SNAT, Source: src, SourceNeg: r.SourceNegate, OutIface: r.Interface, To: to, V6: to.Is6()})
+				out = append(out, netfilter.Rule{Kind: netfilter.SNAT, Source: src, SourceNeg: r.SourceNegate, Dest: dst, DestNeg: r.DestNegate, OutIface: r.Interface, To: to, V6: to.Is6()})
 			}
 		}
 	}

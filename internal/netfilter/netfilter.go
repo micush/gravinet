@@ -131,9 +131,9 @@ func nftScript(rules []Rule) string {
 		for _, r := range fr {
 			switch r.Kind {
 			case Masquerade:
-				fmt.Fprintf(&b, "add rule %s %s postrouting%s%s masquerade\n", fam, tableName, nftSaddr(r), nftOif(r))
+				fmt.Fprintf(&b, "add rule %s %s postrouting%s%s%s masquerade\n", fam, tableName, nftSaddr(r), nftDaddr(r), nftOif(r))
 			case SNAT:
-				fmt.Fprintf(&b, "add rule %s %s postrouting%s%s snat to %s\n", fam, tableName, nftSaddr(r), nftOif(r), r.To)
+				fmt.Fprintf(&b, "add rule %s %s postrouting%s%s%s snat to %s\n", fam, tableName, nftSaddr(r), nftDaddr(r), nftOif(r), r.To)
 			case DNAT:
 				fmt.Fprintf(&b, "add rule %s %s prerouting%s%s%s dnat to %s\n", fam, tableName, nftDaddr(r), nftIif(r), nftDport(r), nftDnatTo(r))
 			}
@@ -224,12 +224,12 @@ func pfScript(rules []Rule) string {
 			if iface == "" {
 				iface = "egress"
 			}
-			fmt.Fprintf(&b, "nat on %s %s from %s to any -> (%s)\n", iface, fam, pfAddr(r.Source, r.SourceNeg), iface)
+			fmt.Fprintf(&b, "nat on %s %s from %s to %s -> (%s)\n", iface, fam, pfAddr(r.Source, r.SourceNeg), pfAddr(r.Dest, r.DestNeg), iface)
 		case SNAT:
 			if r.OutIface != "" {
-				fmt.Fprintf(&b, "nat on %s %s from %s to any -> %s\n", r.OutIface, fam, pfAddr(r.Source, r.SourceNeg), r.To)
+				fmt.Fprintf(&b, "nat on %s %s from %s to %s -> %s\n", r.OutIface, fam, pfAddr(r.Source, r.SourceNeg), pfAddr(r.Dest, r.DestNeg), r.To)
 			} else {
-				fmt.Fprintf(&b, "nat %s from %s to any -> %s\n", fam, pfAddr(r.Source, r.SourceNeg), r.To)
+				fmt.Fprintf(&b, "nat %s from %s to %s -> %s\n", fam, pfAddr(r.Source, r.SourceNeg), pfAddr(r.Dest, r.DestNeg), r.To)
 			}
 		case DNAT:
 			if r.InIface != "" {
@@ -331,6 +331,14 @@ func winNATScript(rules []Rule) (script string, unsupported []Rule) {
 			unsupported = append(unsupported, r) // WinNAT here is scoped to IPv4 only
 			continue
 		}
+		if r.Kind != DNAT && r.Dest.IsValid() {
+			// WinNAT's masquerade equivalent matches an internal prefix and
+			// nothing else — there is no destination selector — so a rule
+			// scoped by destination would translate traffic it was meant to
+			// leave alone. Reported rather than approximated.
+			unsupported = append(unsupported, r)
+			continue
+		}
 		if r.SourceNeg || r.DestNeg {
 			// WinNAT matches on one concrete prefix
 			// (-InternalIPInterfaceAddressPrefix / -ExternalIPAddress) and
@@ -394,42 +402,48 @@ func winNATProto(proto string) string {
 // replace them wholesale without touching anything else on the host.
 const winNATPrefix = "gravinet_nat_"
 
+// iptSrcDst appends the -s/-d match arguments (with their negations) shared by
+// every rule kind. Factored out because the source-only version of this was
+// duplicated across the masquerade and SNAT cases, and that duplication was
+// how the destination match came to be missing from both: DNAT grew a -d and
+// the other two silently never did.
+func iptSrcDst(a []string, r Rule) []string {
+	if r.Source.IsValid() {
+		if r.SourceNeg {
+			a = append(a, "!")
+		}
+		a = append(a, "-s", r.Source.String())
+	}
+	if r.Dest.IsValid() {
+		if r.DestNeg {
+			a = append(a, "!")
+		}
+		a = append(a, "-d", r.Dest.String())
+	}
+	return a
+}
+
 // iptablesRuleArgs renders one rule as the argv that follows the `iptables`
 // binary (an `-A` into our custom chain). Used by the iptables fallback backend.
 func iptablesRuleArgs(r Rule) []string {
 	switch r.Kind {
 	case Masquerade:
 		a := []string{"-t", "nat", "-A", iptPostChain}
-		if r.Source.IsValid() {
-			if r.SourceNeg {
-				a = append(a, "!")
-			}
-			a = append(a, "-s", r.Source.String())
-		}
+		a = iptSrcDst(a, r)
 		if r.OutIface != "" {
 			a = append(a, "-o", r.OutIface)
 		}
 		return append(a, "-j", "MASQUERADE")
 	case SNAT:
 		a := []string{"-t", "nat", "-A", iptPostChain}
-		if r.Source.IsValid() {
-			if r.SourceNeg {
-				a = append(a, "!")
-			}
-			a = append(a, "-s", r.Source.String())
-		}
+		a = iptSrcDst(a, r)
 		if r.OutIface != "" {
 			a = append(a, "-o", r.OutIface)
 		}
 		return append(a, "-j", "SNAT", "--to-source", r.To.String())
 	case DNAT:
 		a := []string{"-t", "nat", "-A", iptPreChain}
-		if r.Dest.IsValid() {
-			if r.DestNeg {
-				a = append(a, "!")
-			}
-			a = append(a, "-d", r.Dest.String())
-		}
+		a = iptSrcDst(a, r)
 		if r.InIface != "" {
 			a = append(a, "-i", r.InIface)
 		}
