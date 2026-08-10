@@ -479,6 +479,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/ping", s.handlePing) // unauthenticated: liveness + boot id
 	mux.HandleFunc("/api/status", s.authed(s.handleStatus))
 	mux.HandleFunc("/api/config", s.authed(s.handleConfig))
+	mux.HandleFunc("/api/radvd", s.authed(s.handleRouterAdvert))
 	mux.HandleFunc("/api/ban", s.authed(s.handleBan))
 	mux.HandleFunc("/api/ban/notes", s.authed(s.handleBanNotes))
 	mux.HandleFunc("/api/peer", s.authed(s.handlePeer))
@@ -1140,7 +1141,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		tlsNotAfter = s.tlsCert.NotAfter.UTC().Format(time.RFC3339)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"nets": out, "udp_ports": cfg.UDPPortList(), "tcp_ports": cfg.TCPPortList(), "nat_state_timeout": cfg.NATStateTimeout, "geoip_lookup": s.cfg.GeoIPEnabled(), "enable_upnp": cfg.EnableUPnP, "ip_forwarding": cfg.ForwardingEnabled(), "disable_redirects": cfg.RedirectsDisabled(), "allow_remote_shell": s.cfg.AllowRemoteShell, "login_ban_max_failures": s.cfg.LoginBan.EffectiveMaxFailures(), "login_ban_seconds": s.cfg.LoginBan.EffectiveBanSeconds(), "tls_source": tlsSource, "tls_common_name": tlsCN, "tls_not_after": tlsNotAfter, "config_history_limit": cfg.EffectiveConfigHistoryLimit(), "config_history_count": config.Count(s.configPath), "shell_supported": ptySupported, "bgp_supported": bgpSupported(), "snmp_supported": snmpSupported, "l2disco_supported": l2discoSupported, "syslog_supported": syslogSupported, "log_level": s.be.LogLevel(), "log_max_size": cfg.LogMaxSizeString(),
+		"nets": out, "udp_ports": cfg.UDPPortList(), "tcp_ports": cfg.TCPPortList(), "nat_state_timeout": cfg.NATStateTimeout, "geoip_lookup": s.cfg.GeoIPEnabled(), "enable_upnp": cfg.EnableUPnP, "ip_forwarding": cfg.ForwardingEnabled(), "disable_redirects": cfg.RedirectsDisabled(), "allow_remote_shell": s.cfg.AllowRemoteShell, "login_ban_max_failures": s.cfg.LoginBan.EffectiveMaxFailures(), "login_ban_seconds": s.cfg.LoginBan.EffectiveBanSeconds(), "tls_source": tlsSource, "tls_common_name": tlsCN, "tls_not_after": tlsNotAfter, "config_history_limit": cfg.EffectiveConfigHistoryLimit(), "config_history_count": config.Count(s.configPath), "shell_supported": ptySupported, "bgp_supported": bgpSupported(), "ipv6ra_supported": ipv6RASupported(), "snmp_supported": snmpSupported, "l2disco_supported": l2discoSupported, "syslog_supported": syslogSupported, "log_level": s.be.LogLevel(), "log_max_size": cfg.LogMaxSizeString(),
 		"worker_threads": cfg.WorkerThreads, "tun_queues": cfg.TunQueues, "tun_queues_supported": tunMultiQueueSupported, "udp_gso": cfg.UDPGSOEnabled(), "udp_gso_supported": udpGSOSupported, "socket_buffer_mb": cfg.SocketBufferMB(), "socket_buffer_max_mb": config.SocketBufferMaxBytes >> 20,
 		// Node-global firewall object/service catalog (see Config.FirewallObjects'
 		// doc comment) — shared by every network above, not nested under any one

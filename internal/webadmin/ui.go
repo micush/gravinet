@@ -397,7 +397,7 @@ const indexHTML = `<!doctype html>
 <script>
 const $ = (h) => { const d=document.createElement('div'); d.innerHTML=h.trim(); return d.firstChild; };
 const app = document.getElementById('app');
-const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, geoipLookup:false, enableUpnp:false, allowRemoteShell:false, loginBanMaxFailures:3, loginBanSeconds:900, tlsSource:'self-signed', tlsCommonName:'', tlsNotAfter:'', configHistoryLimit:250, configHistoryCount:0, shellSupported:true, bgpSupported:false, snmpSupported:false, l2discoSupported:false, syslogSupported:false, selfId:null, selfHostname:'', targetSeq:0, pendingBgpHighlight:null, workerThreads:0, tunQueues:0, tunQueuesSupported:true, udpGSO:false, udpGSOSupported:true, socketBufferMB:16, socketBufferMaxMB:256, perfRestartPending:false, loginBanRestartPending:false };
+const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, geoipLookup:false, enableUpnp:false, allowRemoteShell:false, loginBanMaxFailures:3, loginBanSeconds:900, tlsSource:'self-signed', tlsCommonName:'', tlsNotAfter:'', configHistoryLimit:250, configHistoryCount:0, shellSupported:true, bgpSupported:false, snmpSupported:false, ipv6raSupported:false, l2discoSupported:false, syslogSupported:false, selfId:null, selfHostname:'', targetSeq:0, pendingBgpHighlight:null, workerThreads:0, tunQueues:0, tunQueuesSupported:true, udpGSO:false, udpGSOSupported:true, socketBufferMB:16, socketBufferMaxMB:256, perfRestartPending:false, loginBanRestartPending:false };
 // setTarget is the only place state.target is ever assigned — bumping
 // targetSeq alongside it, once, exactly when the *selection itself* actually
 // changes. load()/startPolling()/refreshCluster() each capture targetSeq
@@ -787,6 +787,7 @@ const NAV_GROUPS = [
     ['firewall', 'rules controlling which traffic is allowed through the tunnel'],
     ['nat', 'port forwarding and address translation for tunnel traffic'],
     ['qos', 'traffic prioritization and queuing order'],
+    ['ipv6ra', 'IPv6 router advertisements \u2014 announce this node as a router on a LAN, with DNS'],
     ['bandwidth', 'rate limiting per peer or network'],
     ['routes', 'additional subnets redistributed across the mesh'],
     // BGP/BFD configuration — gravinet owns the config and drives the FRR
@@ -883,6 +884,8 @@ function label(s){
 // fuller "Layer 2 Discovery" a standalone heading has room for.
 function sectionHeading(s){
   if (s==='l2disco') return 'Layer 2 Discovery';
+  // label() title-cases the section key, which turns 'ipv6ra' into 'Ipv6ra'.
+  if (s==='ipv6ra') return 'IPv6 Router Advertisements';
   return label(s);
 }
 
@@ -896,6 +899,7 @@ function sectionHeading(s){
 // renderSection guards the dispatch as a belt-and-suspenders backstop.
 function sectionVisible(sec){
   if (sec === 'bgp' || sec === 'bgp-peers') return !!state.bgpSupported;
+  if (sec === 'ipv6ra') return !!state.ipv6raSupported;
   if (sec === 'snmp') return !!state.snmpSupported;
   if (sec === 'l2disco' || sec === 'l2-peers') return !!state.l2discoSupported;
   if (sec === 'syslog') return !!state.syslogSupported;
@@ -1083,6 +1087,10 @@ async function load() {
   // so switching to manage a remote peer reflects that peer's capability, not
   // this node's.
   state.bgpSupported = !!(c.body && c.body.bgp_supported);
+  // Same treatment for Traffic > IPv6 RA: true only when this is a platform
+  // whose RA daemon gravinet can actually render config for, and that daemon
+  // is installed on the *targeted* node. See the server's ipv6RASupported().
+  state.ipv6raSupported = !!(c.body && c.body.ipv6ra_supported);
   // Same idea for System > SNMP, System > L2 Disco, and System > Syslog:
   // gates on whether snmpd / lldpd / a syslog daemon gravinet knows how to
   // drive are actually usable on the *targeted* node (see the server's
@@ -2489,14 +2497,17 @@ function enhanceTable(table){
   const isData = (r) => r !== header && r.cells.length > 1 && !r.querySelector('[colspan]');
   const allRows = () => [].slice.call(table.rows);
   const hasData = allRows().filter(isData).length > 0;
-  // Render the filter + toolbar whenever the table is interactive (has data to
-  // sort/filter, or exposes +/- actions). An empty table that can grow still
-  // needs its + button, so don't bail just because there are no rows yet.
-  // table._forceFilter (the mirror of table._noFilter below) opts a table
-  // into the filter box even with neither — Monitor > L2 Peers wants its
-  // filter box present from the first render, before any neighbor has ever
-  // been seen, rather than have it appear only once a row does.
-  if (!hasData && !table._rowAdd && !table._rowRemove && !table._rowButtons && !table._forceFilter) return;
+  // The toolbar always renders. It used to be conditional on the table having
+  // data or exposing +/- actions, with table._forceFilter as an opt-in for
+  // the tables that wanted it anyway — which meant a table's controls could
+  // appear and disappear depending on whether it happened to have rows, and
+  // an empty table could offer no way to put the first row into it. A control
+  // strip that comes and goes is worse than one that is occasionally
+  // redundant, so the condition is gone and _forceFilter with it.
+  //
+  // _noFilter (below) still opts a table out of the filter box specifically;
+  // that is a per-table judgement about a box that would have nothing to
+  // search, not a rule about when the bar exists at all.
 
   const bar = $('<div class="tbar"></div>');
   // table._noFilter opts a table out of the filter box — for a table that
@@ -2574,7 +2585,7 @@ function renderSection() {
     secSettings(c);
   } else {
     ({ networks:secNetworks, keys:secKeys, peers:secPeers, bans:secBans, routes:secRoutes,
-       firewall:secFirewall, nat:secNAT, qos:secQoS, bandwidth:secBandwidth, bgp:secBgp, seeds:secSeeds, hosts:secHosts, dns:secDNS,
+       firewall:secFirewall, nat:secNAT, qos:secQoS, ipv6ra:secRadvd, bandwidth:secBandwidth, bgp:secBgp, seeds:secSeeds, hosts:secHosts, dns:secDNS,
        upgrade:secUpgrade,
        metrics:infoMetrics, 'mesh-peers':infoMeshPeers, capture:infoCapture, speedtest:infoSpeedtest, latency:infoLatency,
        'route-table':infoRoutes, 'bgp-peers':secBgpPeers, 'l2-peers':secL2Peers, 'hosts-file':infoHosts, 'dns-state':infoDNS,
@@ -6621,20 +6632,27 @@ function natAddRow(table, net){
   const tr = document.createElement('tr');
   tr.innerHTML = '<td class="selcol"></td>'
     + '<td class="nat-state"><span class="on">enabled</span></td>'
-    + '<td><input class="nate-src" placeholder="any or CIDR" style="width:120px"></td>'
-    + '<td><input class="nate-dst" placeholder="any or CIDR" style="width:110px"> <input class="nate-dport" placeholder="port(s)" title="dest-port: a single port or a range like 8000-8010 \u2014 port-forward rules only" style="width:70px"> <select class="nate-proto" title="required when dest-port is set"><option value="">any</option><option value="tcp">tcp</option><option value="udp">udp</option></select></td>'
+    + '<td><span class="fwe-field"><input class="nate-src" placeholder="any or CIDR" style="width:120px">'+fwNegToggle('nate-src-negate','match anything EXCEPT this')+'</span></td>'
+    + '<td><span class="fwe-field"><input class="nate-dst" placeholder="any or CIDR" style="width:110px">'+fwNegToggle('nate-dst-negate','match anything EXCEPT this')+'</span> <input class="nate-dport" placeholder="port(s)" title="dest-port: a single port or a range like 8000-8010 \u2014 port-forward rules only" style="width:70px"> <select class="nate-proto" title="required when dest-port is set"><option value="">any</option><option value="tcp">tcp</option><option value="udp">udp</option></select></td>'
     + '<td class="nate-tr-cell-new">' + natTranslateCellHTML({mode:'masquerade'}) + '</td>';
   if (!insertNewRow(table, tr)) return;
   const trCell = tr.querySelector('.nate-tr-cell-new');
   natWireTranslateFields(trCell, '');
+  fwWireNegToggles(tr); // same \u00d8 control, and the same click behavior, as the edit row
   tr.querySelector('.nate-cancel').onclick = () => refresh();
   tr.querySelector('.nate-save').onclick = () => {
     const t = natReadTranslateCell(trCell);
     if (!t){ alert('address is required for static address / port-forward'); return; }
+    const srcV = tr.querySelector('.nate-src').value.trim();
+    const dstV = tr.querySelector('.nate-dst').value.trim();
+    const sNeg = tr.querySelector('.nate-src-negate').classList.contains('active');
+    const dNeg = tr.querySelector('.nate-dst-negate').classList.contains('active');
+    if (sNeg && !srcV){ alert('source \u00d8 is on but source is empty (any): that would match nothing; set source or turn its \u00d8 off'); return; }
+    if (dNeg && !dstV){ alert('dest \u00d8 is on but dest is empty (any): that would match nothing; set dest or turn its \u00d8 off'); return; }
     edit('/api/nat', {
       op:'add', net:net,
-      source: tr.querySelector('.nate-src').value.trim(),
-      dest: tr.querySelector('.nate-dst').value.trim(),
+      source: srcV, dest: dstV,
+      source_negate: sNeg, dest_negate: dNeg,
       dest_port: tr.querySelector('.nate-dport').value.trim(),
       proto: tr.querySelector('.nate-proto').value,
       translate: t.translate,
@@ -6705,6 +6723,141 @@ function qosClassLabel(i, classes){
 function qosClassOpts(classes, sel){
   let o=''; for (let i=0;i<classes;i++) o += '<option value="'+i+'"'+(i===sel?' selected':'')+'>'+qosClassLabel(i,classes)+'</option>';
   return o;
+}
+
+function secRadvd(c){
+  secHint(c, 'This node announces itself on a LAN so hosts autoconfigure an address (SLAAC) and learn a default route, and can hand out DNS servers and search domains in the advertisement itself \u2014 which is how a SLAAC network gets DNS without DHCPv6. Advertise on the LAN interface, never the mesh device. Leave <b>prefixes</b> blank to advertise whichever global /64s the interface already has.');
+  const wrap = $('<div></div>'); c.appendChild(wrap);
+
+  async function load(){
+    wrap.innerHTML = '<div class="card"><div class="hint">loading\u2026</div></div>';
+    const r = await api('/api/radvd');
+    if (state.section !== 'ipv6ra') return;
+    const allIfaces = await systemInterfaces();
+    if (state.section !== 'ipv6ra') return;
+    // Drop this node's own mesh devices — advertising on one would announce
+    // this node as a router to its mesh peers.
+    const meshIfaces = (r.body.mesh_ifaces || []);
+    ifaceNames = allIfaces.filter(n => meshIfaces.indexOf(n) < 0);
+    if (!r || !r.ok || !r.body){ wrap.innerHTML = '<div class="card"><div class="hint">could not load: '+esc((r&&r.body&&r.body.error)||'no response')+'</div></div>'; return; }
+    render(r.body);
+  }
+
+  function render(b){
+    const ra = b.ra || {};
+    const list = ra.interfaces || [];
+    wrap.innerHTML = '';
+    const card = $('<div class="card"></div>');
+    // No banners here. The page is only reachable when the daemon is
+    // installed (ipv6RASupported), and a foreign radvd.conf is set aside
+    // automatically rather than blocking \u2014 so neither condition is
+    // something the operator has to act on, and saying so on every visit is
+    // noise about a problem that no longer exists.
+
+    let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>interface</th><th>prefixes</th><th>dns</th><th>search</th></tr>';
+    if (!list.length) h += '<tr><td colspan="6" class="empty">no interfaces \u2014 click + to advertise on one</td></tr>';
+    else list.forEach((e,i) => {
+      const on = !e.disabled;
+      h += '<tr class="rarow'+(on?'':' fw-disabled')+'" data-idx="'+i+'"'
+        + ' data-iface="'+esc(e.iface||'')+'" data-prefixes="'+esc((e.prefixes||[]).join(', '))+'"'
+        + ' data-dns="'+esc((e.dns||[]).join(', '))+'" data-search="'+esc((e.search||[]).join(', '))+'"'
+>'
+        + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
+        + '<td class="ra-state"><span class="tag-toggle '+(on?'on':'off')+'" data-rastate="1" title="double-click to '+(on?'disable':'enable')+'">'+(on?'enabled':'disabled')+'</span></td>'
+        + '<td class="ra-field">'+esc(e.iface||'')+'</td>'
+        + '<td class="ra-field">'+esc((e.prefixes||[]).join(', ')||'(interface\u2019s own /64s)')+'</td>'
+        + '<td class="ra-field">'+esc((e.dns||[]).join(', ')||'\u2014')+'</td>'
+        + '<td class="ra-field">'+esc((e.search||[]).join(', ')||'\u2014')+'</td></tr>';
+    });
+    const t = $('<div></div>'); t.innerHTML = h+'</table>'; card.appendChild(t);
+    const table = t.querySelector('table');
+    t.querySelectorAll('[data-rastate]').forEach(tag => {
+      tag.ondblclick = (e) => { e.stopPropagation();
+        const tr = tag.closest('tr');
+        toggleTagState(tag, '/api/radvd', on => ({op:(on?'enable':'disable'), index:parseInt(tr.dataset.idx,10)}));
+      };
+    });
+    t.querySelectorAll('tr.rarow .ra-field').forEach(td => {
+      td.title = 'double-click to edit';
+      td.ondblclick = () => raEdit(td.closest('tr'));
+    });
+    selAllWire(t);
+    table._rowAdd = () => raAddRow(table);
+    table._rowRemove = () => removeCheckedRows(table, tr => api('/api/radvd',{method:'POST',body:JSON.stringify({op:'delete',index:parseInt(tr.dataset.idx,10)})}));
+    wrap.appendChild(card);
+    // enhanceTable is what draws the filter box and the +/- toolbar from
+    // _rowAdd/_rowRemove. renderSection runs it over the section's tables
+    // once, synchronously — which is before this table exists, since it
+    // arrives with an async load. Every other section builds its tables
+    // inline and is swept by that pass; this one has to ask.
+    enhanceTable(table);
+  }
+
+  // The host's interfaces, for the picker. Loaded alongside the table rather
+  // than when a row is opened, so the select is populated the instant an
+  // editor appears instead of filling in a moment later under the cursor.
+  let ifaceNames = [];
+  function raIfaceOpts(sel){
+    // A stored interface that is no longer present still has to be selectable,
+    // or opening the editor on it would silently rewrite the row to whatever
+    // happened to be first in the list.
+    const names = ifaceNames.slice();
+    if (sel && names.indexOf(sel) < 0) names.unshift(sel);
+    let o = names.length ? '' : '<option value="">(no interfaces found)</option>';
+    if (!sel) o += '<option value="" selected>choose\u2026</option>';
+    for (const n of names) o += '<option value="'+esc(n)+'"'+(n===sel?' selected':'')+'>'+esc(n)+'</option>';
+    return o;
+  }
+
+  function fields(tr, e){
+    e = e || {};
+    return '<td class="selcol"></td><td class="ra-state"><span class="on">enabled</span></td>'
+      + '<td><select class="rae-iface" style="width:110px">'+raIfaceOpts(e.iface||'')+'</select></td>'
+      + '<td><input class="rae-pfx" placeholder="blank = interface\u2019s /64s" style="width:170px" value="'+esc(e.prefixes||'')+'"></td>'
+      + '<td><input class="rae-dns" placeholder="fd00::1, fd00::2" style="width:150px" value="'+esc(e.dns||'')+'"></td>'
+      + '<td><input class="rae-search" placeholder="lan.example" style="width:130px" value="'+esc(e.search||'')+'">'
+      + ' <button class="sm rae-save">save</button> <button class="sm rae-cancel">cancel</button></td>';
+  }
+
+  function readFields(tr){
+    const csv = (sel) => (tr.querySelector(sel).value||'').split(',').map(x=>x.trim()).filter(Boolean);
+    return {
+      iface: tr.querySelector('.rae-iface').value.trim(),
+      prefixes: csv('.rae-pfx'), dns: csv('.rae-dns'), search: csv('.rae-search')
+    };
+  }
+
+  function raAddRow(table){
+    const tr = document.createElement('tr');
+    tr.innerHTML = fields(tr, {});
+    if (!insertNewRow(table, tr)) return;
+    tr.querySelector('.rae-cancel').onclick = () => load();
+    tr.querySelector('.rae-save').onclick = async () => {
+      const body = Object.assign({op:'add'}, readFields(tr));
+      if (!body.iface){ alert('choose an interface to advertise on'); return; }
+      const r = await api('/api/radvd', {method:'POST', body:JSON.stringify(body)});
+      if (!r.ok){ alert((r.body&&r.body.error)||'add failed'); return; }
+      if (r.body && r.body.note) alert(r.body.note);
+      load();
+    };
+  }
+
+  function raEdit(tr){
+    if (tr.querySelector('.rae-iface')) return;
+    const idx = parseInt(tr.dataset.idx,10);
+    const cur = {iface:tr.dataset.iface, prefixes:tr.dataset.prefixes, dns:tr.dataset.dns, search:tr.dataset.search};
+    tr.innerHTML = fields(tr, cur);
+    tr.querySelector('.rae-cancel').onclick = () => load();
+    tr.querySelector('.rae-save').onclick = async () => {
+      const body = Object.assign({op:'update', index:idx}, readFields(tr));
+      const r = await api('/api/radvd', {method:'POST', body:JSON.stringify(body)});
+      if (!r.ok){ alert((r.body&&r.body.error)||'update failed'); return; }
+      if (r.body && r.body.note) alert(r.body.note);
+      load();
+    };
+  }
+
+  load();
 }
 
 function secQoS(c) {
@@ -9770,12 +9923,12 @@ function secL2Peers(c){
 // itself doesn't hand back (no response, lldpd not installed, zero
 // neighbors seen) simply renders as an empty table.
 //
-// table._forceFilter is set before enhanceTable runs so the filter box is
-// present from the very first render — an empty table with neither rows
-// nor +/- buttons would otherwise never get one (see enhanceTable's own
-// doc comment), leaving the box to pop into existence only once the first
-// neighbor shows up, which reads as the page rearranging itself underneath
-// whoever's looking at it.
+// The filter box is present from the very first render, before any neighbor
+// has been seen — this used to need table._forceFilter, and now falls out of
+// enhanceTable rendering its toolbar unconditionally. Either way the point is
+// that the box must not pop into existence only once the first neighbor shows
+// up, which reads as the page rearranging itself underneath whoever is
+// looking at it.
 async function l2PeersLiveStatus(body){
   const r = await api('/api/l2neighbors');
   const rows = (r.body && r.body.neighbors) || [];
@@ -9787,7 +9940,6 @@ async function l2PeersLiveStatus(body){
   }
   body.innerHTML = h+'</table>';
   const t = body.querySelector('table');
-  t._forceFilter = true;
   enhanceTable(t);
 }
 

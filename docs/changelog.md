@@ -2,6 +2,366 @@
 
 ---
 
+## v841 — 2026-08-10
+
+**Mesh devices can no longer be chosen for router advertisements — hidden in the picker, and refused on save.**
+
+v840's picker offered every non-loopback interface, which included this node's own overlay devices. Selecting one would advertise this node as a router *into the mesh*, telling every peer to route through it. The page's hint said not to; a hint is not a control.
+
+Both halves are done, and they are not the same thing. The picker filters mesh devices out of its list, which is what stops the mistake being made. The handler refuses one on add and update, which is what stops it being made anyway — by an API call, a hand-edited config posted back, or a picker that reports a stale list after a network was added. A dropdown cannot enforce anything; it can only decline to suggest.
+
+The device names come from the same `Backend.Interfaces()` the rest of the admin uses, so a network created after the page loaded is excluded on the next load and refused on save regardless.
+
+The refusal names the network the interface belongs to rather than saying "not allowed", so an operator who typed `mesh0` learns which of their networks it is.
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `internal/webadmin` passes in full, including a guard covering both the client filter and the server refusal.
+
+### Not verified
+
+Nothing rendered in a browser. The refusal has not been exercised against a live backend — the guard checks the code path exists and is called from validation, not that posting `mesh0` to a running node comes back with the error.
+
+---
+
+## v840 — 2026-08-10
+
+**The interface field on IPv6 Router Advertisements is a picker instead of a text box.**
+
+Typing an interface name is the wrong shape for this field. A typo here does not fail loudly: the entry validates, saves, renders into radvd.conf, and then advertises on nothing — with no error anywhere and a page that looks correctly configured. Picking from the host's actual interfaces removes the failure rather than reporting it.
+
+It reuses `systemInterfaces()`, the cached lookup the NAT masquerade dropdown already uses, rather than calling `/api/interfaces` directly — so switching the managed node picks up that node's interfaces instead of quietly keeping the previous one's. The list is fetched alongside the table rather than when a row is opened, so the select is populated the instant an editor appears rather than filling in a moment later under the cursor.
+
+Two cases that would otherwise be quiet damage:
+
+- **A stored interface that is no longer present stays selectable.** Opening the editor on a row naming an interface that has since gone would otherwise rewrite it to whatever happened to be first in the list, turning a look at a row into an edit of it.
+- **Saving with nothing chosen is refused client-side.** The select can sit on its "choose…" placeholder, and posting that would hit the server's own validation — correct, but a worse way to find out.
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `internal/webadmin` passes in full, including a guard on all four of the above.
+
+### Not verified
+
+Nothing rendered in a browser. The picker offers every non-loopback interface `/api/interfaces` returns, which includes gravinet's own mesh devices — the hint says to advertise on the LAN interface and never the mesh device, but nothing stops someone selecting `mesh0`, and doing so would advertise this node as a router into the overlay. Filtering those out is worth doing and is not done here.
+
+---
+
+## v839 — 2026-08-10
+
+**The flags column is gone from the IPv6 Router Advertisements editor — no M/O checkboxes, no lifetime box, no not-default toggle.**
+
+Four controls crammed into one table cell, three of which change nothing for the case this page exists to serve. The default state is plain SLAAC with the daemon's own router lifetime, which is what an operator advertising on a LAN wants; the M and O flags matter only alongside a DHCPv6 server, and "advertise the prefix but not this node as a router" is a deliberately unusual thing to want. Putting all three in front of everyone, permanently, to serve the rare case is the wrong trade, and it made the row hard to read for the common one.
+
+The table is six columns now: state, interface, prefixes, dns, search.
+
+### The part that needed care
+
+The fields are still in the config schema and still rendered into radvd.conf, so they remain settable by editing the config file. That means an update from the editor — which now carries none of them — would have cleared whatever was stored.
+
+The handler carries the current values forward on update, the same way it already preserved the enabled/disabled state. Editing a DNS server must not switch off someone's DHCPv6 flag as a side effect; a control disappearing from a page is not consent to discard what it used to set.
+
+`TestRAUpdatePreservesFieldsTheEditorCannotSend` asserts both halves: that the editor really has stopped sending them (which is what makes the preservation necessary rather than merely tidy), and that the handler carries them over. The second half reads the handler source directly, since there is no rendered artifact that would differ.
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `internal/webadmin` passes in full.
+
+### Not verified
+
+Nothing rendered in a browser. Worth noting what this leaves: `Managed`, `OtherConfig`, `DefaultLifetime` and `NotDefault` are now config-file-only settings with no UI surface, which is a coherent place to be but an easy one to forget — if they should go entirely, the schema and the renderer's handling of them come out too.
+
+---
+
+## v838 — 2026-08-10
+
+**The IPv6 RA page is now titled "IPv6 Router Advertisements", and its description no longer opens by repeating the title.**
+
+v836 replaced "Ipv6ra" with "IPv6 RA", which fixed the mangled capitalisation but left an abbreviation as a page title — the nav key is short because it is a key, and the heading has room to say what the page is. The section heading override now reads "IPv6 Router Advertisements"; the nav item is unchanged.
+
+With the heading naming the feature, the hint's opening "IPv6 router advertisements." was saying it a second time. It is gone, so the first line under the title starts with what the page actually does rather than restating what the reader just read.
+
+The guard on the heading was updated with it, and gained a check that the hint does not open by repeating the title again.
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `internal/webadmin` passes in full. The rendered hint text was printed and read back to confirm the sentence boundary is clean rather than leaving a stray lead-in.
+
+### Not verified
+
+Nothing rendered in a browser. Every RA gap from earlier releases is unchanged: no output through `radvd -c`, no host observed advertising, and the add/edit flow still never used.
+
+---
+
+## v837 — 2026-08-10
+
+**Table toolbars always render. The filter box and +/− buttons no longer appear and disappear with a table's contents.**
+
+`enhanceTable` used to bail when a table had no rows and exposed no `+`/`−` actions. Two consequences, and the second is the one that bit: a table's controls came and went depending on whether it happened to have data, and an empty table could offer no way to put the first row into it.
+
+The condition is gone. A control strip that is occasionally redundant is better than one that is sometimes absent — an operator looking at an empty table should be able to see, without knowing anything about the implementation, that this is a thing rows can be added to.
+
+`table._forceFilter` went with it. It existed only to defeat this bail for Monitor › L2 Peers, which wanted its filter box present before any neighbor had been seen; that is now simply what happens, so the opt-in is dead weight and its remaining set site is removed rather than left implying it still does something.
+
+`table._noFilter` stays. It opts a table out of the filter box specifically — a judgement about a box that would have nothing to search, not a rule about whether the bar exists.
+
+### The L2 Peers test moved with the mechanism
+
+`TestL2PeersNoTitleAlwaysFiltered` asserted `_forceFilter` was set and that `enhanceTable` honoured it. Both are now the wrong thing to require: the behaviour it was protecting is the default. It was rewritten to assert the outcome instead — that the table is enhanced at all, and that the early return does not come back — rather than deleted, because the thing it cares about is still worth caring about.
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `internal/webadmin` passes in full.
+
+### Not verified
+
+Nothing rendered in a browser, as ever. This change makes toolbars appear on tables that previously had none — every read-only Monitor table with no rows now shows a filter box where it showed nothing before. That is the intent, but it is a visual change across many pages that no test observes and only looking will confirm.
+
+---
+
+## v836 — 2026-08-10
+
+**Fixes the IPv6 RA page having no + button, being titled "Ipv6ra", and carrying banners it no longer needs.**
+
+### No way to add an interface
+
+The page rendered an empty table with no toolbar, so the one thing it exists to do could not be done.
+
+`enhanceTable` is what draws the filter box and the `+`/`−` buttons from a table's `_rowAdd`/`_rowRemove`. `renderSection` sweeps a section's tables once, synchronously, right after building it. Every other section builds its tables inline and is caught by that sweep; this one builds its table from an async `/api/radvd` load, which resolves after the sweep has already run. The properties were set on a table nothing ever looked at.
+
+The section now calls `enhanceTable` itself. `TestIPv6RASectionDrawsItsOwnToolbar` pins it, since nothing else would catch a table that renders correctly and simply cannot be added to.
+
+### "Ipv6ra"
+
+`sectionHeading` falls through to `label()`, which title-cases the section key — fine for `firewall`, wrong for an initialism. Overridden to "IPv6 RA", next to the existing `l2disco` override that exists for the same reason.
+
+### Banners removed
+
+Both were written when the page could be reached in a broken state. Neither condition survives: the page is only reachable when the daemon is installed (v833), and a foreign `radvd.conf` is now set aside automatically rather than blocking (v835). What was left was a warning about a problem that no longer exists, shown on every visit — and, in the reported screenshot, still the v831 wording telling an operator to go and move a file by hand.
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `internal/webadmin` passes in full.
+
+### Not verified
+
+Still nothing rendered in a browser, which is why these three shipped: every one of them is visible in a screenshot and invisible to the tests that existed. The two new guards check that the section asks for its toolbar and that the heading is overridden — they assert the source says the right thing, not that the page looks right.
+
+The rest of the RA feature remains unexercised end to end: no output through `radvd -c`, no host observed advertising, and the add/edit flow never used.
+
+---
+
+## v835 — 2026-08-10
+
+**An existing `/etc/radvd.conf` is now set aside and taken over, instead of blocking the feature.**
+
+v831 refused to touch a radvd.conf gravinet had not written. The intent was not to destroy a hand-maintained config; the effect was that installing radvd — which on several distros ships a stock `/etc/radvd.conf` — left the operator with a page that would not work and an instruction to go and move a file by hand. That is not a real answer, and it landed on exactly the operators who took v834's offer to install the daemon for them.
+
+Now the existing file is renamed to `/etc/radvd.conf.pre-gravinet` and the apply proceeds. Neither of the two things worth protecting is given up: nothing anyone wrote is deleted, and enabling the feature actually works.
+
+If that backup name is already taken — a second hand-written file after a previous takeover — a timestamp is appended rather than overwriting the earlier backup. The point is that no operator's file is ever destroyed, and clobbering the first backup on the second takeover would quietly break exactly that.
+
+The page's banner changed from a refusal to a description: enabling an interface takes the file over, and says where the old one goes.
+
+### Tests
+
+`TestSetAsideRadvdConf` covers the first displacement landing on the predictable name, the original content surviving, the path being freed, and — the case that matters most — a second takeover not destroying the first backup. `TestRadvdOwnedRecognisesOwnOutput` checks gravinet recognises its own rendered output, so a routine save does not back up the file on every apply and litter the directory; that a foreign file is not claimed; and that an absent path is available.
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `internal/webadmin` passes in full.
+
+### Not verified
+
+The takeover has only been exercised against temp files, not against a real `/etc/radvd.conf` on a host with radvd running. In particular nothing has confirmed that a stock distro radvd.conf is what actually appears there after v834's install — that is the reported symptom's likely cause, but the file's origin was inferred from the report rather than observed.
+
+The wider RA gaps are unchanged: no output through `radvd -c`, no host observed advertising, and the page never rendered in a browser.
+
+---
+
+## v834 — 2026-08-10
+
+**`install-linux.sh` now installs radvd, the way it already installs FRR, snmpd and lldpd. There was no reason for it to be the exception.**
+
+Every other daemon a gravinet page drives is brought in by the installer, each with the same shape: an `INSTALL_X` default, a `--no-x`/`--x` pair, an `ensure_x` that checks first and warns rather than fails, and a line in the run. radvd was simply missed when the feature was written, which left the operator to install it by hand for no reason anyone had decided on.
+
+`radvd_installed`/`ensure_radvd` follow `lldpd_installed`/`ensure_lldpd` exactly, including the explicit sbin sweep — radvd installs to a directory that is not always on a non-login root PATH, the same trap lldpd has.
+
+One difference is called out in both the flag's help text and the skip message. For BGP, SNMP and L2 Disco, declining the install still leaves a usable page: the config can be authored now and the daemon installed later. Traffic › IPv6 RA is hidden entirely without its daemon (v833), so `--no-radvd` does not leave the feature half-usable — it hides it outright. Saying so where the operator makes the choice is the point.
+
+### This also settles the chicken-and-egg from v833
+
+v833 noted that gating the page on the daemon made v832's auto-install unreachable on a fresh host. Installing radvd alongside gravinet is the resolution: the page is there on first boot because the daemon is, and `installRadvd` goes back to being what it should have been — a repair path for a daemon removed later, not the way it first arrives.
+
+### Verified
+
+`bash -n install/install-linux.sh` clean. `go build ./...` and `go vet` clean.
+
+### Not verified
+
+The installer has not been run. `ensure_radvd` has never executed, on any distro — neither the already-installed path, the install path, nor the warning path. The package is named `radvd` on Debian/Ubuntu, RHEL/Fedora and Arch, which is why it goes through plain `pkg_install` like lldpd rather than the per-distro naming FRR and snmpd need, but that is from packaging knowledge rather than from an install observed here.
+
+`--no-radvd` and `--radvd` are parsed but have not been exercised, and neither has the uninstall side: `uninstall-linux.sh` does not remove radvd, matching how it leaves FRR, snmpd and lldpd alone.
+
+---
+
+## v833 — 2026-08-10
+
+**Traffic › IPv6 RA is now hidden unless the platform is servable and the daemon is installed, matching how Traffic › BGP gates on vtysh.**
+
+`ipv6RASupported()` backs a new `ipv6ra_supported` field on `/api/config`, read into `state.ipv6raSupported` and consulted by `sectionVisible` — the same four-part wiring the BGP, SNMP, L2 Disco and Syslog gates use, evaluated against the *targeted* node so managing a remote peer reflects that peer's capability rather than the admin process's own host.
+
+Two conditions, and the platform half is not a proxy for the daemon half. gravinet renders radvd's config format only; FreeBSD's daemon is rtadvd and its format differs, so a FreeBSD host can have a perfectly good rtadvd installed and still not be servable here. Gating on `GOOS` is what stops that host being offered a page that would write it a file it cannot parse — the hazard v831 opened by teaching `raService` to start rtadvd, and v832 only half-closed by declining to install it.
+
+### A consequence worth stating
+
+This makes v832's auto-install a **repair path rather than a first-run one**: an operator cannot reach the page to trigger an install while the daemon is missing, because the page is hidden precisely then. It still earns its keep — a daemon removed by a later package operation is reinstalled on the next apply instead of failing — but the first install is now the operator's to do, with `pkgman install radvd` or their package manager.
+
+That is a real trade and it was requested with the gating, so it is taken deliberately rather than noticed later. If the intent was for gravinet to bootstrap the daemon on first use, the gate needs to be platform-only and the page needs to stay visible with its "not installed" banner doing the explaining.
+
+### Tests
+
+`TestIPv6RAGateWiring` pins all four wiring points. The state default matters as much as the rest: an undefined `state.ipv6raSupported` is falsy, so omitting it hides the section on every platform including the one where it works — a failure that looks like the feature was never shipped. `TestIPv6RASupportedIsPlatformGated` asserts a non-Linux host reports unsupported whatever it has installed, and that on Linux the gate tracks the daemon.
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `internal/webadmin` passes in full.
+
+### Not verified
+
+The gate has not been observed in a browser — the tests assert the wiring exists and that the server-side predicate is right, not that the nav item appears and disappears. The whole RA feature remains unexercised against a real radvd, and the install path has still never run.
+
+---
+
+## v832 — 2026-08-10
+
+**Traffic › RAdvd is now Traffic › IPv6 RA, and enabling it installs the daemon if it is missing rather than telling the operator to go and do it.**
+
+### Named for the feature, not the daemon
+
+The page was named after radvd, which is an implementation detail that is not even the right one everywhere — FreeBSD's daemon is rtadvd, and a page called RAdvd would be wrong there while describing the same feature. `ipv6ra` says what it does.
+
+`TestIPv6RANavWiring` pins the three places that have to agree — the nav entry, the section dispatch, and the loader's navigated-away guard — and fails if the old key survives in either of the first two, since two nav entries pointing at one section leaves a dead one. Renaming a section is exactly when those drift.
+
+### Installing the daemon
+
+Enabling router advertisements is the operator asking for advertisements. Refusing to work until they install a package by hand is a worse answer than installing it, so `applyRouterAdvert` now does, through the `pkgman` wrapper gravinet already ships and installs beside its own binary — so apt/dnf/pacman are handled without a per-distro branch here.
+
+Bounded by the surrounding care rather than left as a free-running side effect:
+
+- **Only from an explicit apply.** Never from a GET, never from a background reconciler. Installing a package should not be something that happens because someone opened a page.
+- **Always reported.** The note leads with "installed radvd" so a package appearing on a host is never silent.
+- **Three-minute timeout**, and the package manager's own last line of output is carried into any error rather than a bare exit status.
+- **A success that produces no binary is still a failure.** `pkgman` reporting success while nothing lands on PATH is treated as an error, not as a working install.
+- **FreeBSD is excluded and says why.** Its daemon is rtadvd, whose config format gravinet does not yet render; installing a daemon that would then be pointed at a file it cannot parse is worse than not installing it. v831 shipped `raService` able to start rtadvd, which made that hazard live — this closes it on the install side, but the underlying gap remains and the feature still should not be enabled on FreeBSD.
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `internal/webadmin` passes in full, including the new nav-wiring guard.
+
+### Not verified
+
+The install path has never run. No package has been installed by it, `pkgman` has not been invoked from Go here, and the failure branches — pkgman absent, install failing, install succeeding with no binary — are reasoned about rather than exercised. It is also the one code path in gravinet that modifies the host outside its own config and service files, which is worth knowing before the first time it fires.
+
+Everything v831 listed as unverified still is: no output through `radvd -c`, no host observed advertising, the page never rendered in a browser, and the BGP/AutoBGP fix confirmed by predicate rather than by reproducing the wipe.
+
+---
+
+## v831 — 2026-08-10
+
+**Router advertisements are now wired end to end — writer, service reload, and a Traffic › RAdvd page. Plus a fix for BGP settings being wiped when AutoBGP is enabled.**
+
+### BGP settings wiped by enabling AutoBGP
+
+Reported: enable BGP, then enable AutoBGP, and the settings are gone.
+
+`/api/bgp/config` reports an `active` flag meaning "gravinet is managing BGP". When it is false and FRR is installed, the UI does not merely show a banner — it calls `/api/bgp/import` and **re-renders the editor from FRR's live config**, discarding whatever gravinet had stored. The editor autosaves, so the discarded version is then written back. One wrong boolean, and the blast radius is the whole BGP config.
+
+The flag was `bgp.Enabled && bgp.ASN != 0`. AutoBGP derives the ASN in its own reconciler, so between enabling it and that reconciler running, the stored config is legitimately Enabled with ASN 0 — which read as "not managing". Under AutoBGP an ASN of 0 means "not derived yet", never "unconfigured". Now `bgp.Enabled && (bgp.ASN != 0 || bgp.AutoBGP)`.
+
+### Router advertisements, finished
+
+v830 shipped the config model and renderer with nothing calling them. Now:
+
+- **Writer and reload.** `applyRouterAdvert` writes `/etc/radvd.conf` and restarts the daemon, mirroring the FRR integration's shape.
+- **`/api/radvd`** — GET returns the stored config plus whether a daemon is installed; POST adds, edits, deletes, enables and disables interfaces, then applies from the *saved* config so what runs is what was stored rather than what was requested.
+- **Traffic › RAdvd**, a table of advertised interfaces with the usual state toggle, inline editor, and add/remove tools.
+
+Two safety behaviours worth naming:
+
+- **gravinet refuses to overwrite an `radvd.conf` it did not write.** A host may already be advertising from a hand-maintained file, and silently replacing it would take down a working LAN the moment someone enabled this to try it. A marker on the first line distinguishes the two; an unmarked file is reported back, not clobbered.
+- **Disabling actually stops advertising.** With no interfaces enabled the daemon is stopped rather than left running on a stale file, because an off switch that leaves the RAs flowing is decorative.
+
+An apply where every entry resolves to no advertisable /64 is refused with that reason, rather than writing a file radvd would crash-loop on.
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `internal/webadmin` and `internal/config` pass in full.
+
+### Not verified — read before using
+
+**Nothing here has been exercised against a real radvd or a browser.** No output has been through `radvd -c`; no host has been observed advertising; the new page has never been rendered. The handler, the writer, and the service calls are reasoned-about code with no test behind the parts that touch the system — only the renderer and the config model are covered, as they were in v830.
+
+The BGP fix is likewise reasoned from the code path rather than reproduced: the test asserts the corrected predicate over the five states that matter, not that a browser stops wiping the config. Confirming it takes the reported sequence on a real node.
+
+FreeBSD remains half-served. `radvdInstalled` detects `rtadvd` and `raService` drives it, but only the radvd config format is rendered — so a FreeBSD host will now start rtadvd against a file it does not understand. That is worse than v830's silence and is the first thing to fix; until then, do not enable this feature on FreeBSD.
+
+---
+
+## v830 — 2026-08-10
+
+**IPv6 router advertisements: config model, validation, and radvd.conf rendering. Announce a node as a router on a LAN, with DNS servers and search domains carried in the RA itself.**
+
+Scoped to what was asked for — RA on a directly-attached LAN, plus RDNSS/DNSSL — and deliberately not to republishing mesh- or BGP-learned prefixes. radvd's model is that an advertised prefix is one this router owns on that link; a prefix that comes and goes with routing state does not fit it, because hosts cache what they are told for the prefix lifetime and a withdrawal cannot reach them any faster than that.
+
+`config.RAConfig` is off until an operator both enables it and lists an interface, so installing this on a host already running radvd by hand changes nothing until they opt in.
+
+Per interface: the prefixes to advertise (or none, meaning "every global /64 currently on this interface", resolved at render time so an address change is picked up on the next apply rather than leaving hosts caching a prefix that has moved); the M and O flags; a default-router lifetime; RDNSS and DNSSL lists; and the usual disable toggle.
+
+Three decisions worth recording, each one a failure that is silent without it:
+
+- **Managed mode turns off `AdvAutonomous`.** Leaving it on with the M flag set tells hosts to do both SLAAC and DHCPv6, and they end up holding a self-assigned address the DHCPv6 server has never heard of.
+- **A prefix that is not a /64 is refused at save time.** SLAAC appends a 64-bit interface identifier, so hosts silently ignore anything else — indistinguishable, from the LAN, from the RA not working at all.
+- **An interface that resolves to no prefixes is skipped rather than emitted as an empty stanza.** radvd refuses to start on a prefixless interface block, so emitting one would take down advertisements on every other LAN too. One unadvertised LAN is the better failure.
+
+IPv4 in an RDNSS list is dropped rather than rendered: RDNSS has no representation for it and radvd rejects the entire file rather than the offending line.
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `internal/config` and `internal/webadmin` pass in full, including seven new tests covering the SLAAC-with-DNS case, the managed/autonomous interaction, the three lifetime spellings, prefixless and disabled entries, IPv4 rejection, and validation.
+
+### Not verified — read before using
+
+**This release renders configuration; it does not yet apply it.** There is no writer, no service reload, and no UI section. `renderRadvd` and the config model are tested and correct as far as the tests go, but nothing calls them from a request path, so enabling this in a config file today has no effect on a running host. The wiring is the next release, not this one.
+
+No output has been through a real `radvd -c` syntax check, and no host has been observed advertising. The rendered form is from radvd.conf(5), not from a daemon that accepted it.
+
+FreeBSD runs `rtadvd`, whose format differs enough to need a separate renderer; `radvdInstalled` already looks for both binaries, but only the radvd form is rendered, so FreeBSD nodes are detected and then unserved. That gap is named here rather than left to be discovered.
+
+---
+
+## v829 — 2026-08-10
+
+**Fixes the NAT negation toggle being absent from the add-rule row. A new rule could not be negated until it had been saved once and reopened for editing.**
+
+v824 wired the `Ø` controls into `startNATEdit` and not into `natAddRow`. The two are separate blocks of markup for the same fields, and only one of them got the change — so creating a rule offered no way to negate it, while editing that same rule a moment later did. The workaround an operator would find on their own (save it wrong, then fix it) is exactly the kind of thing that makes a feature look half-finished, and it was.
+
+The add row now carries both toggles, wires them through the same `fwWireNegToggles` the firewall and edit-row use, sends `source_negate`/`dest_negate`, and refuses the same negate-an-empty-field combination the edit row refuses.
+
+### Test
+
+`TestNATBothEditorsOfferNegation` checks both editor bodies for the toggles, the click wiring, the API fields, and the empty-field guard. Asserted against the UI source because that is where the divergence lives: nothing on the server differs between a page whose add row has the control and one whose does not, so no server-side test could have caught this. Confirmed to fail when the toggle is removed from the add row again.
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `internal/webadmin` passes the new guard, and the mutation check above confirms it is not vacuous.
+
+### Not verified
+
+Still no browser-level test of the toggle's behaviour — the guard checks that the markup and the click wiring are present in both editors, not that clicking one does the right thing on a real page. That remains the standing gap for this editor, and it is the reason this bug shipped: the wire format was covered on both paths, the markup was covered on neither.
+
+---
+
 ## v828 — 2026-08-10
 
 **Host-route learning now works on FreeBSD, so BGP-learned prefixes forward there the same way v826 made them forward on Linux.**

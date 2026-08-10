@@ -92,8 +92,9 @@ func TestL2PeersNavAndWiring(t *testing.T) {
 // the filter box present from the very first render rather than only
 // appearing once a neighbor shows up — enhanceTable otherwise skips the
 // filter/toolbar entirely for a table with no rows and no +/- buttons (see
-// its own doc comment on table._forceFilter), which would make the box pop
-// into existence later and read as the page rearranging itself.
+// enhanceTable renders its toolbar unconditionally as of v837), which would
+// otherwise make the box pop into existence later and read as the page
+// rearranging itself.
 func TestL2PeersNoTitleAlwaysFiltered(t *testing.T) {
 	idx := strings.Index(indexHTML, "function secL2Peers(")
 	if idx < 0 {
@@ -108,13 +109,21 @@ func TestL2PeersNoTitleAlwaysFiltered(t *testing.T) {
 		t.Fatal("l2PeersLiveStatus not found")
 	}
 	body2 := indexHTML[idx2 : idx2+800]
-	if !strings.Contains(body2, "_forceFilter = true") {
-		t.Error("l2PeersLiveStatus no longer forces the filter box on for an empty table")
+	// The table must be handed to enhanceTable at all — without that call it
+	// gets no toolbar and no filter box, which is the outcome this guards.
+	if !strings.Contains(body2, "enhanceTable(t)") {
+		t.Error("l2PeersLiveStatus no longer enhances its table")
 	}
-	// The mechanism itself: enhanceTable must actually honor _forceFilter in
-	// its early-return gate, or setting the flag above does nothing.
-	if !strings.Contains(indexHTML, "table._rowButtons && !table._forceFilter) return;") {
-		t.Error("enhanceTable no longer honors table._forceFilter in its early-return gate")
+	// The mechanism changed in v837 and this test moved with it. It used to
+	// require table._forceFilter, an opt-in that existed only to defeat
+	// enhanceTable's early return on an empty table with no +/- actions.
+	// That early return is gone — the toolbar is unconditional — so the
+	// behaviour is now the default rather than something to ask for, and
+	// asking for it is what would be stale. What is asserted is the outcome:
+	// the bail must not come back, or an empty L2 Peers table silently loses
+	// its filter box again.
+	if strings.Contains(indexHTML, "table._rowButtons && !table._forceFilter) return;") {
+		t.Error("enhanceTable's early return is back; an empty table would render with no filter box")
 	}
 }
 

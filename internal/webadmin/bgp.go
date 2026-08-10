@@ -466,9 +466,18 @@ func (s *Server) handleBGPConfig(w http.ResponseWriter, r *http.Request) {
 			"installed": frrInstalled(),
 			"supported": bgpSupported(),
 			// Whether gravinet is actively managing BGP. When false and FRR is
-			// installed, the UI follows up with /api/bgp/import to reflect the
-			// live config.
-			"active": bgp.Enabled && bgp.ASN != 0,
+			// installed, the UI follows up with /api/bgp/import and re-renders
+			// the editor from FRR's live config — so this being wrong does not
+			// just mislead a banner, it discards whatever gravinet had stored
+			// and the next autosave writes the discarded version back.
+			//
+			// AutoBGP is why the ASN test alone is not enough. AutoBGP derives
+			// the ASN in its own reconciler, so between enabling it and that
+			// reconciler running, the stored config is legitimately Enabled
+			// with ASN 0 — which read as "not managing", triggered the import,
+			// and wiped the settings the operator had just entered. An ASN of
+			// 0 under AutoBGP means "not derived yet", never "unconfigured".
+			"active": bgp.Enabled && (bgp.ASN != 0 || bgp.AutoBGP),
 			// mesh_routes is what the "Redistribute mesh routes" toggle would
 			// carry into BGP right now (the Mesh Routes page's enabled Advertise
 			// entries, on enabled networks) — shown next to the toggle whether or

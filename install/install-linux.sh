@@ -58,6 +58,10 @@
 #                  via the distro's package manager, for gravinet's System > L2 Disco
 #                  page. Pass this if you don't use LLDP/CDP and don't want this
 #                  host's package set changed.
+#   --no-radvd     don't install radvd. By default, if radvd isn't already on the
+#                  host, it's installed so Traffic > IPv6 RA can advertise this node
+#                  as a router on a LAN. The page is hidden entirely until radvd is
+#                  present, so skipping this hides the feature.
 set -euo pipefail
 
 PREFIX=/usr/local
@@ -71,6 +75,7 @@ ENABLE_RESOLVED=1
 INSTALL_FRR=1
 INSTALL_SNMP=1
 INSTALL_LLDP=1
+INSTALL_RADVD=1
 UNDERLAY_PORT_DEFAULT=65432 # config.DefaultUDPPort
 WEB_PORT_DEFAULT=8443       # config.Default()'s web_admin.listen
 REPO="$(cd "$(dirname "$0")/.." && pwd)" # repo root (parent of install/)
@@ -108,6 +113,8 @@ while [ $# -gt 0 ]; do
     --snmp) INSTALL_SNMP=1 ;;
     --no-lldp) INSTALL_LLDP=0 ;;
     --lldp) INSTALL_LLDP=1 ;;
+    --no-radvd) INSTALL_RADVD=0 ;;
+    --radvd) INSTALL_RADVD=1 ;;
     -h|--help) sed -n '2,60p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
@@ -518,6 +525,43 @@ ensure_lldpd() {
              lldpd is installed some other way. Check that this host's
              package manager can reach its repos and that a package named
              "lldpd" exists for this release.
+NOTE
+}
+
+
+# radvd_installed / ensure_radvd mirror the lldpd pair above. radvd installs to
+# an sbin that isn't always on a non-login root PATH, so the explicit sweep
+# matters here for the same reason it does there.
+radvd_installed() {
+  command -v radvd >/dev/null 2>&1 && return 0
+  local p
+  for p in /usr/sbin/radvd /sbin/radvd /usr/bin/radvd /usr/local/sbin/radvd /usr/local/bin/radvd; do
+    [ -x "$p" ] && return 0
+  done
+  return 1
+}
+
+# ensure_radvd installs radvd if it isn't already present, so Traffic > IPv6 RA
+# is usable. That page is gated on the daemon being installed and is hidden
+# without it, so unlike BGP/SNMP/L2 Disco there is no "author a config now,
+# install the daemon later" path here — skipping this hides the feature
+# outright rather than leaving it half-usable.
+ensure_radvd() {
+  if radvd_installed; then
+    echo "    radvd is already installed"
+    return 0
+  fi
+  echo "    radvd is not installed; installing it"
+  if pkg_install radvd && radvd_installed; then
+    echo "    installed radvd"
+    return 0
+  fi
+  cat <<'NOTE' >&2
+    warning: could not install radvd automatically on this host. gravinet's
+             Traffic > IPv6 RA page stays hidden until radvd is present, so
+             install it some other way to use router advertisements. Check
+             that this host's package manager can reach its repos and that a
+             package named "radvd" exists for this release.
 NOTE
 }
 
@@ -943,6 +987,14 @@ if [ "$INSTALL_LLDP" = 1 ]; then
 else
   echo "    --no-lldp passed; leaving lldpd alone. gravinet's System > L2 Disco page will"
   echo "    still let you author a config, but nothing runs until lldpd is installed yourself."
+fi
+
+echo "==> IPv6 router advertisement daemon (radvd)"
+if [ "$INSTALL_RADVD" = 1 ]; then
+  ensure_radvd
+else
+  echo "    --no-radvd passed; leaving radvd alone. gravinet's Traffic > IPv6 RA page is"
+  echo "    hidden until radvd is installed, so the feature stays unavailable."
 fi
 
 echo "==> /dev/net/tun"

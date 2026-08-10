@@ -403,6 +403,12 @@ type Config struct {
 	// rendered config carries no BGP block and bgpd is switched off in
 	// /etc/frr/daemons. Ported from parapet's Bgp model.
 	BGP BGPConfig `json:"bgp,omitempty"`
+	// RouterAdvert configures IPv6 router advertisements (radvd on Linux,
+	// rtadvd on FreeBSD). Off unless Enabled and at least one interface is
+	// listed; gravinet writes no daemon config and touches no service until
+	// then, so installing gravinet on a host already running radvd by hand
+	// changes nothing until an operator opts in.
+	RouterAdvert RAConfig `json:"router_advert,omitempty"`
 
 	// SNMP runs a read-only SNMPv2c agent (net-snmp's snmpd) on this host —
 	// System > SNMP. It's node-global, like BGP: one agent per host, not
@@ -3029,3 +3035,102 @@ func (s *Store) Swap(c *Config) *Config { return s.p.Swap(c) }
 
 // dir returns the directory of the config path; useful for sibling state files.
 func (c *Config) dir() string { return filepath.Dir(c.path) }
+
+// RAConfig is IPv6 router advertisement: this node telling hosts on a LAN
+// that it is a router they can use, and optionally which DNS servers and
+// search domains to use with it.
+//
+// Scoped deliberately to advertising a directly-attached prefix. It does not
+// republish prefixes learned over the mesh or via BGP: radvd's model is that
+// a prefix it advertises is one this router owns on that link, and a prefix
+// that comes and goes with routing state does not fit it — hosts cache what
+// they are told for the prefix lifetime and a withdrawal cannot reach them
+// faster than that.
+type RAConfig struct {
+	Enabled    bool          `json:"enabled,omitempty"`
+	Interfaces []RAInterface `json:"interfaces,omitempty"`
+}
+
+// RAInterface is one link to advertise on.
+type RAInterface struct {
+	// Iface is the host interface name — the LAN side, never the mesh
+	// device. Advertising into the overlay would tell peers this node is
+	// their router, which is never what an operator means here.
+	Iface string `json:"iface"`
+	// Prefixes are the on-link prefixes to advertise. Empty means "every
+	// global IPv6 prefix currently configured on Iface", resolved at render
+	// time, which is what an operator setting this up on a LAN almost always
+	// wants and saves restating an address the interface already carries.
+	Prefixes []string `json:"prefixes,omitempty"`
+	// Managed and OtherConfig set the M and O flags. Managed says addresses
+	// come from DHCPv6 rather than SLAAC; OtherConfig says other information
+	// (DNS, NTP) does, while addresses still come from SLAAC. Both default
+	// off, which is plain SLAAC with everything carried in the RA itself.
+	Managed     bool `json:"managed,omitempty"`
+	OtherConfig bool `json:"other_config,omitempty"`
+	// DefaultLifetime is how long (seconds) a host should treat this node as
+	// a default router. 0 means the daemon's own default; a deliberate 0 to
+	// advertise "not a default router" is spelled NotDefault instead, so the
+	// unset and the meaningful zero stay distinguishable.
+	DefaultLifetime int  `json:"default_lifetime,omitempty"`
+	NotDefault      bool `json:"not_default,omitempty"`
+	// DNS and Search are RDNSS and DNSSL: recursive DNS servers and search
+	// domains handed to hosts in the RA itself (RFC 8106), which is how a
+	// SLAAC-only network gets DNS without DHCPv6. DNS entries must be IPv6
+	// addresses — RDNSS has no form for an IPv4 server.
+	DNS    []string `json:"dns,omitempty"`
+	Search []string `json:"search,omitempty"`
+	// Disabled parks an entry without deleting it, following the same
+	// convention as every other table.
+	Disabled bool `json:"disabled,omitempty"`
+}
+
+// EnabledInterfaces returns the RA interfaces actually in service.
+func (c RAConfig) EnabledInterfaces() []RAInterface {
+	if !c.Enabled {
+		return nil
+	}
+	var out []RAInterface
+	for _, i := range c.Interfaces {
+		if !i.Disabled && strings.TrimSpace(i.Iface) != "" {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+// Validate checks an RA interface entry, returning the first problem.
+func (i RAInterface) Validate() error {
+	if strings.TrimSpace(i.Iface) == "" {
+		return fmt.Errorf("interface name is required")
+	}
+	for _, p := range i.Prefixes {
+		pfx, err := netip.ParsePrefix(strings.TrimSpace(p))
+		if err != nil {
+			return fmt.Errorf("prefix %q: %v", p, err)
+		}
+		if !pfx.Addr().Is6() {
+			return fmt.Errorf("prefix %q: router advertisements are IPv6 only", p)
+		}
+		// SLAAC derives an address by appending a 64-bit interface
+		// identifier, so a prefix that isn't a /64 cannot be autoconfigured
+		// from. Hosts silently ignore it, which looks exactly like the RA
+		// not working at all.
+		if pfx.Bits() != 64 {
+			return fmt.Errorf("prefix %q: must be a /64 — SLAAC cannot autoconfigure from any other length", p)
+		}
+	}
+	for _, d := range i.DNS {
+		a, err := netip.ParseAddr(strings.TrimSpace(d))
+		if err != nil {
+			return fmt.Errorf("dns %q: %v", d, err)
+		}
+		if !a.Is6() {
+			return fmt.Errorf("dns %q: RDNSS carries IPv6 addresses only", d)
+		}
+	}
+	if i.DefaultLifetime < 0 || i.DefaultLifetime > 9000 {
+		return fmt.Errorf("default lifetime %d: must be between 0 and 9000 seconds", i.DefaultLifetime)
+	}
+	return nil
+}
