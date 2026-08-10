@@ -104,11 +104,17 @@ type natRule struct {
 	// or dest prefix is invalid rather than family-specific, so prefixMatch
 	// alone would let a v4 rule claim v6 packets and rewrite their addresses
 	// with As4 garbage.
-	is6   bool
-	src   netip.Prefix // match source (invalid = any)
-	dst   netip.Prefix // match dest (invalid = any)
-	proto uint8        // 0 = any
-	to    netip.Addr   // translation target
+	is6 bool
+	src netip.Prefix // match source (invalid = any)
+	dst netip.Prefix // match dest (invalid = any)
+	// srcNeg/dstNeg invert their prefix's match — the rule fires for
+	// everything OUTSIDE the prefix. Mirrors fwRule.srcNegate/dstNegate.
+	// Only meaningful alongside a valid prefix; an invalid (any) prefix
+	// with negation on would match nothing at all, which config.Validate
+	// rejects rather than letting a rule silently never fire.
+	srcNeg, dstNeg bool
+	proto          uint8      // 0 = any
+	to             netip.Addr // translation target
 	// dportLo/dportHi scope a DNAT rule to a specific destination port or
 	// range on the original (pre-translation) packet; 0,0 = any port.
 	// Unused for SNAT rules (see config.NATRule.DestPort's doc comment for
@@ -422,6 +428,18 @@ func prefixMatch(p netip.Prefix, a netip.Addr) bool {
 	return !p.IsValid() || p.Contains(a)
 }
 
+// prefixMatchNeg is prefixMatch with an inversion flag. A blank (invalid)
+// prefix still means "any" and stays true regardless of neg, so a negated
+// blank can never turn into "match nothing" here — that combination is
+// refused at save time, and this keeps a stale config from behaving
+// surprisingly if one ever reaches the data plane.
+func prefixMatchNeg(p netip.Prefix, a netip.Addr, neg bool) bool {
+	if !p.IsValid() {
+		return true
+	}
+	return p.Contains(a) != neg
+}
+
 // translateOut applies NAT to an egress (TUN->mesh) packet, rewriting in place.
 func (t *natTable) translateOut(pkt []byte) {
 	if t == nil {
@@ -452,7 +470,7 @@ func (t *natTable) translateOut(pkt []byte) {
 		if r.proto != 0 && r.proto != proto {
 			continue
 		}
-		if !prefixMatch(r.src, src) || !prefixMatch(r.dst, dst) {
+		if !prefixMatchNeg(r.src, src, r.srcNeg) || !prefixMatchNeg(r.dst, dst, r.dstNeg) {
 			continue
 		}
 		fwd := natKey{proto, src, dst, sport, dport}
@@ -512,7 +530,7 @@ func (t *natTable) translateIn(pkt []byte) {
 		if r.proto != 0 && r.proto != proto {
 			continue
 		}
-		if !prefixMatch(r.src, src) || !prefixMatch(r.dst, dst) {
+		if !prefixMatchNeg(r.src, src, r.srcNeg) || !prefixMatchNeg(r.dst, dst, r.dstNeg) {
 			continue
 		}
 		if r.dportLo != 0 && (dport < r.dportLo || dport > r.dportHi) {
@@ -574,6 +592,10 @@ func (t *natTable) sweep(now time.Time) {
 type NATRuleSpec struct {
 	Source string // CIDR/host or empty=any
 	Dest   string
+	// SourceNegate/DestNegate invert their field's match — see
+	// config.NATRule's doc comment.
+	SourceNegate bool
+	DestNegate   bool
 	// DestPort/Proto scope a port-forward rule to a specific destination
 	// port or range — see config.NATRule.DestPort's doc comment. Both
 	// blank (the pre-PAT default) matches every port, same as before
@@ -668,7 +690,8 @@ func (s NATRuleSpec) toRule() (natRule, bool) {
 		dpLo, dpHi = lo, hi
 	}
 	return natRule{
-		src: src, dst: dst, to: to, action: action, proto: protoNum(s.Proto),
+		src: src, dst: dst, srcNeg: s.SourceNegate, dstNeg: s.DestNegate,
+		to: to, action: action, proto: protoNum(s.Proto),
 		dportLo: dpLo, dportHi: dpHi, toPort: toPort, is6: is6,
 	}, true
 }

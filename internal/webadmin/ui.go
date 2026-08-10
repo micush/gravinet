@@ -6488,7 +6488,7 @@ function svcAddRow(table){
 
 function secNAT(c) {
   if (!state.cfg.length) return emptyCard(c, 'No networks.');
-  secHint(c, 'Network address translation rewrites addresses as traffic crosses the tunnel. IPv4 and IPv6 are both supported \u2014 write one rule per family.');
+  secHint(c, 'Network address translation rewrites addresses as traffic crosses the tunnel. IPv4 and IPv6 are both supported \u2014 write one rule per family. Use \u00d8 next to <b>source</b> or <b>dest</b> to match everything EXCEPT that prefix.');
   for (const cf of state.cfg) {
     const nat = cf.nat||{}; const en = !!nat.enabled;
     const card = $('<div class="card"></div>');
@@ -6501,13 +6501,15 @@ function secNAT(c) {
       const tgt = r.interface ? (esc(r.translate||'masquerade')+' ('+esc(r.interface)+')') : esc(r.translate||'');
       const enabled = r.enabled!==false;
       const stTag = '<span class="tag-toggle '+(enabled?'on':'off')+'" data-natstate="1" title="double-click to '+(enabled?'disable':'enable')+'">'+(enabled?'enabled':'disabled')+'</span>';
-      const dstShown = esc(r.dest||'any') + (r.dest_port ? ':'+esc(r.dest_port)+'/'+esc(r.proto||'') : '');
+      const sNeg = !!r.source_negate, dNeg = !!r.dest_negate;
+      const srcShown = (sNeg?'<b>!</b>':'') + esc(r.source||'any');
+      const dstShown = (dNeg?'<b>!</b>':'') + esc(r.dest||'any') + (r.dest_port ? ':'+esc(r.dest_port)+'/'+esc(r.proto||'') : '');
       h += '<tr class="natrow'+(enabled?'':' fw-disabled')+'" data-idx="'+i+'" data-enabled="'+(enabled?1:0)+'"'
-        + ' data-source="'+esc(r.source||'')+'" data-dest="'+esc(r.dest||'')+'" data-dest-port="'+esc(r.dest_port||'')+'" data-proto="'+esc(r.proto||'')+'" data-translate="'+esc(r.translate||'')+'" data-iface="'+esc(r.interface||'')+'">'
+        + ' data-source="'+esc(r.source||'')+'" data-dest="'+esc(r.dest||'')+'" data-dest-port="'+esc(r.dest_port||'')+'" data-proto="'+esc(r.proto||'')+'" data-translate="'+esc(r.translate||'')+'" data-iface="'+esc(r.interface||'')+'" data-source-negate="'+(sNeg?1:0)+'" data-dest-negate="'+(dNeg?1:0)+'">'
         + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
         + '<td class="nat-state">'+stTag+'</td>'
-        + '<td class="nat-field nat-src-cell">'+esc(r.source||'any')+'</td>'
-        + '<td class="nat-field nat-dst-cell">'+dstShown+'</td>'
+        + '<td class="nat-field nat-src-cell"'+(sNeg?' title="anything EXCEPT this"':'')+'>'+srcShown+'</td>'
+        + '<td class="nat-field nat-dst-cell"'+(dNeg?' title="anything EXCEPT this"':'')+'>'+dstShown+'</td>'
         + '<td class="nat-field nat-tr-cell">'+tgt+'</td></tr>';
     });
     const t = $('<div></div>'); t.innerHTML = h+'</table>'; card.appendChild(t);
@@ -6656,9 +6658,9 @@ function startNATEdit(tr, net){
   const srcCell = tr.querySelector('.nat-src-cell');
   const dstCell = tr.querySelector('.nat-dst-cell');
   const trCell  = tr.querySelector('.nat-tr-cell');
-  srcCell.innerHTML = '<input class="nate-src" placeholder="any or CIDR" style="width:120px" value="'+esc(tr.dataset.source||'')+'">';
+  srcCell.innerHTML = '<span class="fwe-field"><input class="nate-src" placeholder="any or CIDR" style="width:120px" value="'+esc(tr.dataset.source||'')+'">'+fwNegToggle('nate-src-negate','match anything EXCEPT this')+'</span>';
   const curProto = tr.dataset.proto || '';
-  dstCell.innerHTML = '<input class="nate-dst" placeholder="any or CIDR" style="width:110px" value="'+esc(tr.dataset.dest||'')+'">'
+  dstCell.innerHTML = '<span class="fwe-field"><input class="nate-dst" placeholder="any or CIDR" style="width:110px" value="'+esc(tr.dataset.dest||'')+'">'+fwNegToggle('nate-dst-negate','match anything EXCEPT this')+'</span>'
     + ' <input class="nate-dport" placeholder="port(s)" title="dest-port: a single port or a range like 8000-8010 \u2014 port-forward rules only" style="width:70px" value="'+esc(tr.dataset.destPort||'')+'">'
     + ' <select class="nate-proto" title="required when dest-port is set">'
     + '<option value=""'+(curProto===''?' selected':'')+'>any</option>'
@@ -6666,14 +6668,24 @@ function startNATEdit(tr, net){
     + '<option value="udp"'+(curProto==='udp'?' selected':'')+'>udp</option></select>';
   trCell.innerHTML = natTranslateCellHTML(natParseTranslate(tr.dataset.translate));
   natWireTranslateFields(trCell, tr.dataset.iface || '');
+  // Same Ø control the firewall editor uses, including its click behavior.
+  fwWireNegToggles(tr);
+  if (tr.dataset.sourceNegate === '1') srcCell.querySelector('.nate-src-negate').classList.add('active');
+  if (tr.dataset.destNegate === '1') dstCell.querySelector('.nate-dst-negate').classList.add('active');
   tr.querySelector('.nate-cancel').onclick = () => refresh();
   tr.querySelector('.nate-save').onclick = async () => {
     const t = natReadTranslateCell(trCell);
     if (!t){ alert('address is required for static address / port-forward'); return; }
+    const srcV = srcCell.querySelector('.nate-src').value.trim();
+    const dstV = dstCell.querySelector('.nate-dst').value.trim();
+    const sNeg = srcCell.querySelector('.nate-src-negate').classList.contains('active');
+    const dNeg = dstCell.querySelector('.nate-dst-negate').classList.contains('active');
+    if (sNeg && !srcV){ alert('source \u00d8 is on but source is empty (any): that would match nothing; set source or turn its \u00d8 off'); return; }
+    if (dNeg && !dstV){ alert('dest \u00d8 is on but dest is empty (any): that would match nothing; set dest or turn its \u00d8 off'); return; }
     const r = await api('/api/nat', { method:'POST', body: JSON.stringify({
       op:'update', net:net, index:idx,
-      source: srcCell.querySelector('.nate-src').value.trim(),
-      dest: dstCell.querySelector('.nate-dst').value.trim(),
+      source: srcV, dest: dstV,
+      source_negate: sNeg, dest_negate: dNeg,
       dest_port: dstCell.querySelector('.nate-dport').value.trim(),
       proto: dstCell.querySelector('.nate-proto').value,
       translate: t.translate,

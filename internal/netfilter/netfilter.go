@@ -40,13 +40,20 @@ const (
 
 // Rule is one kernel NAT rule. Source/Dest are optional matches (invalid = any).
 type Rule struct {
-	Kind     Kind
-	Source   netip.Prefix // ip saddr match (optional)
-	Dest     netip.Prefix // ip daddr match (optional)
-	OutIface string       // oifname, for Masquerade/SNAT
-	InIface  string       // iifname, for DNAT
-	To       netip.Addr   // target for SNAT/DNAT (unused by Masquerade)
-	V6       bool         // address family: false = IPv4 (nft "ip"/iptables), true = IPv6 (nft "ip6"/ip6tables)
+	Kind   Kind
+	Source netip.Prefix // ip saddr match (optional)
+	// SourceNeg/DestNeg invert their prefix match: the rule applies to
+	// everything OUTSIDE the prefix. See config.NATRule's doc comment.
+	// nftables, iptables and pf all express this natively (!=, ! -s,
+	// "from !"); WinNAT cannot, so winNATScript routes a negated rule to
+	// its unsupported list rather than rendering the positive twin.
+	SourceNeg bool
+	DestNeg   bool
+	Dest      netip.Prefix // ip daddr match (optional)
+	OutIface  string       // oifname, for Masquerade/SNAT
+	InIface   string       // iifname, for DNAT
+	To        netip.Addr   // target for SNAT/DNAT (unused by Masquerade)
+	V6        bool         // address family: false = IPv4 (nft "ip"/iptables), true = IPv6 (nft "ip6"/ip6tables)
 
 	// Proto/DPortLo/DPortHi scope a DNAT rule to a specific destination
 	// port or range on the original (pre-translation) packet — port
@@ -137,13 +144,22 @@ func nftScript(rules []Rule) string {
 
 func nftSaddr(r Rule) string {
 	if r.Source.IsValid() {
-		return " " + r.family() + " saddr " + r.Source.String()
+		return " " + r.family() + " saddr " + nftNeg(r.SourceNeg) + r.Source.String()
 	}
 	return ""
 }
 func nftDaddr(r Rule) string {
 	if r.Dest.IsValid() {
-		return " " + r.family() + " daddr " + r.Dest.String()
+		return " " + r.family() + " daddr " + nftNeg(r.DestNeg) + r.Dest.String()
+	}
+	return ""
+}
+
+// nftNeg renders nftables' inequality operator. The trailing space matters:
+// nft needs "saddr != 10.0.0.0/8", not "saddr !=10.0.0.0/8".
+func nftNeg(neg bool) string {
+	if neg {
+		return "!= "
 	}
 	return ""
 }
@@ -208,27 +224,33 @@ func pfScript(rules []Rule) string {
 			if iface == "" {
 				iface = "egress"
 			}
-			fmt.Fprintf(&b, "nat on %s %s from %s to any -> (%s)\n", iface, fam, pfAddr(r.Source), iface)
+			fmt.Fprintf(&b, "nat on %s %s from %s to any -> (%s)\n", iface, fam, pfAddr(r.Source, r.SourceNeg), iface)
 		case SNAT:
 			if r.OutIface != "" {
-				fmt.Fprintf(&b, "nat on %s %s from %s to any -> %s\n", r.OutIface, fam, pfAddr(r.Source), r.To)
+				fmt.Fprintf(&b, "nat on %s %s from %s to any -> %s\n", r.OutIface, fam, pfAddr(r.Source, r.SourceNeg), r.To)
 			} else {
-				fmt.Fprintf(&b, "nat %s from %s to any -> %s\n", fam, pfAddr(r.Source), r.To)
+				fmt.Fprintf(&b, "nat %s from %s to any -> %s\n", fam, pfAddr(r.Source, r.SourceNeg), r.To)
 			}
 		case DNAT:
 			if r.InIface != "" {
-				fmt.Fprintf(&b, "rdr on %s %s%s from any to %s%s -> %s%s\n", r.InIface, fam, pfProto(r), pfAddr(r.Dest), pfDport(r), r.To, pfToPort(r))
+				fmt.Fprintf(&b, "rdr on %s %s%s from any to %s%s -> %s%s\n", r.InIface, fam, pfProto(r), pfAddr(r.Dest, r.DestNeg), pfDport(r), r.To, pfToPort(r))
 			} else {
-				fmt.Fprintf(&b, "rdr %s%s from any to %s%s -> %s%s\n", fam, pfProto(r), pfAddr(r.Dest), pfDport(r), r.To, pfToPort(r))
+				fmt.Fprintf(&b, "rdr %s%s from any to %s%s -> %s%s\n", fam, pfProto(r), pfAddr(r.Dest, r.DestNeg), pfDport(r), r.To, pfToPort(r))
 			}
 		}
 	}
 	return b.String()
 }
 
-// pfAddr renders a prefix match for pf syntax, or "any" when unset.
-func pfAddr(p netip.Prefix) string {
+// pfAddr renders a prefix match for pf syntax, or "any" when unset. neg
+// prepends pf's "!" negation operator, which pf accepts on an address
+// (`from ! 10.1.1.0/24`) but not on `any` — so a blank prefix ignores it,
+// matching nft/iptables and the userspace engine.
+func pfAddr(p netip.Prefix, neg bool) string {
 	if p.IsValid() {
+		if neg {
+			return "! " + p.String()
+		}
 		return p.String()
 	}
 	return "any"
@@ -309,6 +331,15 @@ func winNATScript(rules []Rule) (script string, unsupported []Rule) {
 			unsupported = append(unsupported, r) // WinNAT here is scoped to IPv4 only
 			continue
 		}
+		if r.SourceNeg || r.DestNeg {
+			// WinNAT matches on one concrete prefix
+			// (-InternalIPInterfaceAddressPrefix / -ExternalIPAddress) and
+			// has no inverse form. Rendering the positive twin would
+			// translate exactly the traffic the operator excluded, so this
+			// is reported rather than approximated.
+			unsupported = append(unsupported, r)
+			continue
+		}
 		switch r.Kind {
 		case Masquerade:
 			if !r.Source.IsValid() {
@@ -370,6 +401,9 @@ func iptablesRuleArgs(r Rule) []string {
 	case Masquerade:
 		a := []string{"-t", "nat", "-A", iptPostChain}
 		if r.Source.IsValid() {
+			if r.SourceNeg {
+				a = append(a, "!")
+			}
 			a = append(a, "-s", r.Source.String())
 		}
 		if r.OutIface != "" {
@@ -379,6 +413,9 @@ func iptablesRuleArgs(r Rule) []string {
 	case SNAT:
 		a := []string{"-t", "nat", "-A", iptPostChain}
 		if r.Source.IsValid() {
+			if r.SourceNeg {
+				a = append(a, "!")
+			}
 			a = append(a, "-s", r.Source.String())
 		}
 		if r.OutIface != "" {
@@ -388,6 +425,9 @@ func iptablesRuleArgs(r Rule) []string {
 	case DNAT:
 		a := []string{"-t", "nat", "-A", iptPreChain}
 		if r.Dest.IsValid() {
+			if r.DestNeg {
+				a = append(a, "!")
+			}
 			a = append(a, "-d", r.Dest.String())
 		}
 		if r.InIface != "" {

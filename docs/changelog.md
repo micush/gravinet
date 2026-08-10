@@ -2,6 +2,46 @@
 
 ---
 
+## v824 — 2026-08-09
+
+**Traffic › NAT rules can now negate source and dest: match everything EXCEPT a prefix. Same Ø toggle, same semantics, and the same refusal to negate a blank field as the firewall's existing src/dst negation.**
+
+### Why
+
+NAT matching was strictly positive containment — `prefixMatch` returned true for a blank prefix or one containing the address, with no inverse anywhere in the schema, either engine, or the UI. "NAT everything except 10.1.1.0/24" had no expression.
+
+Complement prefixes are not an answer. Excluding a /24 from a /8 takes sixteen positive rules, and the case that actually motivated this — source not A **and** dest not B — cannot be written as positive rules at any count: rules OR together, so a conjunction of two negations needs the cross-product of both complements, and there is no no-NAT action to carve an exclusion with instead.
+
+The firewall had solved this already (`FirewallRule.SrcNegate`/`DstNegate`, the `Ø` toggle, the `!` marker in the table). This is that same design applied to NAT rather than a second one invented alongside it.
+
+### What
+
+`NATRule.SourceNegate`/`DestNegate`, both `omitempty`, so an existing config round-trips byte-identically and every rule keeps meaning what it did. They negate independently and combine as AND, which is what makes the third shape expressible in one rule.
+
+Negation is match-side only and never touches the translation target: a negated masquerade still takes its address family from `Source`, because a prefix names a family whether the rule fires inside it or outside it.
+
+Every backend that can express it, does, in its own syntax — nftables `saddr != P`, iptables `! -s P`, pf `from ! P`, and the userspace overlay engine via `prefixMatchNeg`. WinNAT cannot: `-InternalIPInterfaceAddressPrefix` takes one concrete prefix with no inverse, and rendering the positive twin would translate exactly the traffic the operator excluded. Negated rules there go to netfilter's existing unsupported-rule path instead.
+
+A blank prefix stays "any" under negation rather than becoming "match nothing", in every engine. The pairing is refused at save time (`applyNATNegate`), and the data plane holds the same line so a hand-edited config can't produce a rule that sits in the table looking active while never firing once.
+
+`NATRuleAddNeg`/`NATRuleUpdateAtNeg` are new entry points beside the existing six-argument forms, which keep their old behaviour and every existing caller.
+
+### Tests
+
+`internal/mesh/natnegate_test.go` walks all three operator-facing shapes plus an un-negated control, asserting the AND case rejects a packet inside *either* prefix rather than only both; that a negated blank still means any; and that negation doesn't leak into family selection. `internal/netfilter/natnegate_test.go` pins the exact rendered syntax on all four backends — a wrong spelling is worse than no support, since pfctl rejecting one line takes the whole anchor down — plus that un-negated rules render no bang anywhere, that pf ignores negation on `any`, and that WinNAT reports rather than approximates. `internal/config`'s tests cover the save-time refusal, all three shapes persisting, clearing a negation on edit, and the plain entry points staying un-negated.
+
+### Verified
+
+`go build ./...` clean at `CGO_ENABLED=0`; `go vet` and `gofmt` clean on everything touched. `internal/config`, `internal/netfilter` and `cmd/gravinet` pass in full, plus the new mesh tests.
+
+### Not verified
+
+`internal/mesh` and `internal/webadmin` were not run in full for this entry — the new mesh tests pass and the package builds and vets clean, but a complete run of either is not part of this evidence.
+
+No rendered ruleset was loaded into a real nft, iptables, pfctl or WinNAT. The backend tests assert the string gravinet emits, not that the kernel accepts it; the syntax is from each tool's documented grammar, and pf's `from ! P` in particular deserves a live check before anyone relies on it in anger. The UI toggle has no browser-level test either, in line with the rest of the editor — the wire format it sends is covered, the click behaviour is not.
+
+---
+
 ## v823 — 2026-08-09
 
 **Traffic › NAT's section hint cut from 1,453 characters to 152. UI copy only — no config, API, or behaviour change.**

@@ -48,7 +48,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "823"
+	version = "824"
 	commit  = "none"
 )
 
@@ -2826,12 +2826,14 @@ func fillRuntimeSpec(spec *mesh.NetSpec, n config.Network, exempts []config.Fire
 				continue
 			}
 			spec.NAT = append(spec.NAT, mesh.NATRuleSpec{
-				Source:    nr.Source,
-				Dest:      nr.Dest,
-				DestPort:  nr.DestPort,
-				Proto:     nr.Proto,
-				Translate: nr.Translate,
-				Interface: nr.Interface,
+				Source:       nr.Source,
+				Dest:         nr.Dest,
+				SourceNegate: nr.SourceNegate,
+				DestNegate:   nr.DestNegate,
+				DestPort:     nr.DestPort,
+				Proto:        nr.Proto,
+				Translate:    nr.Translate,
+				Interface:    nr.Interface,
 			})
 		}
 	}
@@ -2891,7 +2893,7 @@ func kernelNATRules(cfg *config.Config) []netfilter.Rule {
 					}
 				}
 				out = append(out, netfilter.Rule{
-					Kind: netfilter.DNAT, Dest: dst, InIface: r.Interface, To: to, V6: to.Is6(),
+					Kind: netfilter.DNAT, Dest: dst, DestNeg: r.DestNegate, InIface: r.Interface, To: to, V6: to.Is6(),
 					Proto: r.Proto, DPortLo: dpLo, DPortHi: dpHi, ToPort: toPort,
 				})
 				continue
@@ -2901,9 +2903,9 @@ func kernelNATRules(cfg *config.Config) []netfilter.Rule {
 				// only field that can name a family; a blank source means IPv4.
 				// config.buildNATRule refuses to save that combination without
 				// saying so, so this default is never a silent one.
-				out = append(out, netfilter.Rule{Kind: netfilter.Masquerade, Source: src, OutIface: r.Interface, V6: src.IsValid() && src.Addr().Is6()})
+				out = append(out, netfilter.Rule{Kind: netfilter.Masquerade, Source: src, SourceNeg: r.SourceNegate, OutIface: r.Interface, V6: src.IsValid() && src.Addr().Is6()})
 			} else if to, err := netip.ParseAddr(t); err == nil && to.IsValid() {
-				out = append(out, netfilter.Rule{Kind: netfilter.SNAT, Source: src, OutIface: r.Interface, To: to, V6: to.Is6()})
+				out = append(out, netfilter.Rule{Kind: netfilter.SNAT, Source: src, SourceNeg: r.SourceNegate, OutIface: r.Interface, To: to, V6: to.Is6()})
 			}
 		}
 	}

@@ -1435,13 +1435,39 @@ func natTargetText(ip netip.Addr, port uint16) string {
 	return fmt.Sprintf("%s:%d", ip, port)
 }
 
+// applyNATNegate sets a rule's negation flags after buildNATRule has validated
+// the addresses, refusing the one combination that is always a mistake:
+// negation on a blank (any) field. "Everything except any" matches nothing, so
+// such a rule would sit in the table looking active while never firing once.
+// The firewall editor rejects the same pairing rather than saving it.
+func applyNATNegate(r *NATRule, srcNeg, dstNeg bool) error {
+	if srcNeg && r.Source == "" {
+		return fmt.Errorf("source is negated but empty (any): that matches nothing — name a prefix, or turn the negation off")
+	}
+	if dstNeg && r.Dest == "" {
+		return fmt.Errorf("dest is negated but empty (any): that matches nothing — name a prefix, or turn the negation off")
+	}
+	r.SourceNegate, r.DestNegate = srcNeg, dstNeg
+	return nil
+}
+
 func (c *Config) NATRuleAdd(netName, source, dest, destPort, proto, translate, iface string) error {
+	return c.NATRuleAddNeg(netName, source, dest, destPort, proto, translate, iface, false, false)
+}
+
+// NATRuleAddNeg is NATRuleAdd with the source/dest negation flags. Kept as a
+// separate entry point so the six-argument form stays valid for every existing
+// caller and test.
+func (c *Config) NATRuleAddNeg(netName, source, dest, destPort, proto, translate, iface string, srcNeg, dstNeg bool) error {
 	n, err := c.PickNetwork(netName)
 	if err != nil {
 		return err
 	}
 	rule, err := buildNATRule(source, dest, destPort, proto, translate, iface)
 	if err != nil {
+		return err
+	}
+	if err := applyNATNegate(&rule, srcNeg, dstNeg); err != nil {
 		return err
 	}
 	rule.Enabled = true
@@ -1454,6 +1480,11 @@ func (c *Config) NATRuleAdd(netName, source, dest, destPort, proto, translate, i
 // in place, preserving its enabled/disabled state and its position. It backs the
 // click-to-edit rule fields in the UI. Validation matches NATRuleAdd.
 func (c *Config) NATRuleUpdateAt(netName string, idx int, source, dest, destPort, proto, translate, iface string) error {
+	return c.NATRuleUpdateAtNeg(netName, idx, source, dest, destPort, proto, translate, iface, false, false)
+}
+
+// NATRuleUpdateAtNeg is NATRuleUpdateAt with the negation flags.
+func (c *Config) NATRuleUpdateAtNeg(netName string, idx int, source, dest, destPort, proto, translate, iface string, srcNeg, dstNeg bool) error {
 	n, err := c.PickNetwork(netName)
 	if err != nil {
 		return err
@@ -1463,6 +1494,9 @@ func (c *Config) NATRuleUpdateAt(netName string, idx int, source, dest, destPort
 	}
 	rule, err := buildNATRule(source, dest, destPort, proto, translate, iface)
 	if err != nil {
+		return err
+	}
+	if err := applyNATNegate(&rule, srcNeg, dstNeg); err != nil {
 		return err
 	}
 	rule.Enabled = n.NAT.Rules[idx].Enabled // preserve current state

@@ -147,3 +147,73 @@ func TestIPv4RulesUnchanged(t *testing.T) {
 		t.Fatalf("existing IPv4 static SNAT broke: %v", err)
 	}
 }
+
+// Negation on a blank (any) field means "everything except anything", which
+// matches nothing. Such a rule would sit in the table looking active while
+// never firing once — the most confusing possible outcome — so it is refused
+// at save time, matching the firewall editor's own guard.
+func TestNATNegateRequiresAPrefix(t *testing.T) {
+	c := &Config{UDPPorts: []int{51820}, EnableIPv4: true,
+		Networks: []Network{{ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24"}}}
+
+	if err := c.NATRuleAddNeg("lan", "", "", "", "", "192.0.2.1", "", true, false); err == nil {
+		t.Error("negating a blank source should be refused")
+	}
+	if err := c.NATRuleAddNeg("lan", "10.1.1.0/24", "", "", "", "192.0.2.1", "", false, true); err == nil {
+		t.Error("negating a blank dest should be refused")
+	}
+	if len(c.Networks[0].NAT.Rules) != 0 {
+		t.Fatalf("no rule should have been stored: %+v", c.Networks[0].NAT.Rules)
+	}
+
+	// The three shapes an operator actually wants all save.
+	for _, tc := range []struct {
+		src, dst       string
+		srcNeg, dstNeg bool
+	}{
+		{"10.1.1.0/24", "", true, false},
+		{"", "10.3.3.0/24", false, true},
+		{"10.1.1.0/24", "10.3.3.0/24", true, true},
+	} {
+		if err := c.NATRuleAddNeg("lan", tc.src, tc.dst, "", "", "192.0.2.1", "", tc.srcNeg, tc.dstNeg); err != nil {
+			t.Fatalf("src=%q(%v) dst=%q(%v): %v", tc.src, tc.srcNeg, tc.dst, tc.dstNeg, err)
+		}
+	}
+	rules := c.Networks[0].NAT.Rules
+	if len(rules) != 3 {
+		t.Fatalf("want 3 rules, got %d", len(rules))
+	}
+	if !rules[2].SourceNegate || !rules[2].DestNegate {
+		t.Errorf("both flags should persist on the combined rule: %+v", rules[2])
+	}
+	// An un-negated rule must serialize exactly as before — both fields are
+	// omitempty, so an old config round-trips unchanged.
+	if rules[0].DestNegate {
+		t.Error("dest negation should be off when not asked for")
+	}
+}
+
+// Updating a rule in place carries the flags too, and clears them when turned
+// off — an edit that silently kept a stale negation would invert a rule the
+// operator believes they just made positive.
+func TestNATNegateUpdateInPlace(t *testing.T) {
+	c := &Config{UDPPorts: []int{51820}, EnableIPv4: true,
+		Networks: []Network{{ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24"}}}
+	if err := c.NATRuleAddNeg("lan", "10.1.1.0/24", "", "", "", "192.0.2.1", "", true, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.NATRuleUpdateAtNeg("lan", 0, "10.1.1.0/24", "", "", "", "192.0.2.1", "", false, false); err != nil {
+		t.Fatal(err)
+	}
+	if c.Networks[0].NAT.Rules[0].SourceNegate {
+		t.Error("turning negation off in an edit must clear it")
+	}
+	// And the plain (non-Neg) entry points leave a rule un-negated, so every
+	// existing caller keeps its old behaviour.
+	if err := c.NATRuleUpdateAt("lan", 0, "10.1.1.0/24", "", "", "", "192.0.2.1", ""); err != nil {
+		t.Fatal(err)
+	}
+	if c.Networks[0].NAT.Rules[0].SourceNegate {
+		t.Error("the six-argument form must not set negation")
+	}
+}

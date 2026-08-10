@@ -2155,6 +2155,27 @@ type Route struct {
 type NATRule struct {
 	Source string `json:"source"`
 	Dest   string `json:"dest"`
+	// SourceNegate/DestNegate flip what their field matches: on, the rule
+	// matches every address EXCEPT the prefix named, exactly as
+	// FirewallRule.SrcNegate/DstNegate do (same semantics, same "!" marker
+	// in the UI, same refusal to pair with an empty field). The two negate
+	// independently and combine as AND, so "source not A and dest not B" is
+	// one rule with both on — a case that cannot be written as any number
+	// of positive rules, since rules OR together and there is no no-NAT
+	// action to carve an exclusion with.
+	//
+	// Negation is a match-side concept only. It never touches the
+	// translation target: a negated masquerade still takes its address
+	// family from Source (see Validate), because the prefix still names a
+	// family whether the rule matches inside it or outside it.
+	//
+	// Not every backend can express this. WinNAT's
+	// -InternalIPInterfaceAddressPrefix takes one concrete prefix with no
+	// inverse, so a negated rule is reported through netfilter's existing
+	// unsupported-rule path rather than being silently rendered as its
+	// positive twin.
+	SourceNegate bool `json:"source_negate,omitempty"` // match anything EXCEPT Source
+	DestNegate   bool `json:"dest_negate,omitempty"`   // match anything EXCEPT Dest
 	// DestPort scopes a port-forward (DNAT) rule to a specific port or
 	// range on the *original* (pre-translation) destination — "32400" or
 	// "8000-8010" — instead of matching every port on Dest. Blank means

@@ -1107,6 +1107,8 @@ func (s *Server) handleNAT(w http.ResponseWriter, r *http.Request) {
 		Iface, Source, Dest, Translate string
 		DestPort                       string `json:"dest_port"`
 		Proto                          string
+		SourceNegate                   bool `json:"source_negate"`
+		DestNegate                     bool `json:"dest_negate"`
 		Index, Timeout                 int
 	}
 	if !decode(w, r, &req) {
@@ -1118,11 +1120,11 @@ func (s *Server) handleNAT(w http.ResponseWriter, r *http.Request) {
 			// Full rule when any rule field is set; otherwise the masquerade
 			// shorthand (interface only).
 			if req.Source != "" || req.Dest != "" || req.DestPort != "" || req.Translate != "" {
-				return cfg.NATRuleAdd(req.Net, req.Source, req.Dest, req.DestPort, req.Proto, req.Translate, req.Iface)
+				return cfg.NATRuleAddNeg(req.Net, req.Source, req.Dest, req.DestPort, req.Proto, req.Translate, req.Iface, req.SourceNegate, req.DestNegate)
 			}
 			return cfg.NATAdd(req.Net, req.Iface)
 		case "update":
-			return cfg.NATRuleUpdateAt(req.Net, req.Index, req.Source, req.Dest, req.DestPort, req.Proto, req.Translate, req.Iface)
+			return cfg.NATRuleUpdateAtNeg(req.Net, req.Index, req.Source, req.Dest, req.DestPort, req.Proto, req.Translate, req.Iface, req.SourceNegate, req.DestNegate)
 		case "delete", "del", "remove":
 			if req.Iface != "" {
 				return cfg.NATDelete(req.Net, req.Iface)
