@@ -317,6 +317,10 @@ const indexHTML = `<!doctype html>
   .tbar { display:flex; gap:6px; align-items:center; margin-bottom:9px; }
   .tbar-btn { width:28px; height:25px; padding:0; font-size:15px; text-align:center; display:inline-flex; align-items:center; justify-content:center; }
   .tbar-gap { margin-left:28px; } /* one button's width of extra separation from the +/- group */
+  /* Starts a right-aligned group: everything after it is pushed to the far
+     end of the bar. Used to separate buttons that act on the ticked rows
+     from those that act on the table as a whole. */
+  .tbar-right { margin-left:auto; }
   .modal-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; z-index:1000; padding:24px; }
   .modal-panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; max-width:720px; width:100%; max-height:86vh; display:flex; flex-direction:column; box-shadow:0 12px 40px rgba(0,0,0,.5); }
   .modal-head { display:flex; align-items:center; justify-content:space-between; padding:14px 18px; border-bottom:1px solid var(--line); flex:0 0 auto; }
@@ -2519,7 +2523,7 @@ function enhanceTable(table){
   if (table._rowAdd){ const b=$('<button class="sm tbar-btn" title="add a row">+</button>'); b.onclick=table._rowAdd; bar.appendChild(b); }
   if (table._rowRemove){ const b=$('<button class="sm tbar-btn" title="remove selected rows">\u2212</button>'); b.onclick=table._rowRemove; bar.appendChild(b); }
   if (table._rowButtons) table._rowButtons.forEach(spec => {
-    const b=$('<button class="sm '+(spec.cls||'')+(spec.gap?' tbar-gap':'')+'" title="'+esc(spec.title||'')+'">'+esc(spec.label)+'</button>'); b.onclick=spec.onclick; bar.appendChild(b);
+    const b=$('<button class="sm '+(spec.cls||'')+(spec.gap?' tbar-gap':'')+(spec.right?' tbar-right':'')+'" title="'+esc(spec.title||'')+'">'+esc(spec.label)+'</button>'); b.onclick=spec.onclick; bar.appendChild(b);
   });
   if (bar.children.length) table.parentNode.insertBefore(bar, table);
   const applyFilter = () => {
@@ -11140,11 +11144,14 @@ function secConfigHistory(c){
   t.innerHTML = '<table><tr><th class="selcol"></th><th>saved</th><th>by</th><th>changes</th></tr></table>';
   const table = t.querySelector('table');
   table._noFilter = false;
+  // Split into two groups: what acts on the ticked rows on the left, what
+  // moves a configuration in or out of this node on the right, with Restore
+  // last because it is the only one that changes what is running.
   table._rowButtons = [
-    { label:'Snapshot now', cls:'', title:'save a snapshot of the current configuration', onclick: chSnapshotNow },
-    { label:'Upload', cls:'ghost', title:'file a previously downloaded configuration into this list, so it can be reviewed and restored. Uploading does not apply it.', onclick: chUploadConfig },
-    { label:'Diff selected', cls:'ghost', title:'compare two ticked snapshots', onclick: chDiffSelected },
-    { label:'Download', cls:'ghost', title:'download the ticked snapshot as JSON', onclick: chDownloadSelected },
+    { label:'Snapshot', cls:'', title:'save a snapshot of the current configuration', onclick: chSnapshotNow },
+    { label:'Diff', cls:'', title:'compare two ticked snapshots', onclick: chDiffSelected },
+    { label:'Download', cls:'', right:true, title:'download the ticked snapshot as JSON', onclick: chDownloadSelected },
+    { label:'Upload', cls:'', title:'file a previously downloaded configuration into this list, so it can be reviewed and restored. Uploading does not apply it.', onclick: chUploadConfig },
     { label:'Restore', cls:'danger', title:'roll the live configuration back to the ticked snapshot', onclick: chRestoreSelected },
   ];
   card.appendChild(t);
@@ -11187,14 +11194,20 @@ function secConfigHistory(c){
 // rendered from table._rowButtons, based on how many rows are ticked —
 // parapet's updateBackupSelInfo, minus the info text (the button titles
 // already say what each one needs).
+// chUpdateButtons enables each button for the number of ticked rows it can
+// actually act on. Keyed on label, so it has to be kept in step with the bar
+// above — and both Snapshot and Upload act on no selection at all, which is
+// what makes them the exceptions rather than an oversight.
 function chUpdateButtons(table){
   const bar = table.parentNode && table.parentNode.querySelector('.tbar');
   if (!bar) return;
-  const btns = [].slice.call(bar.querySelectorAll('button')).filter(b => b.textContent !== 'Snapshot now');
   const n = CH_SEL.size;
-  btns.forEach(b => {
-    if (b.textContent === 'Diff selected') b.disabled = n !== 2;
-    else b.disabled = n !== 1;
+  [].slice.call(bar.querySelectorAll('button')).forEach(b => {
+    switch (b.textContent) {
+      case 'Snapshot': case 'Upload': b.disabled = false; break; // no selection needed
+      case 'Diff': b.disabled = n !== 2; break;                  // exactly two to compare
+      default: b.disabled = n !== 1;                             // Download, Restore
+    }
   });
 }
 
@@ -11266,8 +11279,15 @@ function chStampToken(stamp){ return String(stamp).replace(/[: ]+/g, '-').replac
 // alone rather than inventing a name.
 function chNodeName(){
   if (state.target){
-    const p = (state.peers||[]).find(x => x.node_id === state.target);
+    // state.cluster is the header picker's own list, which is what carries
+    // hostnames for manageable nodes and is populated whenever a remote node
+    // can be selected at all. The mesh peer list is a different array and is
+    // not loaded on this page; reading that one instead is what made remote
+    // downloads fall back to a node-id prefix.
+    const p = (state.cluster||[]).find(x => x.node_id === state.target);
     if (p && p.hostname) return p.hostname;
+    // Only if a targeted node genuinely has no hostname to offer. Better a
+    // short id than nothing, since the file still has to be distinguishable.
     return state.target.slice(0,8);
   }
   return state.selfHostname || '';

@@ -2,6 +2,60 @@
 
 ---
 
+## v847 — 2026-08-10
+
+**Config History's toolbar is regrouped and recoloured:**
+
+	[filter] [Snapshot] [Diff]              [Download] [Upload] [Restore]
+
+Left: what acts on the ticked rows. Right: what moves a configuration in or out of this node, with Restore last because it is the only one that changes what is running. *Snapshot now* and *Diff selected* lost their trailing words — the surrounding page already supplies that context.
+
+Everything but Restore now shares the default blue. The ghost styling was reading as "secondary", which Download and Upload are not; Restore stays red because it is the one button that replaces the live configuration.
+
+A new `right:true` on a row-button spec starts a right-aligned group (`margin-left:auto` in an already-flex bar), alongside the existing `gap`. Available to any table, not just this one.
+
+### A bug the rename would have introduced
+
+`chUpdateButtons` enables each button for the number of ticked rows it can act on, and it matches on **label text**. Renaming "Diff selected" to "Diff" would have dropped it to the default branch and gated it on one ticked row instead of two — quietly wrong, and only noticeable by someone trying to diff.
+
+Worse, Upload was already caught by that default: it acts on no selection at all, but was disabled until exactly one unrelated row was ticked. That shipped in v844.
+
+Both are fixed, and the branches are now explicit about which buttons need no selection. `TestConfigHistoryToolbar` checks the two halves agree — every label in the bar is one the gating knows about, Snapshot and Upload are always enabled, Diff needs two, and only Restore is danger-coloured.
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `internal/webadmin` passes in full, `TestUIScriptParses` included.
+
+### Not verified
+
+Nothing rendered in a browser. The layout is asserted as "there is a right-hand group", not as anything about where the buttons actually land — whether the split reads the way the sketch intended is exactly the kind of thing these tests cannot see.
+
+---
+
+## v846 — 2026-08-10
+
+**Fixes remote config downloads being named with a node-id prefix instead of the hostname.**
+
+Downloading from the local node produced `gravinet-config-grav3-...json`; downloading from a node selected in the header picker produced `gravinet-config-2e3f31c3-...json`. The fallback was working as written, which is the problem — v844's lookup read the mesh peer list, and that array is not loaded on the Config History page, so a remote target never matched and every remote download fell through to the id.
+
+It now reads `state.cluster`, the header picker's own list. That is the array carrying hostnames for manageable nodes, it is populated whenever a remote node can be selected at all, and it is what the rest of the admin already uses to name the targeted node.
+
+The id prefix stays as the last resort, for a targeted node that genuinely has no hostname to offer — a short id beats nothing, since the file still has to be distinguishable from the others in a downloads folder.
+
+### The guard caught this class of mistake immediately
+
+`TestDownloadFilenameCarriesHostname` gained a check that `chNodeName` does not read the mesh peer array, and it fired on the first run — on a comment naming the wrong array while explaining the fix. The comment was reworded so the guard stays precise. Worth recording because it is the failure mode of source-grep guards generally: they match prose as readily as code, and a guard that can be satisfied or broken by a comment is not measuring what it claims to.
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `internal/webadmin` passes in full, `TestUIScriptParses` included.
+
+### Not verified
+
+The filename is still not observed — no download has been performed from either a local or a remote node. What is tested is that the lookup reads the right array; whether `state.cluster` is populated at the moment the download button is pressed is exactly the assumption that failed last time, and it is unproven now for the same reason.
+
+---
+
 ## v845 — 2026-08-10
 
 **Uploading a configuration from a different node is refused rather than filed.**

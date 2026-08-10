@@ -109,7 +109,7 @@ func TestDownloadFilenameCarriesHostname(t *testing.T) {
 	for _, want := range []string{
 		"function chNodeName()",
 		"state.selfHostname", // this node
-		"(state.peers||[]).find(x => x.node_id === state.target)", // or the managed one
+		"(state.cluster||[]).find(x => x.node_id === state.target)", // or the managed one
 		"'gravinet-config-'+(host ? host+'-' : '')+chStampToken(stamp)",
 	} {
 		if !strings.Contains(src, want) {
@@ -119,6 +119,12 @@ func TestDownloadFilenameCarriesHostname(t *testing.T) {
 	// A hostname goes into a filename, so it must be sanitised.
 	if !strings.Contains(src, "function chFileToken(") {
 		t.Error("hostname is not sanitised before going into a filename")
+	}
+	// state.peers is the mesh peer list and is not loaded on this page;
+	// reading it here is what made remote downloads fall back to a node-id
+	// prefix instead of the hostname.
+	if strings.Contains(between(t, src, "function chNodeName()", "function chFileToken("), "state.peers") {
+		t.Error("chNodeName reads state.peers; it must use state.cluster, the header picker's list")
 	}
 }
 
@@ -189,5 +195,42 @@ func TestHistoryImportRefusesForeignNodeID(t *testing.T) {
 	list, err := config.List(cfgPath)
 	if err != nil || len(list) != 1 {
 		t.Fatalf("exactly the one accepted upload should be in the list: %v (%v)", list, err)
+	}
+}
+
+// The toolbar's enable/disable logic is keyed on button labels, so renaming a
+// button silently changes which selection it requires. Both halves have to
+// agree, and nothing else checks that they do.
+func TestConfigHistoryToolbar(t *testing.T) {
+	src := indexHTML
+	bar := between(t, src, "// Split into two groups", "card.appendChild(t)")
+	upd := between(t, src, "function chUpdateButtons(table)", "function chSingleSelectedId")
+
+	// Every label in the bar must be one chUpdateButtons knows about, or it
+	// falls to the default and demands exactly one ticked row.
+	for _, label := range []string{"Snapshot", "Diff", "Download", "Upload", "Restore"} {
+		if !strings.Contains(bar, "label:'"+label+"'") {
+			t.Errorf("toolbar is missing the %q button", label)
+		}
+	}
+	// Snapshot and Upload act on no selection; gating them on one would make
+	// Upload unreachable until an unrelated row was ticked.
+	if !strings.Contains(upd, "case 'Snapshot': case 'Upload': b.disabled = false") {
+		t.Error("Snapshot/Upload are not always enabled")
+	}
+	if !strings.Contains(upd, "case 'Diff': b.disabled = n !== 2") {
+		t.Error("Diff is not gated on exactly two ticked rows")
+	}
+	// Download and Upload sit in the right-hand group, split from the ones
+	// that act on ticked rows.
+	if !strings.Contains(bar, "right:true") {
+		t.Error("the toolbar has no right-hand group")
+	}
+	// Only Restore is danger-coloured; the rest share the default blue.
+	if strings.Count(bar, "cls:'danger'") != 1 {
+		t.Error("exactly one button (Restore) should be danger-coloured")
+	}
+	if strings.Contains(bar, "cls:'ghost'") {
+		t.Error("no config-history button should be ghost-styled any more")
 	}
 }
