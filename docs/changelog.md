@@ -2,6 +2,70 @@
 
 ---
 
+## v845 — 2026-08-10
+
+**Uploading a configuration from a different node is refused rather than filed.**
+
+v844 shipped upload with the node-id question open. Closing it: an uploaded config whose `node_id` is not this node's is rejected, and the error names both ids so an operator can see which file they picked up.
+
+Restoring a foreign config would take on that node's identity — its node id, and with it its place in every peer's tables, its keys and its networks. That is never what "restore my configuration" means, and it is not undone by restoring the previous entry, because by then this node has already announced itself as something else. A button sitting next to *Restore* should not be able to do that by accident.
+
+An empty node id is refused on the same grounds rather than waved through as harmless: restoring it mints a fresh random identity, which loses this node just as completely as adopting someone else's.
+
+This is a deliberate ceiling. Cloning a node, or moving a config to replacement hardware, is a real thing to want and this blocks it — the right trade here, and the file is still on disk for anyone who genuinely means to do it by hand.
+
+### The test also closes a gap from v844
+
+The node-id check is the one part of import that lives only in the handler, so it needed an HTTP-level test rather than coverage of `ImportSnapshot` beneath it. `TestHistoryImportRefusesForeignNodeID` posts three uploads through the real server: another node's config (refused, with both ids in the message), one with no node id (refused), and this node's own (filed) — then checks exactly one entry landed in the history.
+
+That was named as missing in v844's own "not verified" section; it is now covered.
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `internal/webadmin` and `internal/config` pass in full.
+
+### Not verified
+
+Nothing exercised in a browser — the file picker and the Download-to-Upload round trip still have not been run by hand. The refusal is asserted at the HTTP layer, so what is untested is the UI surfacing the error, not the rule itself.
+
+---
+
+## v844 — 2026-08-10
+
+**Config history downloads now name the node, and a downloaded config can be uploaded back into the list and restored.**
+
+### Filenames name the node
+
+`gravinet-config-2026-08-10-13-50-59-UTC.json` became `gravinet-config-grav3-2026-08-10-13-50-59-UTC.json`. Snapshots from several nodes land in one downloads folder and were otherwise distinguishable only by timestamp — exactly the wrong thing to be reasoning about at the moment you are choosing which config to restore onto which node.
+
+The name is the managed node's when one is targeted and this node's otherwise, sanitised before it goes into a filename, and omitted rather than guessed at if unknown.
+
+### Upload
+
+An **Upload** button beside *Snapshot now*. It files a configuration into the history as an ordinary entry, so it can be viewed, diffed against what is running, and restored through exactly the same path as any snapshot this node took itself.
+
+**Uploading stores; it does not apply.** The running configuration is untouched until the operator restores the entry. That separation is the whole design: it keeps "upload a file" from being a way to reconfigure a node in one unreviewed step, and leaves the diff view standing between a file and a live node.
+
+Three things it refuses or protects:
+
+- **Invalid configs are rejected on upload**, not at restore. An unusable entry sitting in the list looking restorable, failing only when someone reaches for it, would be the worst moment to find out.
+- **The retention limit comes from the running config**, never the uploaded one — an upload must not change how much history this node keeps, least of all as a side effect of being filed.
+- **The entry is marked `uploaded`** and carries the filename, since it would otherwise be indistinguishable in the list from a snapshot this node took.
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `internal/webadmin` and `internal/config` pass in full. Tests cover an imported snapshot appearing in the list with its provenance and user, the running config being byte-identical after an import, and the filename wiring including sanitisation.
+
+`TestUIScriptParses` passes.
+
+### Not verified
+
+Nothing exercised in a browser: the file picker, the read, and the round trip from Download to Upload have not been run. `handleHistoryImport` has no HTTP-level test either — the coverage is on `config.ImportSnapshot` beneath it, so the validation and limit handling in the handler are reasoned about rather than exercised.
+
+One thing worth deciding: an uploaded config is validated as loadable but not checked against *this* node — a config from another host will carry that host's node id, and restoring it would take on that identity. The diff view shows it, but nothing warns.
+
+---
+
 ## v843 — 2026-08-10
 
 **IPv6 Router Advertisements gained a preference dropdown: low, medium or high (RFC 4191 Default Router Preference).**

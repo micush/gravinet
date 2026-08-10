@@ -555,6 +555,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/history/diff", s.authed(s.handleHistoryDiff))
 	mux.HandleFunc("/api/history/restore", s.authed(s.handleHistoryRestore))
 	mux.HandleFunc("/api/history/snapshot", s.authed(s.handleHistorySnapshot))
+	mux.HandleFunc("/api/history/import", s.authed(s.handleHistoryImport))
 	mux.HandleFunc("/api/history/limit", s.authed(s.handleConfigHistoryLimit))
 	mux.HandleFunc("/api/geoip", s.authed(s.handleGeoIPSetting))
 	mux.HandleFunc("/api/ipforwarding", s.authed(s.handleIPForwardingSetting))

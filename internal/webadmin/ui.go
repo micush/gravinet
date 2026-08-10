@@ -11142,6 +11142,7 @@ function secConfigHistory(c){
   table._noFilter = false;
   table._rowButtons = [
     { label:'Snapshot now', cls:'', title:'save a snapshot of the current configuration', onclick: chSnapshotNow },
+    { label:'Upload', cls:'ghost', title:'file a previously downloaded configuration into this list, so it can be reviewed and restored. Uploading does not apply it.', onclick: chUploadConfig },
     { label:'Diff selected', cls:'ghost', title:'compare two ticked snapshots', onclick: chDiffSelected },
     { label:'Download', cls:'ghost', title:'download the ticked snapshot as JSON', onclick: chDownloadSelected },
     { label:'Restore', cls:'danger', title:'roll the live configuration back to the ticked snapshot', onclick: chRestoreSelected },
@@ -11199,6 +11200,28 @@ function chUpdateButtons(table){
 
 function chSingleSelectedId(){ return CH_SEL.size === 1 ? Array.from(CH_SEL)[0] : null; }
 
+// chUploadConfig files a downloaded config back into the history. It is
+// stored, not applied — the entry appears in the list and the running config
+// is untouched until the operator restores it, so the diff view still stands
+// between a file and a live node.
+function chUploadConfig(){
+  const inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = '.json,application/json';
+  inp.onchange = async () => {
+    const f = inp.files && inp.files[0];
+    if (!f) return;
+    let parsed;
+    try { parsed = JSON.parse(await f.text()); }
+    catch (e) { alert('That file is not valid JSON.'); return; }
+    // The note records where the entry came from, since an uploaded snapshot
+    // is otherwise indistinguishable in the list from one this node took.
+    const r = await api('/api/history/import', { method:'POST', body: JSON.stringify({ config: parsed, note: f.name }) });
+    if (!r.ok) { alert((r.body && r.body.error) || 'could not file that configuration'); return; }
+    renderSection();
+  };
+  inp.click();
+}
+
 async function chSnapshotNow(){
   const r = await api('/api/history/snapshot', { method:'POST' });
   if (!r.ok) { alert((r.body && r.body.error) || 'could not save snapshot'); return; }
@@ -11236,12 +11259,31 @@ async function chViewSnapshot(id){
 // filename-safe token.
 function chStampToken(stamp){ return String(stamp).replace(/[: ]+/g, '-').replace(/-+/g, '-').replace(/-+$/, ''); }
 
+// chNodeName is the node the snapshot came from, for the download filename.
+// Config snapshots from several nodes land in one downloads folder and are
+// otherwise distinguishable only by timestamp, which is exactly the wrong
+// thing to have to reason about when restoring one. Falls back to the stamp
+// alone rather than inventing a name.
+function chNodeName(){
+  if (state.target){
+    const p = (state.peers||[]).find(x => x.node_id === state.target);
+    if (p && p.hostname) return p.hostname;
+    return state.target.slice(0,8);
+  }
+  return state.selfHostname || '';
+}
+
+// chFileToken keeps a hostname to what is safe and readable in a filename.
+function chFileToken(v){ return String(v||'').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/-+/g,'-').replace(/^-|-$/g,''); }
+
 function chSaveConfigFile(config, stamp){
   try {
     const text = JSON.stringify(config, null, 2);
     const blob = new Blob([text], { type:'application/json' });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement('a'); a.href = url; a.download = 'gravinet-config-'+chStampToken(stamp)+'.json';
+    const host = chFileToken(chNodeName());
+    const name = 'gravinet-config-'+(host ? host+'-' : '')+chStampToken(stamp)+'.json';
+    const a = document.createElement('a'); a.href = url; a.download = name;
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   } catch (e) { alert('Could not prepare the download.'); }

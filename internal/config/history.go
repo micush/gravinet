@@ -125,6 +125,35 @@ func OnCommit(configPath string, before, after *Config, user string, limit int) 
 	prune(d, limit)
 }
 
+// ImportSnapshot files an externally-supplied configuration into the history
+// as a snapshot, so a config downloaded from this or another node can be
+// restored through the same reviewed path as any other entry: inspect it,
+// diff it against what is running, then restore.
+//
+// It is deliberately only a snapshot. Importing does not apply anything —
+// the running config is untouched until the operator restores the entry —
+// which keeps "upload a file" from being a way to reconfigure a node in one
+// unreviewed step, and makes the diff view the thing standing between a file
+// and a live node.
+//
+// The caller validates before calling; this stores what it is given.
+func ImportSnapshot(configPath string, cfg *Config, user, note string, limit int) (string, error) {
+	d := historyDir(configPath)
+	if err := os.MkdirAll(d, 0o700); err != nil {
+		return "", err
+	}
+	summary := "uploaded"
+	if note = strings.TrimSpace(note); note != "" {
+		summary += " \u00b7 " + note
+	}
+	id, err := writeOne(d, cfg, user, summary)
+	if err != nil {
+		return "", err
+	}
+	prune(d, limit)
+	return id, nil
+}
+
 // nowMillis is unix milliseconds, the snapshot id source.
 func nowMillis() int64 { return time.Now().UnixMilli() }
 
