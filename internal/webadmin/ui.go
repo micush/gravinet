@@ -6760,8 +6760,7 @@ function secRadvd(c){
       const on = !e.disabled;
       h += '<tr class="rarow'+(on?'':' fw-disabled')+'" data-idx="'+i+'"'
         + ' data-iface="'+esc(e.iface||'')+'" data-prefixes="'+esc((e.prefixes||[]).join(', '))+'"'
-        + ' data-dns="'+esc((e.dns||[]).join(', '))+'" data-search="'+esc((e.search||[]).join(', '))+'"'
->'
+        + ' data-dns="'+esc((e.dns||[]).join(', '))+'" data-search="'+esc((e.search||[]).join(', '))+'">'
         + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
         + '<td class="ra-state"><span class="tag-toggle '+(on?'on':'off')+'" data-rastate="1" title="double-click to '+(on?'disable':'enable')+'">'+(on?'enabled':'disabled')+'</span></td>'
         + '<td class="ra-field">'+esc(e.iface||'')+'</td>'

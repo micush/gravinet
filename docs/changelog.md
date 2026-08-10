@@ -2,6 +2,34 @@
 
 ---
 
+## v842 — 2026-08-10
+
+**Fixes the admin UI rendering as a blank grey screen. Adds the test that should have caught it.**
+
+### The bug
+
+v839 removed the flags column, and the edit that stripped the row's now-unused `data-` attributes left a bare `>'` mid-expression. That is a syntax error, and the admin UI is one large script embedded in a Go string — so it did not break the RA page, it stopped the entire script parsing. Every page rendered blank, with nothing on screen to say why.
+
+It then survived three further releases. v840 and v841 both edited that same function and shipped, because everything that looks at this file looks at it as *text*: the Go string still compiled, `gofmt` was clean, `go vet` was clean, and every UI guard I have greps for substrings that were all still present. A file can be a valid Go string literal, pass every test in the repository, and be unparseable as JavaScript.
+
+### The test
+
+`TestUIScriptParses` extracts the `<script>` blocks from `indexHTML` and runs `node --check` over them. Verified against the actual failure: reintroducing the bare `>'` produces a parse error pointing at that line, and removing it passes.
+
+It skips when node is unavailable rather than failing, since it is a development-time check and not everything that builds gravinet has a JS runtime. That trade is worth knowing: on a machine without node this check silently does nothing, and a green run means less than it looks.
+
+This is the fourth UI defect in this feature found by an operator looking at a screen rather than by a test, and the first three were all invisible for the same reason — the guards assert the source says the right thing, never that the result works. A parser is the cheapest possible step toward the latter. It is not a substitute for rendering the page: it catches "this cannot run", not "this runs and is wrong".
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `internal/webadmin` passes in full, including the new parse check.
+
+### Not verified
+
+Still nothing rendered in a browser. `node --check` confirms the script parses; it says nothing about whether the page draws, whether the RA table populates, or whether adding an interface works — all of which remain unobserved.
+
+---
+
 ## v841 — 2026-08-10
 
 **Mesh devices can no longer be chosen for router advertisements — hidden in the picker, and refused on save.**
