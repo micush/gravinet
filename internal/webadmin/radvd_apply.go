@@ -131,11 +131,12 @@ func (s *Server) handleRouterAdvert(w http.ResponseWriter, r *http.Request) {
 		Prefixes        []string
 		DNS             []string
 		Search          []string
-		Managed         bool `json:"managed"`
-		OtherConfig     bool `json:"other_config"`
-		DefaultLifetime int  `json:"default_lifetime"`
-		NotDefault      bool `json:"not_default"`
-		Enabled         bool `json:"enabled"`
+		Preference      string `json:"preference"`
+		Managed         bool   `json:"managed"`
+		OtherConfig     bool   `json:"other_config"`
+		DefaultLifetime int    `json:"default_lifetime"`
+		NotDefault      bool   `json:"not_default"`
+		Enabled         bool   `json:"enabled"`
 		Index           int
 	}
 	if !decode(w, r, &req) {
@@ -152,7 +153,8 @@ func (s *Server) handleRouterAdvert(w http.ResponseWriter, r *http.Request) {
 			e := config.RAInterface{
 				Iface:    strings.TrimSpace(req.Iface),
 				Prefixes: trimAll(req.Prefixes), DNS: trimAll(req.DNS), Search: trimAll(req.Search),
-				Managed: req.Managed, OtherConfig: req.OtherConfig,
+				Preference: strings.ToLower(strings.TrimSpace(req.Preference)),
+				Managed:    req.Managed, OtherConfig: req.OtherConfig,
 				DefaultLifetime: req.DefaultLifetime, NotDefault: req.NotDefault,
 			}
 			if err := e.Validate(); err != nil {

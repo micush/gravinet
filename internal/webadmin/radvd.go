@@ -116,6 +116,12 @@ func renderRadvd(c config.RAConfig) string {
 		case e.DefaultLifetime > 0:
 			fmt.Fprintf(&b, "\tAdvDefaultLifetime %d;\n", e.DefaultLifetime)
 		}
+		// Only emitted when this node is advertising itself as a router:
+		// radvd ignores a preference alongside a zero lifetime, and writing
+		// one anyway would suggest a ranking that nothing acts on.
+		if pref := strings.ToLower(strings.TrimSpace(e.Preference)); pref != "" && !e.NotDefault {
+			fmt.Fprintf(&b, "\tAdvDefaultPreference %s;\n", pref)
+		}
 		for _, p := range pfxs {
 			fmt.Fprintf(&b, "\n\tprefix %s\n\t{\n\t\tAdvOnLink on;\n\t\tAdvAutonomous %s;\n\t\tAdvRouterAddr on;\n\t};\n",
 				p, radvdOnOff(!e.Managed))

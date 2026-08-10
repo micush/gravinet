@@ -2,6 +2,33 @@
 
 ---
 
+## v843 — 2026-08-10
+
+**IPv6 Router Advertisements gained a preference dropdown: low, medium or high (RFC 4191 Default Router Preference).**
+
+What it is for: a link with more than one router on it. A host prefers the higher-ranked one, so a backup set low is used only while the high one is silent — without the two advertising as equals and the host picking between them arbitrarily.
+
+Rendered as `AdvDefaultPreference`. Stored empty means unset, which leaves radvd's own default; the picker shows that as **medium**, because medium *is* radvd's default and offering a blank choice alongside an explicit medium would present two options that behave identically and invite the reader to wonder what the difference is.
+
+Two cases the renderer handles rather than passing through:
+
+- **Unset emits nothing**, rather than writing an explicit `medium` — the generated file should not assert a setting the operator never made.
+- **A preference alongside not-a-default-router is dropped.** radvd ignores a preference when the router lifetime is zero, so emitting one would put a ranking in the file that nothing acts on and that reads, to anyone inspecting it, as though it were in effect.
+
+Validation accepts the three values case- and whitespace-insensitively and rejects anything else, so a hand-edited config fails on save rather than producing a file radvd refuses at start.
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `internal/webadmin` and `internal/config` pass in full, including the three rendering cases, validation, and a guard that the picker sends its value and prefills from the row — without which editing an interface would silently reset its preference.
+
+`TestUIScriptParses` (v842) passes, so this edit did not break the page the way the last one did.
+
+### Not verified
+
+Nothing rendered in a browser, and no radvd has been asked to parse a file containing `AdvDefaultPreference`. The directive name and its low/medium/high values are from radvd.conf(5) and RFC 4191, not from a daemon that accepted them here.
+
+---
+
 ## v842 — 2026-08-10
 
 **Fixes the admin UI rendering as a blank grey screen. Adds the test that should have caught it.**

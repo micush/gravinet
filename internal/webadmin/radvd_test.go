@@ -440,3 +440,69 @@ func TestRAExcludesMeshInterfaces(t *testing.T) {
 		}
 	}
 }
+
+// RFC 4191 default router preference. The point is a host choosing between
+// two routers on one link — a backup set low is used only while the high one
+// is silent, without the two fighting over who is default.
+func TestRenderRadvdPreference(t *testing.T) {
+	for _, tc := range []struct{ pref, want string }{
+		{"high", "AdvDefaultPreference high;"},
+		{"low", "AdvDefaultPreference low;"},
+		{"medium", "AdvDefaultPreference medium;"},
+	} {
+		got := renderRadvd(raCfg(config.RAInterface{
+			Iface: "eth1", Prefixes: []string{"fd0a:1::/64"}, Preference: tc.pref,
+		}))
+		if !strings.Contains(got, tc.want) {
+			t.Errorf("preference %q: missing %q in:\n%s", tc.pref, tc.want, got)
+		}
+	}
+
+	// Unset emits nothing, leaving radvd's own default (medium).
+	unset := renderRadvd(raCfg(config.RAInterface{Iface: "eth1", Prefixes: []string{"fd0a:1::/64"}}))
+	if strings.Contains(unset, "AdvDefaultPreference") {
+		t.Errorf("an unset preference should emit nothing:\n%s", unset)
+	}
+
+	// A preference on a node advertising itself as not-a-default-router is
+	// inert — radvd ignores it alongside a zero lifetime — so writing one
+	// would suggest a ranking nothing acts on.
+	notDefault := renderRadvd(raCfg(config.RAInterface{
+		Iface: "eth1", Prefixes: []string{"fd0a:1::/64"}, Preference: "high", NotDefault: true,
+	}))
+	if strings.Contains(notDefault, "AdvDefaultPreference") {
+		t.Errorf("preference must not be emitted alongside not-default:\n%s", notDefault)
+	}
+}
+
+func TestRAPreferenceValidation(t *testing.T) {
+	base := func(p string) config.RAInterface {
+		return config.RAInterface{Iface: "eth1", Prefixes: []string{"fd0a:1::/64"}, Preference: p}
+	}
+	for _, ok := range []string{"", "low", "medium", "high", "HIGH", " high "} {
+		if err := base(ok).Validate(); err != nil {
+			t.Errorf("preference %q should be accepted: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"highest", "1", "urgent"} {
+		if err := base(bad).Validate(); err == nil {
+			t.Errorf("preference %q should be rejected", bad)
+		}
+	}
+}
+
+// The dropdown has to send the value and prefill from the row, or editing an
+// interface would silently reset its preference to the default.
+func TestRAPreferencePicker(t *testing.T) {
+	sec := between(t, indexHTML, "function secRadvd(", "function secQoS(")
+	for _, want := range []string{
+		`select class="rae-pref"`,                         // it is a dropdown, not a text box
+		"preference: tr.querySelector('.rae-pref').value", // and it is sent
+		"data-preference",                                 // the row carries it
+		"preference:tr.dataset.preference",                // and the editor prefills from it
+	} {
+		if !strings.Contains(sec, want) {
+			t.Errorf("preference picker missing %q", want)
+		}
+	}
+}

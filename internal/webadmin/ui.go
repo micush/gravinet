@@ -6754,17 +6754,19 @@ function secRadvd(c){
     // something the operator has to act on, and saying so on every visit is
     // noise about a problem that no longer exists.
 
-    let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>interface</th><th>prefixes</th><th>dns</th><th>search</th></tr>';
-    if (!list.length) h += '<tr><td colspan="6" class="empty">no interfaces \u2014 click + to advertise on one</td></tr>';
+    let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>interface</th><th>prefixes</th><th title="RFC 4191 default router preference. A host with more than one router on the link prefers the higher one \u2014 so a backup can be set low without the two fighting over who is default.">preference</th><th>dns</th><th>search</th></tr>';
+    if (!list.length) h += '<tr><td colspan="7" class="empty">no interfaces \u2014 click + to advertise on one</td></tr>';
     else list.forEach((e,i) => {
       const on = !e.disabled;
       h += '<tr class="rarow'+(on?'':' fw-disabled')+'" data-idx="'+i+'"'
         + ' data-iface="'+esc(e.iface||'')+'" data-prefixes="'+esc((e.prefixes||[]).join(', '))+'"'
-        + ' data-dns="'+esc((e.dns||[]).join(', '))+'" data-search="'+esc((e.search||[]).join(', '))+'">'
+        + ' data-dns="'+esc((e.dns||[]).join(', '))+'" data-search="'+esc((e.search||[]).join(', '))+'"'
+        + ' data-preference="'+esc(e.preference||'')+'">'
         + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
         + '<td class="ra-state"><span class="tag-toggle '+(on?'on':'off')+'" data-rastate="1" title="double-click to '+(on?'disable':'enable')+'">'+(on?'enabled':'disabled')+'</span></td>'
         + '<td class="ra-field">'+esc(e.iface||'')+'</td>'
         + '<td class="ra-field">'+esc((e.prefixes||[]).join(', ')||'(interface\u2019s own /64s)')+'</td>'
+        + '<td class="ra-field">'+esc(e.preference||'medium')+'</td>'
         + '<td class="ra-field">'+esc((e.dns||[]).join(', ')||'\u2014')+'</td>'
         + '<td class="ra-field">'+esc((e.search||[]).join(', ')||'\u2014')+'</td></tr>';
     });
@@ -6808,11 +6810,25 @@ function secRadvd(c){
     return o;
   }
 
+  // Empty is offered as "medium" rather than as a blank choice: radvd's own
+  // default is medium, so a blank and an explicit medium behave identically
+  // and showing both invites the reader to wonder what the difference is.
+  function raPrefOpts(sel){
+    sel = (sel||'').toLowerCase();
+    let o = '';
+    for (const v of ['low','medium','high']) {
+      const on = (v === sel) || (v === 'medium' && !sel);
+      o += '<option value="'+v+'"'+(on?' selected':'')+'>'+v+'</option>';
+    }
+    return o;
+  }
+
   function fields(tr, e){
     e = e || {};
     return '<td class="selcol"></td><td class="ra-state"><span class="on">enabled</span></td>'
       + '<td><select class="rae-iface" style="width:110px">'+raIfaceOpts(e.iface||'')+'</select></td>'
       + '<td><input class="rae-pfx" placeholder="blank = interface\u2019s /64s" style="width:170px" value="'+esc(e.prefixes||'')+'"></td>'
+      + '<td><select class="rae-pref" title="how strongly a host should prefer this router over another on the same link">'+raPrefOpts(e.preference||'')+'</select></td>'
       + '<td><input class="rae-dns" placeholder="fd00::1, fd00::2" style="width:150px" value="'+esc(e.dns||'')+'"></td>'
       + '<td><input class="rae-search" placeholder="lan.example" style="width:130px" value="'+esc(e.search||'')+'">'
       + ' <button class="sm rae-save">save</button> <button class="sm rae-cancel">cancel</button></td>';
@@ -6822,7 +6838,8 @@ function secRadvd(c){
     const csv = (sel) => (tr.querySelector(sel).value||'').split(',').map(x=>x.trim()).filter(Boolean);
     return {
       iface: tr.querySelector('.rae-iface').value.trim(),
-      prefixes: csv('.rae-pfx'), dns: csv('.rae-dns'), search: csv('.rae-search')
+      prefixes: csv('.rae-pfx'), dns: csv('.rae-dns'), search: csv('.rae-search'),
+      preference: tr.querySelector('.rae-pref').value
     };
   }
 
@@ -6844,7 +6861,8 @@ function secRadvd(c){
   function raEdit(tr){
     if (tr.querySelector('.rae-iface')) return;
     const idx = parseInt(tr.dataset.idx,10);
-    const cur = {iface:tr.dataset.iface, prefixes:tr.dataset.prefixes, dns:tr.dataset.dns, search:tr.dataset.search};
+    const cur = {iface:tr.dataset.iface, prefixes:tr.dataset.prefixes, dns:tr.dataset.dns, search:tr.dataset.search,
+      preference:tr.dataset.preference};
     tr.innerHTML = fields(tr, cur);
     tr.querySelector('.rae-cancel').onclick = () => load();
     tr.querySelector('.rae-save').onclick = async () => {

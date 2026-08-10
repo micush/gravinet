@@ -3080,10 +3080,24 @@ type RAInterface struct {
 	// addresses — RDNSS has no form for an IPv4 server.
 	DNS    []string `json:"dns,omitempty"`
 	Search []string `json:"search,omitempty"`
+	// Preference is the RFC 4191 Default Router Preference — "low", "medium"
+	// or "high", empty meaning unset (radvd's own default, which is medium).
+	// It lets a host choose between several routers advertising on the same
+	// link: a backup router set low is used only while the high one is
+	// silent, without the two fighting over who is default.
+	//
+	// Only meaningful on a router that is advertising itself as one at all.
+	// A preference alongside NotDefault is inert, because a host that has
+	// been told this node is not a default router has nothing to rank.
+	Preference string `json:"preference,omitempty"`
 	// Disabled parks an entry without deleting it, following the same
 	// convention as every other table.
 	Disabled bool `json:"disabled,omitempty"`
 }
+
+// RAPreferences are the accepted Preference values, in the order a picker
+// should show them.
+var RAPreferences = []string{"low", "medium", "high"}
 
 // EnabledInterfaces returns the RA interfaces actually in service.
 func (c RAConfig) EnabledInterfaces() []RAInterface {
@@ -3127,6 +3141,17 @@ func (i RAInterface) Validate() error {
 		}
 		if !a.Is6() {
 			return fmt.Errorf("dns %q: RDNSS carries IPv6 addresses only", d)
+		}
+	}
+	if p := strings.ToLower(strings.TrimSpace(i.Preference)); p != "" {
+		ok := false
+		for _, v := range RAPreferences {
+			if p == v {
+				ok = true
+			}
+		}
+		if !ok {
+			return fmt.Errorf("preference %q: must be low, medium or high", i.Preference)
 		}
 	}
 	if i.DefaultLifetime < 0 || i.DefaultLifetime > 9000 {
