@@ -841,6 +841,7 @@ const NAV_GROUPS = [
   // dhcp, which is why Resolver sits directly above Time.
   { name:'system', items: [
     ['upgrade', 'check and apply a new gravinet binary on this node; local only, no peer can trigger this'],
+    ['interfaces', 'this host\u2019s network interfaces, addresses and default gateways (read-only)'],
     ['resolver', 'this host\u2019s hostname and default DNS servers'],
     ['time', 'this host\u2019s clock, timezone, and NTP synchronization'],
     // SNMP/L2 Disco/Syslog each need a real agent on the host (snmpd/
@@ -2594,7 +2595,7 @@ function renderSection() {
        metrics:infoMetrics, 'mesh-peers':infoMeshPeers, capture:infoCapture, speedtest:infoSpeedtest, latency:infoLatency,
        'route-table':infoRoutes, 'bgp-peers':secBgpPeers, 'l2-peers':secL2Peers, 'hosts-file':infoHosts, 'dns-state':infoDNS,
        resolver:secResolver, time:secTime, snmp:secSNMP, l2disco:secL2Disco, syslog:secSyslog, users:secUsers, power:secPower,
-       logs:secLogs, 'config-history':secConfigHistory, readme:secReadme, 'getting-started':secGettingStarted, api:secAPIDoc, license:secLicense, about:infoAbout }[state.section])(c, nets);
+       logs:secLogs, interfaces:secInterfaces, 'config-history':secConfigHistory, readme:secReadme, 'getting-started':secGettingStarted, api:secAPIDoc, license:secLicense, about:infoAbout }[state.section])(c, nets);
   }
   c.querySelectorAll('table').forEach(enhanceTable);
 }
@@ -6729,6 +6730,161 @@ function qosClassOpts(classes, sel){
   return o;
 }
 
+function secInterfaces(c){
+  secHint(c, 'Every network interface on this host, with its addresses and the default gateway in use. Double-click to edit \u2014 changes are applied to the running system straight away with no confirmation, so changing the address you are connected over will drop your session. Changes are recorded in gravinet\u2019s own configuration \u2014 so they are included in backups and come back on restore \u2014 and written to this host\u2019s network configuration so they survive a reboot.');
+  const wrap = $('<div></div>'); c.appendChild(wrap);
+
+  (async () => {
+    wrap.innerHTML = '<div class="card"><div class="hint">loading\u2026</div></div>';
+    const r = await api('/api/system/interfaces');
+    if (state.section !== 'interfaces') return;
+    if (!r.ok || !r.body){ wrap.innerHTML = '<div class="card"><div class="hint">Could not read this host\u2019s interfaces.</div></div>'; return; }
+    const list = r.body.interfaces || [];
+    const card = $('<div class="card"></div>');
+
+    let h = '<table><tr><th>interface</th><th>state</th><th>addresses</th><th>gateway</th><th>mtu</th><th>mac</th></tr>';
+    if (!list.length) h += '<tr><td colspan="6" class="empty">no interfaces reported</td></tr>';
+    else for (const e of list) {
+      // Addresses are already ordered global-first by the server; keeping
+      // that order here is the point, so the address someone came looking
+      // for is the first one they read.
+      const addrs = (e.addrs||[]).length
+        ? (e.addrs||[]).map(a => '<div'+(a.scope!=='global'?' class="muted"':'')+'>'+esc(a.cidr)+'</div>').join('')
+        : '<span class="muted">\u2014</span>'; // link-local addresses are not reported at all
+      const gw = [e.gw4, e.gw6].filter(Boolean).map(esc).join('<br>') || '<span class="muted">\u2014</span>';
+      const st = e.up ? (e.running ? 'up' : 'up, no carrier') : 'down';
+      const name = esc(e.name) + (e.kind === 'mesh' ? ' <span class="muted">(mesh: '+esc(e.network||'')+')</span>' : '');
+      const globals = (e.addrs||[]).filter(a => a.scope === 'global').map(a => a.cidr);
+      h += '<tr'+(e.up?'':' class="fw-disabled"')+' data-iface="'+esc(e.name)+'"'
+        + ' data-mesh="'+(e.kind === 'mesh' ? 1 : 0)+'"'
+        + ' data-addrs="'+esc(globals.join(', '))+'"'
+        + ' data-gw4="'+esc(e.gw4||'')+'" data-gw6="'+esc(e.gw6||'')+'">'
+        + '<td class="cell-name">'+name+'</td>'
+        + '<td>'+esc(st)+'</td>'
+        + '<td class="if-addrs">'+addrs+'</td>'
+        + '<td class="if-gw">'+gw+'</td>'
+        + '<td class="if-mtu">'+esc(String(e.mtu||''))+'</td>'
+        + '<td class="muted">'+esc(e.mac||'')+'</td></tr>';
+    }
+    const t = $('<div></div>'); t.innerHTML = h+'</table>';
+    card.appendChild(t);
+    const table = t.querySelector('table');
+
+    // Only global addresses are editable, and only on interfaces gravinet
+    // does not manage itself: a mesh device's addressing comes from its
+    // network's settings and is rewritten on every reload, so an edit here
+    // would be undone without explanation.
+    t.querySelectorAll('tr[data-iface]').forEach(tr => {
+      const mesh = tr.dataset.mesh === '1';
+      const ac = tr.querySelector('.if-addrs');
+      if (ac){
+        // A mesh device's address is editable too; it is written to the
+        // network's overlay address rather than set on the host, because
+        // that is the setting the next reload would otherwise overwrite it
+        // with. Same box, same result, different place underneath.
+        ac.title = mesh ? 'double-click to edit this network\u2019s overlay address' : 'double-click to edit';
+        ac.ondblclick = () => ifEditAddrs(tr);
+      }
+      // A mesh interface has no default gateway to set: the overlay's
+      // routing comes from what peers advertise.
+      const gc = tr.querySelector('.if-gw');
+      if (gc && !mesh){ gc.title = 'double-click to edit'; gc.ondblclick = () => ifEditGateway(tr); }
+      // MTU is editable on both kinds: on a mesh device it is written to the
+      // network's own setting, the same way its address is.
+      const mc = tr.querySelector('.if-mtu');
+      if (mc){
+        mc.title = mesh ? 'double-click to edit this network\u2019s MTU' : 'double-click to edit';
+        mc.ondblclick = () => ifEditMTU(tr);
+      }
+    });
+
+    wrap.innerHTML = '';
+    wrap.appendChild(card);
+    enhanceTable(table); // async load, so this section is not in renderSection's sweep
+  })();
+
+  // The whole intended set is submitted, not individual adds and removes, so
+  // re-addressing an interface is one operation rather than two chances to
+  // get half way.
+  // One box per address family, matching the gateway editor. A single box for
+  // both meant reading a mixed list to find the one address being changed,
+  // and retyping the other family alongside it to avoid removing it.
+  //
+  // A colon is enough to tell them apart: an IPv6 address always has one and
+  // an IPv4 CIDR never does.
+  const isV6 = a => a.indexOf(':') >= 0;
+
+  function ifEditAddrs(tr){
+    const cell = tr.querySelector('.if-addrs');
+    if (cell.querySelector('input')) return;
+    const cur = (tr.dataset.addrs||'').split(',').map(x=>x.trim()).filter(Boolean);
+    const v4 = cur.filter(a => !isV6(a)).join(', ');
+    const v6 = cur.filter(isV6).join(', ');
+    cell.innerHTML = '<input class="ife-a4" style="width:150px" placeholder="10.1.1.1/24" value="'+esc(v4)+'">'
+      + '<br><input class="ife-a6" style="width:150px" placeholder="fd00::1/64" value="'+esc(v6)+'">'
+      + ' <button class="sm ife-save">save</button> <button class="sm ife-cancel">cancel</button>';
+    cell.querySelector('.ife-cancel').onclick = () => renderSection();
+    cell.querySelector('.ife-save').onclick = async () => {
+      // Recombined on the way out: the handler takes the interface's whole
+      // intended set, and splitting the request per family would make
+      // clearing one of them look like an edit that did not mention it.
+      const list = [cell.querySelector('.ife-a4').value, cell.querySelector('.ife-a6').value]
+        .join(',').split(',').map(x=>x.trim()).filter(Boolean);
+      const r = await api('/api/system/interface-edit', { method:'POST', body: JSON.stringify({
+        op:'addrs', iface: tr.dataset.iface, addrs: list }) });
+      if (!r.ok){ alert((r.body && r.body.error) || 'could not apply'); return; }
+      // Success needs no announcement: the table redraws with the new
+      // addressing, which is the confirmation. Where it was saved is
+      // gravinet's business, not the operator's. A warning means the change
+      // is live but will not survive a reboot or a restore, which is not
+      // visible anywhere and has to be said.
+      if (r.body && r.body.warning) alert(r.body.warning);
+      renderSection();
+    };
+  }
+
+  function ifEditMTU(tr){
+    const cell = tr.querySelector('.if-mtu');
+    if (cell.querySelector('input')) return;
+    const cur = (cell.textContent||'').trim();
+    cell.innerHTML = '<input class="ife-mtu" style="width:70px" value="'+esc(cur)+'">'
+      + ' <button class="sm ife-save">save</button> <button class="sm ife-cancel">cancel</button>';
+    cell.querySelector('.ife-cancel').onclick = () => renderSection();
+    cell.querySelector('.ife-save').onclick = async () => {
+      const v = parseInt(cell.querySelector('.ife-mtu').value, 10);
+      if (!v){ alert('enter an MTU'); return; }
+      const r = await api('/api/system/interface-edit', { method:'POST', body: JSON.stringify({
+        op:'mtu', iface: tr.dataset.iface, mtu: v }) });
+      if (!r.ok){ alert((r.body && r.body.error) || 'could not apply'); return; }
+      if (r.body && r.body.warning) alert(r.body.warning);
+      renderSection();
+    };
+  }
+
+  function ifEditGateway(tr){
+    const cell = tr.querySelector('.if-gw');
+    if (cell.querySelector('input')) return;
+    cell.innerHTML = '<input class="ife-gw4" style="width:120px" placeholder="IPv4 gateway" value="'+esc(tr.dataset.gw4||'')+'">'
+      + '<br><input class="ife-gw6" style="width:120px" placeholder="IPv6 gateway" value="'+esc(tr.dataset.gw6||'')+'">'
+      + ' <button class="sm ife-save">save</button> <button class="sm ife-cancel">cancel</button>';
+    cell.querySelector('.ife-cancel').onclick = () => renderSection();
+    cell.querySelector('.ife-save').onclick = async () => {
+      const r = await api('/api/system/interface-edit', { method:'POST', body: JSON.stringify({
+        op:'gateway', iface: tr.dataset.iface,
+        gw4: cell.querySelector('.ife-gw4').value.trim(),
+        gw6: cell.querySelector('.ife-gw6').value.trim() }) });
+      if (!r.ok){ alert((r.body && r.body.error) || 'could not apply'); return; }
+      // Success needs no announcement: the table redraws with the new
+      // addressing, which is the confirmation. Where it was saved is
+      // gravinet's business, not the operator's. A warning means the change
+      // is live but will not survive a reboot or a restore, which is not
+      // visible anywhere and has to be said.
+      if (r.body && r.body.warning) alert(r.body.warning);
+      renderSection();
+    };
+  }
+}
+
 function secRadvd(c){
   secHint(c, 'This node announces itself on a LAN so hosts autoconfigure an address (SLAAC) and learn a default route, and can hand out DNS servers and search domains in the advertisement itself \u2014 which is how a SLAAC network gets DNS without DHCPv6. Advertise on the LAN interface, never the mesh device. Leave <b>prefixes</b> blank to advertise whichever global /64s the interface already has.');
   const wrap = $('<div></div>'); c.appendChild(wrap);
@@ -9751,7 +9907,7 @@ function secBgp(c){
     // FRR config by importing it in the background. Best-effort: the editor is
     // already on screen, so any failure here must never take it back down.
     try {
-      if (!r.body.active && (r.body.supported || r.body.installed)){
+      if (!r.body.managed && (r.body.supported || r.body.installed)){
         const im = await api('/api/bgp/import');
         if (state.section !== 'bgp') return; // navigated away while it ran
         if (im.ok && im.body && im.body.imported && im.body.bgp){
@@ -10055,6 +10211,11 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
   pill.ondblclick = () => {
     bgpEnabled = !bgpEnabled;
     setPill(bgpEnabled);
+    // AutoBGP's reconciler treats a disabled BGP as drift and re-enables it,
+    // so the two cannot disagree. The server enforces this; the checkbox is
+    // flipped here too so the form does not sit showing an AutoBGP that has
+    // just been turned off underneath it.
+    if (!bgpEnabled && autoCb.checked) autoCb.checked = false;
     scheduleSave(true);
   };
   const asnInp = rowInput('Local AS number', 'This node\u2019s autonomous-system number, e.g. 65001. Required to enable BGP \u2014 unless AutoBGP is on below and this is left blank, in which case it derives and fills one in.', b.asn||'', 'e.g. 65001', 180);
@@ -11401,7 +11562,13 @@ async function chConfirmRestore(id){
   const m = showModal('restore snapshot', body);
   body.querySelector('#ch-restore-cancel').onclick = m.close;
   body.querySelector('#ch-restore-go').onclick = async () => {
-    const ok = await edit('/api/history/restore', { id: id });
+    // Restart automatically, like the network editor already does. A restore
+    // reinstates a whole configuration, so it almost always contains
+    // something structural; leaving a "restart" banner behind makes the
+    // operator finish a job they already asked for, and until they do the
+    // node is running a configuration that is neither the old one nor the
+    // one they restored.
+    const ok = await edit('/api/history/restore', { id: id }, true);
     if (ok) { m.close(); CH_SEL.clear(); renderSection(); }
   };
 }

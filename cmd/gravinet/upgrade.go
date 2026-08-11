@@ -65,6 +65,7 @@ func usageUpgrade() {
                              with this node's Go toolchain and swap the result in
   gravinet upgrade status    this node's upgrade state
   gravinet upgrade rollback  back out the last applied upgrade
+  gravinet upgrade clear     forget a stale trial record (leaves the running binary alone)
 
 Flags for the archive form:
   -dry-run               build and preflight the result without swapping it in
@@ -95,8 +96,8 @@ func upgradeRoute(args []string) (verb string, rest []string) {
 	if len(args) == 0 {
 		return "", nil
 	}
-	switch m := expandVerb(args[0], v("status"), v("rollback"), v("help"), v("apply")); m {
-	case "status", "rollback", "help":
+	switch m := expandVerb(args[0], v("status"), v("rollback"), v("clear"), v("help"), v("apply")); m {
+	case "status", "rollback", "clear", "help":
 		return m, args[1:]
 	case "-h", "--help":
 		return "help", args[1:]
@@ -128,7 +129,7 @@ func cmdUpgrade(args []string) {
 	case "":
 		usageUpgrade()
 		os.Exit(2)
-	case "status", "rollback":
+	case "status", "rollback", "clear":
 		cmdUpgradeCtl(rest, verb, nil)
 	case "help":
 		usageUpgrade()
@@ -375,6 +376,28 @@ func (u *upgradeSvc) controlOp(op string, body []byte) ([]byte, error) {
 		}
 		return json.Marshal(map[string]any{"ok": true, "restarting": true})
 
+	// clear abandons a trial record without touching the binary. Distinct
+	// from rollback, and the distinction is the whole point: rollback puts
+	// the *previous* binary back, which on a stale record means downgrading
+	// a node that has since moved on several releases. clear only forgets a
+	// record that no longer describes anything.
+	//
+	// It exists because a trial can outlive the process that was watching it.
+	// Watch and OnBoot are both gated on the upgrade feature being enabled,
+	// so a node whose trial was interrupted — the feature turned off, the
+	// binary replaced out of band by the installer, a restart that never ran
+	// the guard — keeps a pending record that nothing will ever advance, and
+	// every subsequent apply is refused by a trial that ended long ago.
+	case "clear":
+		st := u.guard.Load()
+		if st.Phase != upgrade.PhasePending {
+			return json.Marshal(map[string]any{"ok": true, "cleared": false, "phase": string(st.Phase)})
+		}
+		if err := u.guard.Clear(); err != nil {
+			return nil, err
+		}
+		return json.Marshal(map[string]any{"ok": true, "cleared": true, "from": st.From, "to": st.To})
+
 	case "apply":
 		var req struct {
 			SrcPath           string `json:"src_path"`
@@ -399,7 +422,15 @@ func (u *upgradeSvc) controlOp(op string, body []byte) ([]byte, error) {
 		// enough for another upgrade to start inside it), but failing here
 		// turns a long wait followed by a rejection into an immediate answer.
 		if st := u.guard.Load(); st.Phase == upgrade.PhasePending && !req.DryRun {
-			return nil, fmt.Errorf("an upgrade (%s \u2192 %s) is already mid-trial on this node \u2014 wait for it to confirm or revert, or roll it back, before starting another", st.From, st.To)
+			// Name the age and the escape hatch. A trial that ended long
+			// ago leaves a record nothing will advance (see the clear op),
+			// and "wait for it to confirm or revert" is unhelpful advice
+			// for a record that has been waiting for weeks.
+			age := ""
+			if st.StartedUnix > 0 {
+				age = fmt.Sprintf(" started %s ago;", time.Since(time.Unix(st.StartedUnix, 0)).Truncate(time.Minute))
+			}
+			return nil, fmt.Errorf("an upgrade (%s \u2192 %s) is already mid-trial on this node \u2014%s wait for it to confirm or revert, roll it back, or if that trial is over run `gravinet upgrade clear` to forget it (which does not change the running binary)", st.From, st.To, age)
 		}
 
 		// Read the candidate's baked-in version before spending a `go build`

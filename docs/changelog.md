@@ -2,6 +2,573 @@
 
 ---
 
+## v865 — 2026-08-10
+
+**Uploading a configuration from a different node is allowed again. v845's refusal is reversed.**
+
+Restoring another node's configuration takes on that node's identity — its node id, and with it its place in every peer's tables, its keys and its networks. v845 refused it on those grounds. The consequences were described correctly; the conclusion was wrong. That is precisely what moving a node to replacement hardware means, and it is not gravinet's place to decide that an operator restoring their own backup has made a mistake.
+
+The upload is recorded rather than refused. When the node id differs, the history entry says which node it came from, so the list distinguishes a snapshot of this node from one carried over, and the diff shown before restoring makes the identity change visible like any other field. An upload from this node carries no such label — if every entry said "from node ...", the label would tell an operator nothing.
+
+A configuration with no node id at all is accepted and labelled too: restoring it mints a fresh identity, which is worth seeing in the list for the same reason.
+
+Everything else about import is unchanged. It still validates, still only files a snapshot rather than applying anything, and the retention limit still comes from the running config.
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `internal/webadmin` passes in full.
+
+`TestHistoryImportAcceptsForeignNodeID` replaces the test that asserted the refusal: a foreign config files and is labelled with its source node, the operator's own note survives alongside it, an own-node upload carries no label, a config with no node id is accepted and says so, and an invalid configuration is still refused.
+
+### Not verified
+
+Nothing rendered in a browser, and no configuration has actually been restored onto a different node — which is the thing this enables. The identity change itself is not new code: it is what restoring any snapshot containing a different `node_id` has always done, and the reconciler and reload paths treat it as an ordinary field. But the whole round trip, on real hardware, with peers noticing the node id change, has not been exercised.
+
+---
+
+## v864 — 2026-08-10
+
+**Disabling BGP now actually disables it. v863 fixed one of the two things re-enabling it.**
+
+v863 stopped the UI importing FRR's live configuration over a disabled one. That was real, and it was not the whole story: AutoBGP's reconciler was also putting `Enabled` back.
+
+Its drift test is `identityChanged := !cfg.BGP.Enabled || cfg.BGP.ASN != asn || ...`. A disabled BGP therefore *is* drift by definition, so the reconciler wrote a config with `Enabled = true` within seconds of every attempt to turn it off. Turning BGP off was the thing that triggered turning it back on.
+
+That is not a bug in the reconciler so much as a state that cannot hold: AutoBGP exists to keep BGP running, so "AutoBGP on, BGP off" is a contradiction, and the reconciler resolves it the only way it knows. **Turning BGP off now turns AutoBGP off with it**, in the save handler so any client gets it, and in the pill so the form does not sit showing an AutoBGP that was just cleared underneath it.
+
+Enabling BGP leaves AutoBGP alone in both directions — an operator turning BGP on has said nothing about whether they want it.
+
+### Why this took two releases
+
+The two causes produced the same symptom and each was sufficient on its own, so fixing the first changed nothing observable. Worth recording as the reason v863's report came back unchanged: "still doesn't work" after a fix that was correct.
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `internal/webadmin` passes in full.
+
+`TestDisablingBGPClearsAutoBGP` covers the rule in both directions, that the handler and the pill both apply it, and that a disabled config with an ASN still counts as managed — so this fix does not undo v863's, which is the failure mode two fixes to one symptom invite.
+
+### Not verified
+
+Nothing rendered in a browser, and no running node has been watched staying disabled. The two mechanisms that were re-enabling it are both now closed by inspection and by test; whether a third exists is not something these tests can answer, and the honest check is to turn it off on a real node and leave it a few minutes — the reconciler ran on a timer, so a re-enable would not have been instant.
+
+---
+
+## v863 — 2026-08-10
+
+**Two bugs: BGP could not be turned off, and the host-interface reconciler was deleting addresses it had no business touching.**
+
+### Disabling BGP did not stick
+
+Toggle it off, navigate away, come back, and it was enabled again.
+
+The UI imports FRR's live configuration and re-renders the editor from it whenever gravinet "is not managing BGP", and the editor autosaves. That condition was read from `Enabled` — so turning BGP off made gravinet decide it was no longer managing BGP, import the still-running FRR config over the top, and save it back enabled. The setting could not be turned off at all.
+
+v845 fixed the same mechanism for AutoBGP and stopped there. The predicate was the problem, not that one case of it: **disabling is a decision gravinet is managing, not the absence of one.**
+
+The import is now gated on a separate `managed` flag, which asks whether an operator has ever configured BGP here — an ASN, AutoBGP, neighbors, networks, or any redistribute list. If they have, their configuration wins over whatever FRR is running, including when what they configured was "off". A node nobody has touched still imports, which is what that feature is for.
+
+### The reconciler was stripping addresses
+
+Reported as redistribute-connected showing no interface addresses until they were re-saved by hand, and not surviving a reboot. Both are the same cause, and it is mine, introduced with System › Interfaces in v853.
+
+`hostnet.Apply` implements "make the interface match this set", which is right for an editor: a submitted list is the whole intended set, so an address left out has been removed. The reconciler reused it — at every startup and every reload — against a record that may be much older than the interface. Any address gravinet's record did not mention was deleted: one from DHCP, from another tool, or from an edit gravinet never saw. FRR derives connected routes from interface addresses, so they went with them, which is how it surfaced.
+
+Removal is now opt-in via `Spec.Prune`, set by the editor and left false by the reconciler. Ensuring the recorded addresses are present is the reconciler's job; deleting everything else never was.
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `internal/webadmin`, `internal/hostnet` and `cmd/gravinet` pass in full.
+
+`TestApplyOnlyPrunesWhenAsked` runs against this container's live kernel: it adds a real address the record does not mention, confirms a reconciler pass leaves it alone, then confirms an editor pass with the whole-set semantics removes it. That is the actual reported failure reproduced and fixed, not a proxy for it.
+
+`TestBGPManagedIsNotEnabled` covers a configured-but-disabled node counting as managed, each kind of configuration counting, an untouched node still importing, and the UI gating on the new flag.
+
+### Not verified
+
+Nothing rendered in a browser. In particular, whether the redistribute-connected list now populates on a fresh boot depends on FRR seeing the addresses the reconciler no longer removes — which follows, but has not been watched happen on a real host.
+
+Addresses removed by earlier versions are not restored by this: gravinet never recorded them, so it has nothing to put back. They will need setting once more, after which they persist.
+
+---
+
+## v862 — 2026-08-10
+
+**Restoring a config snapshot now restarts the service by itself, instead of leaving a "structural changes — restart" banner.**
+
+A restore reinstates a whole configuration, so it almost always contains something structural. Reporting that back as a task is asking the operator to finish a job they already asked for — and until they do it, the node is running a configuration that is neither the old one nor the one they restored, which is the one state nobody wanted.
+
+The mechanism was already there and restore simply was not using it: `edit()` takes an `autoRestart` argument that routes through `quietRestart()`, which is how the network editor has behaved since it was written. Restore now passes it.
+
+Restore is posted from exactly one place, so the "Restore this" button inside the snapshot viewer goes through the same path rather than needing its own fix — asserted, so a second call site cannot appear later and quietly skip the restart.
+
+The CLI's "structural changes apply on restart" line is untouched. It is on the generic save path, not restore, and it is accurate there: the CLI does not restart the service, and making it do so is a different change nobody asked for.
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `internal/webadmin` passes in full, including `TestUIScriptParses`.
+
+`TestRestoreRestartsAutomatically` pins all three parts: restore asks for the restart, `edit()` still honours the argument, and there is only one restore call site.
+
+### Not verified
+
+Nothing rendered in a browser. `quietRestart` waits for the node to come back and refreshes in place, which is well-worn on other pages, but a restore restarting a node whose configuration has just changed underneath it is a slightly different situation than a network edit doing so — that has not been watched happen.
+
+---
+
+## v861 — 2026-08-10
+
+**The address editor is now one box per address family, matching the gateway editor.**
+
+The two editors sat next to each other and behaved differently: the gateway offered an IPv4 box and an IPv6 box, addresses offered one box holding both. That meant reading a mixed list to find the address being changed, and retyping the other family alongside it to avoid removing it — the editor submits the interface's whole intended set, so an address left out of the box is an address taken off the interface.
+
+Existing addresses are split into the two boxes on open, and recombined into one request on save. Recombining matters: the handler takes the whole set, so sending one family at a time would make clearing IPv6 indistinguishable from an edit that simply did not mention it.
+
+Family is decided by looking for a colon, which is exact for this input — an IPv6 address always has one and an IPv4 CIDR never does.
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `internal/webadmin` passes in full, including `TestUIScriptParses`.
+
+`TestAddressEditorIsSplitByFamily` pins all four properties: both per-family inputs exist, the combined box is gone, the two are recombined into a single request, and the prefill splits by family rather than putting everything in the IPv4 box.
+
+### Not verified
+
+Nothing rendered in a browser. In particular, that the two stacked inputs sit sensibly in a table cell that also has to hold the address list has not been looked at — the gateway cell has had the same shape since v850 without complaint, which is the reason to expect it reads fine rather than evidence that it does.
+
+---
+
+## v860 — 2026-08-10
+
+**Shortens the System › Interfaces description.**
+
+The eight-backend list (NetworkManager, netplan, systemd-networkd, ifupdown, rc.conf, hostname.if, networksetup, netsh) is gone, along with "only interfaces you edit here are managed" and "the response says what was saved where". Which backend a host uses is gravinet's problem to work out, not a menu for the reader to find themselves in — the same reason v855 stopped naming it in the result.
+
+"Double-click <b>addresses</b> or <b>gateway</b>" became just "double-click to edit", which is also now more accurate: MTU became editable in v859 and the enumeration had already fallen behind.
+
+What stayed is what an operator cannot work out from the page: that there is no confirmation step and that the address they are connected over is not special, and that a change is both backed up and persisted.
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `internal/webadmin` passes in full.
+
+The two existing guards on this hint — that it says "no confirmation" and "survive a reboot" — both still pass against the new wording, which is the useful outcome: they pin the two claims that matter rather than the sentence they sit in.
+
+### Not verified
+
+Nothing rendered in a browser; the text was rendered out of the source and read back instead.
+
+---
+
+## v859 — 2026-08-10
+
+**MTU is editable on System › Interfaces, on every platform, and persists.**
+
+It was already a column and already read-only, which made it the obvious next thing to be asked for. It follows the same three-part shape as addresses: applied live, recorded in gravinet's configuration so a restore brings it back, and written to the host's own network configuration so it survives a reboot.
+
+Live: `RTM_SETLINK` with `IFLA_MTU` on Linux, `ifconfig mtu` on the BSDs and macOS, `netsh interface ipv4 set subinterface` on Windows.
+
+Persisted: `802-3-ethernet.mtu` for NetworkManager, `mtu:` for netplan, `MTUBytes=` for networkd, `mtu` for ifupdown, the `ifconfig_<if>` line for rc.conf, an `mtu` line for hostname.if, `networksetup -setMTU` for macOS.
+
+On a mesh device the MTU is written to the network's own `mtu`, exactly as v856 does for its address, because it is reapplied from there on every rebuild.
+
+### Details that would otherwise be quietly wrong
+
+**`MTUBytes` belongs under `[Link]`, not `[Network]`.** networkd ignores it under the wrong section without complaining — the exact silent-no-op this package exists to avoid — so the test asserts both the section and that it appears before `[Network]`.
+
+**0 means unmanaged, not "set it to zero".** An MTU is normally decided by the driver or the link, and an operator who has not touched the field has not asked gravinet to take it over. No backend writes an MTU when none is managed, which is also asserted.
+
+**Unchanged values are not rewritten.** Setting an MTU bounces the link on some drivers, and doing that for a value that already matches is a free outage.
+
+**MTU is applied after the addresses, not before.** An MTU change can bounce the link, and doing so before the new address is on the interface would drop the session carrying the request.
+
+**Range-checked at 576–9216** before it reaches the kernel, which would otherwise refuse it with an errno rather than an explanation.
+
+### Verified against a real kernel
+
+`SetLinkMTU` was run against this container's kernel: `lo`'s MTU was read, changed to 1400, confirmed changed on the live interface, and restored. That is the netlink message construction — the part most likely to be silently wrong — exercised end to end, as with `AddAddr` in v850.
+
+Builds clean for linux, freebsd, darwin, openbsd, windows. `internal/webadmin`, `internal/config`, `internal/hostnet` and `cmd/gravinet` pass in full, including the mesh write-through and the range checks.
+
+### Not verified
+
+Only the Linux live path has run. The `ifconfig mtu` and `netsh subinterface` forms, and every persistence backend's MTU spelling, are written from documentation and have never been executed — the same standing gap as the rest of `hostnet`.
+
+Nothing rendered in a browser, so whether editing MTU on a mesh device actually rebuilds the network with the new value is unconfirmed; the config write is tested, the rebuild path it depends on is v857's, which you have now confirmed works for addresses.
+
+---
+
+## v858 — 2026-08-10
+
+**System › Interfaces no longer lists link-local addresses.**
+
+The kernel assigns them, this page cannot change them, and on a dual-stacked host they outnumber the addresses an operator came to read — so listing them only made the ones that matter harder to find.
+
+Filtered server-side rather than hidden in the page: an address that cannot be edited and is not worth reading has no reason to be sent at all. `netip`'s link-local test covers `fe80::/10` and `169.254.0.0/16`, so IPv4 link-locals go with them.
+
+Loopback is kept. It is equally uneditable, but hiding it would leave `lo` displaying nothing at all, which reads as a fault rather than as a filter.
+
+With link-local gone the address ordering collapses to global-before-loopback, and the `scope` field to those two values.
+
+This also aligns the page with what the editor already did: `hostnet.GlobalAddrs` has excluded link-local and loopback since v850, so an edit never touched them. The inventory was showing addresses the editor had already decided were not its business.
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `internal/webadmin` passes in full.
+
+### Not verified
+
+**The new assertion is vacuous on the machine that ran it.** The inventory test now checks that no reported address is link-local, across every interface — but this container has no IPv6 at all (`/proc/net/if_inet6` does not exist) and no IPv4 link-local, so there was nothing for the filter to remove and the check passed without exercising anything. On a host with a real `fe80::` it is a genuine test; here it proved only that the code does not crash.
+
+The rendered page has not been looked at, so whether the address column now reads better is unconfirmed.
+
+---
+
+## v857 — 2026-08-10
+
+**Fixes a changed mesh overlay address reverting to the old one. v856 wrote it to the config; nothing ever applied it.**
+
+Reported immediately after v856 shipped, and it is exactly the gap that release's own "not verified" section named: the configuration was written correctly and no reload picked it up.
+
+The overlay address is the one setting a running network cannot absorb through `ReloadRuntime`. It is assigned to the TUN device by `buildOneNetSpec`, which runs when a network is *built* — at startup, or when one is added or re-enabled — and the engine holds it separately as the source address for everything the node sends. A reload updates neither. So `address4` changed in config, the reload ran, the device kept its old address, and the next page load read the host and showed the old value back. Written down, ignored, and reverted with no error anywhere.
+
+A running network whose configured overlay address no longer matches the engine's is now taken down and rebuilt through the same path a restart takes. Sessions on that network re-form, which is unavoidable and is what changing your own overlay address means — every peer knew this node at the old one.
+
+### Two cases that must not trigger a rebuild
+
+**A cleared `address4`.** Empty means "self-assign", and the address DAD already picked is a valid answer to that instruction. Treating it as a change would tear down every session on the network for nothing.
+
+**A changed prefix length alone.** `10.42.0.5/16` to `10.42.0.5/24` is not a different address, and the engine holds the address rather than the prefix.
+
+The comparison is against the engine's own value rather than the TUN device's, because the engine's is what actually goes in packets — and a device disagreeing with it is already broken in a way the rebuild fixes anyway.
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `cmd/gravinet` and `internal/webadmin` pass in full.
+
+`TestOverlayAddrChanged` covers unchanged, v4 changed, v6 changed, one-of-two changed, the cleared and prefix-length-only cases that must stay quiet, an unparseable value, and an unknown network.
+
+### Not verified
+
+**The rebuild itself has not been run.** The detection is tested; that `RemoveNetwork` followed by the build path actually brings the network back up on the new address is reasoned from it being the same path a restart takes, and has not been observed. This is the second attempt at this feature, and the first one failed at precisely the step that was reasoned rather than tested — so: change `mesh0`'s address on a node with console access, and check both that the interface moves and that the mesh re-forms afterwards.
+
+---
+
+## v856 — 2026-08-10
+
+**Editing a mesh interface's address on System › Interfaces now writes the network's overlay address, instead of being refused.**
+
+v850 blocked mesh devices for a sound reason and drew the wrong conclusion from it. A mesh device's address is not host state: it comes from the network's `address4`/`address6`, and every reload reapplies it, so setting it with the host tools would hold for a second and then be silently reverted. That is a real hazard. But the answer to "this page cannot change that setting" is to change the setting that governs it, not to refuse and tell the operator to go and find another page.
+
+So the edit is written through to Mesh › Networks and the reload applies it — the same path a change made on that page takes. The address typed is the address you get; where it is stored is gravinet's problem, not something the operator should have to know to type an IP.
+
+### What it still refuses, and why those are different
+
+**An address outside the network's own subnet.** No peer could route to it, so it is refused at save time with the subnet named, rather than accepted and then found not to work.
+
+**More than one address per family.** A mesh device has exactly one overlay address in each. Silently keeping the first of several would leave the operator reading a list that is not what is running.
+
+**A default gateway.** Not a redirect with nowhere to go: a network has no such setting, because overlay routing comes from what peers advertise. The refusal says that rather than just declining.
+
+Clearing the field returns the node to self-assigning an address via DAD, which is what an empty `address4` has always meant.
+
+A mesh device is still never recorded in `HostInterfaces` — if it were, the host-interface reconciler and the mesh would fight over the same interface on every reload.
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `internal/webadmin`, `internal/config` and `cmd/gravinet` pass in full.
+
+`TestMeshInterfaceEditWritesOverlayAddress` drives the real HTTP endpoint through all six behaviours: both families written to the network, nothing written to `HostInterfaces`, an out-of-subnet address refused with the subnet named and the config left untouched, two v4 addresses refused, clearing returning to self-assignment, and the gateway refusal explaining where overlay routing comes from.
+
+The v850 guard asserting mesh rows were skipped entirely was updated rather than deleted — it now asserts the narrower rule that survived, that the gateway cell alone is not editable.
+
+### Not verified
+
+Nothing rendered in a browser, and no reload has actually applied an overlay address changed this way. The test confirms the configuration is written correctly; that the next reload picks it up is the same reconcile-shaped assumption v853 left untested, and this release adds a second caller to it.
+
+---
+
+## v855 — 2026-08-10
+
+**A successful interface edit now says nothing at all.**
+
+v854 moved the result out of a dialog and into the card, which fixed the interruption and kept the wrong thing. *"saved to gravinet's configuration and to NetworkManager"* is a description of gravinet's internals handed to someone who asked for an IP address to change. They asked for an address; the table redraws showing the address; that is the confirmation. Which files it was written to is gravinet's problem.
+
+Removed from both the UI and the handler — the server no longer builds a success message for the client to ignore.
+
+### The two things still worth saying
+
+**A change that did not happen.** Not visible in the table, so it keeps its dialog.
+
+**A change that happened but will not last.** If the config record or the host's own network configuration could not be written, the address is working right now and will vanish at the next reboot or restore. Reporting an error would be wrong — it applied — and saying nothing would be worse, because it is the one outcome the operator cannot see anywhere and would discover at the worst possible moment.
+
+The warning is phrased in those terms rather than in gravinet's: "the address is applied, but it could not be saved to gravinet's configuration, so a restored backup will not bring it back". What it costs, not which subsystem returned a non-nil error.
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `internal/webadmin` passes in full, including `TestUIScriptParses`.
+
+The guards check that no success chatter survives in either the UI or the handler, and that both editors still surface the two exceptions.
+
+### Not verified
+
+Nothing rendered in a browser. The warning path in particular has never been triggered — it needs a host where persistence fails, which is precisely the host nobody has tested on.
+
+---
+
+## v854 — 2026-08-10
+
+**A successful interface edit no longer opens a dialog.**
+
+The operator has just made the change and can see the result in the table behind the modal; making them dismiss a box that says what they can already read is an interruption charged for nothing.
+
+The note is still shown, inline in the card, because it carries something the table does not: *"saved to gravinet's configuration and to NetworkManager"* is how an operator knows the two halves beyond the live change actually happened. Losing that to remove the dialog would have traded one problem for a worse one.
+
+It is rendered with `textContent` rather than as markup — the note carries backend names and error strings from the host, which have no business being parsed.
+
+**Failures keep their dialog.** A failed change is not visible in the table, and something that did not happen must not be missable.
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `internal/webadmin` passes in full, including `TestUIScriptParses` and a new guard covering all four properties: no dialog on success, the note surviving the re-render, both editors still alerting on failure, and the note being set as text.
+
+### Not verified
+
+Nothing rendered in a browser. The guard asserts the source does the right thing, not that the inline note actually appears where it should — which is the same limitation that let three earlier UI defects through in this feature.
+
+Everything from v853 is unchanged: the reconcile that makes a restore bring addressing back has still never run.
+
+---
+
+## v853 — 2026-08-10
+
+**Host addressing is now part of gravinet's configuration, so a restored snapshot brings the node's own IP addresses back with everything else.** This closes the gap that started the System › Interfaces work.
+
+v852 made changes survive a reboot by writing them to the host's own network configuration. That is not the same as surviving a restore: the addressing lived on the host, not in gravinet's config, so a backup carried every mesh setting and left the node reachable at whatever address the host happened to have.
+
+`Config.HostInterfaces` is where it lives now, and `reconcileHostInterfaces` applies it at startup and on every reload. A restore writes the configuration and reloads; the reload gets there; the addresses come back. Without the reconcile the config would describe addressing nothing ever applied — which is the same silent-no-op failure the persistence backends were designed around, one layer up.
+
+An edit therefore now does three things, in this order and for this reason: apply it live, because that is what the operator is watching for; record it in gravinet's config, so a config describes something real; persist it to the host's backend last, because it is the step most likely to fail on an unusual host and failing it must not undo the other two. The note reports each half separately.
+
+### Scope, deliberately narrow
+
+**Opt-in per interface.** `HostInterfaces` is only ever populated by an operator editing that interface through gravinet. An unlisted interface is not managed, not reconciled, and not touched — DHCP, another configuration tool, or a hand-set address on any other NIC is left entirely alone. A config section that quietly claimed every NIC on the box would be a far larger promise than the one being made.
+
+**Link-local and loopback are refused at validation.** The kernel owns them, and a config claiming them would fight it on every single reconcile.
+
+**A reconcile failure is logged and stepped over, not fatal.** A reload carries far more than this, and one interface that cannot be configured — a NIC renamed, a cable pulled, an address already taken — must not stop a mesh from coming up.
+
+**Editing addresses does not drop the gateway, and editing the gateway does not wipe the addresses.** The two are separate edits in the UI but one whole-interface record underneath, so the untouched half is filled in from what is already there.
+
+### Structure
+
+The live-apply layer moved from `internal/webadmin` into `internal/hostnet` as `Apply`, because the daemon needs it too and a reconciler reaching into the web admin for it would have been the wrong dependency. `hostnet` is now the one place that knows how to change host addressing: `Apply` for the running system, `Persist` for the boot-time configuration.
+
+### Verified
+
+Builds clean for linux, freebsd, darwin, openbsd, windows. `internal/webadmin`, `internal/config`, `internal/hostnet` and `cmd/gravinet` pass in full.
+
+Tests cover the config round trip through JSON, `host_interfaces` staying absent from configs that have none so existing files are unchanged, the gateway surviving an addresses-only edit, validation of every field including the link-local and family-mismatch cases, and `buildHostSpec` filling in the half of an edit the operator did not touch.
+
+### Not verified
+
+**The reconcile has never run.** Not at startup, not on a reload, and not as part of a restore — which is the entire point of this release. The path is short and the pieces beneath it are the ones v850 exercised on Linux, but the claim "restore brings your addresses back" has not been demonstrated end to end even once.
+
+Everything v852 listed is unchanged: no persistence backend has executed on the platform it targets, and detection has never run on a host with NetworkManager or netplan installed.
+
+The order to try this in, on a node with console access: edit an address and check it applies; check it appears in `host_interfaces` in the config; reboot and check it comes back; then take a snapshot, change the address, restore the snapshot, and check it returns. The last step is the one nothing here has tested.
+
+---
+
+## v852 — 2026-08-10
+
+**Address changes now persist across reboots on every supported platform.** New `internal/hostnet` detects which system actually manages the host's networking and writes through it.
+
+| platform | backend |
+| --- | --- |
+| Fedora, RHEL, Alma, Rocky, Manjaro | NetworkManager, via `nmcli` |
+| Ubuntu | netplan, via a gravinet-owned YAML |
+| Debian | ifupdown drop-in, or systemd-networkd |
+| FreeBSD | `rc.conf`, via `sysrc` |
+| OpenBSD | `/etc/hostname.<if>` and `/etc/mygate` |
+| macOS | `networksetup` |
+| Windows 10/11 | already persistent — see below |
+
+### The two ways this goes wrong
+
+Writing to a backend that is not in charge produces a file that looks authoritative and is ignored: the setting appears saved and silently is not, which is worse than not writing at all. Writing to the one that *is* in charge means co-owning configuration another tool actively manages, which is how a host comes back from a reboot with no addresses.
+
+So: detect first, use the backend's own supported interface where one exists rather than editing its files behind its back, and own exactly one clearly-marked file per interface where none does. A file without gravinet's marker is never replaced.
+
+Detection order is by which system is actually running, not by which files exist. **netplan is checked before networkd and NetworkManager** specifically because it is a front-end that renders to them — writing to the renderer would be overwritten by netplan at the next boot, which is exactly the silent no-op above. **ifupdown is only used if `/etc/network/interfaces` actually sources `interfaces.d`**, rather than assuming a drop-in will be read.
+
+### Per-backend decisions worth recording
+
+- **NetworkManager**: edits the connection NM already has for the device instead of adding one. Two connections for one interface race at boot and which wins is not something an operator can reason about from a web page.
+- **netplan**: `netplan generate`, not `apply`. Apply reconfigures every interface on the host, which is more than was asked for and can bounce links unrelated to the edit — and the live change is already in place. Uses `routes:` rather than the deprecated `gateway4:`, which works today and breaks later.
+- **FreeBSD**: through `sysrc`, not by editing `rc.conf`. It is the supported editor and preserves everything else in a file where a mistake costs the host its networking.
+- **macOS**: `networksetup` works on *services* ("Ethernet"), not device names, so the device is mapped back to its service first — an address set against `en0` belongs to nothing. It also has no form for secondary addresses, so extras are reported as not stored rather than dropped silently.
+- **Windows**: netsh already defaults to `store=persistent`, so the apply path was persisting all along. Reporting "no backend" here would have been wrong in the direction that matters — telling an operator a change is temporary when it is not.
+
+**A persistence failure does not undo the live change.** An address that works now but will not come back is a worse outcome than one that works now and says so, so the note reports which half happened: saved to a named backend, applied but no backend recognised, or applied but saving failed with the reason.
+
+### Verified
+
+Builds clean for linux, freebsd, darwin, openbsd, windows. `internal/webadmin`, `internal/hostnet`, `internal/tun` and `cmd/gravinet` pass in full.
+
+The three file-rendering backends are tested closely, because their output can be checked without the platform that consumes it and a malformed unit is not noticed until a reboot: networkd unit structure, netplan YAML including the absence of the deprecated keys, and ifupdown's alias stanzas with exactly one gateway per family. Plus marker enforcement, and refusal of interface names that could break out of a file or a command line.
+
+### Not verified
+
+**No backend has been executed on the platform it targets.** Not one `nmcli` invocation, `netplan generate`, `sysrc`, or `networksetup` call has run. What is tested is the text three of them produce; the five command-driven backends are written from documented behaviour and have never been observed working.
+
+Detection itself is untested — nothing here has run on a host with NetworkManager or netplan installed, so the ordering that matters most is reasoned rather than demonstrated.
+
+This is the largest untested surface in the project and it changes whether a host comes back with networking. Try it on one node you can reach a console on before trusting it on the others.
+
+The restore gap is still open: addressing now persists in the *host's* configuration, not in gravinet's, so a restored gravinet snapshot still does not bring it back. Closing that means gravinet keeping its own copy, which is a separate decision.
+
+---
+
+## v851 — 2026-08-10
+
+**Address editing now works on every platform gravinet supports, not just Linux.**
+
+v850 shipped the write half over rtnetlink and left the BSDs, macOS and Windows refusing with "not implemented on this platform". There was no good reason for that: `internal/tun` already configures the overlay device on each of those hosts through the platform's own base-system tools, so the precedent and the mechanism were both already there.
+
+Each platform now uses what its overlay device uses — rtnetlink on Linux, `ifconfig(8)`/`route(8)` on FreeBSD, macOS and OpenBSD, `netsh` on Windows. Shelling out on the BSDs rather than hand-rolling `SIOCAIFADDR` is deliberate and matches `tun_freebsd.go`: both ship in the base system, both are stable interfaces, and a second implementation of something the base system already does correctly is a liability rather than an improvement.
+
+`globalAddrs` turned out to be portable already — it only ever used the `net` package — so it moved out of the Linux file rather than being written four more times. Only the three mutators are platform-split.
+
+Two details that are not the same everywhere:
+
+- **OpenBSD spells address removal `delete`; FreeBSD and macOS take `-alias`.** Rather than branching on `GOOS`, the code tries one and falls back, so a platform accepting either keeps working and a future one that changes its mind does not need a code change.
+- **Delete-then-add for the default route on every platform**, for the reason the Linux path already had: a host can carry several defaults, and replacing one can leave the effective default untouched — indistinguishable from the change not working. The delete is best-effort, since there may not be one; only the add can fail the request.
+
+### Tests
+
+`TestAddressEditingIsImplementedHere` adds to a nonexistent interface and requires the failure to come from the platform's own mechanism rather than from a stub saying the feature does not exist here. It is a compile-time claim as much as a runtime one: on any build where a stub came back, it fails.
+
+### Verified
+
+Builds clean for linux, freebsd, darwin, openbsd and windows. `internal/webadmin` and `internal/tun` pass in full on linux.
+
+`go vet` is clean on the files this touches for all five targets. It reports two pre-existing problems elsewhere that this release does not introduce and does not fix: `auth_bsdauth_test.go` calls `systemAuthenticator` with three arguments on openbsd, and `capture_windows.go` has two `unsafe.Pointer` warnings. Both are worth someone's attention; neither is in this change's path.
+
+### Not verified
+
+**Only the Linux path has ever executed.** v850's live round-trip against this container's kernel covered `AddAddr`/`DelAddr` on Linux and nothing else. Every `ifconfig` and `netsh` invocation here is written from those tools' documented syntax and has never been run — the argument order, the `alias`/`delete` spelling, and netsh's `address=`/`interface=` forms are all unconfirmed. The BSD and Windows paths should be treated as untested code that changes host networking.
+
+`ReplaceDefaultRoute` remains unrun on every platform including Linux, for the reason given in v850: exercising it would have severed the session running the test.
+
+Persistence is still absent everywhere. Changes are live-only on all five platforms.
+
+---
+
+## v850 — 2026-08-10
+
+**System › Interfaces is now editable: double-click addresses or the gateway and the change is applied to the running system.**
+
+No confirmation step, by request and on reflection correctly — `ip addr` does not ask either, and a tool that second-guesses an operator editing an address is one they stop using. The page states the consequence instead of standing in the way of it: a change to the address you are connected over drops your session.
+
+`internal/tun/addr_linux.go` adds the write half over raw rtnetlink, matching the read half from v826 — no `ip` binary, no cgo. `AddAddr`, `DelAddr`, and `ReplaceDefaultRoute`.
+
+### Three decisions that decide whether an edit is safe
+
+**The whole intended address set is submitted, not individual adds and removes.** The handler diffs it. Re-addressing an interface is then one operation from the operator's side rather than two chances to get half way.
+
+**Additions are applied before removals.** Re-addressing leaves the old address up until the new one is in place; the other order drops the interface's only address for the duration, which on the link carrying the request is the difference between a change and an outage.
+
+**Only global addresses are editable.** Link-local and loopback are kernel-managed, are not offered, and cannot be removed by submitting a list without them — an operator editing an IPv4 address has not asked to strip `fe80::`.
+
+Default routes are replaced by deleting every existing default for the family and adding the new one, rather than `NLM_F_REPLACE` on one of them: a host can carry several defaults at different metrics, and replacing one would leave the others and the effective default unchanged — which looks exactly like the change not working.
+
+Mesh devices are excluded from editing and say why. Their addressing comes from the network's own settings and is rewritten on every reload, so an edit would be silently undone.
+
+### Verified against a real kernel
+
+Unusually for this stretch of work, the risky part was actually executed. `AddAddr` was run against the live kernel in this container: the address appeared on the interface, re-adding it was a no-op rather than an error, and `DelAddr` removed it. That is the netlink message construction — the part most likely to be silently wrong — exercised end to end.
+
+`go build ./...` for linux and freebsd, `go vet` and `gofmt` clean. `cmd/gravinet`, `internal/webadmin` and `internal/tun` pass in full.
+
+### Not verified
+
+**Not persisted.** netplan, NetworkManager, systemd-networkd or rc.conf still owns what comes back after a reboot, and gravinet writes to none of them, so every change here is live-only. Stated on the page. This is also why the restore gap that prompted the page is still open — addressing is not in gravinet's config and a restored snapshot does not bring it back.
+
+`ReplaceDefaultRoute` has not been run: the round-trip test covered addresses only, because changing this container's default route would have severed the session running the test. The delete-then-add reasoning is sound and untested.
+
+Editing is Linux-only. The BSDs need ifconfig/route-socket work and Windows needs netsh; both refuse with that message rather than failing obscurely, and the inventory still reads everywhere.
+
+Nothing rendered in a browser.
+
+---
+
+## v849 — 2026-08-10
+
+**New System › Interfaces: every network interface on this host, its addresses, and the default gateways in use. Read-only.**
+
+Prompted by a restore that came back with everything except host addressing. This does not fix that — it is the inventory half, and the page says so rather than letting the presence of a page imply otherwise.
+
+Per interface: name, up/down (distinguishing "up, no carrier" from "up", which is the difference between a cable problem and a config one), addresses with prefix lengths, the default gateway if the route leaves by that interface, MTU and MAC. gravinet's own mesh devices are labelled with their network rather than hidden — an operator reading an interface list wants the overlay in it too, and which network a mesh device belongs to is the useful part.
+
+Two ordering decisions, both about what someone reads first: interfaces are name-sorted so the list does not reshuffle between loads, and addresses are global-first so a v6 host's several link-locals do not bury the address that was being looked for.
+
+The gateway is a property of the route rather than the interface, so it is shown against the interface the route actually leaves by. It reuses the netlink reader the mesh already uses (`tun.DefaultGateway`) instead of growing a second one. On non-Linux the gateway columns are blank: the inventory still lists every interface and address, and blank is honest about what that platform can currently report.
+
+`gravinet system interfaces` is the CLI counterpart, reading the host directly rather than through the daemon — an interface list is exactly what an operator wants when the daemon is the thing that will not start.
+
+### Why read-only
+
+Writing is three problems and applying an address is only the first. Persisting across a reboot belongs to whichever of netplan, NetworkManager, systemd-networkd or rc.conf the host actually uses, and that is the half that would make restore work. And changing the address an operator is connected over strands them, with the config that would let them back in being the one just replaced. A page that did the first and not the others would be worse than no page.
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `internal/webadmin` and `cmd/gravinet` pass in full, including the nav-parity check that v848 had to repair — the CLI leaf went in with the nav item this time rather than nine releases later.
+
+The inventory test drives the real HTTP endpoint against the live host and asserts the shape, scopes, name-sort and address ordering against loopback, the one interface every machine running it has.
+
+### Not verified
+
+Nothing rendered in a browser. The gateway reader has only run on this Linux container, where it correctly reported the default route — a host with several default routes, or none, is untested. The BSD and Windows blank-gateway path has never executed.
+
+---
+
+## v848 — 2026-08-10
+
+**Adds `gravinet upgrade clear` for a stale trial record, and restores CLI/web nav parity for IPv6 RA — a test that had been failing since v832.**
+
+### A trial that nothing will ever finish
+
+Reported: a node refusing every upgrade with *"an upgrade (823 → 828) is already mid-trial — wait for it to confirm or revert"*, on a node that had long since moved past both versions and had no upgrade running.
+
+A trial is resolved by one of two mechanisms, and **both are gated on the upgrade feature being enabled**: `Guard.Watch`, armed at startup, which commits or reverts when the confirm window closes; and `Guard.OnBoot`, which counts boots and reverts after three. Turn the feature off, replace the binary out of band with the installer, or restart without the guard running, and the pending record survives with nothing left that will ever advance it. From then on every apply is refused by a trial that ended weeks ago, and the advice in the message — wait for it — is advice to wait forever.
+
+`Guard.Clear()` already existed for exactly this and nothing reached it: no control op, no CLI verb. `gravinet upgrade clear` now does.
+
+It is deliberately not `rollback`, and the distinction is the point. Rollback restores the *previous* binary, which on a stale record means downgrading a node that has since moved on several releases — precisely the wrong thing for an operator in this position, and the only remedy that was available. Clear forgets a record and leaves the running binary alone.
+
+The refusal message now names the age of the trial and points at the way out, saying explicitly that clearing does not change the running binary.
+
+### The nav parity test I had been failing for nine releases
+
+`TestCLIGroupsMatchNavGroups` requires every web-admin page to have a CLI counterpart. Adding the IPv6 RA nav item in v832 broke it, and it stayed broken through v847 because I had stopped running `cmd/gravinet` — the RA work was all in `internal/webadmin`, so that is the package I kept re-running. A failing test in a package you are not running is indistinguishable from no test at all.
+
+`gravinet traffic ipv6ra` now exists: `list`, `enable IFACE`, `disable IFACE`. Read and state-toggle only — adding an interface needs prefixes, DNS and search lists with validation and an interface picker, and reproducing that as flags would be a second, weaker implementation of the same form. Listing and parking are what is worth having on a terminal.
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `cmd/gravinet`, `internal/webadmin`, `internal/config` and `internal/upgrade` all pass in full.
+
+`TestUpgradeClearForgetsStaleTrial` drives the real control-op path: clear on an idle guard reports nothing cleared, an armed trial blocks an apply with a message naming the escape hatch, clear forgets it and says what it forgot, and a subsequent apply fails on its own merits rather than the guard's.
+
+### Not verified
+
+The reported node has not been observed recovering — `upgrade clear` has not been run against a real stuck daemon, only against a guard in a temp directory.
+
+And the root cause is inferred, not proven. Watch and OnBoot being gated on the feature flag is a mechanism that *would* produce this, and matches a node that upgraded out of band through `install-linux.sh`; nothing here establishes that is what actually happened on that node. `gravinet upgrade status` before clearing would show the boot count, which would say which of the two mechanisms stalled.
+
+---
+
 ## v847 — 2026-08-10
 
 **Config History's toolbar is regrouped and recoloured:**

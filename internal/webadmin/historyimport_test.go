@@ -128,10 +128,14 @@ func TestDownloadFilenameCarriesHostname(t *testing.T) {
 	}
 }
 
-// The node-id guard is the one part of import that lives only in the handler,
-// so it needs an HTTP-level test rather than coverage of ImportSnapshot
-// beneath it.
-func TestHistoryImportRefusesForeignNodeID(t *testing.T) {
+// A configuration from another node is allowed: restoring one is how a node
+// moves to replacement hardware. It is recorded rather than refused, so the
+// list distinguishes a snapshot of this node from one carried over.
+//
+// v845 refused this and v865 reversed it. The refusal was not wrong about the
+// consequences — restoring a foreign config does take on that node's identity
+// — it was wrong that avoiding them was gravinet's call to make.
+func TestHistoryImportAcceptsForeignNodeID(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := dir + "/config.json"
 	cfg := importCfg(t)
@@ -150,9 +154,9 @@ func TestHistoryImportRefusesForeignNodeID(t *testing.T) {
 	defer ts.Close()
 	c := sessionFor(t, ts)
 
-	post := func(upload *config.Config) (int, map[string]any) {
+	post := func(upload *config.Config, note string) (int, map[string]any) {
 		raw, _ := json.Marshal(upload)
-		b, _ := json.Marshal(map[string]any{"config": json.RawMessage(raw), "note": "x.json"})
+		b, _ := json.Marshal(map[string]any{"config": json.RawMessage(raw), "note": note})
 		req, _ := http.NewRequest("POST", ts.URL+"/api/history/import", bytes.NewReader(b))
 		req.AddCookie(c)
 		resp, err := http.DefaultClient.Do(req)
@@ -164,37 +168,70 @@ func TestHistoryImportRefusesForeignNodeID(t *testing.T) {
 		json.NewDecoder(resp.Body).Decode(&out)
 		return resp.StatusCode, out
 	}
+	summaries := func() []string {
+		list, err := config.List(cfgPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, m := range list {
+			out = append(out, m.Summary)
+		}
+		return out
+	}
 
-	// Another node's config: refused, and the error names both ids so the
-	// operator can tell which file they grabbed.
+	// Another node's config files, and says where it came from.
 	foreign := importCfg(t)
 	foreign.NodeID = "bbbbbbbbbbbbbbbb"
-	code, out := post(foreign)
-	if code == http.StatusOK {
-		t.Fatal("a config from another node must not be filed")
+	if code, out := post(foreign, "grav1.json"); code != http.StatusOK {
+		t.Fatalf("a config from another node should be accepted: %d %v", code, out)
 	}
-	msg, _ := out["error"].(string)
-	if !strings.Contains(msg, "bbbbbbbbbbbbbbbb") || !strings.Contains(msg, "aaaaaaaaaaaaaaaa") {
-		t.Errorf("the error should name both node ids, got %q", msg)
+	got := summaries()
+	if len(got) != 1 {
+		t.Fatalf("want one entry, got %v", got)
 	}
-
-	// No node id at all is refused too: restoring it would mint a fresh
-	// identity, losing this node just as completely as adopting another's.
-	blank := importCfg(t)
-	blank.NodeID = ""
-	if code, _ := post(blank); code == http.StatusOK {
-		t.Error("a config with no node id must not be filed")
+	if !strings.Contains(got[0], "bbbbbbbbbbbbbbbb") {
+		t.Errorf("the entry should name the node it came from: %q", got[0])
+	}
+	if !strings.Contains(got[0], "grav1.json") {
+		t.Errorf("the entry should keep the operator's note: %q", got[0])
 	}
 
-	// This node's own config still files.
+	// This node's own config is not labelled with a provenance it does not
+	// have — every entry saying "from node ..." would make the label useless.
 	own := importCfg(t)
 	own.NodeID = "aaaaaaaaaaaaaaaa"
-	if code, out := post(own); code != http.StatusOK {
-		t.Fatalf("this node's own config should file, got %d %v", code, out)
+	if code, _ := post(own, "mine.json"); code != http.StatusOK {
+		t.Fatal("this node's own config should still file")
 	}
-	list, err := config.List(cfgPath)
-	if err != nil || len(list) != 1 {
-		t.Fatalf("exactly the one accepted upload should be in the list: %v (%v)", list, err)
+	for _, sm := range summaries() {
+		if strings.Contains(sm, "mine.json") && strings.Contains(sm, "from node") {
+			t.Errorf("an own-node upload should carry no provenance label: %q", sm)
+		}
+	}
+
+	// A config with no node id at all is accepted too, and labelled, since
+	// restoring it would mint a fresh identity.
+	blank := importCfg(t)
+	blank.NodeID = ""
+	if code, _ := post(blank, "blank.json"); code != http.StatusOK {
+		t.Fatal("a config with no node id should be accepted")
+	}
+	var sawBlank bool
+	for _, sm := range summaries() {
+		if strings.Contains(sm, "blank.json") && strings.Contains(sm, "no node id") {
+			sawBlank = true
+		}
+	}
+	if !sawBlank {
+		t.Error("an upload with no node id should say so in its entry")
+	}
+
+	// Still not a way to load nonsense: validation is unchanged.
+	bad := importCfg(t)
+	bad.Networks[0].Subnet4 = "not-a-subnet"
+	if code, _ := post(bad, "bad.json"); code == http.StatusOK {
+		t.Error("an invalid configuration should still be refused")
 	}
 }
 
@@ -232,5 +269,29 @@ func TestConfigHistoryToolbar(t *testing.T) {
 	}
 	if strings.Contains(bar, "cls:'ghost'") {
 		t.Error("no config-history button should be ghost-styled any more")
+	}
+}
+
+// A restore reinstates a whole configuration, so it almost always contains
+// something structural. Leaving a "restart" banner behind makes the operator
+// finish a job they already asked for — and until they do, the node is
+// running a configuration that is neither the old one nor the one they
+// restored.
+//
+// edit()'s third argument is what turns that into a quiet restart, and it is
+// the same mechanism the network editor has used since it was written.
+func TestRestoreRestartsAutomatically(t *testing.T) {
+	src := indexHTML
+	if !strings.Contains(src, "edit('/api/history/restore', { id: id }, true)") {
+		t.Error("restore does not ask edit() to restart automatically; a restart banner would be left behind")
+	}
+	// The mechanism it relies on: edit() must still act on that argument.
+	if !strings.Contains(src, "if (autoRestart) { quietRestart(); return true; }") {
+		t.Error("edit() no longer honours its autoRestart argument")
+	}
+	// And restore must be the only path to it, so the modal's own "Restore
+	// this" button cannot bypass the restart by calling the API directly.
+	if n := strings.Count(src, "'/api/history/restore'"); n != 1 {
+		t.Errorf("restore is posted from %d places; they would need the same treatment", n)
 	}
 }

@@ -48,7 +48,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "847"
+	version = "865"
 	commit  = "none"
 )
 
@@ -426,6 +426,11 @@ func cmdRun(args []string) {
 		// precisely because those are the things a bad binary dies on: a guard
 		// that only runs on a *successful* startup path cannot rescue a node from
 		// a binary that never gets that far.
+		// Host addressing gravinet owns, applied before the mesh comes up:
+		// a network whose underlay address is one of these needs it in place
+		// before anything tries to bind or dial on it.
+		reconcileHostInterfaces(cfg)
+
 		if cfg.UpgradeEnabled() {
 			// Read the state directory directly rather than creating it: this
 			// runs before anything may fail, and a node with no upgrade
@@ -1097,6 +1102,12 @@ func cmdRun(args []string) {
 			if err != nil {
 				return err
 			}
+			// Host addressing gravinet has been told to own. Runs on every
+			// reload, which is what makes a restored configuration bring the
+			// node's own addresses back with it rather than describing
+			// addressing nothing ever applies.
+			reconcileHostInterfaces(newCfg)
+
 			overlays := overlaysOf(newCfg)
 			engine.SetManaged(newCfg.Managed)
 			engine.SetManager(newCfg.Manager)
@@ -1140,6 +1151,27 @@ func cmdRun(args []string) {
 					continue
 				}
 				desired[id] = true
+				// The overlay address is the one setting a running network
+				// cannot absorb through ReloadRuntime: it is assigned to the
+				// TUN device when the network is built, and the engine holds
+				// it as the source address for everything it sends. Reloading
+				// leaves both untouched, so a changed address4/address6 would
+				// be written to config and then quietly ignored — the address
+				// the operator typed vanishes and the old one comes back.
+				//
+				// Taking the network down here drops it out of `running` for
+				// the branch below, which rebuilds it through exactly the path
+				// a restart takes. Sessions on this network re-form, which is
+				// unavoidable and is what changing your own overlay address
+				// means: peers knew this node at the old one.
+				if running[id] && overlayAddrChanged(engine, id, n) {
+					logx.Infof("reload: net %016x: overlay address changed; rebuilding the network to apply it", id)
+					if e := engine.RemoveNetwork(id); e != nil {
+						logx.Warnf("reload: net %016x: remove for overlay rebuild: %v", id, e)
+					} else {
+						running[id] = false
+					}
+				}
 				if running[id] {
 					// Already up: apply the hot-reloadable runtime settings + keys.
 					var spec mesh.NetSpec
@@ -1163,6 +1195,7 @@ func cmdRun(args []string) {
 					}
 					continue
 				}
+
 				// New or just-enabled network: build it and bring it up live.
 				spec, dev, berr := buildOneNetSpec(n, newCfg, overlays, i)
 				if berr != nil {
@@ -3735,4 +3768,39 @@ func restPorts(ports []int) []int {
 		return nil
 	}
 	return ports[1:]
+}
+
+// overlayAddrChanged reports whether a running network's configured overlay
+// address differs from the one the engine is actually using.
+//
+// Compares against the engine rather than against the TUN device: the engine's
+// value is the one that matters for what this node puts in packets, and a
+// device that somehow disagrees with it is already broken in a way rebuilding
+// will fix anyway.
+//
+// An empty Address4/Address6 means "self-assign", which is not a change to
+// anything currently running — the address the node picked by DAD is a valid
+// answer to that instruction, so clearing the field does not force a rebuild
+// and cost sessions for nothing.
+func overlayAddrChanged(engine *mesh.Engine, id uint64, n config.Network) bool {
+	self4, self6, ok := engine.NetworkSelfAddrs(id)
+	if !ok {
+		return false
+	}
+	for _, c := range []struct {
+		configured string
+		running    netip.Addr
+	}{{n.Address4, self4}, {n.Address6, self6}} {
+		if strings.TrimSpace(c.configured) == "" {
+			continue
+		}
+		p, err := netip.ParsePrefix(c.configured)
+		if err != nil {
+			continue
+		}
+		if p.Addr() != c.running {
+			return true
+		}
+	}
+	return false
 }

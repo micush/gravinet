@@ -478,6 +478,18 @@ func (s *Server) handleBGPConfig(w http.ResponseWriter, r *http.Request) {
 			// and wiped the settings the operator had just entered. An ASN of
 			// 0 under AutoBGP means "not derived yet", never "unconfigured".
 			"active": bgp.Enabled && (bgp.ASN != 0 || bgp.AutoBGP),
+			// managed gates the import-and-re-render below. It is not the
+			// same question as "active", and conflating them is what made
+			// disabling BGP impossible: Enabled went false, active went
+			// false, the UI imported FRR's still-running config over the
+			// top, and the editor's autosave wrote it back enabled.
+			//
+			// Disabling is a decision gravinet is managing, not the absence
+			// of one. So this asks whether an operator has ever configured
+			// BGP here at all — if they have, their configuration wins over
+			// whatever FRR happens to be running, including when what they
+			// configured was "off".
+			"managed": bgpConfigured(bgp),
 			// mesh_routes is what the "Redistribute mesh routes" toggle would
 			// carry into BGP right now (the Mesh Routes page's enabled Advertise
 			// entries, on enabled networks) — shown next to the toggle whether or
@@ -507,6 +519,18 @@ func (s *Server) handleBGPConfig(w http.ResponseWriter, r *http.Request) {
 	if err := s.mutateConfig(r, func(cfg *config.Config) error {
 		prev = cfg.BGP
 		meshRoutes = meshRouteCIDRs(cfg)
+		// AutoBGP exists to keep BGP running, so "AutoBGP on, BGP off" is not
+		// a state that can hold: its reconciler treats a disabled BGP as
+		// drift and writes Enabled back to true within seconds, which is
+		// exactly what made the disable pill appear to do nothing.
+		//
+		// Turning BGP off therefore turns AutoBGP off with it. The
+		// alternative — leaving AutoBGP set but dormant — reads better in
+		// the config and worse on the page, because the operator would be
+		// looking at a toggle that is on and doing nothing.
+		if !req.Enabled {
+			req.AutoBGP = false
+		}
 		cfg.BGP = req
 		return nil
 	}); err != nil {
@@ -820,3 +844,17 @@ func parseBFDPeers(raw []byte) []bfdPeer {
 // tests without a real FRR install. filepath.Clean guards against a caller
 // passing a path with redundant separators.
 var statFile = func(p string) (fs.FileInfo, error) { return os.Stat(filepath.Clean(p)) }
+
+// bgpConfigured reports whether an operator has configured BGP on this node,
+// regardless of whether it is currently enabled.
+//
+// Enabled is deliberately not part of it. A node with BGP turned off but
+// neighbors and an ASN set is configured, and importing FRR's live config
+// over that would discard the operator's work — which is precisely what
+// happened when the import was gated on Enabled.
+func bgpConfigured(b config.BGPConfig) bool {
+	return b.ASN != 0 || b.AutoBGP ||
+		len(b.Neighbors) > 0 || len(b.Networks) > 0 ||
+		len(b.RedistributeConnectedRoutes) > 0 || len(b.RedistributeStaticRoutes) > 0 ||
+		len(b.RedistributeMeshRoutes) > 0
+}

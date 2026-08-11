@@ -9,6 +9,7 @@ package webadmin
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"gravinet/internal/config"
 )
@@ -189,31 +190,27 @@ func (s *Server) handleHistoryImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// A config from a different node is refused outright rather than filed
-	// with a warning. Restoring one would take on that node's identity —
-	// its node id, and with it its place in every peer's tables, its keys
-	// and its networks — which is never what "restore my configuration"
-	// means and is not recoverable by restoring the previous entry, because
-	// by then this node has already announced itself as something else.
+	// A configuration from another node is allowed. Restoring one takes on
+	// that node's identity — its node id, and with it its place in every
+	// peer's tables, its keys and its networks — which is exactly what
+	// moving a node to replacement hardware means, and it is not gravinet's
+	// place to decide that an operator restoring their own backup has made
+	// a mistake.
 	//
-	// An empty node id is refused for the same reason and not treated as
-	// harmless: restoring it mints a fresh random identity, which loses this
-	// node just as completely as adopting someone else's.
-	//
-	// This is a deliberate ceiling on the feature. Cloning a node or moving
-	// a config to replacement hardware is a real thing to want and this
-	// blocks it; that is the right trade for a button sitting next to
-	// Restore, and the file is still on disk for anyone who genuinely means
-	// to do it by hand.
+	// It is recorded rather than refused: the entry says which node it came
+	// from, so the list distinguishes a snapshot of this node from one
+	// carried over, and the diff shown before restoring makes the identity
+	// change visible like any other field.
+	note := strings.TrimSpace(req.Note)
 	if cfg.NodeID != cur.NodeID {
-		got := cfg.NodeID
-		if got == "" {
-			got = "(none set)"
+		from := cfg.NodeID
+		if from == "" {
+			from = "no node id"
 		}
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
-			"error": "that configuration belongs to a different node (node_id " + got + "; this node is " + cur.NodeID + "). Restoring it would give this node that identity, so it can't be filed here.",
-		})
-		return
+		if note != "" {
+			note += " \u00b7 "
+		}
+		note += "from node " + from
 	}
 
 	// The retention limit comes from the running config, not the uploaded
@@ -221,7 +218,7 @@ func (s *Server) handleHistoryImport(w http.ResponseWriter, r *http.Request) {
 	// keeps, least of all as a side effect of being filed.
 	limit := cur.EffectiveConfigHistoryLimit()
 	user, _ := s.validSession(r)
-	id, err := config.ImportSnapshot(s.configPath, &cfg, user, req.Note, limit)
+	id, err := config.ImportSnapshot(s.configPath, &cfg, user, note, limit)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return

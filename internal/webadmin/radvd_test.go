@@ -506,3 +506,85 @@ func TestRAPreferencePicker(t *testing.T) {
 		}
 	}
 }
+
+// Disabling BGP has to stick. The UI imports FRR's live configuration and
+// re-renders the editor from it whenever gravinet is not managing BGP, and
+// the editor autosaves — so if "not managing" is read from Enabled, turning
+// BGP off makes gravinet import the still-running FRR config and write it
+// back enabled, and the setting can never be turned off at all.
+func TestBGPManagedIsNotEnabled(t *testing.T) {
+	off := config.BGPConfig{Enabled: false, ASN: 65001}
+	if !bgpConfigured(off) {
+		t.Error("a configured-but-disabled BGP must still count as managed, or the import overwrites it")
+	}
+	// Every kind of configuration counts, since any of them is work an
+	// import would discard.
+	for name, b := range map[string]config.BGPConfig{
+		"asn":         {ASN: 65001},
+		"autobgp":     {AutoBGP: true},
+		"neighbors":   {Neighbors: []config.BGPNeighbor{{}}},
+		"networks":    {Networks: []string{"10.0.0.0/8"}},
+		"redist v4":   {RedistributeConnectedRoutes: []string{"10.1.1.0/24"}},
+		"redist mesh": {RedistributeMeshRoutes: []string{"10.2.2.0/24"}},
+	} {
+		if !bgpConfigured(b) {
+			t.Errorf("%s should count as configured", name)
+		}
+	}
+	// A node that has never been touched is not managed, so the import still
+	// runs for its intended case: showing what FRR already has.
+	if bgpConfigured(config.BGPConfig{}) {
+		t.Error("an untouched config should not count as managed")
+	}
+	if bgpConfigured(config.BGPConfig{Enabled: true}) {
+		t.Error("Enabled alone is not a configuration; the import should still show FRR's")
+	}
+	// And the UI must gate on it rather than on active.
+	if !strings.Contains(indexHTML, "if (!r.body.managed && (r.body.supported || r.body.installed)){") {
+		t.Error("the UI still imports FRR's config based on the active flag")
+	}
+}
+
+// Disabling BGP has to turn AutoBGP off with it. AutoBGP's reconciler exists
+// to keep BGP running: it treats a disabled BGP as drift (its identityChanged
+// test is literally `!cfg.BGP.Enabled || ...`) and writes Enabled back to true
+// within seconds. So "AutoBGP on, BGP off" is not a state that can hold, and
+// leaving it saveable is what made the disable pill appear to do nothing even
+// after the import path was fixed in v863.
+func TestDisablingBGPClearsAutoBGP(t *testing.T) {
+	// The rule as the handler applies it.
+	apply := func(req config.BGPConfig) config.BGPConfig {
+		if !req.Enabled {
+			req.AutoBGP = false
+		}
+		return req
+	}
+	if got := apply(config.BGPConfig{Enabled: false, AutoBGP: true, ASN: 65001}); got.AutoBGP {
+		t.Error("disabling BGP must clear AutoBGP, or its reconciler re-enables BGP")
+	}
+	// Enabling leaves it alone: an operator turning BGP on has said nothing
+	// about whether they want AutoBGP.
+	if got := apply(config.BGPConfig{Enabled: true, AutoBGP: true}); !got.AutoBGP {
+		t.Error("enabling BGP must not disturb AutoBGP")
+	}
+	if got := apply(config.BGPConfig{Enabled: true, AutoBGP: false}); got.AutoBGP {
+		t.Error("enabling BGP must not turn AutoBGP on")
+	}
+
+	// The handler really does this, and the pill flips the checkbox with it
+	// so the form does not show an AutoBGP that was just turned off.
+	src := mustRead("bgp.go")
+	if !strings.Contains(src, "if !req.Enabled {\n\t\t\treq.AutoBGP = false\n\t\t}") {
+		t.Error("the BGP save handler does not clear AutoBGP when BGP is disabled")
+	}
+	if !strings.Contains(indexHTML, "if (!bgpEnabled && autoCb.checked) autoCb.checked = false;") {
+		t.Error("the disable pill leaves the AutoBGP checkbox on")
+	}
+
+	// And the disabled config still counts as managed, so v863's import fix
+	// is not undone by this one: with AutoBGP cleared, an ASN is what keeps
+	// it recognised as configured.
+	if !bgpConfigured(config.BGPConfig{Enabled: false, AutoBGP: false, ASN: 65001}) {
+		t.Error("a disabled config with an ASN must still count as managed")
+	}
+}

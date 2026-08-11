@@ -480,6 +480,8 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/status", s.authed(s.handleStatus))
 	mux.HandleFunc("/api/config", s.authed(s.handleConfig))
 	mux.HandleFunc("/api/radvd", s.authed(s.handleRouterAdvert))
+	mux.HandleFunc("/api/system/interfaces", s.authed(s.handleSystemInterfaces))
+	mux.HandleFunc("/api/system/interface-edit", s.authed(s.handleSystemInterfaceEdit))
 	mux.HandleFunc("/api/ban", s.authed(s.handleBan))
 	mux.HandleFunc("/api/ban/notes", s.authed(s.handleBanNotes))
 	mux.HandleFunc("/api/peer", s.authed(s.handlePeer))

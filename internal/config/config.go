@@ -409,6 +409,20 @@ type Config struct {
 	// then, so installing gravinet on a host already running radvd by hand
 	// changes nothing until an operator opts in.
 	RouterAdvert RAConfig `json:"router_advert,omitempty"`
+	// HostInterfaces is host addressing gravinet has been told to own, so it
+	// travels with the configuration: back it up, restore it, and the node's
+	// own IP addresses come back with everything else. Without this, a
+	// restored config brought back every mesh setting and left the host
+	// unreachable at the address the operator expected — which is what this
+	// field exists to fix.
+	//
+	// Opt-in per interface, and only ever populated by an operator editing
+	// that interface through gravinet. An interface not listed here is not
+	// managed, not reconciled, and not touched: gravinet is a guest on a host
+	// whose networking is usually configured by something else, and a config
+	// section that quietly claimed every NIC would be a much larger promise
+	// than the one being made.
+	HostInterfaces []HostIface `json:"host_interfaces,omitempty"`
 
 	// SNMP runs a read-only SNMPv2c agent (net-snmp's snmpd) on this host —
 	// System > SNMP. It's node-global, like BGP: one agent per host, not
@@ -3157,5 +3171,96 @@ func (i RAInterface) Validate() error {
 	if i.DefaultLifetime < 0 || i.DefaultLifetime > 9000 {
 		return fmt.Errorf("default lifetime %d: must be between 0 and 9000 seconds", i.DefaultLifetime)
 	}
+	return nil
+}
+
+// HostIface is the addressing gravinet maintains for one host interface.
+type HostIface struct {
+	Iface string `json:"iface"`
+	// Addrs are the interface's global addresses in CIDR form. Empty means
+	// "no static addresses", which is a thing an operator can mean, and is
+	// applied as such rather than read as "leave alone".
+	Addrs []string `json:"addrs,omitempty"`
+	// GW4/GW6 are optional default gateways. Empty means "do not set one",
+	// never "remove the existing one" — a default route belongs to the host
+	// rather than to this interface.
+	GW4 string `json:"gw4,omitempty"`
+	GW6 string `json:"gw6,omitempty"`
+	// MTU is the interface MTU. 0 means gravinet does not manage it, which
+	// is the default and is different from "set it to zero": an MTU is
+	// normally decided by the driver or the link, and an operator who has
+	// not touched the field has not asked gravinet to take it over.
+	MTU int `json:"mtu,omitempty"`
+}
+
+// Validate checks a host interface entry.
+func (h HostIface) Validate() error {
+	if strings.TrimSpace(h.Iface) == "" {
+		return fmt.Errorf("interface name is required")
+	}
+	for _, a := range h.Addrs {
+		p, err := netip.ParsePrefix(strings.TrimSpace(a))
+		if err != nil {
+			return fmt.Errorf("address %q: needs a prefix length (e.g. 10.1.1.1/24): %v", a, err)
+		}
+		if p.Addr().IsLinkLocalUnicast() || p.Addr().IsLoopback() {
+			return fmt.Errorf("address %q: link-local and loopback addresses are managed by the kernel", a)
+		}
+	}
+	// 576 is the IPv4 minimum a host must accept; 9216 covers jumbo frames
+	// with room for the tag overhead some drivers count separately. Outside
+	// that the kernel would refuse it anyway, but with an errno rather than
+	// an explanation.
+	if h.MTU != 0 && (h.MTU < 576 || h.MTU > 9216) {
+		return fmt.Errorf("mtu %d: must be between 576 and 9216, or 0 to leave it unmanaged", h.MTU)
+	}
+	for _, g := range []struct{ v, name string }{{h.GW4, "gw4"}, {h.GW6, "gw6"}} {
+		if strings.TrimSpace(g.v) == "" {
+			continue
+		}
+		a, err := netip.ParseAddr(strings.TrimSpace(g.v))
+		if err != nil {
+			return fmt.Errorf("%s %q: %v", g.name, g.v, err)
+		}
+		if (g.name == "gw4") != a.Is4() {
+			return fmt.Errorf("%s %q is the wrong address family", g.name, g.v)
+		}
+	}
+	return nil
+}
+
+// HostIfaceFor returns the managed entry for an interface, or nil.
+func (c *Config) HostIfaceFor(name string) *HostIface {
+	for i := range c.HostInterfaces {
+		if c.HostInterfaces[i].Iface == name {
+			return &c.HostInterfaces[i]
+		}
+	}
+	return nil
+}
+
+// SetHostIface records (or replaces) the addressing gravinet maintains for an
+// interface, so it travels with the configuration.
+func (c *Config) SetHostIface(h HostIface) error {
+	if err := h.Validate(); err != nil {
+		return err
+	}
+	h.Iface = strings.TrimSpace(h.Iface)
+	if cur := c.HostIfaceFor(h.Iface); cur != nil {
+		// A gateway is only replaced when one was given: editing addresses
+		// must not silently drop the default route.
+		if h.GW4 == "" {
+			h.GW4 = cur.GW4
+		}
+		if h.GW6 == "" {
+			h.GW6 = cur.GW6
+		}
+		if h.MTU == 0 {
+			h.MTU = cur.MTU
+		}
+		*cur = h
+		return nil
+	}
+	c.HostInterfaces = append(c.HostInterfaces, h)
 	return nil
 }

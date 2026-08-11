@@ -230,6 +230,7 @@ var trafficGroup = []groupLeaf{
 	{"firewall", "rules controlling which traffic is allowed through the tunnel", cmdFW},
 	{"nat", "port forwarding and address translation for tunnel traffic", cmdNAT},
 	{"qos", "traffic prioritization and queuing order", cmdQoS},
+	{"ipv6ra", "IPv6 router advertisements \u2014 announce this node as a router on a LAN, with DNS", cmdIPv6RA},
 	{"shaping", "rate limiting per peer or network (the flat form is \"bandwidth\"/\"bw\")", cmdBandwidth},
 	{"routes", "additional subnets redistributed across the mesh", cmdRoute},
 	{"bgp", "BGP and BFD configuration, applied to FRR", cmdTrafficBGP},
@@ -275,6 +276,7 @@ var infoGroup = []groupLeaf{
 // pages. Implementations are in cli_system.go.
 var systemGroup = []groupLeaf{
 	{"upgrade", "check and apply a new gravinet binary on this node; local only", cmdUpgrade},
+	{"interfaces", "this host's network interfaces, addresses and default gateways (read-only)", cmdSystemInterfaces},
 	{"resolver", "this host's hostname and default DNS servers", cmdSystemResolver},
 	{"time", "this host's clock, timezone, and NTP synchronization", cmdSystemTime},
 	{"snmp", "read-only SNMPv2c monitoring agent", cmdSystemSNMP},
