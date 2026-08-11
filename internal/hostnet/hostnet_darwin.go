@@ -17,7 +17,14 @@ func detect() *Backend {
 	if _, err := exec.LookPath("networksetup"); err != nil {
 		return nil
 	}
-	return &Backend{Name: "networksetup", Persist: persistNetworksetup}
+	// networksetup applies and persists in one step, so there is nothing for
+	// Reapply to do beyond succeeding — a DHCP lease is already being sought
+	// by the time Persist returns.
+	return &Backend{
+		Name:    "networksetup",
+		Persist: persistNetworksetup,
+		Reapply: func(Spec) error { return nil },
+	}
 }
 
 func persistNetworksetup(s Spec) error {
@@ -25,8 +32,14 @@ func persistNetworksetup(s Spec) error {
 	if err != nil {
 		return err
 	}
-	v4, v6 := v4v6(s.Addrs)
-	if len(v4) > 0 {
+	mode4, mode6 := s.Mode4.Or(ModeStatic), s.Mode6.Or(ModeStatic)
+	v4, v6 := v4v6(s.StaticAddrs(s.Addrs))
+
+	if mode4 == ModeDHCP {
+		if out, err := exec.Command("networksetup", "-setdhcp", svc).CombinedOutput(); err != nil {
+			return fmt.Errorf("networksetup -setdhcp: %v (%s)", err, strings.TrimSpace(string(out)))
+		}
+	} else if len(v4) > 0 {
 		args := []string{"-setmanual", svc, v4[0].Addr().String(), dottedMask(v4[0])}
 		if s.GW4.IsValid() {
 			args = append(args, s.GW4.String())
@@ -35,7 +48,29 @@ func persistNetworksetup(s Spec) error {
 			return fmt.Errorf("networksetup -setmanual: %v (%s)", err, strings.TrimSpace(string(out)))
 		}
 	}
-	if len(v6) > 0 {
+
+	// macOS is the one platform that does not separate DHCPv6 from SLAAC.
+	// -setv6automatic is "configure IPv6 from the network", and whether that
+	// ends up being autoconfiguration or DHCPv6 is decided by the flags in the
+	// router's advertisement, not here.
+	//
+	// Both modes map onto it rather than dhcp6 being refused, because unlike
+	// on the BSDs it does work: macOS has a DHCPv6 client and will use it when
+	// the RA asks for one. What an operator does not get here is the ability to
+	// insist on one over the other, which is the platform's limit and not
+	// something a wrapper can invent.
+	//
+	// A static family with no addresses is left alone rather than switched
+	// off. -setv6off would be the symmetric thing to do and would break every
+	// record written before this release: those carry no mode, which reads as
+	// static, and most of them were an operator setting an IPv4 address on a
+	// host whose IPv6 was working fine without gravinet's involvement.
+	switch {
+	case mode6 == ModeSLAAC || mode6 == ModeDHCP6:
+		if out, err := exec.Command("networksetup", "-setv6automatic", svc).CombinedOutput(); err != nil {
+			return fmt.Errorf("networksetup -setv6automatic: %v (%s)", err, strings.TrimSpace(string(out)))
+		}
+	case len(v6) > 0:
 		args := []string{"-setv6manual", svc, v6[0].Addr().String(), itoa(v6[0].Bits())}
 		if s.GW6.IsValid() {
 			args = append(args, s.GW6.String())

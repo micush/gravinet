@@ -19,10 +19,25 @@ func detect() *Backend {
 }
 
 func persistHostnameIf(s Spec) error {
+	mode4, mode6 := s.Mode4.Or(ModeStatic), s.Mode6.Or(ModeStatic)
+	if mode6 == ModeDHCP6 {
+		return errNoDHCPv6("OpenBSD", "use slaac, which is what an OpenBSD host on a v6 network normally wants")
+	}
 	path := "/etc/hostname." + s.Iface
 	var lines []string
 	lines = append(lines, Marker)
-	for _, p := range s.Addrs {
+	// OpenBSD spells both non-static modes "autoconf", per family: `inet
+	// autoconf` runs dhcpleased, `inet6 autoconf` turns on RA handling and
+	// slaacd. The two are independent lines in the same file, which is exactly
+	// the per-family split this feature is built around — this backend needed
+	// the least persuading of any of them.
+	if mode4 == ModeDHCP {
+		lines = append(lines, "inet autoconf")
+	}
+	if mode6 == ModeSLAAC {
+		lines = append(lines, "inet6 autoconf")
+	}
+	for _, p := range s.StaticAddrs(s.Addrs) {
 		fam := "inet"
 		if p.Addr().Is6() {
 			fam = "inet6"
@@ -37,12 +52,14 @@ func persistHostnameIf(s Spec) error {
 		return err
 	}
 	// mygate carries both families, one per line, and is not per-interface —
-	// so it is only rewritten when a gateway was actually given.
+	// so it is only rewritten when a gateway was actually given. A non-static
+	// family never has one: the lease or the advertisement carries the route,
+	// and a line here would compete with it on every boot.
 	var gws []string
-	if s.GW4.IsValid() {
+	if s.GW4.IsValid() && mode4 == ModeStatic {
 		gws = append(gws, s.GW4.String())
 	}
-	if s.GW6.IsValid() {
+	if s.GW6.IsValid() && mode6 == ModeStatic {
 		gws = append(gws, s.GW6.String())
 	}
 	if len(gws) == 0 {

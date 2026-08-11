@@ -2,6 +2,232 @@
 
 ---
 
+## v872 — 2026-08-11
+
+**Each address family on `System › Interfaces` now has its own source: IPv4 is static or dhcp, IPv6 is static, dhcp6 or slaac. A static IPv4 address alongside SLAAC IPv6 on one interface is expressible, because that is how hosts are actually deployed.**
+
+This closes the gap v871 named and declined to close.
+
+### Per family, not per interface
+
+A single per-interface mode would have been less code and unable to describe the ordinary case. Every backend expresses the two families separately, and the pairing an operator most often wants — a pinned IPv4 address for something that has to be reachable at a known address, IPv6 left to the router — needs them independent. So `Mode4` and `Mode6` are separate throughout, and every field that could differ per family is read through them: `Addrs` is filtered by `StaticAddrs`, `Prune` only ever prunes a static family, and a gateway is only written under static.
+
+That last one is the subtle half. Pruning across both families on an interface with a static IPv4 address and SLAAC IPv6 would delete every autoconfigured v6 address on it, seconds after the operator asked for them.
+
+### Where the IPv6 split falls
+
+The three v6 modes land on two kernel knobs, and the reason they land cleanly is that DHCPv6 and SLAAC do not differ in whether router advertisements are honoured. A v6 host takes its default route from the RA either way — a DHCPv6 server does not supply one — so both non-static modes accept RAs and differ only in whether an address is derived from the advertised prefix. On Linux that is exactly `accept_ra` and `autoconf`; on Windows `routerdiscovery` and `managedaddress`.
+
+The BSDs cannot draw that line: `accept_rtadv` turns RA handling and prefix autoconfiguration on together. This is consistent rather than a hole, because neither BSD ships a DHCPv6 client for the other half of `dhcp6` anyway, and the persist backends refuse that mode outright instead of quietly handing the operator SLAAC and letting them believe it was DHCPv6.
+
+### Empty means static
+
+`host_interfaces` records written before this release have no mode field and exist only because an operator set a static address through gravinet. So an absent mode reads as static, which is what those records have always meant, and the fields are `omitempty`, so an untouched config still serializes byte for byte as it did.
+
+There is one asymmetry, and it is deliberate: an absent mode arriving in an *update* means "this edit did not mention it" and carries the stored value forward. Collapsing the two readings would turn every MTU edit into a switch back to static — taking an interface off DHCP because someone changed 1500 to 1400.
+
+### Reapply, and why Apply could not do it
+
+An IPv6 mode is kernel behaviour and takes effect the moment `Apply` writes the sysctls. An IPv4 lease is not: it needs a client daemon, which belongs to whichever of NetworkManager, netplan, networkd or ifupdown manages the host. Spawning `dhclient` here would put a second, unmanaged DHCP client on a host that already has one.
+
+So `Backend` gained `Reapply` — `nmcli device reapply`, `networkctl reconfigure` — asked to run only after the configuration is written. Where a backend has no per-interface reload, `ErrNoReapply` is reported as itself rather than escalated to `netplan apply`, which reconfigures every interface on the host: bouncing links that had nothing to do with the edit is not a thing to do on the operator's behalf without telling them. The message says the mode is written and waiting.
+
+### Refused rather than dropped
+
+A static address under a non-static mode, and a gateway under one, are both rejected at validation. Neither would ever be applied by anything, and silently discarding something an operator typed is how a page comes to disagree with the interface it describes. The family vocabularies are disjoint for the same reason: `slaac` submitted as an IPv4 mode is not a typo to tolerate, and the error names the family the word belongs to.
+
+### Tests
+
+The implementation arrived without any, and with `internal/webadmin`'s suite not compiling — four callsites still passing seven arguments to a `buildHostSpec` that now takes a `hostEdit`. Fixed, and covered:
+
+- `internal/hostnet/mode_test.go`: the unset-is-static rule, the RA/autoconf table for all three v6 modes, the invariant that nothing autoconfigures without accepting RAs, cross-family mode spellings, and `StaticAddrs` on a mixed-mode interface in both directions.
+- `TestBackendsSpellTheModes`: netplan, networkd and ifupdown under full DHCP, plus all four combinations of networkd's single folded `DHCP=` key — including `dhcp`/`slaac`, where the v6 half must not count as DHCP.
+- `TestStaticV4WithSLAACV6`: the pairing this release exists for, through all four Linux backends.
+- `TestNMArgsModes`: NM's vocabulary does not line up with gravinet's — `auto` is DHCP for IPv4 but SLAAC for IPv6, and NM's `dhcp` exists only for IPv6. A mapping that assumed the words matched would give an operator who picked DHCPv6 addresses from the wrong place. Also that a non-static family's stale addresses and gateway are cleared, since an address left in an NM profile under method auto is applied alongside the lease at the next boot.
+- `TestUnsetModesAreNotEncoded`, `TestModesRefuseWhatCannotApply`, `TestPartialUpdateKeepsTheStoredMode` in `internal/config`.
+
+`TestApplyAndRecordWarningWording` asserted "The address is applied, but " and now asserts "The change is applied, but ". The wording changed with the feature and the assertion was the stale half — this page edits modes now, and a mode switch that half-succeeded is the case most in need of that warning.
+
+### The page
+
+The hint gained the two vocabularies, that the pairing is ordinary, and that under anything but static there is nothing to type. Which backend runs the DHCP client stays gravinet's problem, per v860.
+
+### Verified
+
+Builds clean for linux, freebsd, darwin, openbsd, windows. `go vet` clean on all five. `gofmt` clean on every file touched — the six pre-existing unformatted files in `internal/tun`, `internal/netfilter` and `internal/resolver` are still left alone. `internal/hostnet`, `internal/config`, `internal/webadmin` and `cmd/gravinet` pass in full.
+
+### Not verified
+
+Nothing here has changed an address on a running host. No DHCP client has been started or stopped by gravinet, no sysctl written outside a test, no `nmcli device reapply` or `networkctl reconfigure` executed, and no interface has been observed acquiring a lease after a mode switch. Every backend's spelling of every mode is from that tool's documentation, checked only for being the string intended.
+
+The reconciler's new behaviour is the least exercised part and the most consequential: a record with a non-static family now writes the host's boot-time configuration on every reload, which is the one file a host cannot afford to have go wrong. It has never run.
+
+Two things follow that are worth stating plainly. Switching a family to DHCP releases the address gravinet put there, so doing it to the interface carrying the session will drop it and there is no lease yet to replace it — the page says the session will drop, but not that it may not come back. And on a host whose backend has no per-interface reload, an interface switched to `dhcp` sits with no IPv4 address until it is brought down and up or the host reboots.
+
+### Provenance
+
+The implementation was already present in the working tree when this release was assembled, and did not come from the v870 tarball. What is mine is the test coverage, the compile fix, the hint, and this entry.
+
+---
+
+## v871 — 2026-08-11
+
+**On a NetworkManager host, clearing one address family on `System › Interfaces` produced an nmcli command NM rejected — so the address applied live and quietly did not survive a reboot.**
+
+Found while answering a question about switching an interface between DHCP and static, which this page cannot do at all. It does not, and the asking exposed the adjacent case that it does badly.
+
+### The bug
+
+`persistNM` built its argv as a flat slice with the methods pre-filled, then patched them by index when a family had no addresses:
+
+```go
+args := []string{"connection", "modify", con,
+    "ipv4.method", "manual", "ipv6.method", "manual"}
+...
+if len(v4) == 0 { args[3] = "disabled" }
+if len(v6) == 0 { args[5] = "disabled" }
+```
+
+Indices 3 and 5 are the *property names*, not their values — those are 4 and 6. So an interface with only IPv6 addresses got:
+
+```
+nmcli connection modify <name> disabled manual ipv6.method manual ipv4.addresses  ...
+```
+
+NM rejects that, `Persist` returns the error, and the operator is told the change will not survive a reboot. Only the wrong half of the message: the live change and the config record had both already succeeded, so nothing on the page looked wrong and the warning read as a quirk of an unusual host rather than a bug here. On the next reboot the interface came up on whatever NM still had.
+
+Both families addressed — the ordinary case — never reached the patch, which is why this survived from v852 to now.
+
+### Why it was there to survive
+
+Every other backend in `hostnet` is a render function returning a string, and each has a test over its output. NM is the one that assembles an argv and shells out, and it was the one with no test. Positional writes into a flat argv are the specific hazard: the correct index is a fact about a literal several lines up, and getting it wrong still compiles.
+
+So the fix is not just the two numbers. `nmModifyArgs` is now a separate function that decides the methods *before* building the slice and never writes back into it, and `TestNMArgsPairing` checks it as key/value pairs rather than by substring — a `strings.Contains` over the joined argv would have passed on the broken command, since every string in it was one that belonged there.
+
+### Not a fix for
+
+The page still has no notion of addressing mode. There is no DHCP, DHCPv6 or SLAAC setting on `System › Interfaces`, in `gravinet system interfaces`, or in `config.HostIface`, and saving an address pins the interface to static on every backend but Windows. Coming back is not possible through gravinet: the host's own tool has to be used, *and* the interface has to be removed from `host_interfaces` by hand, because `reconcileHostInterfaces` re-adds the recorded addresses at every startup and reload and nothing in the UI or CLI drops an entry. That is a real gap and this release does not close it.
+
+*(Closed in v872, which adds per-family modes. The paragraph above describes v871 and is left as written.)*
+
+### Verified
+
+Builds clean for linux, freebsd, darwin, openbsd, windows. `go vet` clean, and `gofmt` clean on the two files touched — six others in `internal/tun`, `internal/netfilter` and `internal/resolver` were already unformatted before this release and are left alone rather than reformatted in a bug-fix commit. `internal/hostnet`, `internal/webadmin`, `internal/config` and `cmd/gravinet` pass in full. `TestNMArgsPairing` was checked against the old code and fails on it, naming the malformed command.
+
+### Not verified
+
+No nmcli has run. That the corrected argv is well-formed is from nmcli's documentation and from the shape of the command, not from NM accepting it — the same standing gap as the rest of `hostnet`, where no persistence backend has executed on the platform it targets. What is now certain is only that the old command could not have been accepted by anything.
+
+---
+
+## v870 — 2026-08-11
+
+**Console accounts are now part of the configuration: a restored backup recreates them, locked. Names and expiry only — no credential of any kind is stored.**
+
+The last and worst of the gaps found by auditing every handler that changes something without writing config. `System > Users` drove `useradd`/`passwd` directly and recorded nothing, so restoring a backup onto replacement hardware left a node **nobody could sign in to** — these are the OS accounts the web admin authenticates against. Unlike a wrong clock or missing resolver, you cannot notice and fix that from the thing you would fix it with.
+
+### Option 1, and what it costs
+
+Three designs were on the table. This is the middle one, chosen deliberately: the roster travels, the credentials do not.
+
+A configuration backup is downloaded through a browser, mailed around, and pasted into issue trackers. Password hashes have no business in it, even though gravinet's own `auth_mode=local` credentials already live in config and there was precedent for going further.
+
+So a restored node comes back with its accounts **present, named, in the gravinet group, with their expiry intact, and no password set** — locked, in shadow(5) terms. Someone sets a password once from the console. That is materially less convenient than a complete restore and materially safer, and it is the difference between "log in at the console and set a password" and "the node is unreachable and the accounts do not exist".
+
+`service.EnsureSystemUser` is the new path. Every platform's user-creation tool already leaves a brand-new account with no usable password, so "locked" needs no extra step — it is what not setting one gives you.
+
+### It never deletes
+
+An account on the host that the configuration does not mention is somebody else's: a system account, one added by hand, one from before gravinet managed users. Removing it because a backup omitted it is a purge, not a restore. The reconciler only ever creates and updates expiry.
+
+Deleting a user through the page does remove it from the roster, so it will not come back on the next restore — that is a recorded decision, not an omission.
+
+### Tests
+
+`TestHostUsersCarryNoCredentials` asserts the encoded form contains the name and expiry and does not contain the strings `password`, `hash`, `secret`, `shadow` or `crypt`. Checked against the JSON rather than the struct on purpose: the struct is the thing that might grow a field later, and the encoding is where that would show.
+
+Also: an account with no expiry omits the field rather than storing 0, so a permanent account and one expiring at the epoch stay distinguishable.
+
+### Verified
+
+Builds clean for linux, freebsd, darwin, openbsd, windows. `go vet` and `gofmt` clean. `internal/config`, `internal/webadmin`, `internal/service` and `cmd/gravinet` pass in full.
+
+### The audit that produced this
+
+Every route in the admin API was checked for whether it persists to config. The remaining answers: TLS cert and log level already did; upgrade-source spools a temp file it immediately deletes, so there is nothing to restore. With this release, **nothing an operator can change through the web admin is lost on restore**.
+
+### Not verified
+
+`EnsureSystemUser` has never run. No account has been created by it on any platform, and the claim that a passwordless `useradd` leaves an account locked is from shadow(5) and each platform's tool, not from an account observed refusing a login here.
+
+The reconciler as a whole still has not run — same as v869. And settings changed before these releases were not captured, so a backup only carries what has been touched since upgrading.
+
+---
+
+## v869 — 2026-08-11
+
+**System › Syslog, Time and Resolver settings are now part of gravinet's configuration, so a restored backup brings them back.**
+
+Asked directly: are these restored? Three of the five were not. SNMP and L2 Disco already lived in `config.json` and travelled with a backup; syslog forwarding, timezone/NTP, and hostname/DNS did not — their handlers never touched `mutateConfig` at all, so they applied to the host and were forgotten. Restoring onto replacement hardware brought back every mesh setting and left the node with the wrong clock, the wrong resolvers and no log forwarding.
+
+`Config.HostSettings` now carries them, and `reconcileHostSettings` applies them at startup and on every reload — the same shape as `HostInterfaces`, and for the same reason: without the reconcile the config would describe settings nothing ever applied.
+
+### Opt-in, per group
+
+Each of the three is a separate pointer, and nil means gravinet does not manage it. A host whose DNS comes from DHCP, or whose clock is managed by something else, is untouched unless an operator has actually changed that setting through gravinet. A reconciler that read an absent group as "set it to empty" would strip a host's resolvers on the first reload after an upgrade.
+
+The pointer is also what makes the group distinguishable from a meaningful empty value: an empty syslog target list means "forward nowhere", which is a setting, not an absence.
+
+### Three deliberate asymmetries
+
+**The clock is never stored.** Only how the host keeps it — timezone and NTP. Restoring a snapshot must not set the system time to whenever the snapshot was taken, which would be worse than anything it fixed.
+
+**NTP is applied even when its server list is empty**, because "NTP off" is a setting an operator can mean, and skipping it would make disabling NTP unrestorable.
+
+**DNS is not.** An empty resolver list is far more likely to mean "gravinet only ever set the hostname here" than "remove every nameserver", and guessing wrong takes name resolution off the host.
+
+**Recording failures do not fail the request.** The setting is already applied and working; the cost of a failed record is that tomorrow's backup lacks it, which is a log line rather than an error on a screen where nothing went wrong.
+
+### A bug the tests caught
+
+`HostSettings` started as a value field with `omitempty`, which does nothing for structs — every config file on every host would have gained a `"host_settings":{}`. Caught by the round-trip test asserting an untouched config serializes unchanged, and fixed by making the field a pointer.
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `internal/config`, `internal/webadmin` and `cmd/gravinet` pass in full, including the round trip, the per-group optionality, the empty-list-is-a-setting case, and validation of ports, protocols and DNS addresses.
+
+### Not verified
+
+**The reconciler has never run.** Not at startup, not on a reload, and not as part of a restore — which is the point of the release. It calls the same `service.SetHost*` functions the web handlers already use successfully, so the applying half is well-worn; the reconciling half is not.
+
+Nothing rendered in a browser, and no backup has been restored onto another node to watch these come back.
+
+---
+
+## v868 — 2026-08-11
+
+**Troubleshooting bundles now capture FRR's own state.**
+
+A bundle was collected to diagnose the redistribute-connected picker showing "none available" on a node whose kernel plainly had a connected route to offer — `192.168.122.0/24` on eth0, with `proto bgp` routes installed alongside it, so FRR was demonstrably running and working.
+
+The bundle could not answer the question. It captures the kernel routing table, which shows what FRR *installed*; it captured nothing of what FRR *knows*. Those disagreeing is precisely the interesting case, and every feature gravinet builds on FRR — the redistribute pickers, the neighbor table, AutoBGP — is undiagnosable from a bundle that asks FRR nothing.
+
+A new **FRR / BGP** section runs, when vtysh is present: `show ip route connected json` and its v6 twin (what the connected picker reads), `show ip route static json`, `show interface brief` (whether zebra sees the interface at all), `show bgp summary`, and `show running-config` (what gravinet actually rendered, versus what it meant to).
+
+Skipped silently when vtysh is absent, like every other tool in the bundle. A command that fails or times out is recorded as such rather than omitted — vtysh being wedged is itself a finding, and an absent section would look identical to a node without FRR.
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `internal/webadmin` passes in full.
+
+### Not verified
+
+No bundle has been generated from a host with FRR installed, so the section has never actually run. The commands are the ones gravinet already issues elsewhere in this package (`showIPRouteConnected` uses the first two verbatim), which is the reason to expect them to work rather than evidence that they do.
+
+This does not fix the reported symptom — it makes the next report diagnosable. The cause is still open: on that node the picker should have offered `192.168.122.0/24`, and gravinet is discarding it somewhere between vtysh and the page.
+
+---
+
 ## v867 — 2026-08-10
 
 **AutoBGP and the BGP enable switch are now genuinely independent. Reverses v864, which coupled them the wrong way round.**

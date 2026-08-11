@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"net/netip"
 
 	"gravinet/internal/config"
@@ -36,7 +37,7 @@ func reconcileHostInterfaces(cfg *config.Config) {
 		// else is not, and doing it here stripped addressing on every
 		// reload — which then also cost FRR the connected routes derived
 		// from it.
-		spec := hostnet.Spec{Iface: h.Iface}
+		spec := hostnet.Spec{Iface: h.Iface, Mode4: h.Mode4, Mode6: h.Mode6}
 		bad := false
 		for _, a := range h.Addrs {
 			p, err := netip.ParsePrefix(a)
@@ -63,6 +64,26 @@ func reconcileHostInterfaces(cfg *config.Config) {
 		if err != nil {
 			logx.Errorf("host interface %s: %v", h.Iface, err)
 			continue
+		}
+		// A record with a non-static family is also written to the host's own
+		// network configuration here, which the reconciler does for nothing
+		// else. The reason is narrow: a restore writes gravinet's config and
+		// reloads, and everything else in a record is something Apply above has
+		// just made true on the running interface. A DHCP lease is not — it
+		// needs the backend's client — so without this a restored node would
+		// report dhcp on an interface that had never asked for an address.
+		//
+		// Static-only records take the path they always have, untouched. That
+		// is deliberate: this runs on every reload, and rewriting an
+		// interface's boot-time configuration each time for a change that has
+		// already been applied is churn on the one file a host cannot afford
+		// to have go wrong.
+		if !h.Mode4.IsStatic() || !h.Mode6.IsStatic() {
+			if _, err := hostnet.Persist(spec); err != nil {
+				logx.Errorf("host interface %s: addressing mode applied but not written to this host's network configuration: %v", h.Iface, err)
+			} else if err := hostnet.Reapply(spec); err != nil && !errors.Is(err, hostnet.ErrNoReapply) {
+				logx.Errorf("host interface %s: could not ask the network configuration to reconfigure it: %v", h.Iface, err)
+			}
 		}
 		// Quiet when there is nothing to do, which is the usual case on an
 		// ordinary reload — this runs on every one of them, and logging a

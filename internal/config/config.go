@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"gravinet/internal/hostnet"
 	"gravinet/internal/protocol"
 )
 
@@ -423,6 +424,20 @@ type Config struct {
 	// section that quietly claimed every NIC would be a much larger promise
 	// than the one being made.
 	HostInterfaces []HostIface `json:"host_interfaces,omitempty"`
+	// HostSettings is the rest of this host's own configuration that gravinet
+	// edits on an operator's behalf — syslog forwarding, timezone and NTP,
+	// hostname and DNS. It is here for the same reason HostInterfaces is:
+	// without it, a restored backup brought back every mesh setting and left
+	// the node with the wrong clock, the wrong resolvers and no log
+	// forwarding, which is not what "restore my configuration" means.
+	//
+	// Every field is opt-in. Each is populated only when an operator changes
+	// that setting through gravinet, and an unset field is not reconciled and
+	// not touched — a host whose DNS is managed by DHCP keeps it.
+	// A pointer, because encoding/json's omitempty does not apply to structs:
+	// a value field would write "host_settings":{} into every config file on
+	// this host, changing files nobody asked to change.
+	HostSettings *HostSettings `json:"host_settings,omitempty"`
 
 	// SNMP runs a read-only SNMPv2c agent (net-snmp's snmpd) on this host —
 	// System > SNMP. It's node-global, like BGP: one agent per host, not
@@ -3185,9 +3200,28 @@ func (i RAInterface) Validate() error {
 // HostIface is the addressing gravinet maintains for one host interface.
 type HostIface struct {
 	Iface string `json:"iface"`
+	// Mode4 and Mode6 are where each family's addresses come from: static or
+	// dhcp for IPv4, static, dhcp6 or slaac for IPv6. See hostnet.Mode.
+	//
+	// Independent per family, because a static IPv4 address alongside SLAAC
+	// IPv6 on one interface is an ordinary deployment rather than a corner
+	// case, and every backend expresses the two separately.
+	//
+	// Empty reads as static and is omitted from the encoding. Both matter for
+	// compatibility: a record written before this release exists only because
+	// an operator set a static address, so absent has to mean static, and
+	// omitting it is what keeps an untouched config serializing byte for byte
+	// as it did.
+	Mode4 hostnet.Mode `json:"mode4,omitempty"`
+	Mode6 hostnet.Mode `json:"mode6,omitempty"`
 	// Addrs are the interface's global addresses in CIDR form. Empty means
 	// "no static addresses", which is a thing an operator can mean, and is
 	// applied as such rather than read as "leave alone".
+	//
+	// Only ever addresses of a family in static mode. A leased or
+	// autoconfigured address recorded here would be reapplied as a static one
+	// at the next reload, pinning an interface to whatever it happened to hold
+	// when someone edited its MTU.
 	Addrs []string `json:"addrs,omitempty"`
 	// GW4/GW6 are optional default gateways. Empty means "do not set one",
 	// never "remove the existing one" — a default route belongs to the host
@@ -3206,6 +3240,12 @@ func (h HostIface) Validate() error {
 	if strings.TrimSpace(h.Iface) == "" {
 		return fmt.Errorf("interface name is required")
 	}
+	if err := hostnet.ValidMode4(h.Mode4); err != nil {
+		return err
+	}
+	if err := hostnet.ValidMode6(h.Mode6); err != nil {
+		return err
+	}
 	for _, a := range h.Addrs {
 		p, err := netip.ParsePrefix(strings.TrimSpace(a))
 		if err != nil {
@@ -3213,6 +3253,17 @@ func (h HostIface) Validate() error {
 		}
 		if p.Addr().IsLinkLocalUnicast() || p.Addr().IsLoopback() {
 			return fmt.Errorf("address %q: link-local and loopback addresses are managed by the kernel", a)
+		}
+		// A static address under a non-static mode would never be applied by
+		// anything. Refused rather than dropped on the way through: silently
+		// discarding an address someone typed is how a page comes to disagree
+		// with the interface it describes.
+		mode, fam := h.Mode4, "IPv4"
+		if p.Addr().Is6() {
+			mode, fam = h.Mode6, "IPv6"
+		}
+		if !mode.IsStatic() {
+			return fmt.Errorf("address %q cannot be set while %s is in %s mode: the address will come from the network", a, fam, string(mode))
 		}
 	}
 	// 576 is the IPv4 minimum a host must accept; 9216 covers jumbo frames
@@ -3222,7 +3273,13 @@ func (h HostIface) Validate() error {
 	if h.MTU != 0 && (h.MTU < 576 || h.MTU > 9216) {
 		return fmt.Errorf("mtu %d: must be between 576 and 9216, or 0 to leave it unmanaged", h.MTU)
 	}
-	for _, g := range []struct{ v, name string }{{h.GW4, "gw4"}, {h.GW6, "gw6"}} {
+	for _, g := range []struct {
+		v, name, fam string
+		mode         hostnet.Mode
+	}{
+		{h.GW4, "gw4", "IPv4", h.Mode4},
+		{h.GW6, "gw6", "IPv6", h.Mode6},
+	} {
 		if strings.TrimSpace(g.v) == "" {
 			continue
 		}
@@ -3232,6 +3289,15 @@ func (h HostIface) Validate() error {
 		}
 		if (g.name == "gw4") != a.Is4() {
 			return fmt.Errorf("%s %q is the wrong address family", g.name, g.v)
+		}
+		// A default route arrives with the lease under DHCP and in the router
+		// advertisement under DHCPv6 or SLAAC — a DHCPv6 server does not supply
+		// one, which is why both v6 modes accept RAs. A gateway configured
+		// alongside would be a second default route competing with the one the
+		// network just handed over, and which wins is not something an operator
+		// can reason about from this page.
+		if !g.mode.IsStatic() {
+			return fmt.Errorf("%s cannot be set while %s is in %s mode: the default route comes with the address", g.name, g.fam, string(g.mode))
 		}
 	}
 	return nil
@@ -3266,9 +3332,123 @@ func (c *Config) SetHostIface(h HostIface) error {
 		if h.MTU == 0 {
 			h.MTU = cur.MTU
 		}
+		// An unset mode here means "this update did not mention it", not
+		// "static" — the same as the fields above, and the opposite of what an
+		// unset mode means when the record is *read*. The distinction is the
+		// difference between a stored record whose mode predates modes and an
+		// incoming update that only touched the MTU, and collapsing the two
+		// would turn every MTU edit into a switch back to static.
+		if h.Mode4 == "" {
+			h.Mode4 = cur.Mode4
+		}
+		if h.Mode6 == "" {
+			h.Mode6 = cur.Mode6
+		}
 		*cur = h
 		return nil
 	}
 	c.HostInterfaces = append(c.HostInterfaces, h)
+	return nil
+}
+
+// HostSettings is host configuration gravinet maintains outside the mesh.
+//
+// Each group is separately opt-in, and the zero value of each means "gravinet
+// does not manage this". That distinction is the whole design: a reconciler
+// that treated an empty field as "set it to empty" would wipe a host's DNS on
+// the first reload after an upgrade.
+type HostSettings struct {
+	Syslog *HostSyslog `json:"syslog,omitempty"`
+	// Users are the console accounts gravinet has been asked to maintain.
+	//
+	// Names and expiry only — never passwords or hashes. A configuration
+	// backup is downloaded through a browser and mailed around, and password
+	// material has no business travelling in it. A restored node therefore
+	// comes back with its accounts present but locked, and someone sets a
+	// password once from the console.
+	//
+	// nil means gravinet manages no accounts here; an empty slice means it
+	// manages the set and the set is empty. Neither ever deletes anything —
+	// see service.EnsureSystemUser.
+	Users    []HostUser    `json:"users,omitempty"`
+	Time     *HostTime     `json:"time,omitempty"`
+	Resolver *HostResolver `json:"resolver,omitempty"`
+}
+
+// HostSyslogTarget is one remote syslog collector.
+type HostSyslogTarget struct {
+	Host     string `json:"host"`
+	Port     int    `json:"port,omitempty"`
+	Proto    string `json:"proto,omitempty"` // "udp" or "tcp"
+	Disabled bool   `json:"disabled,omitempty"`
+}
+
+// HostSyslog is the forwarding configuration as a whole. An empty Targets
+// list is meaningful — it means "forward nowhere" — which is why the
+// containing pointer, not the slice, is what says whether gravinet manages
+// this at all.
+type HostSyslog struct {
+	Targets []HostSyslogTarget `json:"targets"`
+}
+
+// HostTime is the host clock configuration. The clock itself is deliberately
+// not stored: restoring a backup must not set the system time to whenever the
+// backup was taken, which would be worse than any problem it solved.
+type HostTime struct {
+	Timezone   string   `json:"timezone,omitempty"`
+	NTPEnabled bool     `json:"ntp_enabled"`
+	NTPServers []string `json:"ntp_servers,omitempty"`
+}
+
+// HostResolver is the host's name configuration.
+//
+// Hostname is separate from Config.Hostname, which is the name advertised to
+// peers. This one is the operating system's, and restoring it onto different
+// hardware is usually what an operator wants — it is the node's identity in
+// logs, certificates and everything else that is not the mesh.
+type HostResolver struct {
+	Hostname     string   `json:"hostname,omitempty"`
+	DNSServers   []string `json:"dns_servers,omitempty"`
+	SearchDomain string   `json:"search_domain,omitempty"`
+}
+
+// HostUser is one console account gravinet recreates on restore. Deliberately
+// carries no credential of any kind.
+type HostUser struct {
+	Name string `json:"name"`
+	// ExpiresUnix is the account expiry, 0 for none. Worth carrying because
+	// an account restored without its expiry is a temporary account that has
+	// quietly become permanent.
+	ExpiresUnix int64 `json:"expires_unix,omitempty"`
+}
+
+// Validate checks the host settings, so a bad value fails on save rather than
+// on the next reload of some unrelated change.
+func (h HostSettings) Validate() error {
+	if h.Syslog != nil {
+		for _, t := range h.Syslog.Targets {
+			if strings.TrimSpace(t.Host) == "" {
+				return fmt.Errorf("syslog target: host is required")
+			}
+			if t.Port < 0 || t.Port > 65535 {
+				return fmt.Errorf("syslog target %s: port %d out of range", t.Host, t.Port)
+			}
+			if p := strings.ToLower(t.Proto); p != "" && p != "udp" && p != "tcp" {
+				return fmt.Errorf("syslog target %s: proto %q must be udp or tcp", t.Host, t.Proto)
+			}
+		}
+	}
+	for _, u := range h.Users {
+		if strings.TrimSpace(u.Name) == "" {
+			return fmt.Errorf("console account: name is required")
+		}
+	}
+	if h.Resolver != nil {
+		for _, d := range h.Resolver.DNSServers {
+			if _, err := netip.ParseAddr(strings.TrimSpace(d)); err != nil {
+				return fmt.Errorf("dns server %q: %v", d, err)
+			}
+		}
+	}
 	return nil
 }

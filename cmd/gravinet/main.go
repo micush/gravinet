@@ -48,7 +48,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "867"
+	version = "872"
 	commit  = "none"
 )
 
@@ -430,6 +430,7 @@ func cmdRun(args []string) {
 		// a network whose underlay address is one of these needs it in place
 		// before anything tries to bind or dial on it.
 		reconcileHostInterfaces(cfg)
+		reconcileHostSettings(cfg)
 
 		if cfg.UpgradeEnabled() {
 			// Read the state directory directly rather than creating it: this
@@ -1107,6 +1108,7 @@ func cmdRun(args []string) {
 			// node's own addresses back with it rather than describing
 			// addressing nothing ever applies.
 			reconcileHostInterfaces(newCfg)
+			reconcileHostSettings(newCfg)
 
 			overlays := overlaysOf(newCfg)
 			engine.SetManaged(newCfg.Managed)

@@ -179,7 +179,7 @@ func TestBuildHostSpecFillsTheUntouchedHalf(t *testing.T) {
 	srv.SetConfigPath(cfgPath)
 
 	// An addresses-only edit keeps the recorded gateway.
-	spec, err := buildHostSpec(srv, "eth1", "addrs", []string{"10.1.1.9/24"}, "", "", 0)
+	spec, err := buildHostSpec(srv, hostEdit{Iface: "eth1", Op: "addrs", Addrs: []string{"10.1.1.9/24"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,13 +191,13 @@ func TestBuildHostSpecFillsTheUntouchedHalf(t *testing.T) {
 	}
 
 	// Bad input is refused rather than silently coerced.
-	if _, err := buildHostSpec(srv, "eth1", "addrs", []string{"10.1.1.9"}, "", "", 0); err == nil {
+	if _, err := buildHostSpec(srv, hostEdit{Iface: "eth1", Op: "addrs", Addrs: []string{"10.1.1.9"}}); err == nil {
 		t.Error("an address with no prefix length should be refused")
 	}
-	if _, err := buildHostSpec(srv, "eth1", "gateway", nil, "fd00::1", "", 0); err == nil {
+	if _, err := buildHostSpec(srv, hostEdit{Iface: "eth1", Op: "gateway", GW4: "fd00::1"}); err == nil {
 		t.Error("an IPv6 address in the IPv4 gateway field should be refused")
 	}
-	if _, err := buildHostSpec(srv, "eth1", "nonsense", nil, "", "", 0); err == nil {
+	if _, err := buildHostSpec(srv, hostEdit{Iface: "eth1", Op: "nonsense"}); err == nil {
 		t.Error("an unknown op should be refused")
 	}
 }
@@ -262,7 +262,12 @@ func TestApplyAndRecordWarningWording(t *testing.T) {
 	for _, want := range []string{
 		"a restored backup will not bring it back",
 		"will not survive a reboot",
-		"The address is applied, but ",
+		// "The change is applied", not "The address is applied": this page now
+		// edits addressing modes too, and a mode switch that half-succeeded is
+		// the case most in need of the warning. Widened deliberately rather
+		// than by accident — the assertion is here to stop the wording drifting
+		// back to something that describes only half of what the page does.
+		"The change is applied, but ",
 	} {
 		if !strings.Contains(src, want) {
 			t.Errorf("warning wording missing %q", want)

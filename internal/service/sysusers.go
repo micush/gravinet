@@ -782,3 +782,53 @@ func parseWindowsNetUser(out string) (time.Time, bool) {
 	}
 	return time.Time{}, false
 }
+
+// EnsureSystemUser creates a console account without setting any password, and
+// puts it in the gravinet group. An account that already exists is left
+// entirely alone apart from its expiry.
+//
+// This is the restore path, and the missing password is the point. Every
+// platform's user-creation tool leaves a brand-new account with no usable
+// password — locked, in shadow(5) terms — so a restored node comes back with
+// its accounts present and named but unable to sign in until someone sets a
+// password from the console. That is deliberately weaker than a full restore:
+// a configuration backup is downloaded through a browser and mailed around,
+// and password material has no business travelling in it.
+//
+// It never deletes. An account on this host that is absent from the
+// configuration is somebody else's — a system account, one added by hand, one
+// from before gravinet managed users — and removing it because a backup did
+// not mention it is not a restore, it is a purge.
+func EnsureSystemUser(name string, expires time.Time) (bool, string) {
+	if err := validUsername(name); err != nil {
+		return false, err.Error()
+	}
+	if ok, hint := sysUsersCanManage(); !ok {
+		return false, hint
+	}
+	if ok, hint := EnsureGravinetGroup(); !ok {
+		return false, "the " + GravinetGroup + " group doesn't exist and couldn't be created: " + hint
+	}
+
+	existed := sysUserExists(name)
+	if !existed {
+		if ok, hint := createOSUser(name); !ok {
+			return false, hint
+		}
+	}
+	if ok, hint := addToGroup(name, GravinetGroup); !ok {
+		if !existed {
+			deleteOSUser(name)
+		}
+		return false, "account created but could not be added to the " + GravinetGroup + " group: " + hint
+	}
+	if !expires.IsZero() {
+		if ok, hint := SetSystemUserExpiry(name, expires); !ok {
+			return true, "account restored but its expiry could not be applied: " + hint
+		}
+	}
+	if existed {
+		return true, "user '" + name + "' already existed"
+	}
+	return true, "user '" + name + "' restored with no password set — it cannot sign in until one is set"
+}

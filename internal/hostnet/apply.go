@@ -71,10 +71,22 @@ func Apply(s Spec) (added, removed int, err error) {
 	if !safeIface(s.Iface) {
 		return 0, 0, fmt.Errorf("refusing to configure interface name %q", s.Iface)
 	}
+	// The mode goes first, and for one family it has to. Switching IPv6 to
+	// static means turning off RA acceptance and autoconfiguration; doing
+	// that after pruning would let the kernel put an autoconfigured address
+	// back between the two steps, on an interface that had just been told not
+	// to have one.
+	if err := applyMode(s); err != nil {
+		return 0, 0, err
+	}
+
 	want := map[netip.Prefix]bool{}
 	for _, p := range s.Addrs {
 		want[netip.PrefixFrom(p.Addr().Unmap(), p.Bits())] = true
 	}
+	// Read the interface after applyMode, not before: on a platform where the
+	// mode change itself sets an address, a snapshot taken first would be
+	// stale by the time it is compared against.
 	have, err := GlobalAddrs(s.Iface)
 	if err != nil {
 		return 0, 0, err
@@ -93,9 +105,31 @@ func Apply(s Spec) (added, removed int, err error) {
 		}
 		added++
 	}
+	// Abandoned static addresses go regardless of Prune, because the mode
+	// they belonged to no longer exists on this interface. Failing to remove
+	// one is not fatal: it may already be gone, and the family it belonged to
+	// is no longer gravinet's to account for.
+	for _, p := range s.Release {
+		p = netip.PrefixFrom(p.Addr().Unmap(), p.Bits())
+		if want[p] || !haveSet[p] {
+			continue
+		}
+		if err := delAddr(s.Iface, p); err != nil {
+			continue
+		}
+		removed++
+	}
 	if s.Prune {
 		for _, p := range have {
 			if want[p] {
+				continue
+			}
+			// Only a static family has an intended set to prune against.
+			// The addresses of a DHCP or SLAAC family come from a client or
+			// from a router advertisement, and deleting those on the
+			// strength of a list that was never about them would strip the
+			// addressing the operator had just asked for.
+			if !s.ModeFor(p.Addr()).IsStatic() {
 				continue
 			}
 			if err := delAddr(s.Iface, p); err != nil {
@@ -123,4 +157,28 @@ func Apply(s Spec) (added, removed int, err error) {
 		}
 	}
 	return added, removed, nil
+}
+
+// ModeFor picks the mode governing an address's family.
+func (s Spec) ModeFor(a netip.Addr) Mode {
+	if a.Is4() {
+		return s.Mode4.Or(ModeStatic)
+	}
+	return s.Mode6.Or(ModeStatic)
+}
+
+// StaticAddrs filters a prefix list to the families this spec manages
+// statically. Used where a caller has the interface's live addresses and needs
+// the subset that is gravinet's to record or reassert — a leased or
+// autoconfigured address must not be written into the configuration as a
+// static one, which is how an interface on DHCP comes back from a restore
+// pinned to whatever address it happened to hold.
+func (s Spec) StaticAddrs(in []netip.Prefix) []netip.Prefix {
+	var out []netip.Prefix
+	for _, p := range in {
+		if s.ModeFor(p.Addr()).IsStatic() {
+			out = append(out, p)
+		}
+	}
+	return out
 }

@@ -43,6 +43,8 @@ func (s *Server) handleSystemInterfaceEdit(w http.ResponseWriter, r *http.Reques
 		GW4   string   `json:"gw4"`
 		GW6   string   `json:"gw6"`
 		MTU   int      `json:"mtu"`
+		Mode4 string   `json:"mode4"`
+		Mode6 string   `json:"mode6"`
 	}
 	if !decode(w, r, &req) {
 		return
@@ -69,7 +71,12 @@ func (s *Server) handleSystemInterfaceEdit(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	spec, err := buildHostSpec(s, req.Iface, req.Op, req.Addrs, req.GW4, req.GW6, req.MTU)
+	spec, err := buildHostSpec(s, hostEdit{
+		Iface: req.Iface, Op: req.Op, Addrs: req.Addrs,
+		GW4: req.GW4, GW6: req.GW6, MTU: req.MTU,
+		Mode4: hostnet.Mode(strings.TrimSpace(req.Mode4)),
+		Mode6: hostnet.Mode(strings.TrimSpace(req.Mode6)),
+	})
 	var warning string
 	if err == nil {
 		warning, err = s.applyAndRecord(r, spec)
@@ -104,7 +111,10 @@ func (s *Server) applyAndRecord(r *http.Request, spec hostnet.Spec) (warning str
 		return "", err
 	}
 
-	rec := config.HostIface{Iface: spec.Iface, MTU: spec.MTU}
+	rec := config.HostIface{
+		Iface: spec.Iface, MTU: spec.MTU,
+		Mode4: spec.Mode4, Mode6: spec.Mode6,
+	}
 	for _, p := range spec.Addrs {
 		rec.Addrs = append(rec.Addrs, p.String())
 	}
@@ -119,33 +129,101 @@ func (s *Server) applyAndRecord(r *http.Request, spec hostnet.Spec) (warning str
 	if err := s.mutateConfig(r, func(cfg *config.Config) error { return cfg.SetHostIface(rec) }); err != nil {
 		problems = append(problems, "it could not be saved to gravinet's configuration, so a restored backup will not bring it back: "+err.Error())
 	}
+	persisted := true
 	if _, err := hostnet.Persist(spec); err != nil {
+		persisted = false
 		if errors.Is(err, hostnet.ErrNoBackend) {
 			problems = append(problems, "this host has no recognised network configuration, so the change will not survive a reboot")
 		} else {
 			problems = append(problems, "it could not be written to this host's network configuration, so it will not survive a reboot: "+err.Error())
 		}
 	}
+	// A DHCP family is the one case where writing the configuration is not
+	// enough to make the change real. Everything else on this page is a kernel
+	// or link setting gravinet has already made live; a lease has to be sought
+	// by a client daemon, which belongs to the backend. So the backend is asked
+	// to reconfigure the interface — and where it cannot do that for one
+	// interface alone, the operator is told the mode is written and waiting
+	// rather than having the whole host's networking bounced for them.
+	if persisted && (spec.Mode4 == hostnet.ModeDHCP || spec.Mode6 == hostnet.ModeDHCP6) {
+		if err := hostnet.Reapply(spec); err != nil {
+			if errors.Is(err, hostnet.ErrNoReapply) {
+				problems = append(problems, "this host's network configuration has no per-interface reload, so the interface will not ask for a lease until it is brought down and up again or the host reboots")
+			} else {
+				problems = append(problems, "the interface could not be reconfigured to ask for a lease: "+err.Error())
+			}
+		}
+	}
 	if len(problems) == 0 {
 		return "", nil
 	}
-	return "The address is applied, but " + strings.Join(problems, "; and ") + ".", nil
+	return "The change is applied, but " + strings.Join(problems, "; and ") + ".", nil
+}
+
+// hostEdit is one submitted edit. A struct rather than eight positional
+// arguments: the modes made it nine, and two adjacent strings that are both
+// modes and two more that are both gateways is a call site nobody can read.
+type hostEdit struct {
+	Iface, Op    string
+	Addrs        []string
+	GW4, GW6     string
+	MTU          int
+	Mode4, Mode6 hostnet.Mode
 }
 
 // buildHostSpec turns one edit into the interface's whole intended state.
 //
-// An edit names one thing — the addresses, or the gateway — but Apply and the
-// config record are both whole-interface. So the half the operator did not
-// touch is filled in from what is there now, which is what stops editing a
-// gateway from wiping the addresses.
-func buildHostSpec(s *Server, iface, op string, addrs []string, gw4, gw6 string, mtu int) (hostnet.Spec, error) {
+// An edit names one thing — the addresses, the gateway, the MTU, or the mode —
+// but Apply, Persist and the config record are all whole-interface. So the parts
+// the operator did not touch are filled in from what gravinet already records,
+// which is what stops editing a gateway from wiping the addresses.
+func buildHostSpec(s *Server, e hostEdit) (hostnet.Spec, error) {
 	// An edit submits the interface's whole intended set, so an address left
 	// out of the box is one the operator has removed.
-	spec := hostnet.Spec{Iface: strings.TrimSpace(iface), Prune: true}
+	spec := hostnet.Spec{Iface: strings.TrimSpace(e.Iface), Prune: true}
 
-	switch op {
+	// The record comes first now, because everything below is interpreted
+	// through the modes and an edit that did not mention them inherits them.
+	var rec *config.HostIface
+	if cfg, err := config.Load(s.configPath); err == nil {
+		rec = cfg.HostIfaceFor(spec.Iface)
+	}
+	spec.Mode4, spec.Mode6 = hostnet.ModeStatic, hostnet.ModeStatic
+	if rec != nil {
+		spec.Mode4, spec.Mode6 = rec.Mode4.Or(hostnet.ModeStatic), rec.Mode6.Or(hostnet.ModeStatic)
+	}
+
+	switch e.Op {
+	case "mode":
+		if err := hostnet.ValidMode4(e.Mode4); err != nil {
+			return spec, err
+		}
+		if err := hostnet.ValidMode6(e.Mode6); err != nil {
+			return spec, err
+		}
+		was4, was6 := spec.Mode4, spec.Mode6
+		spec.Mode4 = e.Mode4.Or(was4)
+		spec.Mode6 = e.Mode6.Or(was6)
+		// A family that stays static keeps the addresses gravinet has for it;
+		// one that has just left static hands them back. Without the second
+		// half the old static address stays up on an interface that now
+		// reports a different mode, which is an address nothing manages.
+		if rec != nil {
+			for _, a := range rec.Addrs {
+				p, err := netip.ParsePrefix(strings.TrimSpace(a))
+				if err != nil {
+					continue
+				}
+				p = netip.PrefixFrom(p.Addr().Unmap(), p.Bits())
+				if spec.ModeFor(p.Addr()).IsStatic() {
+					spec.Addrs = append(spec.Addrs, p)
+				} else {
+					spec.Release = append(spec.Release, p)
+				}
+			}
+		}
 	case "addrs":
-		for _, a := range addrs {
+		for _, a := range e.Addrs {
 			a = strings.TrimSpace(a)
 			if a == "" {
 				continue
@@ -154,32 +232,47 @@ func buildHostSpec(s *Server, iface, op string, addrs []string, gw4, gw6 string,
 			if err != nil {
 				return spec, fmt.Errorf("%q is not an address with a prefix length (e.g. 10.1.1.1/24): %v", a, err)
 			}
-			spec.Addrs = append(spec.Addrs, netip.PrefixFrom(p.Addr().Unmap(), p.Bits()))
+			p = netip.PrefixFrom(p.Addr().Unmap(), p.Bits())
+			// Typing an address into a family that is not static is not a
+			// thing to accept and then not apply. Reported here, where the
+			// operator can see which box it was.
+			if !spec.ModeFor(p.Addr()).IsStatic() {
+				fam, mode := "IPv4", spec.Mode4
+				if p.Addr().Is6() {
+					fam, mode = "IPv6", spec.Mode6
+				}
+				return spec, fmt.Errorf("%s is in %s mode, so %s cannot be set here — switch %s to static first", fam, string(mode), a, fam)
+			}
+			spec.Addrs = append(spec.Addrs, p)
 		}
 	case "mtu":
-		if mtu < 576 || mtu > 9216 {
-			return spec, fmt.Errorf("mtu %d: must be between 576 and 9216", mtu)
+		if e.MTU < 576 || e.MTU > 9216 {
+			return spec, fmt.Errorf("mtu %d: must be between 576 and 9216", e.MTU)
 		}
-		spec.MTU = mtu
-		cur, err := hostnet.GlobalAddrs(spec.Iface)
-		if err != nil {
+		spec.MTU = e.MTU
+		if err := fillStaticAddrsFromHost(&spec); err != nil {
 			return spec, err
 		}
-		spec.Addrs = cur
 	case "gateway":
-		cur, err := hostnet.GlobalAddrs(spec.Iface)
-		if err != nil {
+		if err := fillStaticAddrsFromHost(&spec); err != nil {
 			return spec, err
 		}
-		spec.Addrs = cur
 		for _, g := range []struct {
 			raw  string
 			is4  bool
+			mode hostnet.Mode
 			dest *netip.Addr
-		}{{gw4, true, &spec.GW4}, {gw6, false, &spec.GW6}} {
+		}{
+			{e.GW4, true, spec.Mode4, &spec.GW4},
+			{e.GW6, false, spec.Mode6, &spec.GW6},
+		} {
 			raw := strings.TrimSpace(g.raw)
 			if raw == "" {
 				continue
+			}
+			fam := map[bool]string{true: "IPv4", false: "IPv6"}[g.is4]
+			if !g.mode.IsStatic() {
+				return spec, fmt.Errorf("%s is in %s mode, so its default route comes from the network and cannot be set here", fam, string(g.mode))
 			}
 			a, err := netip.ParseAddr(raw)
 			if err != nil {
@@ -187,32 +280,50 @@ func buildHostSpec(s *Server, iface, op string, addrs []string, gw4, gw6 string,
 			}
 			a = a.Unmap()
 			if a.Is4() != g.is4 {
-				return spec, fmt.Errorf("%s is not an %s address", raw, map[bool]string{true: "IPv4", false: "IPv6"}[g.is4])
+				return spec, fmt.Errorf("%s is not an %s address", raw, fam)
 			}
 			*g.dest = a
 		}
 	default:
-		return spec, fmt.Errorf("unknown op %q", op)
+		return spec, fmt.Errorf("unknown op %q", e.Op)
 	}
 
 	// An edit names one field; the rest come from what gravinet already
-	// records, so the three edits do not undo each other.
-	if op != "gateway" {
-		if cfg, err := config.Load(s.configPath); err == nil {
-			if h := cfg.HostIfaceFor(spec.Iface); h != nil {
-				if a, err := netip.ParseAddr(h.GW4); err == nil {
-					spec.GW4 = a
-				}
-				if a, err := netip.ParseAddr(h.GW6); err == nil {
-					spec.GW6 = a
-				}
-				if op != "mtu" {
-					spec.MTU = h.MTU
-				}
+	// records, so the edits do not undo each other. A gateway is only carried
+	// forward into a family that is still static — one that is not has just
+	// had its recorded gateway made meaningless, and reasserting it would
+	// install a default route competing with the one the network supplies.
+	if rec != nil {
+		if e.Op != "gateway" {
+			if a, err := netip.ParseAddr(rec.GW4); err == nil && spec.Mode4.IsStatic() {
+				spec.GW4 = a
 			}
+			if a, err := netip.ParseAddr(rec.GW6); err == nil && spec.Mode6.IsStatic() {
+				spec.GW6 = a
+			}
+		}
+		if e.Op != "mtu" {
+			spec.MTU = rec.MTU
 		}
 	}
 	return spec, nil
+}
+
+// fillStaticAddrsFromHost fills in the addresses an edit did not mention from
+// what the interface currently has — the static families only.
+//
+// An MTU or gateway edit has to carry the addresses forward or Prune would
+// remove them. Taking them from the live interface is what makes that work for
+// addresses gravinet never set. Filtering by mode is what stops an MTU edit on a
+// DHCP interface from recording the current lease as a static address, which
+// would then be reapplied as one at every reload.
+func fillStaticAddrsFromHost(spec *hostnet.Spec) error {
+	cur, err := hostnet.GlobalAddrs(spec.Iface)
+	if err != nil {
+		return err
+	}
+	spec.Addrs = spec.StaticAddrs(cur)
+	return nil
 }
 
 // editMeshOverlayAddr redirects an edit of a mesh device to the network's
@@ -244,6 +355,17 @@ func (s *Server) editMeshOverlayAddr(w http.ResponseWriter, r *http.Request, op 
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "warning": ""})
+		return
+	}
+	if op == "mode" {
+		// There is no mode to choose. A mesh device's address is the network's
+		// address4/address6, reapplied from the configuration on every reload;
+		// there is no DHCP server and no router advertising a prefix on an
+		// overlay, so the only answer this control could give is the one it
+		// already has.
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": info.Iface + " is a mesh interface; its address comes from network " + info.Name + "'s own settings, so there is no DHCP or SLAAC mode to choose",
+		})
 		return
 	}
 	if op != "addrs" {

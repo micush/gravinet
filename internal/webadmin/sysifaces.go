@@ -6,22 +6,22 @@ import (
 	"net/netip"
 	"sort"
 	"strings"
+
+	"gravinet/internal/config"
+	"gravinet/internal/hostnet"
 )
 
-// System > Interfaces: a read-only inventory of this host's network
-// interfaces, their addresses, and the default gateways in use.
+// System > Interfaces: this host's network interfaces, their addresses, the
+// default gateways in use, and — for the interfaces gravinet manages — where
+// each family's addresses come from.
 //
-// Read-only on purpose, for now. Changing an address is three separate
-// problems — applying it, persisting it across a reboot through whichever of
-// netplan/NetworkManager/systemd-networkd/rc.conf this host actually uses, and
-// not stranding the operator who is connected over the address being changed.
-// None of those is served by pretending the first is the whole job, so this
-// ships as inventory and says so.
-//
-// Everything here is derived live from the host at request time. Nothing is
-// stored in gravinet's config, which means — deliberately — that restoring a
-// config snapshot does not bring host addressing back with it. That gap is
-// what prompted this page; closing it is the write half, not this half.
+// The addresses, gateways and MTUs are read live from the host at request time,
+// because they are facts about the interface rather than about gravinet. The
+// modes are the exception and come from the configuration: an interface holding
+// a static-looking address is indistinguishable from one holding a lease by
+// looking at it, so the only place the answer exists is the record of what
+// gravinet was asked to do. An interface with no record reports no mode, which
+// is how the page distinguishes "gravinet does not manage this" from "static".
 
 type sysAddr struct {
 	CIDR   string `json:"cidr"`
@@ -41,6 +41,11 @@ type sysIface struct {
 	Addrs   []sysAddr `json:"addrs"`
 	GW4     string    `json:"gw4,omitempty"`
 	GW6     string    `json:"gw6,omitempty"`
+	// Mode4/Mode6 are empty on an interface gravinet does not manage. Empty is
+	// not "static": a record that says static is a decision someone made, and
+	// no record at all is an interface nobody has touched through gravinet.
+	Mode4 string `json:"mode4,omitempty"`
+	Mode6 string `json:"mode6,omitempty"`
 }
 
 // handleSystemInterfaces returns the inventory.
@@ -63,6 +68,16 @@ func (s *Server) handleSystemInterfaces(w http.ResponseWriter, r *http.Request) 
 
 	gw4, gw6 := defaultGateways()
 
+	// A failure to read the configuration is not a reason to fail the
+	// inventory: the addresses are the point of this page and they do not come
+	// from there. The modes are simply absent, which reads as unmanaged.
+	modes := map[string]config.HostIface{}
+	if cfg, err := config.Load(s.configPath); err == nil {
+		for _, h := range cfg.HostInterfaces {
+			modes[h.Iface] = h
+		}
+	}
+
 	out := make([]sysIface, 0, len(ifis))
 	for _, ifi := range ifis {
 		e := sysIface{
@@ -73,6 +88,13 @@ func (s *Server) handleSystemInterfaces(w http.ResponseWriter, r *http.Request) 
 		}
 		if n, ok := meshOf[ifi.Name]; ok {
 			e.Kind, e.Network = "mesh", n
+		}
+		if h, ok := modes[ifi.Name]; ok {
+			// Reported through Or, so a record written before modes existed
+			// says "static" rather than nothing — which is what it has always
+			// meant and what the interface is actually doing.
+			e.Mode4 = string(h.Mode4.Or(hostnet.ModeStatic))
+			e.Mode6 = string(h.Mode6.Or(hostnet.ModeStatic))
 		}
 		addrs, _ := ifi.Addrs()
 		for _, a := range addrs {

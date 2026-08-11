@@ -1394,6 +1394,22 @@ func (s *Server) handleSystemTime(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Record what was applied so a restored backup brings it back. The clock
+	// itself is deliberately never stored: restoring a snapshot must not set
+	// the system time to whenever the snapshot was taken.
+	if ok && req.Op != "clock" {
+		s.recordHostSettings(r, func(h *config.HostSettings) {
+			if h.Time == nil {
+				h.Time = &config.HostTime{}
+			}
+			switch req.Op {
+			case "timezone":
+				h.Time.Timezone = req.Timezone
+			case "ntp":
+				h.Time.NTPEnabled, h.Time.NTPServers = req.Enabled, req.Servers
+			}
+		})
+	}
 	resp := hostTimeJSON(service.HostTime())
 	resp["ok"] = true
 	if note != "" {
@@ -1497,6 +1513,18 @@ func (s *Server) handleSystemSyslog(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": note})
 		return
 	}
+	// An empty target list is meaningful here — "forward nowhere" — so it is
+	// recorded like any other value. The pointer, not the slice, is what
+	// says whether gravinet manages syslog at all.
+	s.recordHostSettings(r, func(h *config.HostSettings) {
+		out := make([]config.HostSyslogTarget, 0, len(targets))
+		for _, t := range targets {
+			out = append(out, config.HostSyslogTarget{
+				Host: t.Remote, Port: t.Port, Proto: t.Protocol, Disabled: t.Disabled,
+			})
+		}
+		h.Syslog = &config.HostSyslog{Targets: out}
+	})
 	resp := hostSyslogJSON(service.HostSyslog())
 	resp["ok"] = true
 	writeJSON(w, http.StatusOK, resp)
@@ -1663,6 +1691,19 @@ func (s *Server) handleSystemResolver(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if ok {
+		s.recordHostSettings(r, func(h *config.HostSettings) {
+			if h.Resolver == nil {
+				h.Resolver = &config.HostResolver{}
+			}
+			switch req.Op {
+			case "hostname":
+				h.Resolver.Hostname = req.Hostname
+			case "dns":
+				h.Resolver.DNSServers, h.Resolver.SearchDomain = req.Servers, req.SearchDomain
+			}
+		})
+	}
 	resp := hostResolverJSON(service.HostResolver())
 	resp["ok"] = true
 	if note != "" {
@@ -1777,6 +1818,32 @@ func (s *Server) handleSystemUsers(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": note})
 		return
 	}
+
+	// Record the account roster so a restored backup recreates it. Names and
+	// expiry only: no password ever reaches gravinet's configuration, so a
+	// restored account comes back locked rather than usable.
+	s.recordHostSettings(r, func(h *config.HostSettings) {
+		switch req.Op {
+		case "add", "expiry":
+			for i := range h.Users {
+				if h.Users[i].Name == req.Username {
+					h.Users[i].ExpiresUnix = req.ExpiresUnix
+					return
+				}
+			}
+			h.Users = append(h.Users, config.HostUser{Name: req.Username, ExpiresUnix: req.ExpiresUnix})
+		case "delete":
+			for i := range h.Users {
+				if h.Users[i].Name == req.Username {
+					h.Users = append(h.Users[:i], h.Users[i+1:]...)
+					return
+				}
+			}
+		case "password":
+			// Nothing to record: the roster already has this account, and the
+			// password is exactly what is deliberately not stored.
+		}
+	})
 
 	authMode := ""
 	if cfg, err := config.Load(s.configPath); err == nil {
@@ -2425,4 +2492,24 @@ func (s *Server) handleInterfaces(w http.ResponseWriter, r *http.Request) {
 		names = append(names, ifi.Name)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"interfaces": names})
+}
+
+// recordHostSettings folds a host-setting change into gravinet's own
+// configuration, so a backup carries it and a restore brings it back.
+//
+// Failures are logged rather than returned. The change has already been
+// applied to the host and is working; refusing the request now would be
+// wrong, and the operator's alternative — that it works today and is absent
+// from tomorrow's backup — is worth a log line rather than an error on a
+// screen where nothing went wrong.
+func (s *Server) recordHostSettings(r *http.Request, edit func(*config.HostSettings)) {
+	if err := s.mutateConfig(r, func(cfg *config.Config) error {
+		if cfg.HostSettings == nil {
+			cfg.HostSettings = &config.HostSettings{}
+		}
+		edit(cfg.HostSettings)
+		return cfg.HostSettings.Validate()
+	}); err != nil {
+		s.log.Warnf("webadmin: applied a host setting but could not record it in gravinet's configuration (a restored backup will not bring it back): %v", err)
+	}
 }

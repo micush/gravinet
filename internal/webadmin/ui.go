@@ -6731,7 +6731,7 @@ function qosClassOpts(classes, sel){
 }
 
 function secInterfaces(c){
-  secHint(c, 'Every network interface on this host, with its addresses and the default gateway in use. Double-click to edit \u2014 changes are applied to the running system straight away with no confirmation, so changing the address you are connected over will drop your session. Changes are recorded in gravinet\u2019s own configuration \u2014 so they are included in backups and come back on restore \u2014 and written to this host\u2019s network configuration so they survive a reboot.');
+  secHint(c, 'Every network interface on this host, with its addresses and the default gateway in use. Double-click to edit \u2014 changes are applied to the running system straight away with no confirmation, so changing the address you are connected over will drop your session. Each family has its own source: IPv4 is <b>static</b> or <b>dhcp</b>, IPv6 is <b>static</b>, <b>dhcp6</b> or <b>slaac</b>, and a static IPv4 address alongside slaac IPv6 is an ordinary pairing. Under anything but static the address and default route come from the network, so there is nothing to type. Changes are recorded in gravinet\u2019s own configuration \u2014 so they are included in backups and come back on restore \u2014 and written to this host\u2019s network configuration so they survive a reboot.');
   const wrap = $('<div></div>'); c.appendChild(wrap);
 
   (async () => {
@@ -6748,9 +6748,21 @@ function secInterfaces(c){
       // Addresses are already ordered global-first by the server; keeping
       // that order here is the point, so the address someone came looking
       // for is the first one they read.
+      // The mode is shown next to the addresses rather than in a column of its
+      // own, because it is the answer to "why are these the addresses" — and a
+      // leased address and a static one look identical, so without the tag the
+      // table cannot be read. Only for interfaces gravinet manages: no tag
+      // means no record, which is different from a record saying static.
+      const modeTag = (m) => m ? ' <span class="muted">'+esc(m)+'</span>' : '';
       const addrs = (e.addrs||[]).length
-        ? (e.addrs||[]).map(a => '<div'+(a.scope!=='global'?' class="muted"':'')+'>'+esc(a.cidr)+'</div>').join('')
-        : '<span class="muted">\u2014</span>'; // link-local addresses are not reported at all
+        ? (e.addrs||[]).map(a => '<div'+(a.scope!=='global'?' class="muted"':'')+'>'+esc(a.cidr)
+            + (a.scope==='global' ? modeTag(a.family==='ipv6' ? e.mode6 : e.mode4) : '')+'</div>').join('')
+        // A family on DHCP with no lease yet has nothing to show but is still
+        // worth reporting: "no address, and here is what it is waiting for" is
+        // a different situation from an interface nobody configured.
+        : (e.mode4||e.mode6)
+          ? '<div class="muted">'+esc([e.mode4,e.mode6].filter(Boolean).join(' / '))+', no address</div>'
+          : '<span class="muted">\u2014</span>'; // link-local addresses are not reported at all
       const gw = [e.gw4, e.gw6].filter(Boolean).map(esc).join('<br>') || '<span class="muted">\u2014</span>';
       const st = e.up ? (e.running ? 'up' : 'up, no carrier') : 'down';
       const name = esc(e.name) + (e.kind === 'mesh' ? ' <span class="muted">(mesh: '+esc(e.network||'')+')</span>' : '');
@@ -6758,6 +6770,7 @@ function secInterfaces(c){
       h += '<tr'+(e.up?'':' class="fw-disabled"')+' data-iface="'+esc(e.name)+'"'
         + ' data-mesh="'+(e.kind === 'mesh' ? 1 : 0)+'"'
         + ' data-addrs="'+esc(globals.join(', '))+'"'
+        + ' data-mode4="'+esc(e.mode4||'')+'" data-mode6="'+esc(e.mode6||'')+'"'
         + ' data-gw4="'+esc(e.gw4||'')+'" data-gw6="'+esc(e.gw6||'')+'">'
         + '<td class="cell-name">'+name+'</td>'
         + '<td>'+esc(st)+'</td>'
@@ -6814,15 +6827,64 @@ function secInterfaces(c){
   // an IPv4 CIDR never does.
   const isV6 = a => a.indexOf(':') >= 0;
 
+  // The mode and the addresses are edited together, in one cell, because they
+  // are one question: where does this family's addresses come from, and if the
+  // answer is "this configuration", which ones. Two controls in two places
+  // would let an operator set a static address on a family that is on DHCP and
+  // find out from an error.
+  //
+  // A mesh device has no mode — its address is its network's — so it keeps the
+  // address-only form.
+  const MODES4 = ['static','dhcp'];
+  const MODES6 = ['static','dhcp6','slaac'];
+  function modeSelect(cls, opts, cur){
+    return '<select class="'+cls+'">'
+      + opts.map(o => '<option value="'+o+'"'+(o===cur?' selected':'')+'>'+o+'</option>').join('')
+      + '</select>';
+  }
+
   function ifEditAddrs(tr){
     const cell = tr.querySelector('.if-addrs');
-    if (cell.querySelector('input')) return;
+    if (cell.querySelector('input') || cell.querySelector('select')) return;
     const cur = (tr.dataset.addrs||'').split(',').map(x=>x.trim()).filter(Boolean);
     const v4 = cur.filter(a => !isV6(a)).join(', ');
     const v6 = cur.filter(isV6).join(', ');
-    cell.innerHTML = '<input class="ife-a4" style="width:150px" placeholder="10.1.1.1/24" value="'+esc(v4)+'">'
-      + '<br><input class="ife-a6" style="width:150px" placeholder="fd00::1/64" value="'+esc(v6)+'">'
-      + ' <button class="sm ife-save">save</button> <button class="sm ife-cancel">cancel</button>';
+    const mesh = tr.dataset.mesh === '1';
+
+    if (mesh){
+      cell.innerHTML = '<input class="ife-a4" style="width:150px" placeholder="10.42.0.5/16" value="'+esc(v4)+'">'
+        + '<br><input class="ife-a6" style="width:150px" placeholder="fd00::1/64" value="'+esc(v6)+'">'
+        + ' <button class="sm ife-save">save</button> <button class="sm ife-cancel">cancel</button>';
+    } else {
+      // An interface with no record defaults to static, which is what it is
+      // doing now — the addresses on it were not put there by gravinet, but
+      // offering "dhcp" as the pre-selected answer would make saving the form
+      // without touching it a change.
+      const m4 = tr.dataset.mode4 || 'static';
+      const m6 = tr.dataset.mode6 || 'static';
+      cell.innerHTML = '<div>'+modeSelect('ife-m4', MODES4, m4)
+          + ' <input class="ife-a4" style="width:150px" placeholder="10.1.1.1/24" value="'+esc(v4)+'"></div>'
+        + '<div style="margin-top:4px">'+modeSelect('ife-m6', MODES6, m6)
+          + ' <input class="ife-a6" style="width:150px" placeholder="fd00::1/64" value="'+esc(v6)+'"></div>'
+        + '<div style="margin-top:4px"><button class="sm ife-save">save</button> '
+          + '<button class="sm ife-cancel">cancel</button></div>';
+      // The address box for a family that is not static is not disabled and
+      // left showing an address — it is emptied and disabled, so the form never
+      // shows an address that saving it would not keep.
+      const sync = () => {
+        [['ife-m4','ife-a4'],['ife-m6','ife-a6']].forEach(([ms,as]) => {
+          const st = cell.querySelector('.'+ms).value === 'static';
+          const box = cell.querySelector('.'+as);
+          box.disabled = !st;
+          box.placeholder = st ? box.placeholder : 'from the network';
+          if (!st) box.value = '';
+        });
+      };
+      cell.querySelector('.ife-m4').onchange = sync;
+      cell.querySelector('.ife-m6').onchange = sync;
+      sync();
+    }
+
     cell.querySelector('.ife-cancel').onclick = () => renderSection();
     cell.querySelector('.ife-save').onclick = async () => {
       // Recombined on the way out: the handler takes the interface's whole
@@ -6830,6 +6892,24 @@ function secInterfaces(c){
       // clearing one of them look like an edit that did not mention it.
       const list = [cell.querySelector('.ife-a4').value, cell.querySelector('.ife-a6').value]
         .join(',').split(',').map(x=>x.trim()).filter(Boolean);
+      if (!mesh){
+        const m4 = cell.querySelector('.ife-m4').value;
+        const m6 = cell.querySelector('.ife-m6').value;
+        // The mode goes first and separately, because it decides whether the
+        // addresses in the second request are allowed at all. Sent only when it
+        // changed: a mode request switches a family to DHCP by releasing its
+        // address, which is not a thing to do to an interface whose operator
+        // only edited the other family's address.
+        if (m4 !== (tr.dataset.mode4||'static') || m6 !== (tr.dataset.mode6||'static')){
+          const rm = await api('/api/system/interface-edit', { method:'POST', body: JSON.stringify({
+            op:'mode', iface: tr.dataset.iface, mode4: m4, mode6: m6 }) });
+          if (!rm.ok){ alert((rm.body && rm.body.error) || 'could not change the addressing mode'); return; }
+          if (rm.body && rm.body.warning) alert(rm.body.warning);
+          // Nothing static left to set, so the second request would be an
+          // empty set that prunes nothing. Stop here rather than send it.
+          if (m4 !== 'static' && m6 !== 'static'){ renderSection(); return; }
+        }
+      }
       const r = await api('/api/system/interface-edit', { method:'POST', body: JSON.stringify({
         op:'addrs', iface: tr.dataset.iface, addrs: list }) });
       if (!r.ok){ alert((r.body && r.body.error) || 'could not apply'); return; }

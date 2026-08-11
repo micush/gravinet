@@ -34,16 +34,49 @@ type Backend struct {
 	// reboot. It does not apply anything: the caller has already done that
 	// live, and a backend that also applies would race with it.
 	Persist func(Spec) error
+	// Reapply asks the backend to reconfigure one interface now.
+	//
+	// This exists for one reason: a DHCP client is a daemon, and gravinet
+	// does not own one. Everything else on this page is a kernel or link
+	// setting gravinet can make directly, but "get an address by DHCP"
+	// requires whichever client this host's backend runs, so switching a
+	// family to DHCP is only live once that backend has been asked to act.
+	//
+	// nil where the backend has no per-interface way to do it. Bouncing the
+	// whole host's networking to serve one interface is not an acceptable
+	// substitute, so the operator is told instead — see ErrNoReapply.
+	Reapply func(Spec) error
 }
 
 // Spec is the intended persistent addressing for one interface.
 type Spec struct {
 	Iface string
+	// Mode4 and Mode6 are where each family's addresses come from. Empty
+	// reads as static; see Mode.Or for why that is the compatible default.
+	//
+	// The two are independent. A static IPv4 address alongside SLAAC IPv6 is
+	// an ordinary configuration and is expressible here because every field
+	// below that could differ per family is interpreted through these.
+	Mode4, Mode6 Mode
 	// Addrs are the interface's global addresses, in CIDR form. An empty
 	// slice means "no static addresses" and is written as such rather than
 	// treated as "leave alone" — an operator who removed the last address
 	// meant it.
+	//
+	// Only ever addresses of a static family. A family in DHCP or SLAAC has
+	// no intended set: its addresses belong to a client or to the router
+	// advertising the prefix, and recording them here would turn a lease into
+	// a static address on the next reload.
 	Addrs []netip.Prefix
+	// Release are addresses to remove whatever the mode says.
+	//
+	// A family switched away from static has no intended set for Prune to
+	// compare against, so without this the address gravinet put there last
+	// time would simply stay up — an address nothing manages any more, on an
+	// interface that now reports a different mode. Only ever addresses
+	// gravinet itself recorded: one from another tool is not gravinet's to
+	// remove, mode change or not.
+	Release []netip.Prefix
 	// MTU is the interface MTU. 0 means "leave it alone", which is what an
 	// edit that did not touch the field means — an interface's MTU is
 	// usually set by the driver or the link, and treating "unspecified" as
@@ -58,6 +91,12 @@ type Spec struct {
 	// there by DHCP, by another tool, or by an edit gravinet never saw is
 	// not gravinet's to delete, and deleting it on every reload is how a
 	// node loses addressing it never asked gravinet to manage.
+	//
+	// Pruning is per family, and only ever a static one. On an interface
+	// with a static IPv4 address and SLAAC IPv6, Addrs holds one v4 prefix;
+	// pruning against it across both families would delete every
+	// autoconfigured v6 address on the interface, seconds after the operator
+	// asked for them.
 	Prune bool
 	// GW4/GW6 are optional default gateways. Invalid means "do not write a
 	// default route for this family", not "remove one" — a gateway belongs
@@ -76,6 +115,30 @@ const Marker = "# Managed by gravinet. Edits will be overwritten."
 // applied live but will not survive a reboot is a fact they need, and
 // guessing a backend would be worse than saying so.
 var ErrNoBackend = fmt.Errorf("no supported network configuration backend found on this host")
+
+// ErrNoReapply is returned when the backend managing this host cannot
+// reconfigure a single interface. Reported rather than worked around: the
+// available workaround is to reload the host's entire network configuration,
+// which bounces links that had nothing to do with the edit.
+var ErrNoReapply = fmt.Errorf("this host's network configuration system has no per-interface reload")
+
+// Reapply asks the host's backend to reconfigure one interface, which is what
+// starts or stops a DHCP client for it. Call only after Persist: the backend
+// acts on what it has been given, so reapplying before writing would
+// reconfigure the interface back to its old mode.
+func Reapply(s Spec) error {
+	if !safeIface(s.Iface) {
+		return fmt.Errorf("refusing to reconfigure interface name %q", s.Iface)
+	}
+	b := detect()
+	if b == nil {
+		return ErrNoBackend
+	}
+	if b.Reapply == nil {
+		return ErrNoReapply
+	}
+	return b.Reapply(s)
+}
 
 // v4v6 splits a prefix list by family, which every backend needs.
 func v4v6(in []netip.Prefix) (v4, v6 []netip.Prefix) {

@@ -184,6 +184,36 @@ func (s *Server) buildTshootText() (string, time.Time) {
 		fmt.Fprintf(&b, "\n--- %s ---\n%s\n", strings.Join(c, " "), out)
 	}
 
+	// FRR's own view, when gravinet is managing BGP. The kernel table above
+	// shows what FRR *installed*; this shows what FRR *knows*, and the two
+	// disagreeing is the interesting case. A bundle collected for exactly
+	// this — the redistribute-connected picker showing "none available" on a
+	// node whose kernel plainly had a connected route to offer — could not
+	// answer whether zebra had the route at all, because nothing here asked
+	// it. That is the whole gap this closes: gravinet manages FRR, so a
+	// bundle that captures none of FRR's state cannot diagnose the features
+	// built on it.
+	//
+	// Skipped silently when vtysh is absent, like every other tool above.
+	if _, present := vtyshPath(); present {
+		sec("FRR / BGP")
+		for _, c := range []string{
+			"show ip route connected json",
+			"show ipv6 route connected json",
+			"show ip route static json",
+			"show interface brief",
+			"show bgp summary",
+			"show running-config",
+		} {
+			out, ok := RunVtysh(c)
+			if !ok {
+				fmt.Fprintf(&b, "\n--- vtysh -c %q ---\n(command failed or timed out)\n", c)
+				continue
+			}
+			fmt.Fprintf(&b, "\n--- vtysh -c %q ---\n%s\n", c, out)
+		}
+	}
+
 	// Address state, not just routes. The routing table above answers "where
 	// does a packet go"; this answers "is the address it's addressed to even
 	// usable yet" — a peer's overlay6 address can be gossiped, listed, and
