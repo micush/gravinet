@@ -519,18 +519,6 @@ func (s *Server) handleBGPConfig(w http.ResponseWriter, r *http.Request) {
 	if err := s.mutateConfig(r, func(cfg *config.Config) error {
 		prev = cfg.BGP
 		meshRoutes = meshRouteCIDRs(cfg)
-		// AutoBGP exists to keep BGP running, so "AutoBGP on, BGP off" is not
-		// a state that can hold: its reconciler treats a disabled BGP as
-		// drift and writes Enabled back to true within seconds, which is
-		// exactly what made the disable pill appear to do nothing.
-		//
-		// Turning BGP off therefore turns AutoBGP off with it. The
-		// alternative — leaving AutoBGP set but dormant — reads better in
-		// the config and worse on the page, because the operator would be
-		// looking at a toggle that is on and doing nothing.
-		if !req.Enabled {
-			req.AutoBGP = false
-		}
 		cfg.BGP = req
 		return nil
 	}); err != nil {

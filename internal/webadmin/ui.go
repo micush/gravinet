@@ -10211,16 +10211,11 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
   pill.ondblclick = () => {
     bgpEnabled = !bgpEnabled;
     setPill(bgpEnabled);
-    // AutoBGP's reconciler treats a disabled BGP as drift and re-enables it,
-    // so the two cannot disagree. The server enforces this; the checkbox is
-    // flipped here too so the form does not sit showing an AutoBGP that has
-    // just been turned off underneath it.
-    if (!bgpEnabled && autoCb.checked) autoCb.checked = false;
     scheduleSave(true);
   };
   const asnInp = rowInput('Local AS number', 'This node\u2019s autonomous-system number, e.g. 65001. Required to enable BGP \u2014 unless AutoBGP is on below and this is left blank, in which case it derives and fills one in.', b.asn||'', 'e.g. 65001', 180);
   const ridInp = rowInput('Router-id', 'BGP router-id (an IPv4-style id), e.g. 10.0.0.1. Optional \u2014 FRR picks one if left blank, or AutoBGP derives one if it\u2019s on below.', b.router_id||'', 'e.g. 10.0.0.1', 180);
-  const autoCb = rowTog('AutoBGP', 'Auto-fills the AS number and router-id above from this node\u2019s tunnel IPv4 if blank, enables BGP, and keeps one Neighbor per connected mesh peer in sync (remote AS, password \u2018autobgp\u2019, BFD on) as peers come and go. Never touches a Neighbor it didn\u2019t create.', !!b.auto_bgp);
+  const autoCb = rowTog('AutoBGP', 'Auto-fills the AS number and router-id above from this node\u2019s tunnel IPv4 if blank, and keeps one Neighbor per connected mesh peer in sync (remote AS, password \u2018autobgp\u2019, BFD on) as peers come and go. Never touches a Neighbor it didn\u2019t create. Independent of the enable/disable pill: it stays set while BGP is off, and resumes when BGP is turned back on.', !!b.auto_bgp);
   const asPrependCb = rowTog('AS Prepend', 'Prepend this node\u2019s own AS number 2 times to every route it advertises outbound, to every neighbor \u2014 makes those routes look less preferred (a longer AS-path) to peers, a common way to steer inbound traffic away from this link without touching what it accepts.', !!b.as_prepend);
   // isNewCfg still drives the session-timer defaults below; BFD itself has no
   // global toggle (see nbrAddRow's own default for how a brand-new neighbor

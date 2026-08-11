@@ -491,6 +491,19 @@ func (r *autoBGPReconciler) sync() {
 		return
 	}
 
+	// AutoBGP is a setting of its own, not a sub-switch of the enable pill.
+	// While BGP is off this stays dormant and writes nothing: it keeps its
+	// value, and resumes on the next pass once BGP is turned back on.
+	//
+	// Without this the reconciler treated a disabled BGP as drift — its
+	// identity test below was `!cfg.BGP.Enabled || ...` — and wrote Enabled
+	// back to true within seconds, so BGP could not be turned off at all
+	// while AutoBGP was set.
+	if !cfg.BGP.Enabled {
+		r.s.be.SetBGPASN(0) // nothing to gossip while BGP is off
+		return
+	}
+
 	selfV4 := autoBGPSelfTunnel4(r.s.be)
 	asn := cfg.BGP.ASN
 	if asn == 0 {
@@ -513,7 +526,10 @@ func (r *autoBGPReconciler) sync() {
 	// ago and asn is a freshly-derived value that hasn't been persisted yet.
 	r.s.be.SetBGPASN(asn)
 
-	identityChanged := !cfg.BGP.Enabled || cfg.BGP.ASN != asn || cfg.BGP.RouterID != routerID
+	// Enabled is no longer part of this: sync returns above while BGP is
+	// off, so reaching here means it is already on and "not enabled" is not
+	// a form of drift this can see.
+	identityChanged := cfg.BGP.ASN != asn || cfg.BGP.RouterID != routerID
 
 	desired := desiredAutoBGPNeighbors(gatherAutoBGPPeers(r.s.be))
 	nextNeighbors, added, removed, changed := mergeAutoBGPNeighbors(cfg.BGP.Neighbors, desired)
@@ -527,7 +543,9 @@ func (r *autoBGPReconciler) sync() {
 	if err := r.s.mutateConfig(nil, func(c *config.Config) error {
 		prev = c.BGP
 		meshRoutes = meshRouteCIDRs(c)
-		c.BGP.Enabled = true
+		// Enabled is deliberately not written. AutoBGP derives an ASN and
+		// maintains neighbors; whether BGP runs at all is the operator's
+		// switch, and writing it here is what made that switch inoperable.
 		c.BGP.ASN = asn
 		c.BGP.RouterID = routerID
 		c.BGP.Neighbors = nextNeighbors

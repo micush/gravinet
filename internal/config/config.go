@@ -2965,8 +2965,16 @@ func (c *Config) Validate() error {
 	// rejects only the one combination that can't produce a runnable config,
 	// mirroring the renderer's own `enabled && asn > 0` gate, and gives a
 	// clear error instead of silently writing a BGP block bgpd would refuse.
-	if c.BGP.Enabled && c.BGP.ASN == 0 {
-		return fmt.Errorf("bgp: a local AS number is required to enable BGP")
+	// AutoBGP is the exception: it derives the AS number from this node's own
+	// tunnel address on its next pass, so "enabled with no ASN yet" is a real
+	// and temporary state rather than an unrunnable config.
+	//
+	// Without this exception the two settings cannot be independent. Enabling
+	// BGP would require an ASN, so a fresh node could only get one by having
+	// AutoBGP turn BGP on for it — which is exactly the coupling that made
+	// the disable switch inoperable.
+	if c.BGP.Enabled && c.BGP.ASN == 0 && !c.BGP.AutoBGP {
+		return fmt.Errorf("bgp: a local AS number is required to enable BGP (or turn on AutoBGP to derive one)")
 	}
 	// BGP timers: hold must exceed keepalive (FRR needs hold >= keepalive, and
 	// the conventional ratio is 3:1); a non-zero hold below FRR's floor of 3s is

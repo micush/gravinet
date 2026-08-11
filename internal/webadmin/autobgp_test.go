@@ -242,7 +242,11 @@ func autoBGPTestServer(t *testing.T, cfg *config.Config, be *stubBackend) *Serve
 func TestAutoBGPReconcilerSyncDerivesAndCreates(t *testing.T) {
 	cfg := &config.Config{
 		UDPPorts: []int{51820}, EnableIPv4: true,
-		BGP: config.BGPConfig{AutoBGP: true},
+		// Enabled is part of the fixture now. AutoBGP no longer turns BGP on
+		// by itself: the two are independent settings, and the reconciler
+		// stays dormant while BGP is off (see
+		// TestAutoBGPReconcilerDormantWhileDisabled).
+		BGP: config.BGPConfig{AutoBGP: true, Enabled: true},
 		Networks: []config.Network{
 			{ID: "0000000000000001", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24"},
 		},
@@ -263,7 +267,7 @@ func TestAutoBGPReconcilerSyncDerivesAndCreates(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !got.BGP.Enabled {
-		t.Error("BGP.Enabled = false, want true (AutoBGP must turn it on)")
+		t.Error("BGP.Enabled went false; the reconciler must leave the operator's switch alone")
 	}
 	wantASN := deriveASNFromIPv4(netip.MustParseAddr("10.0.0.1"))
 	if got.BGP.ASN != wantASN {
@@ -431,5 +435,63 @@ func TestAutoBGPAddNeighborCmdsMatchesRenderFRRActivation(t *testing.T) {
 	}
 	if strings.Contains(joined4, "ipv6 unicast") {
 		t.Errorf("v4 neighbor commands shouldn't touch ipv6 unicast at all: %v", cmds4)
+	}
+}
+
+// While BGP is off the reconciler does nothing at all — it does not derive an
+// ASN, does not create neighbors, and above all does not write Enabled back.
+//
+// AutoBGP staying set through that is the point: it is a setting of its own,
+// not a sub-switch of the enable pill, and it resumes when BGP is turned back
+// on. Two earlier attempts at this bug removed the state instead of fixing
+// the reconciler that could not hold it.
+func TestAutoBGPReconcilerDormantWhileDisabled(t *testing.T) {
+	cfg := &config.Config{
+		UDPPorts: []int{51820}, EnableIPv4: true,
+		BGP: config.BGPConfig{AutoBGP: true, Enabled: false},
+		Networks: []config.Network{
+			{ID: "0000000000000001", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24"},
+		},
+	}
+	be := &stubBackend{
+		netIDs:    []uint64{1},
+		selfByNet: map[uint64]mesh.PeerInfo{1: {NodeID: "self-node-id", Hostname: "self", Overlay4: "10.0.0.1"}},
+		peersByNet: map[uint64][]mesh.PeerInfo{1: {{
+			NodeID: "peerA", Hostname: "alpha", Overlay4: "10.0.0.9", BGPASN: 4200005555,
+		}}},
+	}
+	srv := autoBGPTestServer(t, cfg, be)
+	newAutoBGPReconciler(srv).sync()
+
+	got, err := config.Load(srv.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BGP.Enabled {
+		t.Error("the reconciler re-enabled BGP; disabling it must stick")
+	}
+	if !got.BGP.AutoBGP {
+		t.Error("AutoBGP was cleared; it must keep its value while BGP is off")
+	}
+	if got.BGP.ASN != 0 || got.BGP.RouterID != "" {
+		t.Errorf("the reconciler derived an identity while dormant: asn=%d rid=%q", got.BGP.ASN, got.BGP.RouterID)
+	}
+	if len(got.BGP.Neighbors) != 0 {
+		t.Errorf("the reconciler created %d neighbor(s) while dormant", len(got.BGP.Neighbors))
+	}
+
+	// And it resumes once BGP is turned back on, with AutoBGP still set.
+	got.BGP.Enabled = true
+	if err := got.SaveTo(srv.configPath); err != nil {
+		t.Fatal(err)
+	}
+	newAutoBGPReconciler(srv).sync()
+	after, err := config.Load(srv.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.BGP.ASN == 0 || len(after.BGP.Neighbors) == 0 {
+		t.Errorf("the reconciler did not resume after BGP was re-enabled: asn=%d neighbors=%d",
+			after.BGP.ASN, len(after.BGP.Neighbors))
 	}
 }

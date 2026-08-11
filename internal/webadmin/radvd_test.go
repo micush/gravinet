@@ -545,46 +545,42 @@ func TestBGPManagedIsNotEnabled(t *testing.T) {
 	}
 }
 
-// Disabling BGP has to turn AutoBGP off with it. AutoBGP's reconciler exists
-// to keep BGP running: it treats a disabled BGP as drift (its identityChanged
-// test is literally `!cfg.BGP.Enabled || ...`) and writes Enabled back to true
-// within seconds. So "AutoBGP on, BGP off" is not a state that can hold, and
-// leaving it saveable is what made the disable pill appear to do nothing even
-// after the import path was fixed in v863.
-func TestDisablingBGPClearsAutoBGP(t *testing.T) {
-	// The rule as the handler applies it.
-	apply := func(req config.BGPConfig) config.BGPConfig {
-		if !req.Enabled {
-			req.AutoBGP = false
-		}
-		return req
+// AutoBGP is a setting of its own, not a sub-switch of the enable pill. It
+// keeps its value while BGP is off and resumes when BGP comes back on.
+//
+// Two wrong fixes preceded this one. v845 made a state unrepresentable rather
+// than fixing what could not represent it; v864 did the same thing again,
+// clearing AutoBGP whenever BGP was disabled. What actually could not hold
+// was the reconciler treating a disabled BGP as drift — that is what is fixed
+// here, and the two settings are independent again.
+func TestAutoBGPIsIndependentOfEnabled(t *testing.T) {
+	src := mustRead("autobgp.go")
+
+	// The reconciler stays dormant while BGP is off...
+	if !strings.Contains(src, "if !cfg.BGP.Enabled {") {
+		t.Error("the reconciler still runs while BGP is disabled")
 	}
-	if got := apply(config.BGPConfig{Enabled: false, AutoBGP: true, ASN: 65001}); got.AutoBGP {
-		t.Error("disabling BGP must clear AutoBGP, or its reconciler re-enables BGP")
+	// ...does not treat "off" as drift...
+	if strings.Contains(src, "identityChanged := !cfg.BGP.Enabled") {
+		t.Error("a disabled BGP is still treated as drift to correct")
 	}
-	// Enabling leaves it alone: an operator turning BGP on has said nothing
-	// about whether they want AutoBGP.
-	if got := apply(config.BGPConfig{Enabled: true, AutoBGP: true}); !got.AutoBGP {
-		t.Error("enabling BGP must not disturb AutoBGP")
-	}
-	if got := apply(config.BGPConfig{Enabled: true, AutoBGP: false}); got.AutoBGP {
-		t.Error("enabling BGP must not turn AutoBGP on")
+	// ...and never writes Enabled itself.
+	if strings.Contains(src, "c.BGP.Enabled = true") {
+		t.Error("the reconciler still forces BGP enabled")
 	}
 
-	// The handler really does this, and the pill flips the checkbox with it
-	// so the form does not show an AutoBGP that was just turned off.
-	src := mustRead("bgp.go")
-	if !strings.Contains(src, "if !req.Enabled {\n\t\t\treq.AutoBGP = false\n\t\t}") {
-		t.Error("the BGP save handler does not clear AutoBGP when BGP is disabled")
+	// And nothing clears AutoBGP on the way through the save handler or the
+	// pill, which is what v864 got wrong.
+	if strings.Contains(mustRead("bgp.go"), "req.AutoBGP = false") {
+		t.Error("the save handler still clears AutoBGP when BGP is disabled")
 	}
-	if !strings.Contains(indexHTML, "if (!bgpEnabled && autoCb.checked) autoCb.checked = false;") {
-		t.Error("the disable pill leaves the AutoBGP checkbox on")
+	if strings.Contains(indexHTML, "autoCb.checked = false") {
+		t.Error("the disable pill still turns the AutoBGP checkbox off")
 	}
 
-	// And the disabled config still counts as managed, so v863's import fix
-	// is not undone by this one: with AutoBGP cleared, an ASN is what keeps
-	// it recognised as configured.
-	if !bgpConfigured(config.BGPConfig{Enabled: false, AutoBGP: false, ASN: 65001}) {
-		t.Error("a disabled config with an ASN must still count as managed")
+	// A disabled config with AutoBGP set still counts as managed, so v863's
+	// import fix keeps working for exactly this shape.
+	if !bgpConfigured(config.BGPConfig{Enabled: false, AutoBGP: true}) {
+		t.Error("a disabled config with AutoBGP set must still count as managed")
 	}
 }

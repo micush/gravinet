@@ -2,6 +2,45 @@
 
 ---
 
+## v867 — 2026-08-10
+
+**AutoBGP and the BGP enable switch are now genuinely independent. Reverses v864, which coupled them the wrong way round.**
+
+Three releases have now touched this. v845 and v864 both responded to a state that could not hold by making it unrepresentable — v864 by clearing AutoBGP whenever BGP was disabled. That stopped the symptom and took a setting with it, which is not the same as fixing anything.
+
+What could not hold was the reconciler, not the state. Its drift test was `identityChanged := !cfg.BGP.Enabled || ...`, so a disabled BGP *was* drift and it wrote `Enabled = true` back within seconds.
+
+Now:
+
+- **The reconciler stays dormant while BGP is off.** It returns before deriving anything, creating anything, or writing anything, and gossips ASN 0 while it sleeps.
+- **It never writes `Enabled` at all.** Whether BGP runs is the operator's switch; the reconciler derives an ASN and maintains neighbors, which is a different job.
+- **`Enabled` is out of the drift test.** Reaching that line means BGP is already on, so "off" is not a form of drift it can see.
+- **Nothing clears AutoBGP.** v864's coupling is gone from both the save handler and the pill.
+
+### The constraint that made the coupling look necessary
+
+`Validate` refused `Enabled` with no ASN. So a fresh node could not turn BGP on by itself, and the only way to get an ASN was to let AutoBGP turn BGP on — which is where the coupling came from in the first place.
+
+That rule now exempts AutoBGP: enabled-with-no-ASN-yet is a real and temporary state when something is about to derive one. The UI's own guard already read `bgpEnabled && !autoCb.checked && asn <= 0` and had been telling operators to "turn on AutoBGP above to derive one" — the client and the server had simply disagreed about it, and the client was right.
+
+### Tests
+
+`TestAutoBGPReconcilerDormantWhileDisabled` is the new one: with BGP off it asserts nothing is derived, no neighbors are created, `Enabled` stays false and AutoBGP stays set — then turns BGP back on and asserts the reconciler resumes.
+
+`TestAutoBGPReconcilerSyncDerivesAndCreates` encoded the old contract ("AutoBGP must turn it on") and was updated rather than deleted: its fixture now enables BGP, and it asserts the reconciler leaves that switch alone.
+
+`TestAutoBGPIsIndependentOfEnabled` replaces v864's test and pins all five properties.
+
+### Verified
+
+`go build ./...`, `go vet` and `gofmt` clean. `internal/webadmin`, `internal/config` and `cmd/gravinet` pass in full.
+
+### Not verified
+
+Nothing rendered in a browser, and no running node has been watched staying disabled across several reconciler passes. The reconciler runs on a timer, so the honest check is still to turn BGP off on a real node and leave it a few minutes — all three of these releases would have passed a check made immediately after clicking.
+
+---
+
 ## v865 — 2026-08-10
 
 **Uploading a configuration from a different node is allowed again. v845's refusal is reversed.**
