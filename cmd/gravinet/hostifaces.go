@@ -60,7 +60,6 @@ func reconcileHostInterfaces(cfg *config.Config) {
 		}
 
 		added, removed, err := hostnet.Apply(spec)
-		_ = removed // never non-zero here: the reconciler does not prune
 		if err != nil {
 			logx.Errorf("host interface %s: %v", h.Iface, err)
 			continue
@@ -78,7 +77,50 @@ func reconcileHostInterfaces(cfg *config.Config) {
 		// interface's boot-time configuration each time for a change that has
 		// already been applied is churn on the one file a host cannot afford
 		// to have go wrong.
-		if !h.Mode4.IsStatic() || !h.Mode6.IsStatic() {
+		// A static family whose interface is carrying addresses gravinet does
+		// not record is the shape of an unfinished switch away from DHCP: the
+		// recorded address is on, the lease is still on beside it, and the
+		// client that put it there is still running because the host's own
+		// configuration was never told otherwise. Naming them is the first
+		// half — silently coexisting is how this reads as "why do I have two
+		// addresses" — and Persist below is the half that stops the client.
+		//
+		// They are not deleted here. This runs on every reload, and an address
+		// gravinet did not put on an interface may be somebody else's; removing
+		// it on the strength of a record is the editor's job, where an operator
+		// asked for it and is watching.
+		var stray []netip.Prefix
+		if live, err := hostnet.GlobalAddrs(h.Iface); err == nil {
+			want := map[netip.Prefix]bool{}
+			for _, p := range spec.Addrs {
+				want[p] = true
+			}
+			for _, p := range live {
+				if !want[p] && spec.ModeFor(p.Addr()).IsStatic() {
+					stray = append(stray, p)
+				}
+			}
+		}
+		if len(stray) > 0 {
+			logx.Warnf("host interface %s: %v %s on this interface but not in gravinet's configuration, "+
+				"on a family gravinet records as static — if this was a lease, the client that issued it is still running; "+
+				"re-save the addresses on System > Interfaces to remove it",
+				h.Iface, stray, map[bool]string{true: "is", false: "are"}[len(stray) == 1])
+		}
+
+		// The host's own network configuration is written when a record has a
+		// non-static family, and now also when the live interface disagrees
+		// with the record — an added address or a stray one both mean the boot
+		// configuration says something other than what gravinet was asked for,
+		// and a static family whose backend still says dhcp gets its lease
+		// back on the next renewal no matter how often Apply removes it.
+		//
+		// Still not written on an ordinary reload where nothing disagreed.
+		// That was the original reason to skip it for static-only records, and
+		// it holds: rewriting an interface's boot-time configuration every time
+		// a mesh setting changes is churn on the one file a host cannot afford
+		// to have go wrong.
+		if !h.Mode4.IsStatic() || !h.Mode6.IsStatic() || added > 0 || removed > 0 || len(stray) > 0 {
 			if _, err := hostnet.Persist(spec); err != nil {
 				logx.Errorf("host interface %s: addressing mode applied but not written to this host's network configuration: %v", h.Iface, err)
 			} else if err := hostnet.Reapply(spec); err != nil && !errors.Is(err, hostnet.ErrNoReapply) {

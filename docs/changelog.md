@@ -2,6 +2,104 @@
 
 ---
 
+## v874 — 2026-08-11
+
+**A DHCP lease sitting beside a static address was labelled `static` on `System › Interfaces`, and an MTU or gateway edit could adopt it into gravinet's configuration permanently.**
+
+Two separate defects behind one screenshot: `eth0` recorded static with `192.168.122.12/24`, a leased `192.168.122.198/24` still up beside it, and both rows tagged `static`.
+
+### The tag was per family, painted onto every address
+
+The tag exists for exactly one reason, and the code said so: a leased address and a static one look identical, so without it the table cannot be read. But it was the *family's* mode rendered next to each address of that family, so under a static IPv4 family every IPv4 address read `static` — including one gravinet had never set. The page reported a leftover lease as a decision somebody made.
+
+The source is now decided per address, server-side. Under a non-static family an address did come from the network, so the family's mode is the honest tag. Under a static family, an address gravinet records is `static` and one it does not is **`unmanaged`** — a lease that has not gone away yet, or something set by hand. No tag at all still means no record for the interface, which is different from a record saying static.
+
+`unmanaged` rather than a blank, because blank is what an unmanaged *interface* already means and this is a different statement: gravinet manages this interface and does not account for this address.
+
+### An MTU edit could adopt a lease
+
+An edit names one field, so the rest are carried forward or `Prune` would remove them. The addresses were read from the live interface and filtered by mode, and the filter was documented as what keeps a lease out.
+
+It does not, in the one case that matters. An interface with no record has no mode; `buildHostSpec` reads absent as static; so every address on a never-managed interface passed the filter. One MTU change on a DHCP interface wrote the current lease into `host_interfaces` as a static address — reapplied as one at every reload thereafter, and written into the host's own boot configuration. The lease became gravinet's permanently, and nothing said so.
+
+Carried-forward addresses now come from the record rather than from the interface. With no record there is no intended set, so such an edit also no longer prunes: there is nothing to prune against, and those addresses belong to whatever is managing the interface.
+
+### Why the lease came back
+
+Removing the address was never the hard part — the editor prunes, so re-saving the addresses takes it off. It came back because the client that issued it was still running: `Persist` was skipped for static-only records on reload, so on a host whose backend still said `dhcp` for that interface, the next renewal put the lease back however many times Apply removed it.
+
+Persist now also runs when the live interface disagrees with the record — an address added, an address pruned, or a stray one found. An ordinary reload where nothing disagreed still skips it, which was the original reason for the exception and still holds: rewriting an interface's boot configuration every time a mesh setting changes is churn on the one file a host cannot afford to have go wrong.
+
+The reconciler also now names stray addresses:
+
+```
+host interface eth0: [192.168.122.198/24] is on this interface but not in
+gravinet's configuration, on a family gravinet records as static — if this was
+a lease, the client that issued it is still running; re-save the addresses on
+System > Interfaces to remove it
+```
+
+It does not delete them. This runs on every reload, and an address gravinet did not put there may be somebody else's; removing it is the editor's job, where an operator asked for it and is watching.
+
+### Verified
+
+`TestMTUEditDoesNotAdoptUnrecordedAddresses`, `TestMTUEditCarriesRecordedAddressesOnly` and `TestMTUEditSkipsNonStaticFamilies` cover the carry-forward, and all three fail against the previous live-interface version. `TestAddressSourceTagIsPerAddress` covers the classification over the case on the page — the recorded address, the lease beside it, and both non-static families. `TestInterfacesUIUsesPerAddressTag` pins the column to the server's tag so it cannot drift back to deriving one from the family.
+
+Builds clean for linux, freebsd, darwin, openbsd, windows. `go vet` clean, `gofmt` clean on every file touched. `internal/webadmin`, `internal/config`, `internal/hostnet`, `internal/service` and `cmd/gravinet` pass in full.
+
+### Not verified
+
+No lease has been observed disappearing on a real host. That `Persist` on a drifting static family actually stops the client is the same standing gap as the rest of `hostnet`: no backend has executed on the platform it targets. The stray-address warning has not been seen in a log.
+
+One thing this does not resolve. A `mode` edit on an interface with no record still sets `Prune` and carries no addresses, so explicitly declaring an unmanaged interface static would remove every address on it and leave none — an outage by design rather than by accident, but not obviously the right behaviour. Left alone here because the fix is a decision about what a static family with no addresses should mean, not a bug with an obvious shape.
+
+---
+
+## v873 — 2026-08-11
+
+**A hostname set on `System › Resolver` was never captured in config history, so a restore never brought it back. It reached `config.json` and no snapshot at all.**
+
+### What happened
+
+`handleSystemResolver` is the only host-setting handler that restarts gravinet itself — the advertised node name is read once at startup, so a hostname change needs a fresh process to reach mesh peers. It restarts on a 700ms delay, and flushes the pending history snapshot first so a snapshot mid-debounce is not lost with the process.
+
+The flush ran before the change was committed:
+
+```go
+service.SetHostname(req.Hostname)          // the host is renamed
+...
+s.flushPendingHistorySnapshot()            // nothing pending — a no-op
+go func() { sleep(700ms); service.Restart() }()
+...
+if ok { s.recordHostSettings(...) }        // commits, and starts a 3s debounce
+```
+
+`mutateConfig` does not snapshot inline; it schedules one on a three-second debounce. So the flush found nothing, the commit then started a timer, and the restart killed the process about two seconds before it fired. Nothing ever wrote the snapshot.
+
+The failure is worse than a lost snapshot, because `SaveTo` had already run. The hostname was in `config.json`, survived the restart, and showed correctly on the page and on the host. It was absent only from history — and since a restore reads a snapshot and not `config.json`, restoring any entry silently dropped it. `reconcileHostSettings` skips an empty hostname, so the host kept whatever name it had and nothing reported a problem.
+
+It also meant the change never appeared in a history diff, which is the other half of why this went unnoticed: the page said the right thing, the host said the right thing, and the audit trail said nothing had happened.
+
+### The fix
+
+The commit moves ahead of the restart block, so the handler's own flush has something to capture. One reordering; the flush itself was already correct and is now load-bearing rather than a no-op on this path.
+
+The DNS op was never affected — it does not restart, so its debounce elapsed normally.
+
+### Testing it required driving the handler
+
+The first version of the test called `recordHostSettings` and `flushPendingHistorySnapshot` in the fixed order and asserted the snapshot appeared. It passed against the unfixed handler, because it was testing a copy of the ordering rather than the handler's. A test that cannot fail on the bug it describes is worse than no test: it reads as coverage.
+
+So `setHostnameFn`, `setHostDNSFn`, `canRestartFn` and `restartFn` are now indirected — the same pattern `hostresolver.go` already uses for `sysDefaultGatewayFn` and `hardwarePortsFn` — because the handler otherwise renames the machine running the test and restarts the process running it. `TestHostnameIsRecordedBeforeRestartFlush` drives the real endpoint, then checks history *immediately* after the reply, waiting out no debounce, because in production nothing waits either. It also asserts the restart was actually scheduled, so the flush is not incidentally unnecessary in the test. Checked against the old ordering: it fails, naming the missing snapshot.
+
+### Not verified
+
+No restore has been performed on a running host. What is checked is that a snapshot recording the hostname exists by the time the reply is sent; that `reconcileHostSettings` then applies it on the reload a restore triggers is unchanged code and still untested end to end.
+
+The general shape — a handler that commits after scheduling its own restart — was audited across the other three `recordHostSettings` callers (time, syslog, console accounts) and none of them restarts gravinet, so none can hit this. That audit was by reading, not by test.
+
+---
+
 ## v872 — 2026-08-11
 
 **Each address family on `System › Interfaces` now has its own source: IPv4 is static or dhcp, IPv6 is static, dhcp6 or slaac. A static IPv4 address alongside SLAAC IPv6 on one interface is expressible, because that is how hosts are actually deployed.**

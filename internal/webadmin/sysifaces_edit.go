@@ -250,13 +250,9 @@ func buildHostSpec(s *Server, e hostEdit) (hostnet.Spec, error) {
 			return spec, fmt.Errorf("mtu %d: must be between 576 and 9216", e.MTU)
 		}
 		spec.MTU = e.MTU
-		if err := fillStaticAddrsFromHost(&spec); err != nil {
-			return spec, err
-		}
+		fillStaticAddrs(&spec, rec)
 	case "gateway":
-		if err := fillStaticAddrsFromHost(&spec); err != nil {
-			return spec, err
-		}
+		fillStaticAddrs(&spec, rec)
 		for _, g := range []struct {
 			raw  string
 			is4  bool
@@ -309,21 +305,40 @@ func buildHostSpec(s *Server, e hostEdit) (hostnet.Spec, error) {
 	return spec, nil
 }
 
-// fillStaticAddrsFromHost fills in the addresses an edit did not mention from
-// what the interface currently has — the static families only.
+// fillStaticAddrs fills in the addresses an edit did not mention, for the
+// static families, from what gravinet already records for this interface.
 //
 // An MTU or gateway edit has to carry the addresses forward or Prune would
-// remove them. Taking them from the live interface is what makes that work for
-// addresses gravinet never set. Filtering by mode is what stops an MTU edit on a
-// DHCP interface from recording the current lease as a static address, which
-// would then be reapplied as one at every reload.
-func fillStaticAddrsFromHost(spec *hostnet.Spec) error {
-	cur, err := hostnet.GlobalAddrs(spec.Iface)
-	if err != nil {
-		return err
+// remove them. The record is where they come from, and the distinction from the
+// live interface is the whole point: an address on the interface that gravinet
+// does not record is not gravinet's, and writing it into the record because
+// someone changed the MTU claims it forever.
+//
+// That is not hypothetical. This used to read the live interface and filter by
+// mode, on the reasoning that the mode filter would keep a lease out. It does
+// not, in the one case that matters: an interface with no record at all has no
+// mode, buildHostSpec reads that as static, and so a DHCP lease on a
+// never-managed interface passed the filter and was recorded as a static
+// address — reapplied as one at every reload thereafter, and written into the
+// host's own boot configuration.
+//
+// With no record there is no intended set at all, so an MTU or gateway edit
+// must not prune either: there is nothing to prune against, and the addresses
+// on the interface belong to whatever is managing it.
+func fillStaticAddrs(spec *hostnet.Spec, rec *config.HostIface) {
+	if rec == nil {
+		spec.Prune = false
+		return
 	}
-	spec.Addrs = spec.StaticAddrs(cur)
-	return nil
+	var recorded []netip.Prefix
+	for _, a := range rec.Addrs {
+		p, err := netip.ParsePrefix(strings.TrimSpace(a))
+		if err != nil {
+			continue
+		}
+		recorded = append(recorded, netip.PrefixFrom(p.Addr().Unmap(), p.Bits()))
+	}
+	spec.Addrs = spec.StaticAddrs(recorded)
 }
 
 // editMeshOverlayAddr redirects an edit of a mesh device to the network's

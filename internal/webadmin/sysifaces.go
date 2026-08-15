@@ -27,6 +27,16 @@ type sysAddr struct {
 	CIDR   string `json:"cidr"`
 	Family string `json:"family"` // "ipv4" or "ipv6"
 	Scope  string `json:"scope"`  // global, link-local, loopback
+	// Mode is where this one address came from, and it is per address rather
+	// than per family because a family's mode does not settle it. Under a
+	// static family, an address gravinet records is "static" and one it does
+	// not is "unmanaged" — a lease that has not gone away yet, or something
+	// set by hand. Painting the family's mode onto every address of that
+	// family labelled a leftover DHCP address "static", which is the one
+	// question the tag exists to answer.
+	//
+	// Empty on an interface with no record, and on link-local and loopback.
+	Mode string `json:"mode,omitempty"`
 }
 
 type sysIface struct {
@@ -89,12 +99,22 @@ func (s *Server) handleSystemInterfaces(w http.ResponseWriter, r *http.Request) 
 		if n, ok := meshOf[ifi.Name]; ok {
 			e.Kind, e.Network = "mesh", n
 		}
-		if h, ok := modes[ifi.Name]; ok {
+		// recorded is the set of addresses gravinet has actually been told to
+		// put on this interface, so a static family can distinguish its own
+		// addresses from whatever else is up.
+		recorded := map[netip.Prefix]bool{}
+		h, managed := modes[ifi.Name]
+		if managed {
 			// Reported through Or, so a record written before modes existed
 			// says "static" rather than nothing — which is what it has always
 			// meant and what the interface is actually doing.
 			e.Mode4 = string(h.Mode4.Or(hostnet.ModeStatic))
 			e.Mode6 = string(h.Mode6.Or(hostnet.ModeStatic))
+			for _, a := range h.Addrs {
+				if p, err := netip.ParsePrefix(strings.TrimSpace(a)); err == nil {
+					recorded[netip.PrefixFrom(p.Addr().Unmap(), p.Bits())] = true
+				}
+			}
 		}
 		addrs, _ := ifi.Addrs()
 		for _, a := range addrs {
@@ -125,6 +145,22 @@ func (s *Server) handleSystemInterfaces(w http.ResponseWriter, r *http.Request) 
 				sa.Scope = "loopback"
 			} else {
 				sa.Scope = "global"
+			}
+			if managed && sa.Scope == "global" {
+				fam := hostnet.Mode(e.Mode4)
+				if addr.Is6() {
+					fam = hostnet.Mode(e.Mode6)
+				}
+				switch {
+				case !fam.IsStatic():
+					// The family takes its addressing from the network, so
+					// this address did come from there.
+					sa.Mode = string(fam)
+				case recorded[netip.PrefixFrom(addr, ones)]:
+					sa.Mode = string(hostnet.ModeStatic)
+				default:
+					sa.Mode = "unmanaged"
+				}
 			}
 			e.Addrs = append(e.Addrs, sa)
 		}

@@ -4,8 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"gravinet/internal/config"
+	"gravinet/internal/logx"
 )
 
 // TestSystemResolverGet checks the read shape secResolver draws from. Reuses
@@ -132,5 +137,150 @@ func TestSystemResolverNavPlacement(t *testing.T) {
 	}
 	if !strings.Contains(indexHTML, "function secResolver(") {
 		t.Error("secResolver is not defined")
+	}
+}
+
+// resolverHandlerServer is a Server behind a real HTTP listener with a real
+// config file, and it restores the indirected service calls afterwards so one
+// test's stubs cannot leak into another's.
+func resolverHandlerServer(t *testing.T) (*Server, *httptest.Server, *http.Cookie) {
+	t.Helper()
+	dir := t.TempDir()
+	cfgPath := dir + "/config.json"
+	cfg := &config.Config{
+		UDPPorts: []int{51820}, EnableIPv4: true,
+		WebAdmin: config.WebAdmin{Listen: "127.0.0.1:8443"},
+	}
+	if err := cfg.SaveTo(cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	cred, _ := GenerateCredential("admin", "pw", 10000)
+	srv := New(config.WebAdmin{AuthMode: "local", Users: []config.AdminUser{cred},
+		LoginBan: config.BanPolicy{MaxFailures: 3, WindowSeconds: 60, BanSeconds: 900}},
+		&stubBackend{}, logx.Default())
+	srv.SetConfigPath(cfgPath)
+	srv.SetReload(func() error { return nil })
+	ts := httptest.NewServer(srv.handler())
+	t.Cleanup(ts.Close)
+
+	sh, sd, cr, rs := setHostnameFn, setHostDNSFn, canRestartFn, restartFn
+	t.Cleanup(func() { setHostnameFn, setHostDNSFn, canRestartFn, restartFn = sh, sd, cr, rs })
+
+	return srv, ts, sessionFor(t, ts)
+}
+
+func postResolver(t *testing.T, ts *httptest.Server, c *http.Cookie, body map[string]any) int {
+	t.Helper()
+	b, _ := json.Marshal(body)
+	req, _ := http.NewRequest("POST", ts.URL+"/api/system/resolver", bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(c)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode
+}
+
+// hostnameInHistory reports whether any snapshot records the given hostname —
+// the question a restore actually asks, since a restore reads a snapshot and
+// not config.json.
+func hostnameInHistory(t *testing.T, srv *Server, want string) bool {
+	t.Helper()
+	metas, err := config.List(srv.configPath)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	cur, err := config.Load(srv.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range metas {
+		_, cfg, err := config.Get(srv.configPath, m.ID, cur)
+		if err != nil {
+			continue
+		}
+		if cfg.HostSettings != nil && cfg.HostSettings.Resolver != nil &&
+			cfg.HostSettings.Resolver.Hostname == want {
+			return true
+		}
+	}
+	return false
+}
+
+// A hostname change has to be committed to gravinet's config before anything
+// schedules a restart, and this drives the real handler to check it.
+//
+// The hostname op is the only host-setting handler that restarts gravinet
+// itself, and it flushes the pending history snapshot first so a snapshot
+// mid-debounce is not lost with the process. That flush can only capture what
+// is already committed. With the record happening after it, the flush found
+// nothing pending, the record then started a fresh 3-second debounce, and the
+// restart killed the process ~700ms later — so the change reached config.json
+// and *no snapshot at all*. It survived a restart and was absent from every
+// restore, which is the worst shape this can fail in: the setting looks right
+// on the page and on the host, and only a restore reveals it was never written
+// anywhere a restore reads.
+//
+// Asserted by effect, immediately after the reply: by then the handler's own
+// flush must already have produced the snapshot, with no debounce waited out,
+// because in production nothing waits either.
+func TestHostnameIsRecordedBeforeRestartFlush(t *testing.T) {
+	srv, ts, c := resolverHandlerServer(t)
+
+	restarted := make(chan struct{}, 1)
+	setHostnameFn = func(string) (bool, string) { return true, "" }
+	canRestartFn = func() (bool, string) { return true, "" }
+	restartFn = func() (bool, string) { restarted <- struct{}{}; return true, "" }
+
+	if code := postResolver(t, ts, c, map[string]any{"op": "hostname", "hostname": "node7.example"}); code != 200 {
+		t.Fatalf("POST op=hostname = %d, want 200", code)
+	}
+
+	if !hostnameInHistory(t, srv, "node7.example") {
+		t.Error("the reply came back with no snapshot recording the hostname — " +
+			"the restart is already scheduled, so a restore cannot bring it back")
+	}
+	cfg, err := config.Load(srv.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HostSettings == nil || cfg.HostSettings.Resolver == nil ||
+		cfg.HostSettings.Resolver.Hostname != "node7.example" {
+		t.Errorf("config.json does not carry the hostname: %+v", cfg.HostSettings)
+	}
+
+	// The restart really was scheduled, so the flush above was load-bearing
+	// rather than incidentally unnecessary in this test.
+	select {
+	case <-restarted:
+	case <-time.After(3 * time.Second):
+		t.Error("no restart was scheduled; this test is not covering the case it describes")
+	}
+}
+
+// The DNS op shares the handler but never restarts, so its record is picked up
+// by the ordinary debounce. Flushing explicitly here stands in for waiting the
+// window out.
+func TestResolverDNSIsRecorded(t *testing.T) {
+	srv, ts, c := resolverHandlerServer(t)
+	setHostDNSFn = func([]string, string) (bool, string) { return true, "" }
+	canRestartFn = func() (bool, string) { return false, "not under a service manager" }
+
+	if code := postResolver(t, ts, c, map[string]any{
+		"op": "dns", "servers": []string{"10.0.0.53"}, "search_domain": "internal",
+	}); code != 200 {
+		t.Fatalf("POST op=dns = %d, want 200", code)
+	}
+	srv.flushPendingHistorySnapshot() // stands in for waiting out the debounce
+
+	cfg, err := config.Load(srv.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rz := cfg.HostSettings.Resolver
+	if len(rz.DNSServers) != 1 || rz.DNSServers[0] != "10.0.0.53" || rz.SearchDomain != "internal" {
+		t.Errorf("resolver not recorded as given: %+v", rz)
 	}
 }

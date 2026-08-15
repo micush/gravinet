@@ -12,6 +12,7 @@ import (
 	"gravinet/internal/config"
 	"gravinet/internal/hostnet"
 	"gravinet/internal/logx"
+	"sort"
 )
 
 // The inventory is read from the live host, so the assertions are about
@@ -301,6 +302,180 @@ func TestAddressEditorIsSplitByFamily(t *testing.T) {
 	for _, want := range []string{"cur.filter(a => !isV6(a))", "cur.filter(isV6)"} {
 		if !strings.Contains(sec, want) {
 			t.Errorf("the editor does not split existing addresses by family: missing %q", want)
+		}
+	}
+}
+
+// hostIfaceEditServer is a Server over a real config file, so buildHostSpec can
+// read the record it interprets an edit through.
+func hostIfaceEditServer(t *testing.T, ifaces ...config.HostIface) *Server {
+	t.Helper()
+	cfg := &config.Config{UDPPorts: []int{51820}, EnableIPv4: true, HostInterfaces: ifaces}
+	dir := t.TempDir()
+	cfgPath := dir + "/config.json"
+	if err := cfg.SaveTo(cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(config.WebAdmin{AuthMode: "local"}, &stubBackend{}, logx.Default())
+	srv.SetConfigPath(cfgPath)
+	return srv
+}
+
+func cidrs(ps []netip.Prefix) []string {
+	out := make([]string, 0, len(ps))
+	for _, p := range ps {
+		out = append(out, p.String())
+	}
+	sort.Strings(out)
+	return out
+}
+
+// An MTU or gateway edit must not adopt an address gravinet does not record.
+//
+// The addresses an edit did not mention are carried forward so Prune does not
+// remove them, and they used to be read from the live interface and filtered by
+// mode. The filter was supposed to keep a lease out, and does not in the case
+// that matters: an interface with no record has no mode, buildHostSpec reads
+// that as static, and so a DHCP lease on a never-managed interface passed the
+// filter, went into the record as a static address, and was reapplied as one at
+// every reload and written into the host's boot configuration. One MTU change
+// and the leased address was gravinet's forever.
+//
+// With no record there is also nothing to prune against, so the edit must not
+// prune: those addresses belong to whatever is managing the interface.
+func TestMTUEditDoesNotAdoptUnrecordedAddresses(t *testing.T) {
+	srv := hostIfaceEditServer(t) // no record for eth9 at all
+
+	spec, err := buildHostSpec(srv, hostEdit{Iface: "eth9", Op: "mtu", MTU: 1400})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spec.Addrs) != 0 {
+		t.Errorf("an MTU edit adopted %v; gravinet records no address for this interface", cidrs(spec.Addrs))
+	}
+	if spec.Prune {
+		t.Error("an MTU edit on an unrecorded interface must not prune: there is no intended set to prune against")
+	}
+	if spec.MTU != 1400 {
+		t.Errorf("MTU = %d, want 1400", spec.MTU)
+	}
+
+	// Same for a gateway edit, which shares the path.
+	spec, err = buildHostSpec(srv, hostEdit{Iface: "eth9", Op: "gateway", GW4: "10.9.9.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spec.Addrs) != 0 || spec.Prune {
+		t.Errorf("gateway edit: addrs=%v prune=%v, want none and false", cidrs(spec.Addrs), spec.Prune)
+	}
+}
+
+// With a record, the addresses carried forward are the recorded ones — so an
+// MTU edit reasserts what gravinet was asked for and prunes anything else,
+// which is what removes a lease still sitting beside a static address.
+func TestMTUEditCarriesRecordedAddressesOnly(t *testing.T) {
+	srv := hostIfaceEditServer(t, config.HostIface{
+		Iface: "eth9", Mode4: hostnet.ModeStatic, Mode6: hostnet.ModeStatic,
+		Addrs: []string{"192.168.122.12/24", "fd0a:9::1/64"}, GW4: "192.168.122.1",
+	})
+
+	spec, err := buildHostSpec(srv, hostEdit{Iface: "eth9", Op: "mtu", MTU: 1400})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"192.168.122.12/24", "fd0a:9::1/64"}
+	got := cidrs(spec.Addrs)
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("addrs = %v, want %v", got, want)
+	}
+	if !spec.Prune {
+		t.Error("an edit against a record submits the whole intended set, so it prunes")
+	}
+	if spec.GW4.String() != "192.168.122.1" {
+		t.Errorf("gateway not carried forward: %v", spec.GW4)
+	}
+}
+
+// A family recorded as non-static keeps its addresses out of the carried-forward
+// set, so an MTU edit cannot turn a lease into a static address that way either.
+func TestMTUEditSkipsNonStaticFamilies(t *testing.T) {
+	srv := hostIfaceEditServer(t, config.HostIface{
+		Iface: "eth9", Mode4: hostnet.ModeDHCP, Mode6: hostnet.ModeStatic,
+		Addrs: []string{"fd0a:9::1/64"},
+	})
+	spec, err := buildHostSpec(srv, hostEdit{Iface: "eth9", Op: "mtu", MTU: 1400})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cidrs(spec.Addrs); len(got) != 1 || got[0] != "fd0a:9::1/64" {
+		t.Errorf("addrs = %v, want only the static IPv6 address", got)
+	}
+}
+
+// The per-address source tag. The bug this pins is the one visible on the page:
+// eth0 recorded static with one address, a DHCP lease still up beside it, and
+// both rows tagged "static" — because the tag was the family's mode painted onto
+// every address of that family. The leftover lease was labelled as a decision
+// somebody made, which is the exact question the tag exists to answer.
+func TestAddressSourceTagIsPerAddress(t *testing.T) {
+	rec := config.HostIface{
+		Iface: "eth0", Mode4: hostnet.ModeStatic, Mode6: hostnet.ModeStatic,
+		Addrs: []string{"192.168.122.12/24"},
+	}
+	recorded := map[netip.Prefix]bool{}
+	for _, a := range rec.Addrs {
+		p, _ := netip.ParsePrefix(a)
+		recorded[p] = true
+	}
+
+	// The classification the handler applies, exercised over the case on the
+	// page: the recorded address and the lease that has not gone away.
+	tag := func(addr netip.Prefix, fam hostnet.Mode) string {
+		switch {
+		case !fam.IsStatic():
+			return string(fam)
+		case recorded[addr]:
+			return string(hostnet.ModeStatic)
+		default:
+			return "unmanaged"
+		}
+	}
+
+	lease := netip.MustParsePrefix("192.168.122.198/24")
+	mine := netip.MustParsePrefix("192.168.122.12/24")
+
+	if got := tag(mine, rec.Mode4); got != "static" {
+		t.Errorf("the recorded address should read static, got %q", got)
+	}
+	if got := tag(lease, rec.Mode4); got == "static" {
+		t.Error("a leased address gravinet does not record must not be tagged static")
+	} else if got != "unmanaged" {
+		t.Errorf("the unrecorded address should read unmanaged, got %q", got)
+	}
+
+	// Under a non-static family the address really did come from the network,
+	// so the family's own mode is the honest tag and no record is expected.
+	if got := tag(lease, hostnet.ModeDHCP); got != "dhcp" {
+		t.Errorf("under dhcp the tag should be dhcp, got %q", got)
+	}
+	if got := tag(netip.MustParsePrefix("2001:db8::5/64"), hostnet.ModeSLAAC); got != "slaac" {
+		t.Errorf("under slaac the tag should be slaac, got %q", got)
+	}
+}
+
+// The UI must read the server's per-address tag rather than deriving one from
+// the interface's family mode, which is what produced the mislabelling.
+func TestInterfacesUIUsesPerAddressTag(t *testing.T) {
+	src := mustRead("ui.go")
+	if !strings.Contains(src, "modeTag(a.mode)") {
+		t.Error("the addresses column should tag each address from a.mode")
+	}
+	for _, bad := range []string{
+		"modeTag(a.family==='ipv6' ? e.mode6 : e.mode4)",
+		"modeTag(a.family === 'ipv6' ? e.mode6 : e.mode4)",
+	} {
+		if strings.Contains(src, bad) {
+			t.Errorf("the addresses column still derives the tag from the family mode: %s", bad)
 		}
 	}
 }

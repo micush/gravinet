@@ -1610,6 +1610,19 @@ func appendNote(existing, add string) string {
 	return existing + "; " + add
 }
 
+// Indirected so handleSystemResolver can be driven in a test without renaming
+// the machine the test runs on or restarting the process running it. Same
+// reason hostresolver.go indirects sysDefaultGatewayFn and hardwarePortsFn:
+// the ordering this handler has to get right (commit before restart) is only
+// observable by driving the handler itself, and every other way of checking it
+// tests a copy of the ordering rather than the real one.
+var (
+	setHostnameFn = service.SetHostname
+	setHostDNSFn  = service.SetHostDNS
+	canRestartFn  = service.CanRestart
+	restartFn     = service.Restart
+)
+
 func (s *Server) handleSystemResolver(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		writeJSON(w, http.StatusOK, hostResolverJSON(service.HostResolver()))
@@ -1631,11 +1644,11 @@ func (s *Server) handleSystemResolver(w http.ResponseWriter, r *http.Request) {
 	switch req.Op {
 	case "hostname":
 		s.log.Infof("webadmin: setting host hostname to %q (requested from admin UI)", req.Hostname)
-		ok, note = service.SetHostname(req.Hostname)
+		ok, note = setHostnameFn(req.Hostname)
 	case "dns":
 		s.log.Infof("webadmin: setting host default DNS to %d server(s), search domain %q (requested from admin UI)",
 			len(req.Servers), req.SearchDomain)
-		ok, note = service.SetHostDNS(req.Servers, req.SearchDomain)
+		ok, note = setHostDNSFn(req.Servers, req.SearchDomain)
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "op must be 'hostname' or 'dns'"})
 		return
@@ -1644,6 +1657,26 @@ func (s *Server) handleSystemResolver(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": note})
 		return
 	}
+
+	// Recorded here, before the restart block below, and the order is the
+	// whole point. The hostname op restarts this process ~700ms from now, and
+	// the snapshot flush it does first can only capture what is already
+	// committed — mutateConfig schedules its snapshot on a 3-second debounce,
+	// so a record that lands after the flush is caught by nothing and then
+	// killed by the restart before its own timer fires. Recorded afterwards, a
+	// hostname change reached config.json and no snapshot at all: it survived
+	// a restart and was absent from every restore.
+	s.recordHostSettings(r, func(h *config.HostSettings) {
+		if h.Resolver == nil {
+			h.Resolver = &config.HostResolver{}
+		}
+		switch req.Op {
+		case "hostname":
+			h.Resolver.Hostname = req.Hostname
+		case "dns":
+			h.Resolver.DNSServers, h.Resolver.SearchDomain = req.Servers, req.SearchDomain
+		}
+	})
 
 	// A hostname change only takes effect on the OS immediately — the name
 	// gravinet itself advertises to mesh peers (config.Hostname, falling back
@@ -1657,12 +1690,12 @@ func (s *Server) handleSystemResolver(w http.ResponseWriter, r *http.Request) {
 	// `gravinet run`, outside a service manager), the hostname change still
 	// stands — only note that a manual restart is needed for peers to see it.
 	if req.Op == "hostname" {
-		if canRestart, hint := service.CanRestart(); canRestart {
+		if canRestart, hint := canRestartFn(); canRestart {
 			s.flushPendingHistorySnapshot() // about to restart; don't lose a snapshot still mid-debounce
 			go func() {
 				time.Sleep(700 * time.Millisecond) // let the reply flush first
 				s.log.Infof("webadmin: restarting service to apply hostname change (requested from admin UI)")
-				if ok, hint := service.Restart(); !ok {
+				if ok, hint := restartFn(); !ok {
 					s.log.Warnf("webadmin: automatic restart after hostname change failed: %s", hint)
 				}
 			}()
@@ -1691,19 +1724,6 @@ func (s *Server) handleSystemResolver(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if ok {
-		s.recordHostSettings(r, func(h *config.HostSettings) {
-			if h.Resolver == nil {
-				h.Resolver = &config.HostResolver{}
-			}
-			switch req.Op {
-			case "hostname":
-				h.Resolver.Hostname = req.Hostname
-			case "dns":
-				h.Resolver.DNSServers, h.Resolver.SearchDomain = req.Servers, req.SearchDomain
-			}
-		})
-	}
 	resp := hostResolverJSON(service.HostResolver())
 	resp["ok"] = true
 	if note != "" {

@@ -6751,12 +6751,16 @@ function secInterfaces(c){
       // The mode is shown next to the addresses rather than in a column of its
       // own, because it is the answer to "why are these the addresses" — and a
       // leased address and a static one look identical, so without the tag the
-      // table cannot be read. Only for interfaces gravinet manages: no tag
-      // means no record, which is different from a record saying static.
+      // table cannot be read. The tag is per address and comes from the server,
+      // which is what lets a static family say "unmanaged" next to an address
+      // gravinet does not record: a lease that has not gone away yet reads as
+      // exactly that, rather than being claimed as static. No tag means no
+      // record for the interface, which is different from a record saying
+      // static.
       const modeTag = (m) => m ? ' <span class="muted">'+esc(m)+'</span>' : '';
       const addrs = (e.addrs||[]).length
         ? (e.addrs||[]).map(a => '<div'+(a.scope!=='global'?' class="muted"':'')+'>'+esc(a.cidr)
-            + (a.scope==='global' ? modeTag(a.family==='ipv6' ? e.mode6 : e.mode4) : '')+'</div>').join('')
+            + modeTag(a.mode)+'</div>').join('')
         // A family on DHCP with no lease yet has nothing to show but is still
         // worth reporting: "no address, and here is what it is waiting for" is
         // a different situation from an interface nobody configured.
