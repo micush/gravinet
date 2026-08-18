@@ -171,40 +171,49 @@ func TestPeerOverlayEditSeedsAndNormalizesCIDR(t *testing.T) {
 	}
 }
 
-// TestPeerOverlayEditPromptsOnce: changing a peer's overlay address must cost
-// the operator exactly one modal.
+// TestPeerOverlayEditRaisesNoDialogOnSuccess: editing a peer's overlay address
+// must cost the operator no modal at all on the way through.
 //
-// The commit path used to raise two: a confirm ("saves on that node now, takes
-// effect on its next restart") and then, after a successful save, an alert
-// saying the same thing again. The second one asked for a click and told the
-// operator nothing they had not just read and agreed to — and it is the only
-// success alert on the page, so it was inconsistent as well as redundant.
+// It cost two, then one, then none, and the shrinking is the story. The commit
+// path raised a confirm — "saves on that node now, takes effect on its next
+// restart" — and then an alert repeating it on success. v875 removed the alert.
+// v878 found the confirm's one substantive claim had been false since v857,
+// which made the reload rebuild the network and apply the address immediately,
+// and rewrote the wording. v879 removed the matching own-node confirm on Mesh >
+// Networks once its restart went away.
 //
-// The confirm is the one that stays: it carries the consequence and offers a
-// way out. Success is reported the way every other inline editor here reports
-// it, by refreshing the row. Failure alerts are deliberately not counted
-// against this — an error is the case the operator has *not* been warned about.
-func TestPeerOverlayEditPromptsOnce(t *testing.T) {
+// That a confirmation could go on stating something untrue for two releases is
+// the argument against it, not for it: nobody was reading it. What it said that
+// was worth saying — the write lands on the peer rather than here, and applies
+// there at once — is in the cell's own tooltip now, where it appears *before*
+// the operator commits instead of after they have typed an address and pressed
+// Enter.
+//
+// Failure paths still interrupt. A save error and the wrong-family warning are
+// the two cases the operator has not already been told about.
+func TestPeerOverlayEditRaisesNoDialogOnSuccess(t *testing.T) {
 	src := uiSrc(t)
 	i := strings.Index(src, "function peerOverlayEdit")
 	if i < 0 {
 		t.Fatal("peerOverlayEdit not found")
 	}
 	body := src[i:]
-	if j := strings.Index(body, "\nfunction infoMeshPeers"); j > 0 {
-		body = body[:j]
-	} else {
+	j := strings.Index(body, "\nfunction infoMeshPeers")
+	if j < 0 {
 		t.Fatal("could not find the end of peerOverlayEdit; the bound below is unreliable")
 	}
+	body = body[:j]
 
-	if n := strings.Count(body, "confirm("); n != 1 {
-		t.Errorf("peerOverlayEdit raises %d confirm dialogs, want exactly 1", n)
+	if n := strings.Count(body, "confirm("); n != 0 {
+		t.Errorf("peerOverlayEdit raises %d confirm dialogs, want none: the edit is deliberate, reversible, and explained by the cell's tooltip before it is made", n)
 	}
 	if strings.Contains(body, "alert('Saved") {
-		t.Error("the success alert survives: a confirm the operator already answered, followed by a modal repeating it, is two clicks for one edit")
+		t.Error("a success alert is back")
 	}
-	// The remaining alerts must all be failure paths. Anything else is a new
-	// success popup wearing different words.
+	if strings.Contains(body, "takes effect on its next restart") {
+		t.Error("the pre-v857 restart claim is back somewhere in this editor; the reload rebuilds the network and applies the address immediately")
+	}
+	// The remaining alerts must all be failure paths.
 	for _, ok := range []string{
 		"alert((r.body && r.body.error) || 'save failed')",
 		"alert('That looks like an IPv'",
@@ -215,5 +224,21 @@ func TestPeerOverlayEditPromptsOnce(t *testing.T) {
 	}
 	if n := strings.Count(body, "alert("); n != 2 {
 		t.Errorf("peerOverlayEdit raises %d alerts, want 2 (both failures)", n)
+	}
+
+	// Removing the dialog must not delete what it said. The tooltip is the only
+	// place left that carries it.
+	tip := src[strings.Index(src, "function overlayEditCellHTML"):]
+	if e := strings.Index(tip, "\nfunction "); e > 0 {
+		tip = tip[:e]
+	}
+	for _, want := range []string{
+		"not this one",       // which node the write lands on
+		"immediately",        // when it takes effect
+		"drops and re-forms", // what that costs
+	} {
+		if !strings.Contains(tip, want) {
+			t.Errorf("the overlay cell tooltip no longer says %q — the confirm was removed and its content went with it", want)
+		}
 	}
 }

@@ -152,29 +152,6 @@ func TestOrdinaryEditStillReloadsBeforeResponding(t *testing.T) {
 	}
 }
 
-// TestPeerOverlayEditConfirmDoesNotPromiseARestart: the confirm on Mesh >
-// peers told the operator the change "takes effect on its next restart". That
-// stopped being true in v857, which made the reload rebuild the network to
-// apply the address immediately. An operator was therefore told the change was
-// deferred, shown a timeout that looked like failure, and had the address
-// change anyway — three signals, none of them matching what happened.
-func TestPeerOverlayEditConfirmDoesNotPromiseARestart(t *testing.T) {
-	i := strings.Index(indexHTML, "function peerOverlayEdit")
-	if i < 0 {
-		t.Fatal("peerOverlayEdit not found in indexHTML")
-	}
-	body := indexHTML[i:]
-	if j := strings.Index(body, "\nfunction infoMeshPeers"); j > 0 {
-		body = body[:j]
-	}
-	if strings.Contains(body, "takes effect on its next restart") {
-		t.Error("the confirm still promises the change waits for a restart; reloadFn rebuilds the network and applies it immediately")
-	}
-	if !strings.Contains(body, "immediately") {
-		t.Error("the confirm no longer tells the operator the change applies immediately, which is what makes the session drop that follows explicable")
-	}
-}
-
 // TestNetworkAddressEditHasNoConfirm: the own-node overlay-address editor on
 // Mesh > Networks used to raise a confirm, and the only thing that dialog said
 // was that the node would restart to apply the change. v857 removed the
@@ -189,8 +166,9 @@ func TestPeerOverlayEditConfirmDoesNotPromiseARestart(t *testing.T) {
 //
 // subnet and mtu keep their confirms, and this pins that too — theirs is not a
 // restart warning but a mesh-wide one (every other node must be changed to
-// match, and gravinet cannot detect a mismatch), which nothing has made
-// untrue.
+// match, and gravinet cannot detect a mismatch), and both do still restart the
+// node. That is the line: a dialog earns its place by guarding something
+// destructive or undiscoverable, not by narrating an ordinary edit.
 func TestNetworkAddressEditHasNoConfirm(t *testing.T) {
 	i := strings.Index(indexHTML, "} else if (field === 'address4' || field === 'address6'){")
 	if i < 0 {

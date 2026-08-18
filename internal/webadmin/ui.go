@@ -4202,7 +4202,11 @@ function overlayEditCellHTML(p) {
   const slot = (fam, val) => {
     const cls = 'ov-fam' + (fam === '6' ? ' hint' : '');
     const body = val ? esc(val) : '<span class="mut">\u2013 add v' + fam + '</span>';
-    return '<span class="' + cls + '" data-ov-fam="' + fam + '" title="double-click to edit this peer\'s IPv' + fam + ' overlay address on its own node">' + body + '</span>';
+    // The tooltip carries what a confirm used to: that the write lands on the
+    // peer, not here, and that it applies there at once. Both were worth
+    // saying and neither was worth an OK button — see peerOverlayEdit.
+    const tip = 'double-click to edit this peer\'s IPv' + fam + ' overlay address. Saved on the peer\'s own node, not this one, and applied there immediately: it rebuilds that network, so every session on it drops and re-forms \u2014 including the one this page manages the peer over. Type "none" to clear and auto-assign.';
+    return '<span class="' + cls + '" data-ov-fam="' + fam + '" title="' + esc(tip) + '">' + body + '</span>';
   };
   return slot('4', p.overlay4 || '') + '<br>' + slot('6', p.overlay6 || '');
 }
@@ -4486,8 +4490,18 @@ function peerOverlayEdit(td, n, p, fam){
     const clearing = typed === '' || typed.toLowerCase() === 'none';
     const v = clearing ? typed : overlayWithPrefix(typed, plen);
     if (v === cur){ refresh(); return; }
-    const who = p.host || p.id.slice(0,8);
-    if (!confirm('Change '+who+'\'s IPv'+(v6?'6':'4')+' overlay address for "'+nameOf(n.id)+'"?\n\nThis applies on '+who+'\'s own node immediately: it rebuilds that network to take the new address, so every session on it drops and re-forms \u2014 including the one this page manages '+who+' over. Nothing changes on this node.')){ refresh(); return; }
+    // No confirm. What one used to say — the write lands on the peer rather
+    // than here, and applies there at once — is now in the cell's own tooltip
+    // (see overlayEditCellHTML), which says it *before* the operator commits
+    // rather than after they have already typed an address and pressed Enter.
+    //
+    // The dialog this replaced had, until v878, been claiming the change waited
+    // for the peer's next restart, which stopped being true in v857. That is
+    // the argument against the modal rather than for it: a confirmation nobody
+    // reads is a confirmation that can go on lying for two releases. Failures
+    // below still interrupt, because those are what the operator has not
+    // already been told.
+
     // The family comes from which slot was double-clicked, not from sniffing
     // the typed value's notation. Sniffing was what let a dual-stack peer's v6
     // address be edited at all before there were per-family slots, and it is
@@ -4509,13 +4523,11 @@ function peerOverlayEdit(td, n, p, fam){
     if (v6) body.address6 = v; else body.address4 = v;
     const r = await api('/api/network', { method:'POST', body: JSON.stringify(body) }, p.id);
     if (!r.ok){ alert((r.body && r.body.error) || 'save failed'); refresh(); return; }
-    // No success popup. The confirm above already said what the save means —
-    // written on the peer's node now, effective on its next restart — so a
-    // second modal repeating it is a click that carries no information the
-    // operator did not just read and agree to. Every other inline cell editor
-    // on this page reports success the same way: the refreshed row shows the
-    // new value. A failure still interrupts, because that is the case the
-    // operator has not already been told about.
+    // No success popup either. This editor now raises no dialog at all on the
+    // way through: the cell's tooltip says what the edit means before it is
+    // made, and the refreshed row showing the new value is how every other
+    // inline cell editor on this page reports success. Only failures
+    // interrupt.
     refresh();
   };
   inp.onkeydown = e => {

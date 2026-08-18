@@ -2,6 +2,30 @@
 
 ---
 
+## v880 — 2026-08-18
+
+**Editing a peer's overlay address raises no dialog at all now.**
+
+The count on this editor has gone two, one, one, none across four releases, and the shrinking is the point.
+
+v875 removed the success alert that repeated what the confirm had just said. v878 found that the confirm's one substantive claim — the change waits for the peer's next restart — had been false since v857, and rewrote the wording. v879 deleted the matching own-node confirm on Mesh › Networks once its restart went away, but kept this one on the argument that it told the operator *which node* the write lands on.
+
+That argument does not survive the history it sits on. A dialog that spent two releases stating something untrue is a dialog nobody was reading, and the way to deliver a fact nobody reads is not a modal. It is gone.
+
+What it said that was worth saying is now in the cell's own tooltip: that the write goes to the peer's node rather than this one, that it applies there immediately by rebuilding that network, that every session on it drops and re-forms including the one the page is managing the peer over, and that `none` clears and auto-assigns. That is strictly better placed — it is readable *before* the operator commits, rather than after they have typed an address and pressed Enter.
+
+The line this settles on: a dialog earns its place by guarding something destructive or undiscoverable, not by narrating an ordinary edit. Editing a peer's address is deliberate (a double-click on that peer's own row), reversible (type the old value back), and its consequence is visible the moment it happens.
+
+**Failures still interrupt** — a save error and the wrong-family warning are the two things the operator has not already been told.
+
+**The rest of the page's confirms were audited and all stay.** Every one guards a restart, a deletion, losing access to the console you are typing in, turning off time sync, or clearing a log — destructive or irreversible, all of them. `subnet` and `mtu` in particular keep theirs: it was never a restart warning, but a mesh-wide one that gravinet cannot detect for you.
+
+**Tests.** `TestPeerOverlayEditPromptsOnce` becomes `TestPeerOverlayEditRaisesNoDialogOnSuccess`: zero confirms, no success alert, the pre-v857 restart claim absent anywhere in the editor, and exactly the two failure alerts. It also checks the tooltip still carries which-node, when, and what-it-costs — removing a dialog must not delete what it said. `TestPeerOverlayEditConfirmDoesNotPromiseARestart` (v878) is folded into it, since a confirm that does not exist cannot promise anything.
+
+`go build ./...`, `go vet` and `gofmt` clean; `internal/webadmin`, `internal/config` and `cmd/gravinet` pass in full, including the node-based UI parse check.
+
+---
+
 ## v879 — 2026-08-18
 
 **Changing this node's own overlay address no longer asks for a restart, and no longer raises a dialog to warn about one.**
