@@ -2,6 +2,47 @@
 
 ---
 
+## v877 — 2026-08-18
+
+**A table's filter box was cleared by the automatic refresh, the same way its sort was in v876.**
+
+Same defect, other half of `enhanceTable`. The sort lived in two closure locals; the filter text lived in the `<input>` itself. Both belonged to the DOM `renderSection()` destroys, so both died with it. The filter hid it better only because `startPolling` declines to re-render while an input has focus — so the box emptied on the first poll *after* the operator clicked away from it, rather than while they were typing, which made it look like something else had happened.
+
+`state.tableSort` is now `state.tableView`, holding `{col, dir, filter}` per table under the same key, and `tableSortKey` is `tableViewKey`. Renamed rather than kept: a slot called `tableSort` that also carried filter text would be the sort of name that costs someone twenty minutes later.
+
+Two ordering details:
+
+- The filter text is restored **before** the sort. `sortBy` ends in `applyFilter()`, so restoring in this order hides the right rows in one pass instead of reordering the full set and then filtering it.
+- A table with a restored filter and no saved sort still has to call `applyFilter()`, which is what the `else` on the restore is for. Without it the box comes back populated over unfiltered rows — worse than losing the text, because the rows then visibly contradict the query sitting above them.
+
+**Cleared on a target switch.** `setTarget` now resets `state.tableView`. A remembered sort is harmless on another managed node; a remembered *filter* is not. Carrying `rpi4` onto a node that has no such peer shows an empty table under a query the operator did not type there, which reads as the node having no peers. Both are cleared together rather than only the risky one — a view that half-survives a switch is harder to reason about than one that does not survive at all. `setTarget` is already the one place a real switch is known to have happened, which is why `_ifaceCache` is reset there too.
+
+**Tests.** `internal/webadmin/tableview_test.go` (was `tablesort_test.go`) now pins the filter record, the restore, the restore *order* relative to the sort, and the `else applyFilter()` branch, alongside the v876 sort assertions. `TestTableViewClearedOnTargetSwitch` pins the reset in `setTarget`. Same caveat as v876: this scans the served page, so it guards the wiring and not the behaviour. The behaviour was checked by hand against a DOM — a filter survives successive re-renders, survives a sort applied on top of it, clears when emptied, and does not survive a target switch.
+
+---
+
+## v876 — 2026-08-18
+
+**Fixed: sorting a column in the admin UI was undone by the next automatic refresh.**
+
+Sort Mesh > peers by rtt, wait four seconds, and the table is back in its original order. Same on Monitor > Mesh Peers and Bans, which are the three views `startPolling` re-renders on any status change; everywhere else the sort survived only until the next edit, since almost every mutating path ends in a `refresh()`.
+
+`enhanceTable` deliberately only reorders existing `<tr>` nodes — that is what lets inline editors, checkboxes and wired handlers survive a sort — and it kept the chosen column and direction in `col`/`dir`, two closure locals belonging to the table it enhanced. `renderSection()` rebuilds the table from scratch, so those locals died with the DOM nodes they described. Nothing was reordering the data at the source, so after a rebuild there was nothing left that knew a sort had ever been asked for.
+
+The choice now lives in `state.tableSort` and is re-applied as the last step of enhancing a table. Two details carry the fix:
+
+**The key describes the table, not its position.** An index into the render moves as soon as a network is added or a card appears, which would hand one table's sort to another; and nothing generates ids. So a table is named by what a person would point at — section, card heading, column signature, and an occurrence number for the rare card holding two identically-shaped tables. Including the columns is what makes a stale entry harmless: rename or reorder one and the key changes, so the old sort is simply not found rather than replayed against an index that now means something else.
+
+**Restoring is separate from toggling.** `sortBy(i, d)` does the reordering; the click handler decides the direction and calls it. Folding them together is what would make a remembered `desc` flip to `asc` on every poll — a table that appears to sort itself, which is worse than one that forgets.
+
+This lands in `enhanceTable`, so it covers every table on the page that goes through it, not only the three polled views.
+
+**Tests.** `TestTableSortSurvivesRerender` (`internal/webadmin/tablesort_test.go`) pins the state slot, the key derivation, the save on click, the restore, and that `sortBy` contains no direction toggle of its own. Following this package's usual approach it scans the served page rather than running the JS, so it pins the wiring and not the behaviour — it cannot prove a sort is restored, only that nothing has removed the parts that do it. The behaviour itself was checked by hand against a DOM: ascending and descending both survive successive re-renders, a numeric column survives, and a table in another section does not inherit the sort.
+
+**Not changed.** The filter box has the same shape of problem — its text is also lost to a re-render, though only after focus leaves it, since the poll declines to re-render while an input is focused. Left alone here rather than folded into a fix that was asked for about sorting.
+
+---
+
 ## v875 — 2026-08-18
 
 **Fixed: a node's own path-MTU advisory poisoned its IPv6 route cache, so jumbo IPv6 over the tunnel failed at `sendmsg` with `EMSGSIZE` — on a path that overlay fragmentation was carrying fine.**

@@ -401,7 +401,7 @@ const indexHTML = `<!doctype html>
 <script>
 const $ = (h) => { const d=document.createElement('div'); d.innerHTML=h.trim(); return d.firstChild; };
 const app = document.getElementById('app');
-const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, geoipLookup:false, enableUpnp:false, allowRemoteShell:false, loginBanMaxFailures:3, loginBanSeconds:900, tlsSource:'self-signed', tlsCommonName:'', tlsNotAfter:'', configHistoryLimit:250, configHistoryCount:0, shellSupported:true, bgpSupported:false, snmpSupported:false, ipv6raSupported:false, l2discoSupported:false, syslogSupported:false, selfId:null, selfHostname:'', targetSeq:0, pendingBgpHighlight:null, workerThreads:0, tunQueues:0, tunQueuesSupported:true, udpGSO:false, udpGSOSupported:true, socketBufferMB:16, socketBufferMaxMB:256, perfRestartPending:false, loginBanRestartPending:false };
+const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, geoipLookup:false, enableUpnp:false, allowRemoteShell:false, loginBanMaxFailures:3, loginBanSeconds:900, tlsSource:'self-signed', tlsCommonName:'', tlsNotAfter:'', configHistoryLimit:250, configHistoryCount:0, shellSupported:true, bgpSupported:false, snmpSupported:false, ipv6raSupported:false, l2discoSupported:false, syslogSupported:false, selfId:null, selfHostname:'', targetSeq:0, pendingBgpHighlight:null, workerThreads:0, tunQueues:0, tunQueuesSupported:true, udpGSO:false, udpGSOSupported:true, socketBufferMB:16, socketBufferMaxMB:256, perfRestartPending:false, loginBanRestartPending:false, tableView:{} };
 // setTarget is the only place state.target is ever assigned — bumping
 // targetSeq alongside it, once, exactly when the *selection itself* actually
 // changes. load()/startPolling()/refreshCluster() each capture targetSeq
@@ -421,7 +421,14 @@ const state = { section:'networks', status:[], cfg:[], restartPending:false, sta
 // real switch is known to have happened, means the next systemInterfaces()
 // call — L2 Disco's picker on its next load(), or NAT's masquerade dropdown
 // next time a row is opened — fetches fresh instead of reusing a stale list.
-function setTarget(v){ state.target = v; state.targetSeq++; _ifaceCache = null; }
+// Also clears state.tableView (see enhanceTable): a remembered sort is
+// harmless on another node, but a remembered *filter* is not — carrying
+// "rpi4" onto a node that has no such peer shows an empty table with a
+// populated filter box the operator did not type, which reads as the node
+// having no peers. Both are cleared together rather than only the risky
+// one, because a view that half-survives a switch is harder to reason
+// about than one that does not survive it at all.
+function setTarget(v){ state.target = v; state.targetSeq++; _ifaceCache = null; state.tableView = {}; }
 
 // selection holds the currently ticked rows per multi-select section, keyed by
 // "netid#rowid", so a selection survives the 4s status re-render (peers/bans
@@ -2491,6 +2498,34 @@ function evalFilterAst(node, haystack){
 
 const filterTitle = 'AND / OR / NOT (or -term), "quoted phrase", (parentheses)';
 
+// tableViewKey names a table stably across re-renders, so enhanceTable can put
+// back the sort and filter the operator chose. It cannot be an index into the render,
+// because a table's position moves whenever a network is added or a card
+// appears; and it cannot be an id, because nothing generates one. So the key is
+// what a person would use to point at the table: which section they are on,
+// which card it is in, what its columns are, and — for the rare case where one
+// card holds two identically-shaped tables — which of those it is.
+//
+// Including the column signature is what makes a stale entry harmless rather
+// than dangerous. If a table gains, loses, or renames a column, the key changes
+// and the old view is simply not found, instead of a saved column index being
+// replayed against a column that now means something else.
+function tableViewKey(table){
+  const header = table.rows[0];
+  const cols = header ? [].slice.call(header.cells).map(c => c.textContent.trim()).join(' \u2502 ') : '';
+  const card = table.closest ? table.closest('.card') : null;
+  const h = card ? card.querySelector('h3') : null;
+  const base = [state.section, h ? h.textContent.trim() : '', cols].join(' \u25b8 ');
+  // Occurrence within this render, counted over the tables enhanced before
+  // this one. enhanceTable runs in DOM order for renderSection's blanket pass
+  // and at build time for the async sections, so the same table gets the same
+  // number every time the same page is drawn.
+  let n = 0;
+  document.querySelectorAll('table[data-viewbase]').forEach(t => { if (t.dataset.viewbase === base) n++; });
+  table.dataset.viewbase = base;
+  return base + ' #' + n;
+}
+
 // enhanceTable gives a rendered table a live cross-column filter box and
 // click-to-sort headers. It only reorders/hides existing <tr> nodes — never
 // rebuilds them — so handlers, checkboxes, and inline editors already wired to
@@ -2498,6 +2533,12 @@ const filterTitle = 'AND / OR / NOT (or -term), "quoted phrase", (parentheses)';
 function enhanceTable(table){
   if (table.dataset.enh) return; table.dataset.enh = '1';
   const header = table.rows[0]; if (!header) return;
+  const key = tableViewKey(table);
+  // view is this table's remembered sort and filter, kept outside the table
+  // because the table itself does not survive a re-render. Created on first
+  // sight so the click and input handlers below can write into one object
+  // rather than each re-reading and re-storing a whole record.
+  const view = state.tableView[key] || (state.tableView[key] = {});
   const tb = table.tBodies[0] || table;
   const isData = (r) => r !== header && r.cells.length > 1 && !r.querySelector('[colspan]');
   const allRows = () => [].slice.call(table.rows);
@@ -2534,30 +2575,57 @@ function enhanceTable(table){
     allRows().forEach(r => { if (r === header) return;
       r.style.display = (!ast || evalFilterAst(ast, r.textContent.toLowerCase())) ? '' : 'none'; });
   };
-  if (filt) filt.oninput = applyFilter;
+  if (filt) filt.oninput = () => { view.filter = filt.value; applyFilter(); };
+  // Put the filter text back before any sort restore below, so the sort's own
+  // applyFilter() call sees it and hides the same rows in one pass instead of
+  // reordering the full set and then filtering it again.
+  if (filt && view.filter) filt.value = view.filter;
 
   const ths = [].slice.call(header.cells);
   const pureNum = (s) => s !== '' && /^-?[\d.]+$/.test(s.replace(/[, ]/g,''));
   let col = -1, dir = 1;
+  // sortBy does the reordering; the click handler decides the direction. They
+  // are separate because a restore has to apply a sort without toggling it —
+  // folding the two together is what would make a remembered 'desc' flip back
+  // to 'asc' on every poll.
+  const sortBy = (i, d) => {
+    col = i; dir = d;
+    ths.forEach(x => x.removeAttribute('data-sort'));
+    ths[i].setAttribute('data-sort', d > 0 ? 'asc' : 'desc');
+    const v = (r) => r.cells[i] ? r.cells[i].textContent.trim() : '';
+    const rows = allRows().filter(isData);
+    rows.sort((a,b) => { const x = v(a), y = v(b);
+      const c = (pureNum(x) && pureNum(y))
+        ? parseFloat(x.replace(/[, ]/g,'')) - parseFloat(y.replace(/[, ]/g,''))
+        : x.toLowerCase().localeCompare(y.toLowerCase());
+      return c * d; });
+    rows.forEach(r => tb.appendChild(r));                                  // sorted data first
+    allRows().filter(r => r !== header && !isData(r)).forEach(r => tb.appendChild(r)); // placeholders last
+    applyFilter();
+  };
   ths.forEach((th, i) => {
     if (!th.textContent.trim()) return; // skip checkbox / action columns
     th.classList.add('sortable-th');
     th.onclick = () => {
-      if (col === i) dir = -dir; else { col = i; dir = 1; }
-      ths.forEach(x => x.removeAttribute('data-sort'));
-      th.setAttribute('data-sort', dir > 0 ? 'asc' : 'desc');
-      const v = (r) => r.cells[i] ? r.cells[i].textContent.trim() : '';
-      const rows = allRows().filter(isData);
-      rows.sort((a,b) => { const x = v(a), y = v(b);
-        const c = (pureNum(x) && pureNum(y))
-          ? parseFloat(x.replace(/[, ]/g,'')) - parseFloat(y.replace(/[, ]/g,''))
-          : x.toLowerCase().localeCompare(y.toLowerCase());
-        return c * dir; });
-      rows.forEach(r => tb.appendChild(r));                                  // sorted data first
-      allRows().filter(r => r !== header && !isData(r)).forEach(r => tb.appendChild(r)); // placeholders last
-      applyFilter();
+      const d = (col === i) ? -dir : 1;
+      view.col = i; view.dir = d;
+      sortBy(i, d);
     };
   });
+  // Put back the sort the operator picked. Mesh > peers, Monitor > Mesh Peers
+  // and Bans are re-rendered from scratch by the four-second status poll (see
+  // startPolling), which dropped a chosen order roughly as often as it could
+  // be read — and the same happens to every table on any path that calls
+  // renderSection(), which is most edits. The state lives outside the table
+  // because the table itself does not survive; nothing here reorders data at
+  // the source, so this is the only place the choice can be kept.
+  //
+  // Guarded on the column still being sortable rather than merely present: a
+  // saved index landing on a checkbox or action column would set data-sort on
+  // a header that has no sort behaviour and never got the class.
+  const sortable = view.col !== undefined && ths[view.col] && ths[view.col].classList.contains('sortable-th');
+  if (sortable) sortBy(view.col, view.dir);
+  else applyFilter(); // no sort to restore, but a restored filter still has to be applied
 }
 
 // addLineFilter inserts a filter box (matching the table filter's look) above a
