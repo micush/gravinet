@@ -2,6 +2,32 @@
 
 ---
 
+## v884 — 2026-08-18
+
+**Reverted the `.gitignore` added in v883.**
+
+v883 was asked to remove `distribute-gravinet` from a source archive. It removed the file and then added a `.gitignore` for it, on the reasoning that the script excludes itself from its own rsyncs so nothing should track it anywhere.
+
+That reasoning was wrong, and it was not the request. The script is deliberately tracked in the maintainer's own repository and kept out of the public mirror, which the existing `--exclude distribute-gravinet` on the mirror rsync already handles. An ignore rule is repository-wide: it would have untracked the script in the one repository that is supposed to hold it, breaking a working arrangement in order to enforce a rule nobody asked for.
+
+The `.gitignore` is deleted; the repository had none before v883 and has none again. The file stays out of the archive, which is all that was wanted.
+
+---
+
+## v883 — 2026-08-18
+
+**Removed `distribute-gravinet` from the source tree, and kept it out.**
+
+It is the maintainer's own deployment script, not part of gravinet: a private fleet host list, a git tag-and-push, and an rsync-plus-ssh-as-root loop over every node. It had been sitting at the repo root and going out in source archives.
+
+The script already knew it should not travel. Both of its rsyncs — the public github mirror and each peer — pass `--exclude distribute-gravinet`. Source archives were the one copy path that did not go through it, so nothing enforced there what the script enforces everywhere else.
+
+Deleted from the archive. Nothing else in the tree referenced it. (This entry originally also added a `.gitignore`; that was a mistake and was reverted in v884 — see there.)
+
+No code change; no behaviour change.
+
+---
+
 ## v882 — 2026-08-18
 
 ### Enter in the peer overlay editor looked like it did nothing
