@@ -41,7 +41,10 @@ func sendDataRecovering(e *Engine, ps *peerSession, pkt []byte) {
 func newSignalFixture(t *testing.T) (*Engine, *netState, *peerSession, *fakeDev) {
 	t.Helper()
 	dev := newFakeDev("mesh0")
-	ns := &netState{self4: netip.MustParseAddr("192.168.203.5")}
+	ns := &netState{
+		self4: netip.MustParseAddr("192.168.203.5"),
+		self6: netip.MustParseAddr("fd00:203::5"),
+	}
 	ns.spec.Dev = dev
 	ps := &peerSession{nodeID: "mcfed", net: ns}
 	ps.setEff(1473) // the real mcfed figure: jumbo LAN one side, ~1500 the other
@@ -150,5 +153,83 @@ func TestNoAdvisoryForPacketThatFits(t *testing.T) {
 	case <-dev.out:
 		t.Fatal("advised on a packet that needed no fragmentation")
 	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+// mkV6 builds a minimal IPv6 packet of total length n (header included).
+// IPv6 has no DF bit — every packet is implicitly don't-fragment — so there is
+// no flag counterpart to mkV4's.
+func mkV6(src, dst netip.Addr, n int, nextHdr byte) []byte {
+	p := make([]byte, n)
+	p[0] = 0x60
+	binary.BigEndian.PutUint16(p[4:6], uint16(n-40))
+	p[6] = nextHdr
+	p[7] = 64
+	a := src.As16()
+	b := dst.As16()
+	copy(p[8:24], a[:])
+	copy(p[24:40], b[:])
+	return p
+}
+
+// A packet this node originated itself must never be advised. The advisory
+// would be addressed from our overlay address to our overlay address: IPv4
+// discards it as a martian source, and IPv6 believes it and caches a route
+// exception that makes every subsequent DONTFRAG send fail with EMSGSIZE —
+// breaking jumbo overlay traffic that sendFragmented would have delivered.
+func TestNoAdvisoryForLocallyOriginatedPacket(t *testing.T) {
+	e, ns, ps, dev := newSignalFixture(t)
+	per := int(ps.maxFrag.Load())
+	self4, self6 := ns.selfAddrs()
+
+	for _, tc := range []struct {
+		name string
+		pkt  []byte
+	}{
+		{"v4", mkV4(self4, netip.MustParseAddr("192.168.203.216"), per+2000, true, 6)},
+		{"v6", mkV6(self6, netip.MustParseAddr("fd00:203::216"), per+2000, 6)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ps.lastTooBig.Store(0) // the limiter must not be what makes this pass
+			sendDataRecovering(e, ps, tc.pkt)
+			select {
+			case out := <-dev.out:
+				t.Fatalf("advised this host's own stack (%d bytes written): the packet is fragmented and delivered regardless, and on v6 the kernel acts on this by refusing every later jumbo send", len(out))
+			case <-time.After(150 * time.Millisecond):
+			}
+		})
+	}
+}
+
+// The suppression above must not reach the case the advisory exists for: a
+// host behind this node, on a redistributed jumbo segment, whose packets this
+// node forwards. IPv6 is eligible unconditionally — there is no DF bit to
+// check.
+func TestAdvisoryStillSentForForwardedV6(t *testing.T) {
+	e, _, ps, dev := newSignalFixture(t)
+	src := netip.MustParseAddr("fd00:5::116")
+	per := int(ps.maxFrag.Load())
+
+	sendDataRecovering(e, ps, mkV6(src, netip.MustParseAddr("fd00:203::216"), per+2000, 6))
+	select {
+	case out := <-dev.out:
+		if out[0]>>4 != 6 || out[6] != 58 {
+			t.Fatalf("advisory is not an IPv6 ICMPv6 packet: version=%d nextHdr=%d", out[0]>>4, out[6])
+		}
+		if m := out[40:]; m[0] != 2 {
+			t.Fatalf("ICMPv6 type = %d, want 2 (packet too big)", m[0])
+		}
+		want := per
+		if want < icmpV6MinMTU {
+			want = icmpV6MinMTU
+		}
+		if got := int(binary.BigEndian.Uint32(out[44:48])); got != want {
+			t.Fatalf("advertised MTU = %d, want %d", got, want)
+		}
+		if got, _ := netip.AddrFromSlice(out[24:40]); got != src {
+			t.Fatalf("advisory destination = %v, want the original sender %v", got, src)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no advisory for a forwarded sender: the v706 case is what this feature is for")
 	}
 }

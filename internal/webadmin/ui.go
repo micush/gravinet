@@ -4431,7 +4431,13 @@ function peerOverlayEdit(td, n, p, fam){
     if (v6) body.address6 = v; else body.address4 = v;
     const r = await api('/api/network', { method:'POST', body: JSON.stringify(body) }, p.id);
     if (!r.ok){ alert((r.body && r.body.error) || 'save failed'); refresh(); return; }
-    alert('Saved; takes effect next time '+who+' restarts.');
+    // No success popup. The confirm above already said what the save means —
+    // written on the peer's node now, effective on its next restart — so a
+    // second modal repeating it is a click that carries no information the
+    // operator did not just read and agree to. Every other inline cell editor
+    // on this page reports success the same way: the refreshed row shows the
+    // new value. A failure still interrupts, because that is the case the
+    // operator has not already been told about.
     refresh();
   };
   inp.onkeydown = e => {

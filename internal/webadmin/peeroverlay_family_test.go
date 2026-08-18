@@ -170,3 +170,50 @@ func TestPeerOverlayEditSeedsAndNormalizesCIDR(t *testing.T) {
 		t.Error("the pre-v783 clearing test survives; it tests the normalized value")
 	}
 }
+
+// TestPeerOverlayEditPromptsOnce: changing a peer's overlay address must cost
+// the operator exactly one modal.
+//
+// The commit path used to raise two: a confirm ("saves on that node now, takes
+// effect on its next restart") and then, after a successful save, an alert
+// saying the same thing again. The second one asked for a click and told the
+// operator nothing they had not just read and agreed to — and it is the only
+// success alert on the page, so it was inconsistent as well as redundant.
+//
+// The confirm is the one that stays: it carries the consequence and offers a
+// way out. Success is reported the way every other inline editor here reports
+// it, by refreshing the row. Failure alerts are deliberately not counted
+// against this — an error is the case the operator has *not* been warned about.
+func TestPeerOverlayEditPromptsOnce(t *testing.T) {
+	src := uiSrc(t)
+	i := strings.Index(src, "function peerOverlayEdit")
+	if i < 0 {
+		t.Fatal("peerOverlayEdit not found")
+	}
+	body := src[i:]
+	if j := strings.Index(body, "\nfunction infoMeshPeers"); j > 0 {
+		body = body[:j]
+	} else {
+		t.Fatal("could not find the end of peerOverlayEdit; the bound below is unreliable")
+	}
+
+	if n := strings.Count(body, "confirm("); n != 1 {
+		t.Errorf("peerOverlayEdit raises %d confirm dialogs, want exactly 1", n)
+	}
+	if strings.Contains(body, "alert('Saved") {
+		t.Error("the success alert survives: a confirm the operator already answered, followed by a modal repeating it, is two clicks for one edit")
+	}
+	// The remaining alerts must all be failure paths. Anything else is a new
+	// success popup wearing different words.
+	for _, ok := range []string{
+		"alert((r.body && r.body.error) || 'save failed')",
+		"alert('That looks like an IPv'",
+	} {
+		if !strings.Contains(body, ok) {
+			t.Errorf("expected failure alert is missing: %s", ok)
+		}
+	}
+	if n := strings.Count(body, "alert("); n != 2 {
+		t.Errorf("peerOverlayEdit raises %d alerts, want 2 (both failures)", n)
+	}
+}

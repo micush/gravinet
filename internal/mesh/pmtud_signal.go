@@ -53,6 +53,31 @@ func (e *Engine) signalPacketTooBig(ps *peerSession, pkt []byte, mtu int) {
 	}
 	self4, self6 := ns.selfAddrs()
 
+	// Never advise this node's own stack. The advisory names self4/self6 as
+	// its source, so for a packet this host originated the message is
+	// self-addressed — src == dst == our own overlay address, arriving on
+	// our own overlay device. The two families then diverge, and neither
+	// outcome is the one intended:
+	//
+	//   - IPv4 is discarded before it reaches the PMTU cache, as a source
+	//     address that is one of our own local addresses arriving from
+	//     "outside" (fib_validate_source; see rp_filter/accept_local). The
+	//     advisory has no effect at all, and only appears to be harmless.
+	//   - IPv6 has no equivalent source check. It is believed, and installs
+	//     a per-destination route exception, after which every DONTFRAG
+	//     send above that size fails locally with EMSGSIZE — even though
+	//     sendFragmented would have split the packet and delivered it. The
+	//     overlay's whole jumbo-MTU premise is defeated for the one host
+	//     that can least afford it.
+	//
+	// The advisory exists for senders *behind* this node — the redistributed
+	// jumbo LAN in the v706 field case — which are unaffected by this and
+	// still receive it. Checked before the rate limiter so local traffic
+	// cannot consume the per-session token that a forwarded sender needs.
+	if src == self4 || src == self6 {
+		return
+	}
+
 	now := time.Now().UnixNano()
 	last := ps.lastTooBig.Load()
 	if now-last < int64(tooBigMinInterval) {

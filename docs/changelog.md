@@ -2,6 +2,54 @@
 
 ---
 
+## v875 — 2026-08-18
+
+**Fixed: a node's own path-MTU advisory poisoned its IPv6 route cache, so jumbo IPv6 over the tunnel failed at `sendmsg` with `EMSGSIZE` — on a path that overlay fragmentation was carrying fine.**
+
+Reported as an asymmetry with no obvious cause:
+
+```
+$ ping -4 -M do -s 4000 rpi4
+4008 bytes from rpi4 (192.168.203.216): icmp_seq=1 ttl=64 time=9.00 ms   ... 0% packet loss
+
+$ ping -6 -M do -s 4000 rpi4
+ping: sendmsg: Message too long                                          ... 100% packet loss
+```
+
+Same two hosts, same tunnel, same 8915 B overlay MTU, one family works and the other cannot get a packet out of the local kernel. `-M do` sets `IPV6_PMTUDISC_DO`, so this is `sendmsg()` refusing on a cached path MTU, not anything happening on the wire.
+
+### The advisory was addressed to the node that sent it
+
+`signalPacketTooBig` (v706) builds its ICMP with `self4`/`self6` as the source and `parseSrc(pkt)` as the destination. For a packet this host *originated*, those are the same address: the message is written into `mesh0` from our own overlay address, to our own overlay address, and the two stacks then do different things with it.
+
+IPv4 never sees it. A source address that is one of our own local addresses, arriving on an interface from "outside", is discarded by `fib_validate_source` — so the v4 half of v706 has been a no-op on any host with `rp_filter` on since the day it shipped, and looked harmless only because it was.
+
+IPv6 has no equivalent source check. It believes the advisory, installs a per-destination route exception at the advertised MTU, and from then on refuses every `DONTFRAG` send above that size — for the ~10 minutes of `net.ipv6.route.mtu_expires`, refreshed by each new advisory. `sendFragmented` would have split that packet and delivered it, exactly as it does for IPv4. The overlay's entire jumbo-MTU premise, defeated for the one host in the best position to know better.
+
+The advisory now declines when the source is one of this node's own overlay addresses, checked before the rate limiter so local traffic cannot consume the per-session token a forwarded sender needs. The case v706 was written for — a host *behind* this node on a redistributed jumbo segment, which is what the field report described and what every existing test in `pmtud_signal_test.go` models — is untouched and still advised.
+
+Note that the IPv4 outcome was never a design decision, only a sysctl this deployment happened to have set. A host with `rp_filter=0` and no tclassid users takes the early-out in `fib_validate_source`, accepts the advisory, and breaks IPv4 jumbo traffic the same way. Both families are now deterministic for the same reason instead of accidentally different for two.
+
+**Tests** (`internal/mesh/pmtud_signal_test.go`):
+
+- `TestNoAdvisoryForLocallyOriginatedPacket` — both families, with `lastTooBig` explicitly reset so the rate limiter is not what makes it pass. Fails with the guard removed.
+- `TestAdvisoryStillSentForForwardedV6` — the suppression must not reach the case the feature exists for. This also closes a gap: every prior test in that file was IPv4, so the v6 branch that caused this had no coverage at all.
+- `mkV6`, alongside the existing `mkV4`. No DF flag parameter, because IPv6 has no DF bit — every IPv6 packet is implicitly don't-fragment, which is the whole reason this defect had one victim and not two.
+
+**What this does not change.** Overlay fragmentation is unchanged; oversized packets were always delivered and still are. Hosts already carrying a cached exception keep it until it expires — `ip -6 route flush cache` clears one now, and `ip -6 route replace <prefix> dev mesh0 mtu lock <mtu>` pins a route against future PMTU updates from any source.
+
+Still open, and untouched here: when `per` falls below 1280, the v6 advisory is clamped up to the RFC 8200 minimum while `sendData` keeps fragmenting at `per`. A forwarded sender that honours 1280 therefore stays above the threshold and is re-advised once a second indefinitely. Harmless to correctness, pointless in effect, and it wants either a floor on `per` or a suppression when the clamp bites.
+
+### One popup, not two, when changing a peer's overlay address
+
+`peerOverlayEdit`'s commit path raised a `confirm` — *saves on that node now, takes effect on its next restart* — and then, on success, an `alert` saying the same thing again. The second modal asked for a click and carried nothing the operator had not just read and agreed to.
+
+The confirm stays: it states the consequence and offers a way out. Success is now reported the way every other inline cell editor on that page reports it, by refreshing the row to show the new value. The removed alert was in fact the only success alert in `ui.go`, so it was inconsistent as well as redundant. Failure paths still interrupt — a save error and the wrong-family warning are the cases the operator has *not* already been told about.
+
+`TestPeerOverlayEditPromptsOnce` pins exactly one `confirm`, no success `alert`, and both remaining alerts as failure paths, so a third modal cannot be added back without the count moving.
+
+---
+
 ## v874 — 2026-08-11
 
 **A DHCP lease sitting beside a static address was labelled `static` on `System › Interfaces`, and an MTU or gateway edit could adopt it into gravinet's configuration permanently.**
