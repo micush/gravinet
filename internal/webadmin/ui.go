@@ -2126,10 +2126,20 @@ function startInlineEdit(td){
       if (!confirm('Set the overlay MTU for "'+nameOf(net)+'" to '+n+'?\n\nThis node will restart immediately to apply it. Make the same change on every other node in this network — a node left on a different MTU still works, but silently fragments every full-size packet it sends.')){ renderSection(); return; }
       payload = { op:'mtu', net, mtu:n };
     } else if (field === 'address4' || field === 'address6'){
-      // Only warn about the restart if the banner isn't already up. Once a
-      // restart is pending the user has seen the notice and it's still showing,
-      // so don't re-prompt on each subsequent address change.
-      if (!state.restartPending && !confirm('Change this node\'s overlay '+field+' for "'+nameOf(net)+'"?\n\nA running interface is not re-addressed live, so this node will restart immediately to apply it. Type "none" to clear and auto-assign.')){ renderSection(); return; }
+      // No confirm. The dialog that used to be here said only one thing —
+      // that the node would restart to apply this — and that stopped being
+      // true in v857, when the reload started rebuilding the network instead.
+      // Rewriting it to describe the rebuild would have kept a modal whose
+      // whole reason for existing had gone: the operator double-clicked their
+      // own node's address cell and typed a new address, on their own node's
+      // page, and peers reconnecting is what that means. It is the same
+      // posture the UDP/TCP port fields already take — applied live, with the
+      // consequence in the field's own hint rather than behind an OK button.
+      //
+      // subnet and mtu below keep theirs, and for a different reason than a
+      // restart: both must match on every other node in the network and
+      // gravinet cannot detect a mismatch. That warning is about the mesh,
+      // not about this node, and nothing has made it untrue.
       payload = { op:'address', net }; payload[field] = v;
     } else {
       // Unlike address4/address6 above, this isn't just a "this node
@@ -3828,9 +3838,9 @@ function secNetworks(c) {
       + '<td class="editable" data-edit="name" data-net="'+esc(cf.id)+'" title="double-click to rename">'+esc(cf.name)+'</td>'
       + '<td><span class="net-id">'+esc(cf.id)+'</span></td><td>'+st+'</td><td>'+mesh+'</td>'
       + '<td class="editable" data-edit="subnet4" data-net="'+esc(cf.id)+'" title="double-click to edit">'+esc(cf.subnet4||'—')+'</td>'
-      + '<td class="editable" data-edit="address4" data-net="'+esc(cf.id)+'" title="double-click to edit this node\'s overlay address">'+esc(cf.address4||'auto')+'</td>'
+      + '<td class="editable" data-edit="address4" data-net="'+esc(cf.id)+'" title="double-click to edit this node\'s overlay address (e.g. 10.42.0.5/16), or &quot;none&quot; to clear and auto-assign. Applied immediately: the network is rebuilt to take the new address, so every session on it drops and re-forms.">'+esc(cf.address4||'auto')+'</td>'
       + '<td class="editable" data-edit="subnet6" data-net="'+esc(cf.id)+'" title="double-click to edit">'+esc(cf.subnet6||'—')+'</td>'
-      + '<td class="editable" data-edit="address6" data-net="'+esc(cf.id)+'" title="double-click to edit this node\'s overlay address">'+esc(cf.address6||'auto')+'</td>'
+      + '<td class="editable" data-edit="address6" data-net="'+esc(cf.id)+'" title="double-click to edit this node\'s overlay address (e.g. fd00:42::5/64), or &quot;none&quot; to clear and auto-assign. Applied immediately: the network is rebuilt to take the new address, so every session on it drops and re-forms.">'+esc(cf.address6||'auto')+'</td>'
       + '<td class="editable" data-edit="mtu" data-net="'+esc(cf.id)+'" title="double-click to edit the overlay MTU">'+esc(cf.mtu||'')+'</td>'
       + '<td>'+((live.peers||[]).length)+'</td><td>'+((cf.seeds||[]).length)+'</td>'
       + '<td class="editable" data-edit="notes" data-net="'+esc(cf.id)+'" title="double-click to edit">'+esc(cf.notes||'')+'</td></tr>';
@@ -4477,7 +4487,7 @@ function peerOverlayEdit(td, n, p, fam){
     const v = clearing ? typed : overlayWithPrefix(typed, plen);
     if (v === cur){ refresh(); return; }
     const who = p.host || p.id.slice(0,8);
-    if (!confirm('Change '+who+'\'s IPv'+(v6?'6':'4')+' overlay address for "'+nameOf(n.id)+'"?\n\nThis saves on '+who+'\'s own node now but takes effect on its next restart, not this node\'s.')){ refresh(); return; }
+    if (!confirm('Change '+who+'\'s IPv'+(v6?'6':'4')+' overlay address for "'+nameOf(n.id)+'"?\n\nThis applies on '+who+'\'s own node immediately: it rebuilds that network to take the new address, so every session on it drops and re-forms \u2014 including the one this page manages '+who+' over. Nothing changes on this node.')){ refresh(); return; }
     // The family comes from which slot was double-clicked, not from sniffing
     // the typed value's notation. Sniffing was what let a dual-stack peer's v6
     // address be edited at all before there were per-family slots, and it is

@@ -421,7 +421,11 @@ func (s *Server) editMeshOverlayAddr(w http.ResponseWriter, r *http.Request, op 
 		}
 	}
 
-	err := s.mutateConfig(r, func(cfg *config.Config) error {
+	// Deferred, not inline: this writes the same network overlay address Mesh >
+	// Networks does, so the reload that applies it rebuilds the network — and
+	// on a peer being managed over the mesh, that is the interface this very
+	// request arrived on. See mutateConfigDeferReload.
+	applyLive, err := s.mutateConfigDeferReload(r, func(cfg *config.Config) error {
 		n := cfg.FindNetwork(fmt.Sprintf("%016x", info.NetworkID))
 		if n == nil {
 			return fmt.Errorf("network %s is no longer configured", info.Name)
@@ -454,6 +458,8 @@ func (s *Server) editMeshOverlayAddr(w http.ResponseWriter, r *http.Request, op 
 		return
 	}
 	// The reload applies it, so the address is in place by the time the page
-	// reloads its inventory.
+	// reloads its inventory — but it runs after this response is on the wire,
+	// not before it.
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "warning": ""})
+	respondThenApply(w, applyLive)
 }

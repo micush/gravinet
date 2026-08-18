@@ -12,8 +12,14 @@ import (
 )
 
 // TestHandleNetworkAddress covers the overlay-address edit on /api/network: the
-// address op persists this node's own overlay address and reports restart:true
-// (a running interface isn't re-addressed live), and validation is enforced.
+// address op persists this node's own overlay address, does *not* ask for a
+// restart, and enforces validation.
+//
+// The restart assertion is inverted from what it was, deliberately. It was
+// written when a running interface genuinely could not be re-addressed live;
+// v857 made reloadFn rebuild the network to apply the change, and the flag
+// then survived for two releases as a leftover that cost every session on the
+// network a second re-form moments after the reload had already caused one.
 func TestHandleNetworkAddress(t *testing.T) {
 	cfgPath := t.TempDir() + "/cfg.json"
 	cfg := &config.Config{
@@ -55,13 +61,13 @@ func TestHandleNetworkAddress(t *testing.T) {
 		return c2.Networks[0]
 	}
 
-	// set the overlay address; expect ok and restart:true.
+	// set the overlay address; expect ok and no restart request.
 	res := post(map[string]any{"op": "address", "net": "1234", "address4": "10.0.0.42/16"})
 	if ok, _ := res["ok"].(bool); !ok {
 		t.Fatal("address set rejected")
 	}
-	if restart, _ := res["restart"].(bool); !restart {
-		t.Error("address change should report restart required")
+	if restart, _ := res["restart"].(bool); restart {
+		t.Error("address change asked for a restart: the reload already rebuilds the network to apply it, so a restart only re-forms every session on it a second time")
 	}
 	if stored().Address4 != "10.0.0.42/16" {
 		t.Fatalf("address not persisted: %+v", stored())

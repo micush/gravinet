@@ -85,8 +85,8 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 	}
 	// Network lifecycle (add/delete/enable/disable/join/rename) applies live via
 	// the reload hook, which diffs the config and brings networks up or down
-	// without a restart. Re-addressing changes (subnet, overlay address) still
-	// need one — the hot reload does not re-address a running interface.
+	// without a restart. A subnet change still needs one; an overlay-address
+	// change no longer does, since v857 — see the address op below.
 	restart := false
 	// Captured for reconcileMeshRedistribute below: disabling or deleting a
 	// network takes its routes off the Mesh Routes page (meshRouteCIDRs skips
@@ -94,7 +94,7 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 	// themselves would.
 	var prevMesh []string
 	var mtuAdvice string
-	err := s.mutateConfig(r, func(cfg *config.Config) error {
+	mutate := func(cfg *config.Config) error {
 		prevMesh = meshRouteCIDRs(cfg)
 		switch req.Op {
 		case "add":
@@ -133,7 +133,15 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 			mtuAdvice = a
 			return e
 		case "address":
-			restart = true // adopting a changed overlay address needs a restart
+			// No restart. That was true until v857, which made reloadFn
+			// rebuild a running network whose configured overlay address no
+			// longer matches the engine's — RemoveNetwork, then the same
+			// build path a restart takes. Everything downstream of the
+			// address is rebuilt with it, and the admin's own overlay
+			// listener is re-established by the ensure() ticker in main.go
+			// within its 8s period, so nothing was left for the restart to
+			// do except make every session on the network re-form a second
+			// time, moments after the reload had already done it.
 			return cfg.NetworkSetAddress(req.Net, req.Address4, req.Address6)
 		case "join":
 			return cfg.NetworkJoin(req.Id, req.Key, req.Peer, req.Subnet4, req.Subnet6)
@@ -145,7 +153,19 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 		default:
 			return fmt.Errorf("unknown op %q", req.Op)
 		}
-	})
+	}
+	// The overlay-address op is the one edit that can take down the interface
+	// this request arrived on — see reloadSeversManagementPath and
+	// mutateConfigDeferReload. For it the change is committed here and applied
+	// after the response has gone out; everything else reloads inline, so its
+	// effect is already true by the time the response says it succeeded.
+	var applyLive func()
+	var err error
+	if reloadSeversManagementPath(req.Op) {
+		applyLive, err = s.mutateConfigDeferReload(r, mutate)
+	} else {
+		err = s.mutateConfig(r, mutate)
+	}
 	if err == nil {
 		s.reconcileMeshRedistribute(prevMesh)
 		// Only redistribute-bgp itself needs an immediate resync — it's the
@@ -170,9 +190,47 @@ func (s *Server) handleNetwork(w http.ResponseWriter, r *http.Request) {
 	// the log after the restart it triggers.
 	if err == nil && mtuAdvice != "" {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "restart": restart, "note": mtuAdvice})
+	} else {
+		s.editResult(w, err, restart)
+	}
+	respondThenApply(w, applyLive)
+}
+
+// reloadSeversManagementPath reports whether applying op live can take down the
+// overlay interface the request itself is being served over, which is what
+// makes the response undeliverable when the reload runs first.
+//
+// Only the overlay-address op qualifies today. reloadFn rebuilds a running
+// network when its configured address no longer matches the engine's — and
+// only then: a cleared address means self-assign and is not a change, and a
+// prefix-length-only edit is not a different address (see overlayAddrChanged).
+// The subnet op looks like a near miss and is not one, since it does not leave
+// a running network with a configured address the engine disagrees with; the
+// lifecycle ops (disable, delete) tear their networks down asynchronously
+// already, for the same "the caller has what it needs to report success"
+// reason this defers for.
+func reloadSeversManagementPath(op string) bool { return op == "address" }
+
+// respondThenApply flushes the response already written to w, then runs the
+// deferred live-apply. A nil applyLive means the handler reloaded inline and
+// there is nothing left to do.
+//
+// The flush is the point: it pushes the status line, headers and body to the
+// kernel while the overlay interface is still up, so the reply is on its way
+// before the rebuild removes the address it would have travelled from. That is
+// ordering, not a guarantee — if that segment is lost, the retransmission has
+// nothing left to travel over — but it narrows the window from the whole
+// rebuild to a single packet. A ResponseWriter that is not a Flusher leaves
+// the write to the server's own buffering, which is what happened before this
+// existed.
+func respondThenApply(w http.ResponseWriter, applyLive func()) {
+	if applyLive == nil {
 		return
 	}
-	s.editResult(w, err, restart)
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+	applyLive()
 }
 
 // handleNetworkToken mints a join token for a network (read-only — it doesn't

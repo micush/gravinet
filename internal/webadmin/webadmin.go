@@ -251,12 +251,49 @@ func (s *Server) SetReload(fn func() error) { s.reload = fn }
 // config history table, matching how an unattributed snapshot already
 // displays there).
 func (s *Server) mutateConfig(r *http.Request, fn func(*config.Config) error) error {
+	applyLive, err := s.mutateConfigDeferReload(r, fn)
+	if err != nil {
+		return err
+	}
+	applyLive()
+	return nil
+}
+
+// mutateConfigDeferReload is mutateConfig with the live-apply step handed back
+// to the caller instead of run inline. Everything else is identical: load,
+// apply, validate, save and snapshot all happen before it returns, under the
+// same locks, so a caller that ignores the returned function still has a
+// committed change — it just isn't running yet.
+//
+// This exists for one situation, and it should stay rare. Applying a config
+// change can take down the overlay interface the request being served arrived
+// on: a changed overlay address makes reloadFn rebuild that network, which
+// closes the TUN, removes the address the connection is bound to, and re-forms
+// every session. When a manager is driving a peer over the mesh (handleProxy
+// dials the peer's overlay address — it is the only kind of address
+// resolveManagedTarget will return), the peer would remove the address, then
+// try to answer down a socket whose source no longer exists. Nothing came back
+// and no RST could, since the return path was the overlay itself, so the
+// manager sat until proxyClient's 15s deadline and reported "context deadline
+// exceeded" for a change that had in fact been saved and applied.
+//
+// Deferring lets the handler write and flush its response first, while the
+// interface is still up. That is ordering, not a guarantee: the reply is
+// handed to the kernel and goes out over a live tunnel, but if that segment is
+// lost the retransmission has nothing left to travel over. The remaining
+// window is one packet wide instead of the whole rebuild.
+//
+// Only handlers that can sever their own path should use this. Reloading
+// inline is the right default everywhere else — it is what makes an edit's
+// effect true by the time the response says it succeeded, and every other
+// caller depends on that.
+func (s *Server) mutateConfigDeferReload(r *http.Request, fn func(*config.Config) error) (applyLive func(), err error) {
 	if s.configPath == "" {
-		return fmt.Errorf("config path not set")
+		return nil, fmt.Errorf("config path not set")
 	}
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
-	return config.WithLock(s.configPath, func() error {
+	err = config.WithLock(s.configPath, func() error {
 		cfg, err := config.Load(s.configPath)
 		if err != nil {
 			return err
@@ -279,13 +316,25 @@ func (s *Server) mutateConfig(r *http.Request, fn func(*config.Config) error) er
 			user, _ = s.validSession(r)
 		}
 		s.scheduleHistorySnapshot(before, user)
-		if s.reload != nil {
-			if err := s.reload(); err != nil {
-				s.log.Warnf("webadmin: reload after edit failed: %v", err)
-			}
-		}
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	// Re-taken rather than held across the caller's response write: a reload
+	// reads the config file back, so it needs the same protection against the
+	// engine's async persist hook that the commit above did. Nesting is the
+	// same shape as before — the inline path ran reload inside both locks too.
+	return func() {
+		if s.reload == nil {
+			return
+		}
+		s.cfgMu.Lock()
+		defer s.cfgMu.Unlock()
+		if err := config.WithLock(s.configPath, s.reload); err != nil {
+			s.log.Warnf("webadmin: reload after edit failed: %v", err)
+		}
+	}, nil
 }
 
 // restoreConfig replaces the live config outright with candidate, running it

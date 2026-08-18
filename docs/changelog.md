@@ -2,6 +2,87 @@
 
 ---
 
+## v879 — 2026-08-18
+
+**Changing this node's own overlay address no longer asks for a restart, and no longer raises a dialog to warn about one.**
+
+v878 corrected the peer-side confirm on Mesh › peers, which had been promising that the change waited for a restart. That fixed the wording and left the contradiction: three functions away, the own-node editor on Mesh › Networks still said the opposite, and the handler still asked for the restart that made it half-true.
+
+### There is no restart
+
+v857 made `reloadFn` rebuild a running network whose configured overlay address no longer matches the engine's — `RemoveNetwork`, then the same build path a restart takes. Everything downstream of the address is rebuilt with it, and the admin's own overlay listener is re-established by main.go's `ensure()` ticker within its 8s period. Nothing was left for the restart to do.
+
+Except that the UI still did it. `handleNetwork` returned `restart:true` for the address op and the Networks editor passes `autoRestart`, so an own-node address change went: save → reload rebuilds the network → every session on it re-forms → UI reads the flag → daemon restarts → every session re-forms **again**, a moment later. The honest answer to "when do sessions re-form" was "twice", which matched neither dialog. The flag is gone.
+
+The peer path never restarted — `peerOverlayEdit` calls `api()` directly and ignores the flag — so only the reply's contents change there.
+
+### And therefore no dialog
+
+The confirm on the own-node address cell said exactly one thing: *"A running interface is not re-addressed live, so this node will restart immediately to apply it."* With the restart gone, every word of it was false.
+
+Rewriting it to describe the rebuild instead would have kept a modal whose reason for existing had gone. The operator double-clicked their own node's address cell, on their own node's page, and typed a new address; peers reconnecting is what that means. This is the posture the UDP and TCP port fields already take — applied live, consequence stated in the field's own hint rather than behind an OK button — and the address field now matches them: the cell's tooltip carries the example format, the `none` clearing behaviour, and that the network is rebuilt so every session on it drops and re-forms.
+
+**`subnet` and `mtu` keep their confirms**, and keep asking for their restarts. Their warning was never about restarting: both settings must match on every other node in the network, and gravinet cannot detect a mismatch — a peer left on the old subnet simply stops being reachable with nothing in the logs to say why. That is a statement about the mesh rather than about this node, and nothing has made it untrue.
+
+### Tests
+
+- `TestHandleNetworkAddress`'s restart assertion is **inverted**, not deleted. It was correct when written and became a leftover; a test that pins the old answer is how a leftover survives two releases.
+- `TestNetworkAddressEditHasNoConfirm` — no `confirm` and no `restartPending` in the address branch, the removed dialog's content present in the cell tooltip (removing the modal must not delete what it said), and `subnet`/`mtu`'s confirms still there.
+- `TestPeerOverlayEditConfirmDoesNotPromiseARestart` from v878 still holds: the peer path keeps its single confirm, which is about *which node* the edit lands on, not about a restart.
+
+`go build ./...`, `go vet` and `gofmt` clean; `internal/webadmin`, `internal/config` and `cmd/gravinet` pass in full, including the node-based UI parse check.
+
+---
+
+## v878 — 2026-08-18
+
+**Fixed: changing a peer's overlay address reported `context deadline exceeded` on the manager, for a change that had already been saved and applied.**
+
+```
+reaching ff706bd5890c02c4: Post "https://192.168.203.134:8443/api/network":
+context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+```
+
+That dialog is `proxyClient` giving up after 15s, not the peer refusing anything. The address changed; reloading the peers page showed it.
+
+### The reply had nowhere to go
+
+Managing a peer means proxying to it over the mesh. `resolveManagedTarget` returns overlay addresses and nothing else, so both the request and its reply ride the network being edited — `192.168.203.134` above is the peer's overlay address on it.
+
+On the peer, `mutateConfig` called `s.reload()` **before the handler wrote anything**. Since v857 that reload is where an overlay-address change is applied, by rebuilding the network: `RemoveNetwork` closes the TUN, drops the address the connection is bound to, and tears down every session; the network is then rebuilt through the path a restart takes. Only then did the handler try to answer — down a socket whose source address no longer existed. Nothing arrived and no RST could, since the return path *was* the overlay, so the manager sat out its full deadline.
+
+v857's rebuild is correct and stays. Every peer knew the node at the old address; re-forming those sessions is what changing it means. The defect was ordering: the reply was written after the thing that made replying impossible.
+
+### Commit, respond, flush, apply
+
+`mutateConfigDeferReload` is `mutateConfig` with the live-apply handed back to the caller. Load, apply, validate, save and snapshot all still happen before it returns, under the same locks — a caller that reads the config the moment it sees `ok:true` finds the new value there. Only the reload moves, and the returned closure re-takes both locks to run it, since a reload reads the file back and needs the same protection from the engine's async persist hook that the commit did.
+
+`respondThenApply` then flushes the written response before applying. The flush is the point: it pushes status line, headers and body to the kernel while the interface is still up. This is ordering, not a guarantee — if that segment is lost, the retransmission has nothing left to travel over — but the window goes from the whole rebuild to a single packet.
+
+Two handlers use it, and they are the two that write a network's overlay address: `/api/network`'s `address` op, and System › Interfaces' mesh-device address edit (v858 redirected that one into the same config field, and inherited the same defect with it). `reloadSeversManagementPath` names the condition rather than leaving `op == "address"` inline in a branch.
+
+**Everything else still reloads inline, deliberately.** An edit's effect being true by the time the response says it succeeded is what the rest of the config surface depends on. `TestOrdinaryEditStillReloadsBeforeResponding` holds a `notes` edit's reload open and requires the response *not* to arrive, so the deferral cannot quietly spread.
+
+### The confirm was also wrong
+
+Mesh › peers told the operator the change *"takes effect on its next restart, not this node's."* That stopped being true in v857. So the operator was told the change was deferred, shown a timeout that read as failure, and had the address change immediately — three signals, none matching what happened. It now says the change applies on that node immediately, that the network is rebuilt to take it, and that every session on it drops and re-forms including the one the page is managing that peer over.
+
+### Tests
+
+`internal/webadmin/addr_apply_order_test.go`. The reload hook blocks until released, so a response that waits on the reload cannot arrive at all:
+
+- `TestOverlayAddressRespondsBeforeApplying` — response arrives with the reload still blocked, the config on disk already holds the new address, and the reload does eventually run (a "fix" that stopped applying the change would be v856 again). With `reloadSeversManagementPath` returning false it fails with the reported error verbatim, down to the wording.
+- `TestOrdinaryEditStillReloadsBeforeResponding` — the inverse, pinning the narrowness.
+- `TestPeerOverlayEditConfirmDoesNotPromiseARestart` — the stale restart promise cannot come back.
+
+`go build ./...`, `go vet` and `gofmt` clean; `internal/webadmin` passes in full.
+
+### Not addressed
+
+The peer's sessions still re-form, so the manager's next few polls of that peer can fail while they do. That is inherent to re-addressing and shows up as a transient, not a stuck state — but the UI does not currently say so, and a brief "re-forming sessions" state on the row would be better than rows that flicker to unreachable with no explanation.
+
+---
+
 ## v877 — 2026-08-18
 
 **A table's filter box was cleared by the automatic refresh, the same way its sort was in v876.**
