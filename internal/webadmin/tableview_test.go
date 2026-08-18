@@ -139,3 +139,41 @@ func TestTableViewClearedOnTargetSwitch(t *testing.T) {
 		t.Errorf("setTarget does not clear state.tableView — one node's filter would follow the operator to the next, hiding rows that are actually there.\ngot: %s", line)
 	}
 }
+
+// TestPeersStateColumnIsContentSized: Mesh > peers' state column held 20% of
+// the table, and every value it can contain is a short fixed label — enabled,
+// disabled, connecting…, this node. On any ordinary window that left most of
+// the column empty and opened a visible gap between the state tag and the
+// overlay address beside it.
+//
+// It is sized in px now, which is the actual point: a percentage tracks the
+// table's width, and this column's content does not. The set of values is
+// closed, so the right width is the widest of them plus padding, once, at any
+// window size. The width it releases goes to the c-fill columns (endpoint,
+// notes), which are auto and do hold variable-length values.
+//
+// This pins the shape rather than the number — the number is a measurement
+// (86px for "connecting…" at 13px monospace, plus 20px of th,td padding) and
+// may be re-measured, but going back to a percentage would be the regression.
+func TestPeersStateColumnIsContentSized(t *testing.T) {
+	i := strings.Index(indexHTML, "table.peers-table col.c-state-op {")
+	if i < 0 {
+		t.Fatal("the c-state-op rule is gone; Mesh > peers' state column has no explicit width under table-layout:fixed")
+	}
+	rule := indexHTML[i:]
+	if e := strings.Index(rule, "}"); e > 0 {
+		rule = rule[:e]
+	}
+	if strings.Contains(rule, "%") {
+		t.Errorf("c-state-op is a percentage again (%s) — its content is a closed set of short labels that does not grow with the table, so a percentage only buys empty space next to the overlay column", strings.TrimSpace(rule))
+	}
+	if !strings.Contains(rule, "px") {
+		t.Errorf("c-state-op is not sized in px: %s", strings.TrimSpace(rule))
+	}
+
+	// The columns that genuinely hold variable-length values must stay
+	// flexible, or the freed width has nowhere useful to go.
+	if !strings.Contains(indexHTML, "table.peers-table col.c-fill { width:auto; }") {
+		t.Error("c-fill is no longer auto — endpoint and notes are what absorb the width the state column gave up")
+	}
+}

@@ -215,7 +215,21 @@ const indexHTML = `<!doctype html>
      the left with one oversized overlay column soaking up all the room the
      removed columns freed up. */
   table.peers-table col.c-target-op { width:38%; }
-  table.peers-table col.c-state-op { width:20%; }
+  /* Sized in px, not a percentage, because its content does not scale with
+     the table: every value this column can hold is a fixed short label, and
+     the set is closed — enabled, disabled, connecting…, this node. At the
+     13px monospace these cells use (~7.83px per glyph) the longest of them,
+     "connecting…", measures 86px; with th,td's 10px of padding either side
+     that is 106px of content in the widest case. 120px covers it with room
+     for a font substitution that runs wider than the stack's own metrics.
+
+     It was 20%, which on any ordinary window left most of the column empty
+     and opened a visible gap between the state tag and the overlay address
+     beside it. A percentage is right for a column whose content grows with
+     the data; this one's cannot. The width given up goes to the two c-fill
+     columns (endpoint, notes), which are auto and do hold variable-length
+     values. */
+  table.peers-table col.c-state-op { width:120px; }
   table.peers-table col.c-key { width:10%; }
   /* Sits between target and key on Monitor > Mesh Peers. Narrow — a version
      is a short numeric string — and the room comes off c-target/c-endpoint,

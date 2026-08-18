@@ -2,6 +2,24 @@
 
 ---
 
+## v881 — 2026-08-18
+
+**Mesh › peers: the gap between the state and overlay columns is closed.**
+
+`c-state-op` held 20% of the table. Every value that column can contain is a short fixed label and the set is closed — *enabled*, *disabled*, *connecting…*, *this node* — so on any ordinary window most of that 20% was empty, and the empty part sat between the state tag and the overlay address next to it.
+
+It is 120px now. The change that matters is px rather than the number: a percentage tracks the table's width, and this column's content does not track anything. At the 13px monospace these cells use (~7.83px per glyph) the widest label, *connecting…*, measures 86px; with `th,td`'s 10px of padding either side that is 106px in the worst case, and 120px leaves room for a font substitution wider than the stack's own metrics.
+
+The width released goes to the two `c-fill` columns — endpoint and notes — which are `auto` and do hold variable-length values. `c-target-op` is untouched at 38%; a hostname does vary in length, and nothing about it was reported.
+
+**Test.** `TestPeersStateColumnIsContentSized` pins the shape rather than the number: the rule must exist, must not be a percentage, and `c-fill` must stay auto so the freed width still has somewhere useful to go. The 120px is a measurement and may be re-measured; returning to a percentage would be the regression.
+
+`go build ./...`, `go vet` and `gofmt` clean; `internal/webadmin` passes in full, including the node-based UI parse check.
+
+**Not verified.** The rendered page has not been looked at — the arithmetic above is from measuring the label in DejaVu Sans Mono at 13px, not from a browser laying the table out.
+
+---
+
 ## v880 — 2026-08-18
 
 **Editing a peer's overlay address raises no dialog at all now.**
