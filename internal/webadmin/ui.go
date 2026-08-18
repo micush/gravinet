@@ -209,12 +209,23 @@ const indexHTML = `<!doctype html>
   table.peers-table col.c-target { width:12%; }
   table.peers-table col.c-state { width:8%; }
   /* Mesh > Peers only has target/state/overlay left after Monitor > Mesh
-     Peers took the rest, so it gets its own wider proportions instead of
-     reusing c-target/c-state (still sized for the monitor page's fuller,
-     8-column layout); otherwise the operate table would sit cramped on
-     the left with one oversized overlay column soaking up all the room the
-     removed columns freed up. */
-  table.peers-table col.c-target-op { width:38%; }
+     Peers took the rest, so it does not reuse c-target/c-state (still sized
+     for the monitor page's fuller, 8-column layout).
+
+     Both of its first two columns are px rather than the percentages they
+     were, for the same reason: their content does not scale with the table,
+     so a percentage only bought empty space. This one holds nodeCell's
+     "hostname id" — the id is a fixed 16 hex characters (125px at the 13px
+     monospace these cells use) and the hostname is the only variable part.
+     "mcfed ff706bd5890c02c4" measures 172px, "gateway-lon-01 …" 243px; with
+     th,td's 20px of padding, 300px fits a hostname of about 18 characters
+     beside the id. At 38% the column was around 490px on an ordinary window,
+     most of it gap between the hostname and the state tag.
+
+     Longer values wrap rather than ellipsis — see td.tgt-cell below. The
+     freed width goes to the c-fill columns (endpoint, notes), which are auto
+     and do hold variable-length values. */
+  table.peers-table col.c-target-op { width:300px; }
   /* Sized in px, not a percentage, because its content does not scale with
      the table: every value this column can hold is a fixed short label, and
      the set is closed — enabled, disabled, connecting…, this node. At the
@@ -251,6 +262,12 @@ const indexHTML = `<!doctype html>
      actually needs it (never mid-IPv4-octet or mid-word), so a short value
      still renders on one line and only a genuinely long one wraps. */
   table.peers-table td.ov-cell, table.peers-table td.ep-cell { overflow:visible; text-overflow:clip; white-space:normal; overflow-wrap:anywhere; }
+  /* Same treatment for Mesh > Peers' target cell, and for a sharper reason:
+     nodeCell puts the node id *after* the hostname, so ellipsis-truncating a
+     long value would eat the id — the part you are in this table to copy
+     (matching it against a join token, per nodeCell's own comment). Wrapping
+     costs a row some height; truncating would cost the cell its purpose. */
+  table.peers-table td.tgt-cell { overflow:visible; text-overflow:clip; white-space:normal; overflow-wrap:anywhere; }
   /* routes-table: shared column grid for Mesh Routes' Advertise and Reject
      subcards — they're separate <table>s, each sized from its own content
      under the default auto layout, so their columns used to drift out of
@@ -303,6 +320,15 @@ const indexHTML = `<!doctype html>
   td.editing { padding:2px 6px; }
   input.cell-edit { width:100%; min-width:90px; box-sizing:border-box; font:inherit; font-size:13px;
     padding:3px 6px; background:var(--bg); color:var(--fg); border:1px solid var(--acc); border-radius:4px; }
+  /* A cell editor whose save is in flight. Currently only the peer overlay
+     address editor, whose save is proxied across the mesh and can take
+     seconds — long enough that, with no indication at all, pressing Enter was
+     indistinguishable from the key not registering. The input keeps its typed
+     value visible (dimmed, disabled) rather than being swapped out, so the
+     operator can still see what is being saved. */
+  .cell-saving { display:flex; align-items:center; gap:8px; }
+  .cell-saving input.cell-edit { opacity:.55; border-color:var(--line); }
+  .cell-saving-note { font-size:12px; color:var(--mut); white-space:nowrap; }
   .keycell .kval { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12px; word-break:break-all; }
   .keycell .kval.masked { color:var(--mut); letter-spacing:2px; }
   .tag-toggle { cursor:pointer; user-select:none; }
@@ -1995,9 +2021,16 @@ function startPolling(){
     if (sig === state.statusSig) return; // nothing moved
     state.status = nets;
     state.nat = nat;
-    state.statusSig = sig;
     const ae = document.activeElement, tag = ae && ae.tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return; // don't clobber edits
+    // Only now. statusSig is the record of what has been *drawn*, not of what
+    // has been fetched — assigning it above the guard meant an update that
+    // arrived while an inline editor was open was marked as seen and never
+    // rendered, and the next poll then matched the signature and returned at
+    // the check above. One edit was enough to freeze the table until something
+    // else forced a render. Left un-assigned, the next poll after the field
+    // closes still sees a difference and draws it.
+    state.statusSig = sig;
     if (state.section === 'peers' || state.section === 'mesh-peers' || state.section === 'bans') renderSection();
   }, 4000);
 }
@@ -4349,7 +4382,7 @@ function secPeers(c) {
       // there — a local note on your own node's id isn't a meaningful thing
       // to attach.
       h += '<tr class="selectable'+(p.self?' peer-self':(p.disabled?' peer-dis':''))+'"><td class="selcol"><input type="checkbox" class="rsel" data-k="'+esc(selKey(n.id,p.id))+'"'+(p.self?' title="this is the current node"':'')+'></td>'
-        + '<td>'+nodeCell(p.host,p.id,n.id,p.endpoint)+'</td><td>'+st+'</td>'
+        + '<td class="tgt-cell">'+nodeCell(p.host,p.id,n.id,p.endpoint)+'</td><td>'+st+'</td>'
         + ovCell+'<td class="ep-cell" title="'+(p.self?'this node\'s own observed public address (same as the NAT summary above)':(p.relayed?'no direct underlay address — reached through the relay named here':'observed underlay address — for a peer behind NAT this is its public mapping as seen from here'))+'">'+esc(dispAddr(p.endpointText))+'</td>'
         + (p.self
           ? '<td class="hint" title="a local note on your own node\'s id isn\'t meaningful here">\u2013</td>'
@@ -4535,6 +4568,26 @@ function peerOverlayEdit(td, n, p, fam){
     }
     const body = { op:'address', net:n.id };
     if (v6) body.address6 = v; else body.address4 = v;
+    // Say that the save is running before waiting on it. This one is proxied:
+    // /api/network is not in LOCAL_API and the third argument names the peer,
+    // so the call becomes /api/proxy and crosses the mesh — resolveManagedTarget
+    // probing candidates at 2s each, then proxyClient with a 15s ceiling.
+    // api() shows nothing while that is in flight, so the seconds between
+    // pressing Enter and the reply landing looked byte-for-byte identical to a
+    // keystroke that had been ignored. Operators clicked off the field to make
+    // it "work"; blur just re-entered commit and returned on the done flag,
+    // original save landed around the same moment, which made the click look
+    // like the cause.
+    //
+    // Disabling also blurs, which re-enters commit — harmless, the done flag
+    // is already set. Every exit below re-renders, so nothing has to undo this.
+    // A wrapper div, not display:flex on the <td> itself: that would drop the
+    // cell's display:table-cell and take it out of the row's column grid.
+    inp.disabled = true;
+    const wrap = $('<div class="cell-saving"></div>');
+    td.appendChild(wrap);
+    wrap.appendChild(inp);
+    wrap.appendChild($('<span class="cell-saving-note">saving\u2026</span>'));
     const r = await api('/api/network', { method:'POST', body: JSON.stringify(body) }, p.id);
     if (!r.ok){ alert((r.body && r.body.error) || 'save failed'); refresh(); return; }
     // No success popup either. This editor now raises no dialog at all on the

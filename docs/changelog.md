@@ -2,6 +2,52 @@
 
 ---
 
+## v882 — 2026-08-18
+
+### Enter in the peer overlay editor looked like it did nothing
+
+Reported as: sometimes hitting Enter on a peer's overlay address does nothing until you click off the field.
+
+Enter was firing every time. That save is proxied — `/api/network` is not in `LOCAL_API` and the call names the peer as its target, so it becomes `/api/proxy` and crosses the mesh: `resolveManagedTarget` probing candidate addresses at 2s each, then `proxyClient` with a 15s ceiling. `api()` shows nothing at all while that runs, and the editor does not change either. The seconds between the keystroke and the reply were byte-for-byte identical to a key that had not registered.
+
+Clicking off was not what fixed it. `onblur` re-enters `commit`, which returns immediately on the done flag; the original save landed at about the same moment, which made the click look like the cause. That also explains the "sometimes" — invisible when the peer answers quickly, obvious when the path is slow.
+
+The input is now disabled and dimmed with a `saving…` note beside it the moment the request goes out, so Enter visibly does something immediately. The typed value stays on screen rather than being swapped out, so what is being saved is still readable while it is in flight. The indicator lives in a wrapper div, not on the `<td>`: `display:flex` on a table cell drops `display:table-cell` and takes the cell out of the row's column grid.
+
+Only this editor is covered. `inlineCellEdit` has the same gap and over twenty call sites, several with synchronous handlers — worth doing, not worth doing blind as part of this.
+
+### The status poll swallowed any update that arrived mid-edit
+
+Found while reading the above. In `startPolling`:
+
+```js
+state.statusSig = sig;
+const ae = document.activeElement, tag = ae && ae.tagName;
+if (tag === 'INPUT' || …) return;   // don't clobber edits
+```
+
+`statusSig` is the record of what has been *drawn*. Assigning it above the guard marked an update as seen and then skipped rendering it — and every later poll matched the signature and returned at the check above. A single inline edit was enough to freeze Mesh › peers, Monitor › Mesh Peers and Bans until something else forced a render. The assignment moves below the guard; `state.status` and `state.nat` still update in place, so anything reading them is current, and the next poll after the field closes sees a difference and draws it.
+
+### Mesh › peers: the gap after the target column
+
+`c-target-op` was 38%, roughly 490px on an ordinary window. It holds nodeCell's "hostname id", where the id is a fixed 16 hex characters — 125px at the 13px monospace these cells use — and the hostname is the only variable part. `mcfed ff706bd5890c02c4` measures 172px; a long one like `gateway-lon-01 …` reaches 243px. It is 300px now, which fits about an 18-character hostname beside the id, and the freed width goes to the auto `c-fill` columns (endpoint, notes) that do hold variable-length values.
+
+Narrowing it is only safe because the cell now wraps, and for a sharper reason than the overlay and endpoint cells that already do: nodeCell puts the id *after* the hostname, so ellipsis would eat the id — the part this table exists to let you copy against a join token. Wrapping costs a row some height; truncating would cost the cell its purpose.
+
+Together with v881's state column, both of this table's fixed-content columns are now px rather than percentages, for the same reason in both cases.
+
+### Tests
+
+- `TestPeerOverlayEditShowsSaveInFlight` — the disable and the note must be set *before* the await, which is the only moment they can help, and `display:flex` must not be on the `<td>`.
+- `TestStatusPollDoesNotSwallowSkippedRenders` — the signature assignment must sit below the focus guard.
+- `TestPeersStateColumnIsContentSized` now covers both columns, and that the target cell carries the wrap class.
+
+Behaviour was checked against a DOM as well as the source: opening the editor focuses it, Enter fires exactly one proxied POST with the right body, the input disables and the note appears while it is in flight with the typed value still visible, a blur during the flight does not fire a second save, and the reply triggers exactly one refresh. The `<td>` stays a `<td>`.
+
+`go build ./...`, `go vet` and `gofmt` clean.
+
+---
+
 ## v881 — 2026-08-18
 
 **Mesh › peers: the gap between the state and overlay columns is closed.**

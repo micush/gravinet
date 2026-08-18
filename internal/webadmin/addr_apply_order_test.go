@@ -204,3 +204,79 @@ func TestNetworkAddressEditHasNoConfirm(t *testing.T) {
 		}
 	}
 }
+
+// TestPeerOverlayEditShowsSaveInFlight: pressing Enter in the peer overlay
+// address editor used to produce no visible change at all until the reply came
+// back.
+//
+// That save is proxied — /api/network is not in LOCAL_API and the call names
+// the peer as its target, so it becomes /api/proxy and crosses the mesh:
+// resolveManagedTarget probing candidate addresses at 2s each, then
+// proxyClient with a 15s ceiling. api() shows nothing while that runs, so the
+// gap between the keystroke and the reply was byte-for-byte identical to a key
+// that had not registered. The reported symptom was "Enter does nothing until
+// I click off the field" — clicking off did nothing of the sort; blur
+// re-entered commit and returned on the done flag, and the original save
+// landed at about the same moment.
+func TestPeerOverlayEditShowsSaveInFlight(t *testing.T) {
+	i := strings.Index(indexHTML, "function peerOverlayEdit")
+	if i < 0 {
+		t.Fatal("peerOverlayEdit not found in indexHTML")
+	}
+	body := indexHTML[i:]
+	if j := strings.Index(body, "\nfunction infoMeshPeers"); j > 0 {
+		body = body[:j]
+	}
+
+	call := strings.Index(body, "await api('/api/network'")
+	if call < 0 {
+		t.Fatal("the proxied save call is gone from peerOverlayEdit")
+	}
+	for _, want := range []string{"inp.disabled = true;", "cell-saving", "cell-saving-note"} {
+		at := strings.Index(body, want)
+		if at < 0 {
+			t.Errorf("no in-flight indication (%q missing): a proxied save with no feedback is indistinguishable from a dropped keystroke", want)
+			continue
+		}
+		if at > call {
+			t.Errorf("%q is set after the await, which is the one moment it cannot help", want)
+		}
+	}
+
+	// A <td> made display:flex loses display:table-cell and drops out of the
+	// row's column grid, so the indicator has to live in a wrapper.
+	if strings.Contains(indexHTML, "td.cell-saving { display:flex") {
+		t.Error("display:flex is applied to the cell itself; that takes the <td> out of the table's column layout")
+	}
+	if !strings.Contains(indexHTML, ".cell-saving { display:flex") {
+		t.Error("the .cell-saving wrapper rule is missing")
+	}
+}
+
+// TestStatusPollDoesNotSwallowSkippedRenders: the four-second poll skips
+// re-rendering while an inline editor is focused, so it must not also record
+// that update as drawn.
+//
+// state.statusSig is the record of what is on screen. Assigning it above the
+// activeElement guard meant an update arriving mid-edit was marked seen and
+// never rendered, and every later poll then matched the signature and returned
+// at the check above it. One inline edit was enough to freeze Mesh > peers
+// until something else forced a render.
+func TestStatusPollDoesNotSwallowSkippedRenders(t *testing.T) {
+	i := strings.Index(indexHTML, "function startPolling()")
+	if i < 0 {
+		t.Fatal("startPolling not found in indexHTML")
+	}
+	body := indexHTML[i:]
+	if j := strings.Index(body, "\nfunction "); j > 0 {
+		body = body[:j]
+	}
+	guard := strings.Index(body, "if (tag === 'INPUT'")
+	assign := strings.Index(body, "state.statusSig = sig;")
+	if guard < 0 || assign < 0 {
+		t.Fatal("the focus guard or the signature assignment is gone from startPolling")
+	}
+	if assign < guard {
+		t.Error("statusSig is recorded before the render is known to have happened; an update skipped for a focused input is marked as drawn and never appears")
+	}
+}
