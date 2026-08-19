@@ -211,7 +211,7 @@ main() {
     [ "${quiet}" = true ] && output="/dev/null"
 
     case "${distro}" in
-        ubuntu|debian|kali|pop|mint|linuxmint)
+        ubuntu|debian|kali|pop|mint|linuxmint|tuxedo)
             case "${action}" in
                 update)
                     sudo apt-get update > "${output}" 2>&1
