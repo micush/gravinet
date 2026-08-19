@@ -18,7 +18,7 @@ cmd/gravinet        entrypoint, subcommands (run, genkey, ctl, version)
 internal/config    single source of truth; hot-reloadable; what the web UI edits
 internal/crypto    key slots, keyID derivation, AEAD session cipher, replay window
 internal/protocol  wire framing: packet types, headers, MTU/fragmentation
-internal/transport UDP sockets, port fallback, NAT-aware send/recv, worker pool
+internal/transport UDP sockets, alternate ports, NAT-aware send/recv, worker pool
 internal/tun       platform TUN device (linux/windows/darwin/freebsd build tags)
 internal/mesh      peers, handshake, sessions, mesh formation, relaying, routing
 internal/control   control plane: node list gossip, bans, hostnames, routes, NAT
@@ -220,7 +220,7 @@ recv_session + frag header) rather than relying on IP frag.
 
 ## Roadmap (priority order — each step compiles & is testable)
 1. ✅ Skeleton, config, logging, crypto core, protocol framing
-2. ✅ TUN device abstraction (linux) + UDP transport w/ port fallback + worker pool
+2. ✅ TUN device abstraction (linux) + UDP transport w/ alternate ports + worker pool
 3. ✅ Handshake + sessions + point-to-point encrypted tunnel
 4. ✅ Mesh formation: node-list gossip, auto full-mesh, NAT keepalive
 5. ✅ Overlay addressing: subnet handout, random pick, DAD

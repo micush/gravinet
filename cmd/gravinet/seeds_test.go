@@ -8,7 +8,7 @@ import (
 )
 
 func TestResolveSeedsPortExpansion(t *testing.T) {
-	want := 1 + len(config.FallbackUDPPorts) // primary + fallbacks
+	want := 1 + len(config.AltUDPPorts) // primary + alternates
 
 	// Bare IPv4 → tried on every standard port.
 	if got := resolveSeeds([]string{"198.51.100.7"}, config.DefaultUDPPort, nil); len(got) != want {
@@ -63,7 +63,7 @@ func TestResolveSeedsRejectsOverlayAddress(t *testing.T) {
 }
 
 // TestResolveSeedsMultiPort covers "host:port,port,..." — an operator-chosen
-// port list, distinct from the no-port case's built-in fallback expansion
+// port list, distinct from the no-port case's built-in port expansion
 // (TestResolveSeedsPortExpansion above).
 func TestResolveSeedsMultiPort(t *testing.T) {
 	got := resolveSeeds([]string{"203.0.113.9:60000,60001,60002"}, config.DefaultUDPPort, nil)

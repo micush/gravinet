@@ -39,14 +39,14 @@ func TestUsableLocalCandidateFilters(t *testing.T) {
 
 // TestLocalEndpointsFallBackToTCPPortWhenUDPDisabled: with UDP off (PrimaryPort
 // 0 — the '-' setting) the interface addresses are still perfectly dialable
-// over the TCP/TLS fallback, so they must still be advertised, at the fallback
+// over TCP/TLS, so they must still be advertised, at the TCP
 // port. Suppressing them would leave a UDP-disabled node with no LAN path to
 // its same-NAT neighbours and nothing but a relay — which is exactly backwards,
 // since a relay is its *only* alternative. Only when UDP and TCP/TLS are both
 // off is there genuinely nothing dialable to offer.
 func TestLocalEndpointsFallBackToTCPPortWhenUDPDisabled(t *testing.T) {
 	// UDP on: candidates carry the UDP port.
-	e := NewEngine(Options{NodeID: "self", PrimaryPort: 51820, TCPFallbackPort: 443})
+	e := NewEngine(Options{NodeID: "self", PrimaryPort: 51820, TCPPort: 443})
 	got := e.localEndpoints()
 	if len(got) == 0 {
 		t.Skip("no usable interface addresses on this host")
@@ -57,15 +57,15 @@ func TestLocalEndpointsFallBackToTCPPortWhenUDPDisabled(t *testing.T) {
 		}
 	}
 
-	// UDP off, TCP/TLS on: still advertised, now at the fallback port.
+	// UDP off, TCP/TLS on: still advertised, now at the TCP port.
 	e.SetPrimaryPort(0)
 	got = e.localEndpoints()
 	if len(got) == 0 {
-		t.Fatal("UDP disabled but TCP/TLS fallback enabled: host candidates must still be advertised — they are dialable over TCP, and a relay is this node's only alternative")
+		t.Fatal("UDP disabled but TCP/TLS enabled: host candidates must still be advertised — they are dialable over TCP, and a relay is this node's only alternative")
 	}
 	for _, ep := range got {
 		if ep.Port() != 443 {
-			t.Errorf("UDP disabled: candidate %s should carry the TCP/TLS fallback port 443", ep)
+			t.Errorf("UDP disabled: candidate %s should carry the TCP/TLS port 443", ep)
 		}
 		if !usableLocalCandidate(ep.Addr()) {
 			t.Errorf("candidate %s should have been filtered out", ep)
@@ -73,7 +73,7 @@ func TestLocalEndpointsFallBackToTCPPortWhenUDPDisabled(t *testing.T) {
 	}
 
 	// Both off: nothing dialable, so nothing to advertise.
-	e.SetFallbackPort(0)
+	e.SetTCPPort(0)
 	if got := e.localEndpoints(); len(got) != 0 {
 		t.Fatalf("UDP and TCP/TLS both disabled: want no candidates, got %v", got)
 	}
@@ -83,7 +83,7 @@ func TestLocalEndpointsFallBackToTCPPortWhenUDPDisabled(t *testing.T) {
 // making host candidates work over TCP. A peer's LAN address is by definition
 // not its observed endpoint, so a lookup keyed on the endpoint can never hit
 // for a candidate — before the owner lookup, every LAN candidate silently fell
-// through to *our own* fallback port, which is correct only by coincidence
+// through to *our own* TCP port, which is correct only by coincidence
 // (when both nodes happen to use the same one). Here the peer advertises 8443
 // while we use 443; dialing our own 443 at its LAN address would just fail.
 //
@@ -93,7 +93,7 @@ func TestLocalEndpointsFallBackToTCPPortWhenUDPDisabled(t *testing.T) {
 // the owner's advertised port is tried whether or not it wins the ordering.
 func TestTCPPortForHostCandidateUsesOwnersAdvertisedPort(t *testing.T) {
 	e, ns := testEngineWithNet(t)
-	e.SetFallbackPort(443) // ours, deliberately different from the peer's
+	e.SetTCPPort(443) // ours, deliberately different from the peer's
 	lan := netip.MustParseAddrPort("192.168.55.1:65432")
 
 	ns.mu.Lock()
@@ -106,7 +106,7 @@ func TestTCPPortForHostCandidateUsesOwnersAdvertisedPort(t *testing.T) {
 		t.Fatalf("owner lookup should resolve to the peer's advertised TCP port 8443, got %d", got)
 	}
 	// And the candidate set built for that seed must actually contain it.
-	cands := e.fallbackCandidates(ns, lan, 443, ns.seedOwnerOf(lan))
+	cands := e.tcpCandidates(ns, lan, 443, ns.seedOwnerOf(lan))
 	var ports []uint16
 	for _, c := range cands {
 		ports = append(ports, c.Port)
@@ -158,7 +158,7 @@ func TestLocalEndpointsSafeUnderNetLock(t *testing.T) {
 // TestRefreshLocalCandidatesPublishes: the refresh is what actually enumerates,
 // and localEndpoints must see its result.
 func TestRefreshLocalCandidatesPublishes(t *testing.T) {
-	e := NewEngine(Options{NodeID: "self", PrimaryPort: 51820, TCPFallbackPort: 443})
+	e := NewEngine(Options{NodeID: "self", PrimaryPort: 51820, TCPPort: 443})
 	// NewEngine primes the cache, so this is already populated without anyone
 	// having called refresh explicitly — a handshake built before the first
 	// maintenance tick still advertises candidates.
@@ -175,7 +175,7 @@ func TestRefreshLocalCandidatesPublishes(t *testing.T) {
 	e.SetPrimaryPort(0) // UDP off → fall back to the TCP/TLS port
 	for _, ep := range e.localEndpoints() {
 		if ep.Port() != 443 {
-			t.Fatalf("after disabling UDP, candidate %s should carry the fallback port 443", ep)
+			t.Fatalf("after disabling UDP, candidate %s should carry the TCP port 443", ep)
 		}
 	}
 }
@@ -387,7 +387,7 @@ func TestHostCandidateSweptOnShortGraceAndNotResurrected(t *testing.T) {
 // TestHostCandidateOfUDPDisabledPeerIsDialedOverTCP is the regression that cost
 // the most debugging in this whole sequence, and it was self-inflicted.
 //
-// v379, trying to stop a TCP dial storm, skipped the fallback dial for any host
+// v379, trying to stop a TCP dial storm, skipped the TCP dial for any host
 // candidate whenever *this* node had UDP enabled. That keys the decision on the
 // wrong end. Whether a TCP dial is worth making depends on whether the PEER can
 // be reached over UDP, not on whether WE can speak it. A peer with UDP disabled
@@ -398,15 +398,15 @@ func TestHostCandidateSweptOnShortGraceAndNotResurrected(t *testing.T) {
 // machines on the same switch, one of them TCP-only, failed every direct attempt
 // and relayed to each other across the internet, with the LAN path suppressed by
 // the very code meant to be conserving effort. Suppression was the wrong tool;
-// rate-limiting (fallbackDialCooldown) is.
+// rate-limiting (tcpDialCooldown) is.
 func TestHostCandidateOfUDPDisabledPeerIsDialedOverTCP(t *testing.T) {
 	e := NewEngine(Options{
-		NodeID:          "self",
-		PrimaryPort:     65432, // OUR udp works fine — this is what used to suppress the dial
-		TCPFallbackPort: 443,
-		Nets:            []NetSpec{{ID: 1, Name: "n", Dev: newFakeDev("d")}},
+		NodeID:      "self",
+		PrimaryPort: 65432, // OUR udp works fine — this is what used to suppress the dial
+		TCPPort:     443,
+		Nets:        []NetSpec{{ID: 1, Name: "n", Dev: newFakeDev("d")}},
 	})
-	f := &fakeFallback{has: map[netip.AddrPort]bool{}}
+	f := &fakeTCP{has: map[netip.AddrPort]bool{}}
 	e.Attach(f)
 	ns := e.network(1)
 
@@ -414,7 +414,7 @@ func TestHostCandidateOfUDPDisabledPeerIsDialedOverTCP(t *testing.T) {
 	// TCP/TLS. Nothing in the candidate itself says so — and nothing needs to.
 	cand := netip.MustParseAddrPort("192.168.55.3:65432")
 	e.addLocalCandidates(1, "gn-cush1", []netip.AddrPort{cand})
-	e.ensureFallback(ns, cand)
+	e.ensureTCP(ns, cand)
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) && len(f.dials()) == 0 {
@@ -425,26 +425,26 @@ func TestHostCandidateOfUDPDisabledPeerIsDialedOverTCP(t *testing.T) {
 	}
 }
 
-// TestFallbackDialIsPacedNotSuppressed: the storm that v379 was right to worry
+// TestTCPDialIsPacedNotSuppressed: the storm that v379 was right to worry
 // about is bounded by a per-seed cooldown instead of by refusing to dial. The
-// first attempt is always immediate; a retry waits out fallbackDialCooldown.
-func TestFallbackDialIsPacedNotSuppressed(t *testing.T) {
+// first attempt is always immediate; a retry waits out tcpDialCooldown.
+func TestTCPDialIsPacedNotSuppressed(t *testing.T) {
 	e, ns := testEngineWithNet(t)
 	seed := netip.MustParseAddrPort("192.168.55.3:65432")
 	now := time.Now()
 
-	if !e.fallbackDialDue(ns, seed, now) {
-		t.Fatal("the first fallback dial for a seed must be immediate")
+	if !e.tcpDialDue(ns, seed, now) {
+		t.Fatal("the first TCP dial for a seed must be immediate")
 	}
-	if e.fallbackDialDue(ns, seed, now.Add(time.Second)) {
+	if e.tcpDialDue(ns, seed, now.Add(time.Second)) {
 		t.Fatal("a repeat dial to the same seed a tick later must be paced — that per-tick re-dial across dozens of seeds was the storm")
 	}
-	if !e.fallbackDialDue(ns, seed, now.Add(fallbackDialCooldown+time.Second)) {
+	if !e.tcpDialDue(ns, seed, now.Add(tcpDialCooldown+time.Second)) {
 		t.Fatal("after the cooldown elapses the seed must be retried — a peer that just became reachable over TCP has to be picked up")
 	}
 	// Pacing is per-seed: a different address is unaffected.
 	other := netip.MustParseAddrPort("192.168.55.9:65432")
-	if !e.fallbackDialDue(ns, other, now.Add(time.Second)) {
+	if !e.tcpDialDue(ns, other, now.Add(time.Second)) {
 		t.Fatal("the cooldown must be per-seed, not global")
 	}
 }
@@ -544,12 +544,12 @@ func TestHostCandidateUpgradeIsNotThrottled(t *testing.T) {
 // The engine here has UDP enabled — that is the whole point of the test.
 func TestHostCandidateDialedOverTCPWhenPeerHasUDPDisabled(t *testing.T) {
 	e := NewEngine(Options{
-		NodeID:          "gn-cush2",
-		PrimaryPort:     65432, // OUR UDP works fine. Irrelevant to the peer.
-		TCPFallbackPort: 443,
-		Nets:            []NetSpec{{ID: 1, Name: "n", Dev: newFakeDev("d")}},
+		NodeID:      "gn-cush2",
+		PrimaryPort: 65432, // OUR UDP works fine. Irrelevant to the peer.
+		TCPPort:     443,
+		Nets:        []NetSpec{{ID: 1, Name: "n", Dev: newFakeDev("d")}},
 	})
-	f := &fakeFallback{has: map[netip.AddrPort]bool{}}
+	f := &fakeTCP{has: map[netip.AddrPort]bool{}}
 	e.Attach(f)
 	ns := e.network(1)
 
@@ -558,8 +558,8 @@ func TestHostCandidateDialedOverTCPWhenPeerHasUDPDisabled(t *testing.T) {
 	e.addLocalCandidates(1, "gn-cush1", []netip.AddrPort{cand})
 
 	// The UDP probe has failed and the seed is cooling down — exactly the state
-	// initSeedTick's backoff branch calls ensureFallback in.
-	e.ensureFallback(ns, cand)
+	// initSeedTick's backoff branch calls ensureTCP in.
+	e.ensureTCP(ns, cand)
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) && len(f.dials()) == 0 {
@@ -758,7 +758,7 @@ func TestUpgradeGateIsPerPeerNotGlobal(t *testing.T) {
 // ENETUNREACH — and gravinet retried each one on every cycle, forever:
 //
 //	send: write udp6 [::]:65432->[fdf5:...]:65432: sendto: network is unreachable
-//	tcp fallback dial [fdf5:...]:65432: connect: network is unreachable
+//	tcp dial [fdf5:...]:65432: connect: network is unreachable
 //
 // Dozens of pointless syscalls a tick, drowning the log and eating the dial
 // budget the addresses that *can* work are competing for — exactly when a roam
@@ -811,7 +811,7 @@ func TestCanSourceFamilyFailsOpenBeforeEnumeration(t *testing.T) {
 // the hot path — initSeedTick — not merely available.
 func TestSeedInUnreachableFamilyIsSkipped(t *testing.T) {
 	e, ns := testEngineWithNet(t)
-	f := &fakeFallback{has: map[netip.AddrPort]bool{}}
+	f := &fakeTCP{has: map[netip.AddrPort]bool{}}
 	e.Attach(f)
 
 	own := map[netip.Addr]bool{netip.MustParseAddr("10.83.82.7"): true}

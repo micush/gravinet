@@ -303,8 +303,8 @@ func TestSyncSeedBypassRoutesDedupesSameAddressDifferentPort(t *testing.T) {
 	calls := withFakeGateway(t)
 	ns.fullTunnel.Store(true)
 
-	// A UDP seed and its resolved TCP/TLS fallback share an IP but not a
-	// port (see seedFallback's doc comment) — that's one /32, not two.
+	// A UDP seed and its resolved TCP/TLS share an IP but not a
+	// port (see seedTCP's doc comment) — that's one /32, not two.
 	ns.mu.Lock()
 	ns.seeds = []netip.AddrPort{netip.MustParseAddrPort("203.0.113.5:51820")}
 	ns.tcpSeeds = []netip.AddrPort{netip.MustParseAddrPort("203.0.113.5:443")}

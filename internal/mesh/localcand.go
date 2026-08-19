@@ -83,7 +83,7 @@ func (e *Engine) localEndpoints() []netip.AddrPort {
 //
 // The port is the primary UDP port when UDP is enabled. When UDP is off
 // (PrimaryPort 0 — the '-' setting) the addresses are still perfectly dialable
-// over the TCP/TLS fallback, so they're advertised at the fallback port instead
+// over TCP/TLS, so they're advertised at the TCP port instead
 // rather than suppressed: a node with UDP disabled has *more* need of a LAN path
 // to its same-NAT neighbours, not less, since a relay is its only alternative.
 // Only when both are off is there genuinely nothing to offer.
@@ -91,7 +91,7 @@ func (e *Engine) refreshLocalCandidates() {
 	var out []netip.AddrPort
 	port := uint16(e.primaryPort.Load())
 	if port == 0 {
-		port = uint16(e.fallbackPort.Load()) // UDP off: still reachable over TCP/TLS
+		port = uint16(e.tcpListenPort.Load()) // UDP off: still reachable over TCP/TLS
 	}
 	if port != 0 {
 		// Enumerate per-interface, not via net.InterfaceAddrs(): that flattens
@@ -217,7 +217,7 @@ const hostCandGrace = 20 * time.Minute
 // IPv6 endpoints and IPv6 host candidates produces a steady stream of
 //
 //	send: write udp6 [::]:65432->[fdf5:...]:65432: sendto: network is unreachable
-//	tcp fallback dial [fdf5:...]:65432: connect: network is unreachable
+//	tcp dial [fdf5:...]:65432: connect: network is unreachable
 //
 // — dozens of pointless syscalls per tick, drowning the log and consuming the
 // dial budget the addresses that *can* work are competing for. Precisely when the
@@ -312,8 +312,8 @@ func (e *Engine) isOwnUnderlaySeed(seed netip.AddrPort) bool {
 // address some seed already names.
 //
 // gn-ionos3 is what this costs when it is missing. Its own address was a seed,
-// with a twelve-port fallback list, and its tcp_ports covered every one of those
-// ports — so all thirteen self-dials connected, each established a TCP fallback
+// with a twelve-alternate ports list, and its tcp_ports covered every one of those
+// ports — so all thirteen self-dials connected, each established a TCP
 // to this daemon, and each then handshaked into onHSInit's "claims our own node
 // id" drop, 793 times in nineteen minutes. gn-ionos2 had the identical seed
 // entry and got away with one connection at boot only because it listens on a
@@ -328,7 +328,7 @@ func (e *Engine) sweepOwnAddressSeeds(ns *netState) {
 			dropped = append(dropped, s)
 			delete(ns.seedOwner, s)
 			delete(ns.seedBackoff, s)
-			delete(ns.seedFallback, s)
+			delete(ns.seedTCP, s)
 			continue
 		}
 		kept = append(kept, s)

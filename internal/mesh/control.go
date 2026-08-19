@@ -42,7 +42,7 @@ type peerEntry struct {
 	managed  bool   // peer advertises remote management (propagated mesh-wide via gossip)
 	manager  bool   // peer advertises Manager mode (propagated mesh-wide via gossip)
 	webPort  uint16 // peer's web-admin port, so non-neighbors can manage it too
-	tcpPort  uint16 // peer's TCP/TLS fallback port, so non-neighbors can dial it when UDP fails
+	tcpPort  uint16 // peer's TCP/TLS port, so non-neighbors can dial it when UDP fails
 	// extraTCPPorts/extraUDPPorts are the peer's additional listen ports
 	// (config extra_tcp_listen_ports/extra_listen_ports), propagated the
 	// same way tcpPort is so non-neighbors learn about them too — see
@@ -353,7 +353,7 @@ func (e *Engine) learnPeers(ps *peerSession, entries []peerEntry) {
 			// ride the same seed pool rather than a separate dial mechanism:
 			// each becomes its own seed candidate at the peer's address, so
 			// initLoop's existing retry/backoff/dedup already tries all of
-			// them, no new parallel-dial logic needed the way ensureFallback
+			// them, no new parallel-dial logic needed the way ensureTCP
 			// (TCP) required — UDP's primary is learned automatically by
 			// observing which port a packet arrives from, but an extra port
 			// nobody's dialed yet has no such signal, hence this explicit
@@ -1272,9 +1272,9 @@ func encodePeerList(entries []peerEntry) []byte {
 			b = append(b, wp[:]...)
 		}
 	}
-	// TCP/TLS fallback ports are appended as one trailing block, in entry order,
+	// TCP/TLS ports are appended as one trailing block, in entry order,
 	// after all entries. Older decoders stop after the entries and ignore these
-	// bytes; newer decoders read them to learn each peer's fallback port. Adding
+	// bytes; newer decoders read them to learn each peer's TCP port. Adding
 	// it here (rather than per-entry) keeps the format backward-compatible.
 	if len(entries) > 0 {
 		b = append(b, peerListTCPBlock)
@@ -1452,7 +1452,7 @@ func peerListHasSeed(entries []peerEntry) bool {
 	return false
 }
 
-// peerListTCPBlock marks the optional trailing block of per-entry TCP fallback
+// peerListTCPBlock marks the optional trailing block of per-entry TCP
 // ports in an encoded peer list. peerListExtraTCPBlock/peerListExtraUDPBlock
 // mark further optional trailing blocks of per-entry extra ports — see
 // decodePeerList for how an unrecognized marker (a block from a version this
@@ -1556,7 +1556,7 @@ func decodePeerList(b []byte) ([]peerEntry, error) {
 		en.manager = flags&flagManager != 0
 		entries = append(entries, en)
 	}
-	// Optional trailing blocks: per-entry TCP fallback ports, then per-entry
+	// Optional trailing blocks: per-entry TCP ports, then per-entry
 	// extra TCP/UDP ports (see encodePeerList). Each is its own marker byte,
 	// read in a loop rather than a single check so newer blocks can follow
 	// the original one — an older decoder here (one that predates this loop

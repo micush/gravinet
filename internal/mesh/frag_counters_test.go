@@ -66,7 +66,7 @@ func TestFragReasmCounters(t *testing.T) {
 			if pi.FragsSent != tx.fragsSent.Load() || pi.PathMTU != int(tx.effMTU.Load()) {
 				t.Fatalf("ListPeers diagnostics mismatch: %+v", pi)
 			}
-			if pi.Transport != "udp" { // nopSender has no TCP fallback
+			if pi.Transport != "udp" { // nopSender has no TCP
 				t.Fatalf("Transport = %q, want udp", pi.Transport)
 			}
 		}

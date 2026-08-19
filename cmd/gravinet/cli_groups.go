@@ -309,7 +309,7 @@ var settingsGroup = []groupLeaf{
 	{"keepalive", "how often this node pings each peer, in seconds; applied live", cmdSettingsKeepalive},
 	{"peer-timeout", "how long a peer may go silent before its session drops; applied live", cmdSettingsPeerTimeout},
 	{"udp-port", "UDP listen port(s), comma-separated, first is primary; \"-\" turns UDP off", cmdSettingsUDPPort},
-	{"tcp-port", "TCP/TLS fallback port(s), comma-separated; \"-\" turns the fallback off", cmdSettingsTCPPort},
+	{"tcp-port", "TCP/TLS port(s), comma-separated; \"-\" turns TCP off", cmdSettingsTCPPort},
 	{"nat-state", "idle NAT connection timeout in seconds (0 = default 120s); applied live", cmdSettingsNATState},
 	{"ip-forwarding", "turn on host IPv4/IPv6 forwarding at startup: on|off|status; needs a restart", cmdSettingsIPForwarding},
 	{"ip-redirects", "suppress host ICMP redirects at startup: on|off|status; needs a restart", cmdSettingsIPRedirects},

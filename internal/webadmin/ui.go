@@ -928,6 +928,10 @@ function label(s){
   if (s==='getting-started') return 'Getting Started';
   if (s==='capture') return 'Packet Capture';
   if (s==='l2disco') return 'l2disco';
+  // Rail label only. The page keeps the full "IPv6 Router Advertisements"
+  // heading (see sectionHeading), the same split l2disco uses: a nav rail is
+  // narrow, a standalone <h2> is not.
+  if (s==='ipv6ra') return 'v6 ra';
   return s==='nat'||s==='qos'||s==='dns'||s==='bgp'||s==='api'||s==='snmp' ? s.toUpperCase() : s.charAt(0).toUpperCase()+s.slice(1);
 }
 // sectionHeading is what the content pane's own <h2> shows \u2014 label(s)
@@ -1194,7 +1198,13 @@ function buildSearchIndex(){
   // that happens to contain the word). Indexed once here, not per network.
   for (const g of NAV_GROUPS) {
     add(g.name, 'Section group', null, null, {kind:'group', firstSection:g.items[0][0]});
-    for (const [s, tip] of g.items) { if (!sectionVisible(s)) continue; add(label(s), 'Section', s, null, {kind:'section', section:s}, tip); }
+    // The key goes into the haystack alongside the tip, because it is a name
+    // this section answers to: it is what the URL hash shows and what the
+    // docs and the config call it. Several labels no longer contain their
+    // own key \u2014 'ipv6ra' renders as "v6 ra", 'bandwidth' as "Shaping"
+    // \u2014 and without this, typing the name a section is filed under
+    // would fail to find it.
+    for (const [s, tip] of g.items) { if (!sectionVisible(s)) continue; add(label(s), 'Section', s, null, {kind:'section', section:s}, tip + ' ' + s); }
   }
   add('Settings', 'Section', 'settings', null, {kind:'section', section:'settings'}, 'console, security, and node-wide settings');
 
@@ -1234,7 +1244,7 @@ function buildSearchIndex(){
     ['natstate-row', 'NAT state timeout', 'How long an idle translated NAT connection is remembered before its mapping is reclaimed.', 'network'],
     ['ip-forwarding-row', 'IP forwarding', 'Whether this node turns on host IPv4/IPv6 forwarding at startup \u2014 the on-ramp for redistributed routes and NAT. On by default; needs a restart to take effect.', 'network'],
     ['ip-redirects-row', 'Disable ICMP redirects', 'Turn off host acceptance and sending of ICMP IPv4/IPv6 redirects at startup. On by default. icmp redirect', 'network'],
-    ['upnp-row', 'UPnP', 'Ask the LAN router to forward every port this node listens on \u2014 UDP, TCP fallback, and any extra ports \u2014 from its WAN side to this host automatically, so peers can reach it without a manual port forward. Off by default. upnp port forwarding nat traversal', 'network'],
+    ['upnp-row', 'UPnP', 'Ask the LAN router to forward every port this node listens on \u2014 UDP, TCP, and any extra ports \u2014 from its WAN side to this host automatically, so peers can reach it without a manual port forward. Off by default. upnp port forwarding nat traversal', 'network'],
     ['worker-threads-row', 'Worker threads', 'How many goroutines process outbound TUN traffic and inbound UDP traffic.', 'performance'],
     ['tun-queues-row', 'TUN queues', 'How many independent read queues to open on each overlay interface.', 'performance'],
     ['socket-buffer-row', 'Socket buffer', 'Per-UDP-socket receive/send buffer, in megabytes.', 'performance'],
@@ -2773,13 +2783,13 @@ function buildTabBar(tabs, active, onSelect){
 
 // buildPortListRow renders an inline-editable comma-separated port list for
 // a Settings row — parses on blur and posts the list live. The first port is
-// the primary/fallback port itself (UDP port and TCP port both use this,
+// the primary/TCP port itself (UDP port and TCP port both use this,
 // with any further ports being extras); reverts the *whole* field on any
 // invalid entry, simpler and more predictable than partially accepting a
 // list with one bad entry in it.
 //
 // Typing "-" instead of a port list turns that transport off entirely (UDP
-// or the TCP/TLS fallback, depending on apiPath) — sent to the server as
+// or the TCP/TLS, depending on apiPath) — sent to the server as
 // {disabled:true} rather than an empty port list, which the server refuses
 // the same way an empty list is refused (each of handlePort and
 // handleTCPPort also refuses to disable its own transport while the other
@@ -3421,7 +3431,7 @@ function secSettingsNetwork(c) {
   ntInput.onkeydown = (e) => { if (e.key === 'Enter') { ntInput.blur(); } };
 
   const up = $('<div class="settings-row" id="upnp-row"></div>');
-  const upLabel = $('<div><div class="settings-label">UPnP</div><div class="settings-desc">Ask this node\u2019s LAN router to forward its ports (UDP, TCP fallback, and any extras above) automatically, so a node behind a home/office router can be reached without a manual port forward. Off by default. Best-effort \u2014 a router without UPnP just silently skips it.</div></div>');
+  const upLabel = $('<div><div class="settings-label">UPnP</div><div class="settings-desc">Ask this node\u2019s LAN router to forward its ports (UDP, TCP, and any extras above) automatically, so a node behind a home/office router can be reached without a manual port forward. Off by default. Best-effort \u2014 a router without UPnP just silently skips it.</div></div>');
   const upSw = $('<label class="sw"><input type="checkbox" id="upnp-toggle-cb"><span class="sw-slider"></span></label>');
   const upCb = upSw.querySelector('input');
   upCb.checked = state.enableUpnp;
@@ -4628,7 +4638,7 @@ function infoMeshPeers(c) {
       let xport = '';
       if (!p.disabled && !p.pending && !p.self) {
         const proto = (p.transport==='tcp')
-          ? '<span class="off" title="UDP to this peer is blocked or failing; running over the TCP/TLS fallback">tcp</span>'
+          ? '<span class="off" title="UDP to this peer is blocked or failing; running over TCP/TLS">tcp</span>'
           : '<span class="on" title="UDP, the normal transport">udp</span>';
         const mtu = p.mtu ? (p.mtu+' B') : 'probing';
         const sd = p.fsdrop||0, rd = p.rdrop||0;
@@ -5199,7 +5209,7 @@ function portLabel(min, max){ if(!min && !max) return 'any'; if(min===max) retur
 // used now.
 function secSeeds(c, nets){
   const cfgs = state.cfg;
-  c.appendChild($('<div class="hint" style="margin:0 0 10px">Seed addresses (host, host:port, or host:port,port,... for more than one) this node dials to find each network; persist whether or not a peer is connected. <b>udp</b> bootstraps over UDP with automatic TCP/TLS fallback; <b>tcp</b> goes straight over TCP/TLS, for cold-starting when UDP\u2019s blocked entirely. Double-click <b>address</b>, <b>transport</b>, or <b>notes</b> to edit, or <b>state</b> to park a seed without deleting it \u2014 a disabled seed keeps its address and notes but isn\u2019t dialed and isn\u2019t embedded in a join token. State applies immediately and is mirrored on the peer behind that address \u2014 disable a seed and its peer is disabled too, enable it and the peer comes back, and the same in reverse from <b>Peers</b>. A seed that has never completed a handshake has no known peer, so nothing moves with it; you\u2019ll be told when that happens. + to add, tick rows and \u2212 to remove, or tick one and \ud83d\udec8 for DNS/WHOIS.</div>'));
+  c.appendChild($('<div class="hint" style="margin:0 0 10px">Seed addresses (host, host:port, or host:port,port,... for more than one) this node dials to find each network; persist whether or not a peer is connected. <b>udp</b> bootstraps over UDP, dialing TCP/TLS alongside it if UDP turns out to be blocked; <b>tcp</b> goes straight over TCP/TLS, for cold-starting when UDP\u2019s blocked entirely. Double-click <b>address</b>, <b>transport</b>, or <b>notes</b> to edit, or <b>state</b> to park a seed without deleting it \u2014 a disabled seed keeps its address and notes but isn\u2019t dialed and isn\u2019t embedded in a join token. State applies immediately and is mirrored on the peer behind that address \u2014 disable a seed and its peer is disabled too, enable it and the peer comes back, and the same in reverse from <b>Peers</b>. A seed that has never completed a handshake has no known peer, so nothing moves with it; you\u2019ll be told when that happens. + to add, tick rows and \u2212 to remove, or tick one and \ud83d\udec8 for DNS/WHOIS.</div>'));
   if (!cfgs.length){ emptyCard(c, 'no networks — create one under Networks first'); return; }
   for (const cf of cfgs){
     const card = $('<div class="card"></div>');
@@ -5248,13 +5258,13 @@ function secSeeds(c, nets){
 }
 
 // seedProtoBadge shows how a seed is dialed. Seeds bootstrap over UDP today (the
-// TCP/TLS path is an automatic fallback when UDP is blocked); a scheme prefix on
+// TCP/TLS path is dialled automatically when UDP is blocked); a scheme prefix on
 // the address is honored if present so the badge stays correct if explicit TCP
 // seeds are added later.
 function seedProtoBadge(addr){
   const a = (addr||'').toLowerCase();
   if (a.startsWith('tcp://') || a.startsWith('tcp:'))
-    return '<span class="off" title="dialed over the TCP/TLS fallback">tcp</span>';
+    return '<span class="off" title="dialed over TCP/TLS">tcp</span>';
   return '<span class="hint" title="dialed over UDP; falls back to TCP/TLS automatically if UDP is blocked">udp</span>';
 }
 

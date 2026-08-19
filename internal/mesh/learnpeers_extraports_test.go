@@ -12,7 +12,7 @@ import (
 // peer's extra UDP ports, each becomes its own seed candidate at the peer's
 // address (alongside the endpoint itself) — reusing initLoop's existing
 // retry/backoff/dedup rather than a separate dial mechanism, unlike the TCP
-// side (ensureFallback), which has no equivalent existing pool to reuse.
+// side (ensureTCP), which has no equivalent existing pool to reuse.
 func TestLearnPeersSeedsExtraUDPPorts(t *testing.T) {
 	const netID = uint64(0xE47A)
 	key, _ := crypto.GenerateKey()

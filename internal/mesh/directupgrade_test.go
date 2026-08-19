@@ -153,23 +153,23 @@ func TestRelayedConnectionUpgradesToDirect(t *testing.T) {
 	t.Log("relayed session upgraded to direct, and remained reachable throughout")
 }
 
-// TestUpgradeAttemptAlsoTriesFallback is the fast, isolated counterpart to
+// TestUpgradeAttemptAlsoTriesTCP is the fast, isolated counterpart to
 // TestRelayedConnectionUpgradesToDirect, for the gap that test's own harness
 // (a plain in-memory UDP switchboard, with no tcpDialer at all) can't
 // exercise: before this fix, seedOwnerNeedsUpgrade decided an upgrade
 // attempt was due, but initLoop's upgrade branch only ever acted on that by
 // calling planHandshake/e.send — the plain UDP path. Once a peer was
 // relay-connected, that was the *only* remaining retry path (the backoff
-// branch that normally calls ensureFallback is unreachable once
+// branch that normally calls ensureTCP is unreachable once
 // connectedToSeedOwner is true), so a peer relayed because UDP genuinely
 // doesn't reach it — up to and including UDP being turned off entirely
 // (config.PrimaryPort == 0, the '-' port setting) — could never upgrade to a
-// working TCP/TLS fallback path, even though the ordinary "not yet
+// working TCP/TLS path, even though the ordinary "not yet
 // connected at all" branch already tries exactly that. This calls
 // initSeedTick directly (no timers, no real transport) on a seed whose
-// owner is relay-connected, and confirms ensureFallback now dials the
-// fallback alongside the UDP attempt.
-func TestUpgradeAttemptAlsoTriesFallback(t *testing.T) {
+// owner is relay-connected, and confirms ensureTCP now dials the
+// TCP alongside the UDP attempt.
+func TestUpgradeAttemptAlsoTriesTCP(t *testing.T) {
 	key, err := crypto.GenerateKey()
 	if err != nil {
 		t.Fatalf("GenerateKey: %v", err)
@@ -179,11 +179,11 @@ func TestUpgradeAttemptAlsoTriesFallback(t *testing.T) {
 		t.Fatalf("NewKeySet: %v", err)
 	}
 	e := NewEngine(Options{
-		NodeID:          "self",
-		TCPFallbackPort: 443,
-		Nets:            []NetSpec{{ID: 1, Name: "n", Dev: newFakeDev("d"), Keys: ks, Subnet4: netip.MustParsePrefix("10.0.0.0/24")}},
+		NodeID:  "self",
+		TCPPort: 443,
+		Nets:    []NetSpec{{ID: 1, Name: "n", Dev: newFakeDev("d"), Keys: ks, Subnet4: netip.MustParsePrefix("10.0.0.0/24")}},
 	})
-	f := &fakeFallback{has: map[netip.AddrPort]bool{}}
+	f := &fakeTCP{has: map[netip.AddrPort]bool{}}
 	e.Attach(f)
 	ns := e.netSnapshot()[1]
 	if ns == nil {
@@ -205,8 +205,8 @@ func TestUpgradeAttemptAlsoTriesFallback(t *testing.T) {
 
 	e.initSeedTick(ns, seed, nil, time.Now())
 
-	// The dial runs off a goroutine ensureFallback starts; wait for it, same
-	// as TestEnsureFallbackDialsAndSeeds does for the ordinary (not yet
+	// The dial runs off a goroutine ensureTCP starts; wait for it, same
+	// as TestEnsureTCPDialsAndSeeds does for the ordinary (not yet
 	// connected) case this mirrors.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) && len(f.dials()) == 0 {
@@ -218,7 +218,7 @@ func TestUpgradeAttemptAlsoTriesFallback(t *testing.T) {
 	// code to derive a port, and deriving is what let one peer's port be used
 	// for another (two nodes behind one NAT, tcp/65432 and udp/65432).
 	if !dialedContains(f, fb) {
-		t.Fatalf("initSeedTick on a relay-only owner due for an upgrade should have dialed the fallback %s; got dials=%v", fb, f.dials())
+		t.Fatalf("initSeedTick on a relay-only owner due for an upgrade should have dialed the TCP %s; got dials=%v", fb, f.dials())
 	}
 }
 

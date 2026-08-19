@@ -172,17 +172,17 @@ func (e *Engine) install(ns *netState, ps *peerSession) {
 	// the same lock.
 	localCands := ps.localEndpoints
 	// Clear this peer's backoff — reachable again. Matched against the exact
-	// endpoint, or (for a fallback-established session) against seedFallback's
-	// record of which seed this fallback address resolves to. An exact-key-only
-	// delete here was a silent no-op for every fallback-established session,
-	// since ps.endpoint is the fallback port, never the original (blocked) UDP
+	// endpoint, or (for a TCP-established session) against seedTCP's
+	// record of which seed this TCP address resolves to. An exact-key-only
+	// delete here was a silent no-op for every TCP-established session,
+	// since ps.endpoint is the TCP port, never the original (blocked) UDP
 	// seed address:port the backoff entry is actually keyed under — leaving it
 	// to linger until it happened to expire on its own. Matching by IP alone
 	// (an earlier version of this fix) would be wrong here for the same reason
 	// it's wrong in connectedTo: it could clear a different peer's backoff
 	// entry just for sharing an IP.
 	for seed := range ns.seedBackoff {
-		if seed == ps.endpoint || ns.seedFallback[seed] == ps.endpoint {
+		if seed == ps.endpoint || ns.seedTCP[seed] == ps.endpoint {
 			delete(ns.seedBackoff, seed)
 		}
 	}
@@ -242,7 +242,7 @@ func (e *Engine) install(ns *netState, ps *peerSession) {
 			if s != ps.endpoint && ns.seedOwner[s] == ps.nodeID && !ns.explicitSeed[s] && !ns.hostCand[s] {
 				delete(ns.seedOwner, s)
 				delete(ns.seedBackoff, s)
-				delete(ns.seedFallback, s)
+				delete(ns.seedTCP, s)
 				continue // stale: superseded by ps.endpoint, drop it
 			}
 			kept = append(kept, s)
@@ -602,7 +602,7 @@ func (e *Engine) onHSInit(payload []byte, from netip.AddrPort, via *peerSession)
 		PartialMesh:    ns.spec.PartialMesh,
 		LocalEndpoints: e.localEndpoints(),
 		WebPort:        e.webPort,
-		TCPPort:        uint16(e.fallbackPort.Load()),
+		TCPPort:        uint16(e.tcpListenPort.Load()),
 		ExtraTCPPorts:  loadPortList(&e.extraTCPPorts),
 		ExtraUDPPorts:  loadPortList(&e.extraUDPPorts),
 		BGPASN:         e.bgpASN.Load(),
@@ -643,7 +643,7 @@ func (e *Engine) onHSResp(payload []byte, from netip.AddrPort, via *peerSession)
 	if p == nil {
 		return // unknown or already-completed handshake
 	}
-	// Whether *this* completing handshake arrived over the TCP fallback or
+	// Whether *this* completing handshake arrived over TCP or
 	// plain UDP — same check ListPeers already uses to report a connected
 	// peer's transport accurately, reused here (see configuredSeedOwnerUDP/
 	// TCP's doc comment on netState) to attribute a configured seed's owner
@@ -935,7 +935,7 @@ func (e *Engine) initLoop(ns *netState) {
 
 // initSeedTick is initLoop's per-seed decision, factored out so it's directly
 // unit-testable without waiting on the real 1s ticker (see
-// TestUpgradeAttemptAlsoTriesFallback). backoff is initLoop's already-taken
+// TestUpgradeAttemptAlsoTriesTCP). backoff is initLoop's already-taken
 // snapshot of ns.seedBackoff for this tick.
 func (e *Engine) initSeedTick(ns *netState, seed netip.AddrPort, backoff map[netip.AddrPort]time.Time, now time.Time) {
 	if e.seedRefusedByPolicy(ns, seed, now) {
@@ -952,7 +952,7 @@ func (e *Engine) initSeedTick(ns *netState, seed netip.AddrPort, backoff map[net
 		return
 	}
 	if !e.canSourceFamily(seed.Addr()) {
-		// No routable address in this family, so every send and every fallback
+		// No routable address in this family, so every send and every TCP dial
 		// dial to it is a guaranteed ENETUNREACH. Don't spend the tick learning
 		// that again — see canSourceFamily. Re-evaluated each maintenance tick,
 		// so a roam that gains IPv6 picks these straight back up.
@@ -976,7 +976,7 @@ func (e *Engine) initSeedTick(ns *netState, seed netip.AddrPort, backoff map[net
 		// directUpgradeInterval's doc comment for why this exists and why
 		// it's throttled so much more gently than a genuinely failing seed.
 		//
-		// Also try the TCP/TLS fallback in parallel, the same way the
+		// Also try the TCP/TLS in parallel, the same way the
 		// not-yet-connected branch below already does for a seed that's
 		// merely cooling down. Without this, a peer that only ever became
 		// relay-connected — because UDP to it doesn't work, up to and
@@ -984,21 +984,21 @@ func (e *Engine) initSeedTick(ns *netState, seed netip.AddrPort, backoff map[net
 		// the '-' port setting added in v366) — can never upgrade: this
 		// upgrade attempt is otherwise the *only* remaining retry path once
 		// connectedToSeedOwner is true (the backoff branch below, which is
-		// what normally calls ensureFallback, is unreachable from here for
+		// what normally calls ensureTCP, is unreachable from here for
 		// as long as the peer stays relayed, since every UDP-endpoint
 		// variant gossip re-registers for the same owner routes back into
 		// this same branch instead). With UDP disabled, e.send's plain
 		// planHandshake attempt just below will keep failing immediately
 		// (Dual.Send returns errNoUDP) forever, on every throttled retry,
 		// and nothing would ever try the path that could actually work.
-		// ensureFallback already no-ops once a fallback connection exists
+		// ensureTCP already no-ops once a TCP connection exists
 		// or one is already being dialed, so calling it on every throttled
 		// upgrade attempt costs nothing extra when UDP is working fine.
-		e.ensureFallback(ns, seed)
+		e.ensureTCP(ns, seed)
 	} else if until, ok := backoff[seed]; ok && now.Before(until) {
 		// UDP to this seed is cooling down after a failed handshake — try
-		// reaching the same peer over the TCP/TLS fallback in parallel.
-		e.ensureFallback(ns, seed)
+		// reaching the same peer over TCP/TLS in parallel.
+		e.ensureTCP(ns, seed)
 		return // unreachable seed cooling down
 	}
 	pkt, to, send := e.planHandshake(ns, seed)
@@ -1075,7 +1075,7 @@ func (e *Engine) buildHSInit(ns *netState, p *pendingHS) []byte {
 		SelfSeed:       ns.spec.SelfSeed,
 		LocalEndpoints: e.localEndpoints(),
 		WebPort:        e.webPort,
-		TCPPort:        uint16(e.fallbackPort.Load()),
+		TCPPort:        uint16(e.tcpListenPort.Load()),
 		ExtraTCPPorts:  loadPortList(&e.extraTCPPorts),
 		ExtraUDPPorts:  loadPortList(&e.extraUDPPorts),
 		BGPASN:         e.bgpASN.Load(),
@@ -1092,13 +1092,13 @@ func (e *Engine) buildHSInit(ns *netState, p *pendingHS) []byte {
 
 // connectedTo reports whether we already have a session to seed's endpoint.
 // connectedTo reports whether ns has a live session reachable at seed's exact
-// address, or at the specific fallback address ensureFallback last resolved
+// address, or at the specific TCP address ensureTCP last resolved
 // for this seed. The second check is necessary because when UDP to a seed is
-// blocked, ensureFallback deliberately reconnects the same peer on a
-// different port (the TCP/TLS fallback port) — that is the intended,
+// blocked, ensureTCP deliberately reconnects the same peer on a
+// different port (the TCP/TLS port) — that is the intended,
 // successful outcome, not a different peer, and matching on the exact
-// original port would mean a peer that's fully connected via its fallback
-// path is never recognized as such, so initLoop keeps calling ensureFallback
+// original port would mean a peer that's fully connected via TCP
+// path is never recognized as such, so initLoop keeps calling ensureTCP
 // on every tick forever even though the peer is already up.
 //
 // This is intentionally more precise than "any live session sharing this
@@ -1110,10 +1110,10 @@ func (e *Engine) buildHSInit(ns *netState, p *pendingHS) []byte {
 func (e *Engine) connectedTo(ns *netState, seed netip.AddrPort) bool {
 	ns.mu.RLock()
 	defer ns.mu.RUnlock()
-	fb, hasFallback := ns.seedFallback[seed]
+	fb, hasTCP := ns.seedTCP[seed]
 	for _, ps := range ns.byNode {
 		ep := ps.ep()
-		if ep == seed || (hasFallback && ep == fb) {
+		if ep == seed || (hasTCP && ep == fb) {
 			return true
 		}
 	}
@@ -1234,9 +1234,9 @@ func (e *Engine) connectedToSeedOwner(ns *netState, seed netip.AddrPort) bool {
 	return live
 }
 
-// tcpPortForEndpoint returns the TCP/TLS fallback port advertised by the node
+// tcpPortForEndpoint returns the TCP/TLS port advertised by the node
 // whose underlay endpoint matches ep (learned via handshake or gossip), or 0 if
-// unknown. This lets the fallback dial a peer's actual port without a mesh-wide
+// unknown. This lets the TCP dial a peer's actual port without a mesh-wide
 // agreement on a single port.
 // tcpPortForUniqueIP is the IP-based lookup the old tcpPortForEndpoint did,
 // narrowed to the case where it is actually well-posed.
@@ -1492,7 +1492,7 @@ func (ns *netState) seedCandidates() []Candidate {
 // TCP ports a peer advertises — same matching priority (live session by IP
 // first, then gossip/handshake-learned node info by exact endpoint), same
 // self-correcting tolerance for an occasional same-IP collision. Used by
-// ensureFallback to dial every advertised candidate in parallel, not just
+// ensureTCP to dial every advertised candidate in parallel, not just
 // the primary.
 func (ns *netState) extraTCPPortsForEndpoint(ep netip.AddrPort) []uint16 {
 	ns.mu.RLock()
@@ -1510,7 +1510,7 @@ func (ns *netState) extraTCPPortsForEndpoint(ep netip.AddrPort) []uint16 {
 	return nil
 }
 
-// primeTCPSeeds dials each configured TCP/TLS seed over the fallback directly,
+// primeTCPSeeds dials each configured TCP/TLS seed over TCP directly,
 // rather than waiting for a UDP handshake to fail. This is what lets a node cold-
 // bootstrap onto the mesh when UDP is blocked end to end: once the TLS connection
 // is up, the seed is registered so the next init tick runs the handshake over it.
@@ -1592,7 +1592,7 @@ func (e *Engine) primeTCPSeeds(ns *netState) {
 		if reached[seed.Addr()] {
 			continue // another port on this host is already carrying us
 		}
-		if ns.fallbackInBackoff(seed) {
+		if ns.tcpInBackoff(seed) {
 			continue // connected before without ever handshaking; still cooling down
 		}
 		s := seed
@@ -1606,11 +1606,11 @@ func (e *Engine) primeTCPSeeds(ns *netState) {
 				// backoff at all. In the field that was 780 dials a minute —
 				// thirteen a second, indefinitely — against a single address
 				// that could never answer.
-				wait := ns.noteFallbackFailure(s)
+				wait := ns.noteTCPFailure(s)
 				e.log.Debugf("mesh: tcp seed dial %s: %v (not retrying for %s)", s, err, wait)
 				return
 			}
-			ns.clearFallbackBackoff(s)
+			ns.clearTCPBackoff(s)
 			e.AddSeed(netID, s) // route the handshake to this seed over the new TLS conn
 			e.log.Infof("mesh: dialed tcp seed %s", s)
 		}()
@@ -1657,8 +1657,8 @@ func (e *Engine) addTCPSeed(networkID uint64, seed netip.AddrPort) {
 	ns.tcpSeeds = append(ns.tcpSeeds, seed)
 }
 
-// ensureFallback opens a TCP/TLS fallback connection to a peer when UDP to it has
-// failed (the seed is in backoff). It dials the peer's assumed fallback port
+// ensureTCP opens a TCP/TLS connection to a peer when UDP to it has
+// failed (the seed is in backoff). It dials the peer's assumed TCP port
 // (default 443) — and, if the peer has advertised any extra TCP ports, those
 // too, all in parallel — and registers whichever succeeds as a seed, so the
 // next init tick sends the handshake there and the Dual sender, seeing a live
@@ -1677,26 +1677,26 @@ func (e *Engine) addTCPSeed(networkID uint64, seed netip.AddrPort) {
 // collide with each other the way retrying the *same* fb concurrently
 // would, and an extra live connection that ends up unused simply sits idle
 // rather than causing any conflicting state.
-// fallbackDialCooldown paces repeat TCP/TLS fallback dials to the same seed.
+// tcpDialCooldown paces repeat TCP/TLS dials to the same seed.
 // Long enough that dozens of unreachable seeds cost a trickle rather than a
 // storm, short enough that a peer which only just became reachable over TCP
 // (its UDP listener went away, a firewall opened) is picked up promptly.
-const fallbackDialCooldown = 30 * time.Second
+const tcpDialCooldown = 30 * time.Second
 
-// fallbackDialDue reports whether seed is due a TCP/TLS fallback dial, and
+// tcpDialDue reports whether seed is due a TCP/TLS dial, and
 // records the attempt if so. The first attempt for any seed is immediate; only
-// retries are paced by fallbackDialCooldown.
-func (e *Engine) fallbackDialDue(ns *netState, seed netip.AddrPort, now time.Time) bool {
+// retries are paced by tcpDialCooldown.
+func (e *Engine) tcpDialDue(ns *netState, seed netip.AddrPort, now time.Time) bool {
 	ns.mu.Lock()
 	defer ns.mu.Unlock()
-	if last, tried := ns.seedAttempt[seed]; tried && now.Sub(last) < fallbackDialCooldown {
+	if last, tried := ns.seedAttempt[seed]; tried && now.Sub(last) < tcpDialCooldown {
 		return false
 	}
 	ns.seedAttempt[seed] = now
 	return true
 }
 
-func (e *Engine) ensureFallback(ns *netState, seed netip.AddrPort) {
+func (e *Engine) ensureTCP(ns *netState, seed netip.AddrPort) {
 	if !seed.Addr().IsValid() {
 		return
 	}
@@ -1724,10 +1724,10 @@ func (e *Engine) ensureFallback(ns *netState, seed netip.AddrPort) {
 	// two machines on the same switch, one of them TCP-only, would fail every
 	// direct attempt and relay to each other across the internet, with the LAN
 	// path suppressed by the very code meant to be conserving effort.
-	if !e.fallbackDialDue(ns, seed, time.Now()) {
+	if !e.tcpDialDue(ns, seed, time.Now()) {
 		return
 	}
-	fp := int(e.fallbackPort.Load())
+	fp := int(e.tcpListenPort.Load())
 	if fp <= 0 {
 		return
 	}
@@ -1751,7 +1751,7 @@ func (e *Engine) ensureFallback(ns *netState, seed netip.AddrPort) {
 	// typed, usually beside a note naming the peer, and it leads the list now
 	// instead of being discarded.
 	owner := ns.seedOwnerOf(seed)
-	cands := e.fallbackCandidates(ns, seed, fp, owner)
+	cands := e.tcpCandidates(ns, seed, fp, owner)
 	seeds := ns.seedCandidates()
 	connected := owner != "" && e.hasDirectSession(ns, owner)
 	for _, c := range cands {
@@ -1834,7 +1834,7 @@ func (e *Engine) hasDirectSession(ns *netState, nodeID string) bool {
 	return ps != nil && ps.ep().IsValid()
 }
 
-// fallbackCandidates builds the ordered candidate set for one seed.
+// tcpCandidates builds the ordered candidate set for one seed.
 //
 // Sources, most authoritative first — and note that none of them reaches
 // across peers, which is the whole difference from the derivation this
@@ -1847,7 +1847,7 @@ func (e *Engine) hasDirectSession(ns *netState, nodeID string) bool {
 // Every candidate is TCP: this is the TCP dial path. Protocol is carried
 // explicitly so a UDP seed can never silently become a TCP candidate at the
 // same address, which is how cush2's seed became cush1's socket.
-func (e *Engine) fallbackCandidates(ns *netState, seed netip.AddrPort, ourPort int, owner string) []Candidate {
+func (e *Engine) tcpCandidates(ns *netState, seed netip.AddrPort, ourPort int, owner string) []Candidate {
 	var out []Candidate
 	add := func(port uint16, src CandSource) {
 		if port != 0 {
@@ -1887,12 +1887,12 @@ func seedOwnerAt(seeds []Candidate, c Candidate) string {
 	return "another peer"
 }
 
-// dialCandidate is ensureFallback's per-candidate-port body — claim,
-// check, and dial exactly one fallback address. Factored out so the primary
+// dialCandidate is ensureTCP's per-candidate-port body — claim,
+// check, and dial exactly one TCP address. Factored out so the primary
 // port and any extra ports all go through the identical logic rather than
 // duplicating it once per candidate.
 func (e *Engine) dialCandidate(ns *netState, tr Sender, seed netip.AddrPort, port int) {
-	// Dial the peer at the chosen fallback port. When it equals the seed's port
+	// Dial the peer at the chosen TCP port. When it equals the seed's port
 	// (the default — both 65432), fb == seed and the existing seed simply starts
 	// routing over TLS once the connection is up; when they differ (e.g. the peer
 	// advertises 443), fb is registered as an additional seed so the next init
@@ -1902,14 +1902,14 @@ func (e *Engine) dialCandidate(ns *netState, tr Sender, seed netip.AddrPort, por
 	// Claim fb before doing anything else: several stale duplicate seed
 	// entries for one peer (same IP, different historically-observed ports —
 	// see AddSeed) all resolve to this same fb, and initLoop fires
-	// ensureFallback for every one of them in a single synchronous pass while
+	// ensureTCP for every one of them in a single synchronous pass while
 	// this function's dial runs asynchronously in a goroutine. Without this
 	// claim, many callers can race past the checks below before the first
 	// one's dial has completed and updated shared state, each independently
-	// dialing and logging "established tcp fallback" for the exact same
+	// dialing and logging "established tcp" for the exact same
 	// address within the same tick.
 	ns.mu.Lock()
-	ns.seedFallback[seed] = fb
+	ns.seedTCP[seed] = fb
 	ns.mu.Unlock()
 
 	// One claim covers both "already dialing this" and "still cooling down".
@@ -1925,12 +1925,12 @@ func (e *Engine) dialCandidate(ns *netState, tr Sender, seed netip.AddrPort, por
 
 	if e.connectedTo(ns, fb) {
 		release()
-		return // already connected over the fallback
+		return // already connected over TCP
 	}
 	fd, ok := tr.(tcpDialer)
 	if !ok || fd.HasTCP(fb) {
 		release()
-		return // transport has no fallback, or a connection is already up
+		return // transport cannot dial TCP, or a connection is already up
 	}
 	// No separate backoff check here any more: the claim above already
 	// declined if this candidate is cooling down, because the in-flight flag
@@ -1939,12 +1939,12 @@ func (e *Engine) dialCandidate(ns *netState, tr Sender, seed netip.AddrPort, por
 	// candidate in flight, which a subsequent Due() correctly reports as
 	// not-dialable, so every dial would suppress itself.
 	//
-	// That consolidation is the fix for v780. watchFallbackHandshake had
-	// recorded an escalating backoff against fb (noteFallbackFailure) and
+	// That consolidation is the fix for v780. watchTCPHandshake had
+	// recorded an escalating backoff against fb (noteTCPFailure) and
 	// logged "not retrying for <wait>" since v713, but nothing on this path
-	// read it back: the only caller of fallbackInBackoff was primeTCPSeeds'
+	// read it back: the only caller of tcpInBackoff was primeTCPSeeds'
 	// explicit-TCP-seed loop, keyed on the *seed*, while the address
-	// watchFallbackHandshake penalizes is fb — the candidate port, which for
+	// watchTCPHandshake penalizes is fb — the candidate port, which for
 	// any advertised extra port isn't the seed at all. So the ladder climbed
 	// 30s to 10m entirely for the log's benefit while a flat cooldown stayed
 	// the real pace. Written and read through one keyed entry, that class of
@@ -1953,7 +1953,7 @@ func (e *Engine) dialCandidate(ns *netState, tr Sender, seed netip.AddrPort, por
 	go func() {
 		defer release()
 		if err := fd.DialTCP(fb); err != nil {
-			e.log.Debugf("mesh: tcp fallback dial %s: %v", fb, err)
+			e.log.Debugf("mesh: tcp dial %s: %v", fb, err)
 			return
 		}
 		if fb != seed {
@@ -1961,7 +1961,7 @@ func (e *Engine) dialCandidate(ns *netState, tr Sender, seed netip.AddrPort, por
 			// derived fb entry. Without this, fb is added unowned and can
 			// never be pruned by install()'s stale-seed cleanup even after
 			// its peer connects via a completely different path (a stale
-			// UDP-then-TCP-fallback address left behind by NAT rebinding, an
+			// UDP-then-TCP-TCP address left behind by NAT rebinding, an
 			// address change, etc.) — it would sit in ns.seeds and get
 			// retried by initLoop forever, exactly like the original seed
 			// would have without this propagation.
@@ -1974,30 +1974,30 @@ func (e *Engine) dialCandidate(ns *netState, tr Sender, seed netip.AddrPort, por
 				e.AddSeed(netID, fb)
 			}
 		}
-		e.log.Infof("mesh: udp to %s appears blocked; established tcp/%d fallback", seed.Addr(), port)
-		go e.watchFallbackHandshake(ns, fb)
+		e.log.Infof("mesh: udp to %s appears blocked; established tcp/%d", seed.Addr(), port)
+		go e.watchTCPHandshake(ns, fb)
 	}()
 }
 
-// fallbackHandshakeGrace is how long watchFallbackHandshake waits after a TCP/
-// TLS fallback socket connects before concluding the handshake isn't going to
+// tcpHandshakeGrace is how long watchTCPHandshake waits after a TCP/
+// TLS socket connects before concluding the handshake isn't going to
 // complete. Generous enough to cover a full handshake retry cycle
 // (handshakeRetry between attempts, cycling through all configured keys)
 // without false-triggering on a merely slow handshake. A var (not const) so
 // tests can shorten it rather than waiting out the real duration.
-var fallbackHandshakeGrace = 10 * time.Second
+var tcpHandshakeGrace = 10 * time.Second
 
-// watchFallbackHandshake warns if fb never yields a working mesh session
-// within fallbackHandshakeGrace of its raw TCP/TLS socket connecting.
+// watchTCPHandshake warns if fb never yields a working mesh session
+// within tcpHandshakeGrace of its raw TCP/TLS socket connecting.
 // DialTCP succeeding only confirms the socket connected — it says
 // nothing about whether a gravinet peer is actually on the other end. Without
 // this, an address that isn't running gravinet (or isn't reachable as the
 // peer expected, or fails the handshake for some other reason — wrong key,
-// banned, version mismatch) produces "established tcp fallback" every time
+// banned, version mismatch) produces "established tcp" every time
 // its socket reconnects, which reads as success and gives no signal that
 // nothing is actually working.
-func (e *Engine) watchFallbackHandshake(ns *netState, fb netip.AddrPort) {
-	t := time.NewTimer(fallbackHandshakeGrace)
+func (e *Engine) watchTCPHandshake(ns *netState, fb netip.AddrPort) {
+	t := time.NewTimer(tcpHandshakeGrace)
 	defer t.Stop()
 	select {
 	case <-e.stop:
@@ -2007,7 +2007,7 @@ func (e *Engine) watchFallbackHandshake(ns *netState, fb netip.AddrPort) {
 	case <-t.C:
 	}
 	if e.connectedTo(ns, fb) {
-		ns.clearFallbackBackoff(fb) // handshake completed; forget any past failures
+		ns.clearTCPBackoff(fb) // handshake completed; forget any past failures
 		return
 	}
 	// Back off before redialling. A socket that connects and never handshakes
@@ -2018,8 +2018,8 @@ func (e *Engine) watchFallbackHandshake(ns *netState, fb netip.AddrPort) {
 	// indefinitely, each attempt burning a 10s grace period. Observed against
 	// a local gateway that accepts connections to arbitrary addresses, which
 	// makes every unreachable LAN candidate look permanently "connected".
-	wait := ns.noteFallbackFailure(fb)
-	e.log.Warnf("mesh: tcp fallback to %s connected but no mesh session formed within %s — the address may not be running gravinet, may not be the peer expected, or the handshake may be failing (wrong key, banned, version mismatch); not retrying for %s", fb, fallbackHandshakeGrace, wait)
+	wait := ns.noteTCPFailure(fb)
+	e.log.Warnf("mesh: tcp to %s connected but no mesh session formed within %s — the address may not be running gravinet, may not be the peer expected, or the handshake may be failing (wrong key, banned, version mismatch); not retrying for %s", fb, tcpHandshakeGrace, wait)
 }
 
 // Candidate backoff. Doubles from candBackoffMin to candBackoffMax and resets
@@ -2037,16 +2037,16 @@ func tcpCandKey(fb netip.AddrPort) CandKey {
 	return CandKey{Addr: fb.Addr().Unmap(), Port: fb.Port(), Proto: ProtoTCP}
 }
 
-func (ns *netState) noteFallbackFailure(fb netip.AddrPort) time.Duration {
+func (ns *netState) noteTCPFailure(fb netip.AddrPort) time.Duration {
 	return ns.cands.Fail(tcpCandKey(fb), time.Now())
 }
 
-func (ns *netState) clearFallbackBackoff(fb netip.AddrPort) {
+func (ns *netState) clearTCPBackoff(fb netip.AddrPort) {
 	ns.cands.Succeed(tcpCandKey(fb))
 }
 
-// fallbackInBackoff reports whether fb is still cooling down.
-func (ns *netState) fallbackInBackoff(fb netip.AddrPort) bool {
+// tcpInBackoff reports whether fb is still cooling down.
+func (ns *netState) tcpInBackoff(fb netip.AddrPort) bool {
 	return !ns.cands.Due(tcpCandKey(fb), time.Now())
 }
 
@@ -2064,7 +2064,7 @@ const deadSeedGrace = 1 * time.Hour
 
 // sweepDeadSeeds removes seeds that have been in ns.seeds for at least
 // deadSeedGrace and have never once resulted in a connection — checked
-// against everConnected (this seed's own address, or its resolved fallback
+// against everConnected (this seed's own address, or its resolved TCP address
 // address, per install()), not against whether a session happens to be live
 // at this exact instant. The two are different questions: a seed that
 // connected fine yesterday and is simply unreachable right now — a peer
@@ -2137,7 +2137,7 @@ func (e *Engine) sweepDeadSeeds(ns *netState, now time.Time) {
 		stillYoung := !known || now.Sub(first) < grace
 		hadConnection := ns.everConnected[s]
 		if !hadConnection {
-			if fb, hasFallback := ns.seedFallback[s]; hasFallback {
+			if fb, hasTCP := ns.seedTCP[s]; hasTCP {
 				hadConnection = ns.everConnected[fb]
 			}
 		}
@@ -2153,7 +2153,7 @@ func (e *Engine) sweepDeadSeeds(ns *netState, now time.Time) {
 		dead = append(dead, s)
 		delete(ns.seedFirstSeen, s)
 		delete(ns.seedBackoff, s)
-		delete(ns.seedFallback, s)
+		delete(ns.seedTCP, s)
 		delete(ns.seedOwner, s)
 	}
 	ns.seeds = kept
@@ -2163,24 +2163,24 @@ func (e *Engine) sweepDeadSeeds(ns *netState, now time.Time) {
 	}
 }
 
-// SetFallbackPort updates this node's TCP/TLS fallback port at runtime (so a live
+// SetTCPPort updates this node's TCP/TLS port at runtime (so a live
 // config change takes effect for both advertising and outbound dialing).
-func (e *Engine) SetFallbackPort(port int) {
-	e.fallbackPort.Store(int64(port))
+func (e *Engine) SetTCPPort(port int) {
+	e.tcpListenPort.Store(int64(port))
 	e.refreshLocalCandidates() // candidates carry a port; re-publish on the new one
 }
 
 // SetPrimaryPort updates this node's primary UDP listen port at runtime, so a
 // live config change (including turning UDP off, port 0) is reflected in the
 // host candidates it advertises — see localEndpoints. The counterpart to
-// SetFallbackPort.
+// SetTCPPort.
 func (e *Engine) SetPrimaryPort(port int) {
 	e.primaryPort.Store(int64(port))
 	e.refreshLocalCandidates() // candidates carry a port; re-publish on the new one
 }
 
 // SetExtraTCPPorts/SetExtraUDPPorts update this node's own additional
-// advertised listen ports at runtime — the counterpart to SetFallbackPort
+// advertised listen ports at runtime — the counterpart to SetTCPPort
 // for extra_tcp_listen_ports/extra_listen_ports, so a live config change to
 // either takes effect for advertising immediately, same as the primary port
 // changing already did. Also pushes the change to already-connected peers

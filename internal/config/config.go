@@ -23,7 +23,7 @@ import (
 	"gravinet/internal/protocol"
 )
 
-// DefaultUDPPort is tried first; FallbackUDPPorts are tried in order if the
+// DefaultUDPPort is tried first; AltUDPPorts are tried in order if the
 // primary cannot bind or a peer is unreachable on it.
 //
 // 65432 sits in the IANA dynamic/private range (49152-65535), so it carries no
@@ -34,19 +34,19 @@ import (
 // the out-of-the-box default and is changeable live under Settings.
 const DefaultUDPPort = 65432
 
-// DefaultTCPFallbackPort is the default TCP/TLS fallback listen port. It mirrors
+// DefaultTCPPort is the default TCP/TLS listen port. It mirrors
 // the UDP port so a node listens on the same number on both transports by
 // default; set tcp_fallback_port to anything (e.g. 443) to change it.
-const DefaultTCPFallbackPort = 65432
+const DefaultTCPPort = 65432
 
 // DefaultControlSocket is the local IPC endpoint used by the CLI. It's
 // platform-specific — see socket_linux.go / socket_bsd.go / socket_windows.go /
 // socket_other.go — since "/run" is a Linux (systemd/FHS) convention that
 // doesn't exist by default on macOS, FreeBSD, or Windows.
 
-// FallbackUDPPorts are well-known UDP ports likely to traverse restrictive
+// AltUDPPorts are well-known UDP ports likely to traverse restrictive
 // middleboxes when the primary is blocked.
-var FallbackUDPPorts = []int{443, 4500, 3478, 1194, 500, 53}
+var AltUDPPorts = []int{443, 4500, 3478, 1194, 500, 53}
 
 // Config is the whole daemon configuration.
 type Config struct {
@@ -61,7 +61,7 @@ type Config struct {
 	// reachable at some set of {address, protocol, port}, and any of them
 	// might work.
 	//
-	// The old shape (PrimaryPort + ExtraListenPorts, TCPFallbackPort +
+	// The old shape (PrimaryPort + ExtraListenPorts, TCPPort +
 	// ExtraTCPListenPorts) encoded a hierarchy the network does not have, and
 	// the hierarchy leaked. Because TCP was "derived from" UDP, the engine
 	// kept re-deriving a peer's TCP port from things that were not that
@@ -99,7 +99,7 @@ type Config struct {
 	// EnableUPnP turns on gravinet's own best-effort UPnP IGD port-forwarding
 	// helper: on startup, gravinet asks the LAN gateway (via UPnP, if it
 	// supports it and has UPnP enabled) to forward every port this node
-	// actually listens on — the primary UDP port, the TCP/TLS fallback port,
+	// actually listens on — the primary UDP port, the TCP/TLS port,
 	// and any configured extra listen ports — from its WAN side to this
 	// host. This is the same "auto-configure my router" convenience many
 	// P2P/VPN tools offer, so a node behind a home/office router with no
@@ -938,7 +938,7 @@ type Network struct {
 	// session, persisted so a restart has many bootstrap candidates (not just the
 	// one configured seed). Tried alongside Seeds; first to answer wins.
 	PeerCache []string `json:"peer_cache,omitempty"`
-	// SeedTCPPort is an optional TCP/TLS fallback port to dial the Seeds on when
+	// SeedTCPPort is an optional TCP/TLS port to dial the Seeds on when
 	// UDP can't reach them at cold start (before any peer's port is learned via
 	// handshake/gossip). Populated from a join token so a node can bootstrap over
 	// TCP onto a mesh using a non-default port. 0 means "assume our own port".
@@ -1556,7 +1556,7 @@ func dedupePorts(in []int) []int {
 //
 // Called from Load, before anything reads a port. The old shape carried the
 // same information in a way that implied a hierarchy — PrimaryPort *then*
-// ExtraListenPorts, TCPFallbackPort *then* ExtraTCPListenPorts — so the fold
+// ExtraListenPorts, TCPPort *then* ExtraTCPListenPorts — so the fold
 // is order-preserving: what was primary leads the list and becomes what this
 // node advertises, which keeps an upgraded node advertising exactly what it
 // advertised before.
@@ -1579,8 +1579,8 @@ type portsOnDisk struct {
 
 	PrimaryPort         *int  `json:"primary_port"`
 	ExtraListenPorts    []int `json:"extra_listen_ports"`
-	TCPFallbackPort     *int  `json:"tcp_fallback_port"`
-	DisableTCPFallback  *bool `json:"disable_tcp_fallback"`
+	TCPPort             *int  `json:"tcp_fallback_port"`
+	DisableTCP          *bool `json:"disable_tcp_fallback"`
 	ExtraTCPListenPorts []int `json:"extra_tcp_listen_ports"`
 }
 
@@ -1609,18 +1609,18 @@ func (c *Config) migratePortConfig(d portsOnDisk) {
 	switch {
 	case d.TCPPorts != nil:
 		c.TCPPorts = *d.TCPPorts
-	case d.PrimaryPort != nil || d.TCPFallbackPort != nil || d.DisableTCPFallback != nil:
+	case d.PrimaryPort != nil || d.TCPPort != nil || d.DisableTCP != nil:
 		// This config predates the flat keys. disable_tcp_fallback was the off
 		// switch and is a separate field from the port, so an off config
 		// usually still carries a port value — reading the port and ignoring
 		// the bool would turn TCP back on. tcp_fallback_port 0 or absent meant
 		// "the default", not "off", which is most nodes.
-		if d.DisableTCPFallback != nil && *d.DisableTCPFallback {
+		if d.DisableTCP != nil && *d.DisableTCP {
 			c.TCPPorts = nil
 		} else {
-			p := DefaultTCPFallbackPort
-			if d.TCPFallbackPort != nil && *d.TCPFallbackPort != 0 {
-				p = *d.TCPFallbackPort
+			p := DefaultTCPPort
+			if d.TCPPort != nil && *d.TCPPort != 0 {
+				p = *d.TCPPort
 			}
 			c.TCPPorts = append([]int{p}, d.ExtraTCPListenPorts...)
 		}
@@ -2395,7 +2395,7 @@ func Default() *Config {
 	return &Config{
 		LogLevel:      "info",
 		UDPPorts:      []int{DefaultUDPPort},
-		TCPPorts:      []int{DefaultTCPFallbackPort},
+		TCPPorts:      []int{DefaultTCPPort},
 		EnableIPv4:    true,
 		EnableIPv6:    true,
 		WorkerThreads: 0,

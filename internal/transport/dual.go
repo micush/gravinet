@@ -12,7 +12,7 @@ import (
 // both are delivered to the same Handler, so the engine never has to know
 // which underlay carried a packet.
 //
-// Neither is a fallback for the other. They are two ways to reach a peer, and
+// Neither is a TCP for the other. They are two ways to reach a peer, and
 // which one works is a fact about that peer and the network between, not a
 // tier to descend. UDP is preferred only because it is cheaper to set up.
 //
@@ -26,7 +26,7 @@ type Dual struct {
 // Send routes to TLS when a live connection to `to` exists, else to UDP. When
 // UDP is off and there's no live TLS connection yet either, this errors rather
 // than dialing — same as any other send that hasn't found its peer yet — and
-// the engine's candidate dialing (see mesh.Engine.ensureFallback) is what
+// the engine's candidate dialing (see mesh.Engine.ensureTCP) is what
 // actually opens one.
 func (d Dual) Send(to netip.AddrPort, payload []byte) error {
 	if d.TLS != nil && d.TLS.HasConn(to) {

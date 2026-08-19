@@ -9,7 +9,7 @@ import (
 // candStore holds one network's dial candidates and the pacing state for each.
 //
 // It replaces four maps that were all keyed by netip.AddrPort — seedBackoff,
-// fallbackBackoff, fallbackAttempt and dialing — plus seedFallback, which
+// tcpBackoff, tcpAttempt and dialing — plus seedTCP, which
 // mapped each seed to the single derived address it turned into. Keying by
 // AddrPort is the same conflation the Candidate type exists to fix, one level
 // down: udp/65432 and tcp/65432 at one address are separate NAT mappings that
@@ -17,7 +17,7 @@ import (
 // against one peer suppresses dials to another.
 //
 // Splitting pacing across two maps had its own cost, documented in v780: the
-// escalating backoff was recorded against the *derived* fallback address while
+// escalating backoff was recorded against the *derived* TCP address while
 // the only reader checked the *seed*, so the ladder climbed 30s → 10m purely
 // for the log's benefit and a flat 30s cooldown remained the real pace. One
 // store keyed by what is actually dialed removes the class of bug rather than
@@ -236,8 +236,8 @@ func (s *candStore) Len() int {
 }
 
 const (
-	// candBackoffMin/Max are the retry ladder, carried over from the fallback
-	// path's fallbackBackoffMin/Max. The values are unchanged; what changes is
+	// candBackoffMin/Max are the retry ladder, carried over from the TCP
+	// path's tcpBackoffMin/Max. The values are unchanged; what changes is
 	// that the entry recording them and the entry read before dialing are now
 	// the same entry (see candStore's doc comment on v780).
 	candBackoffMin = 30 * time.Second

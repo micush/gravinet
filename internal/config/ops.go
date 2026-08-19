@@ -613,7 +613,7 @@ func (c *Config) RouteRejectSetEnabled(netName, cidr string, on bool) error {
 
 // SeedParts splits an optional transport scheme from a seed address.
 // "tcp://host:port" -> ("tcp", "host:port"); "udp://host" or a bare host ->
-// ("udp", "host"). A tcp:// seed is dialed over the TCP/TLS fallback directly
+// ("udp", "host"). A tcp:// seed is dialed over TCP/TLS directly
 // (cold bootstrap when UDP is blocked end to end); everything else is UDP.
 func SeedParts(addr string) (transport, hostport string) {
 	addr = strings.TrimSpace(addr)
@@ -629,7 +629,7 @@ func SeedParts(addr string) (transport, hostport string) {
 
 // validateSeedAddr checks a bootstrap endpoint string. A bare host (or IP) is
 // allowed — the node falls back to the primary port and gravinet's own
-// built-in fallback set; if a port is given it must be numeric and in range.
+// built-in port set; if a port is given it must be numeric and in range.
 // More than one port may be given as a comma-separated list
 // ("host:port,port,..."), each tried as its own dial candidate against the
 // same host — same idea as the built-in no-port expansion, but an

@@ -41,7 +41,7 @@ type hsPayload struct {
 	// not to "never a seed."
 	SelfSeed bool
 	WebPort  uint16 // web-admin port, advertised so a manager can reach it over the overlay
-	TCPPort  uint16 // TCP/TLS fallback port, advertised so peers can dial it when UDP fails
+	TCPPort  uint16 // TCP/TLS port, advertised so peers can dial it when UDP fails
 	// ExtraTCPPorts/ExtraUDPPorts are additional listen ports (config
 	// extra_tcp_listen_ports/extra_listen_ports) beyond the primary ones
 	// above, advertised so a peer can try them too — the primary UDP port
@@ -302,7 +302,7 @@ func encodeHSPayload(p hsPayload) []byte {
 	var wp [2]byte
 	binary.BigEndian.PutUint16(wp[:], p.WebPort)
 	b = append(b, wp[:]...)
-	// TCP/TLS fallback port (optional trailing field): [tcpPort:2].
+	// TCP/TLS port (optional trailing field): [tcpPort:2].
 	var tp [2]byte
 	binary.BigEndian.PutUint16(tp[:], p.TCPPort)
 	b = append(b, tp[:]...)
@@ -505,7 +505,7 @@ func decodeHSPayload(b []byte) (hsPayload, error) {
 		if wp, ok := r.take(2); ok {
 			p.WebPort = binary.BigEndian.Uint16(wp)
 		}
-		// TCP/TLS fallback port is a further optional trailing field.
+		// TCP/TLS port is a further optional trailing field.
 		if tp, ok := r.take(2); ok {
 			p.TCPPort = binary.BigEndian.Uint16(tp)
 			// Extra TCP/UDP listen ports are further optional trailing fields,

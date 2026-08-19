@@ -168,7 +168,7 @@ func TestJoinTokenCarriesTCPPort(t *testing.T) {
 	if n.SeedTCPPort != 443 {
 		t.Fatalf("SeedTCPPort = %d, want 443", n.SeedTCPPort)
 	}
-	// The joiner's own fallback port is untouched (heterogeneous ports allowed).
+	// The joiner's own TCP port is untouched (heterogeneous ports allowed).
 	if p := dst.AdvertisedTCPPort(); p != 9999 {
 		t.Fatalf("joiner's own TCP port changed to %d", p)
 	}
@@ -186,7 +186,7 @@ func TestJoinTokenOmitsTCPPortWhenDisabled(t *testing.T) {
 		t.Fatal(err)
 	}
 	if n := dst.FindNetwork("00000000feedface"); n == nil || n.SeedTCPPort != 0 {
-		t.Fatalf("expected no seed hint when issuer disabled fallback, got %v", n)
+		t.Fatalf("expected no seed hint when issuer disabled TCP, got %v", n)
 	}
 }
 

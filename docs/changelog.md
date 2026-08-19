@@ -2,6 +2,48 @@
 
 ---
 
+## v886 — 2026-08-18
+
+**"Fallback" is gone as a name for a port or a transport. A port is a port: UDP, TCP, whatever.**
+
+The word survived long after the thing it described. v789 folded `primary_port`/`tcp_fallback_port` into flat `udp_ports`/`tcp_ports` lists, and `candidate.go` had already written down that the hierarchy was reduced to a preference — UDP is cheaper than TCP-over-TLS, so it is tried first, and that is the whole of it. The naming never caught up, so the GUI, the CLI, the logs, the docs and about forty Go files kept calling a co-equal port list a fallback.
+
+**Identifiers.** `DefaultTCPFallbackPort` → `DefaultTCPPort`; `SetFallbackPort` → `SetTCPPort`; `TCPFallbackEnabled` → `TCPEnabled`; `mesh.Options.TCPFallbackPort` → `TCPPort`; `ensureFallback` → `ensureTCP`; `watchFallbackHandshake` → `watchTCPHandshake`; `dialFallbackCandidate` → `dialTCPCandidate`; `noteFallbackFailure` → `noteTCPFailure`; `clearFallbackBackoff` → `clearTCPBackoff`; `fallbackCandidates` → `tcpCandidates`; `seedFallback` → `seedTCP`; `fallbackPort` → `tcpListenPort`; and the backoff/cooldown/grace fields, the test helpers (`fakeFallback` → `fakeTCP`, `slowFallback` → `slowTCP`, `fallbackEngine` → `tcpEngine`) and the test names with them. Four test files renamed: `fallback_test.go` → `tcpdial_test.go`, `fallbackbackoff_test.go` → `tcpbackoff_test.go`, `fallbackdial_backoff_test.go` → `tcpdial_backoff_test.go`, `fallback_extraports_test.go` → `tcpdial_extraports_test.go`.
+
+**The alternate UDP bind ports too**, since those were also ports wearing the word: `config.FallbackUDPPorts` → `AltUDPPorts`, `transport.Options.FallbackPorts` → `AltPorts`, `TestPortFallback` → `TestAltPortBind`.
+
+**User-visible text.** Both UPnP descriptions now read "UDP, TCP, and any extra ports". The peers `tcp` badge tooltip says "running over TCP/TLS"; the seed badge, "dialed over TCP/TLS". The Seeds hint says **udp** "bootstraps over UDP, dialing TCP/TLS alongside it if UDP turns out to be blocked". The port editor's error is now `"-" to turn TCP off`, matching the CLI's `tcp-port` help. Three `logx` lines in main.go lost it, as did `README.md`, `getting-started.md`, `docs/API.md` and `docs/ARCHITECTURE.md`.
+
+### What deliberately kept the word
+
+**The two legacy JSON keys.** `tcp_fallback_port` and `disable_tcp_fallback` in `portsOnDisk` are the pre-v789 on-disk format, read from config files that already exist on running nodes. Renaming a tag renames the key it matches, and `migratePortConfig` would stop finding it — an upgraded node would silently fall back to defaults for the ports its peers already know it by. The Go fields behind them are `TCPPort` and `DisableTCP` now, so what is left is two tag strings and the comments explaining which old key each one reads.
+
+**The handful of comments whose job is to say the concept is gone**: `candidate.go`'s "what this replaces is a hierarchy — a primary UDP port with a fallback", `config.go`'s "neither was ever a real distinction", `README.md`'s "no primary, no fallback, just two lists". These are what tell someone upgrading why their config looks different. Deleting them removes the explanation, not the concept.
+
+**Ordinary English about other mechanisms** stays: the relay fallback, PMTU's floor, nft-versus-iptables, vtysh's running-config read, the v6-address preference in ping. None of those names a port.
+
+### Verification
+
+`go build ./...` and `go vet ./...` clean across every package including tests; `gofmt` clean. `internal/config`, `internal/transport`, `internal/webadmin` and `cmd/gravinet` pass in full.
+
+The rename was applied by script and then read back: substitutions that produced awkward prose ("a working TCP to that peer", "every frame on this TCP", "transport has no TCP") were rewritten by hand rather than left as literal search-and-replace output.
+
+---
+
+## v885 — 2026-08-18
+
+**Traffic › IPv6 RA is now labelled `v6 ra` in the nav rail.**
+
+`label()` title-cases a section key it has no override for, so `ipv6ra` had been rendering as "Ipv6ra".
+
+The rail label and the page heading stay separate, the same split `l2disco` already uses: the rail gets the short form, the content pane keeps its full "IPv6 Router Advertisements" `<h2>`, because a nav rail is narrow and a standalone heading is not. The section key, the URL hash and every config field are unchanged.
+
+**Search keeps working.** `buildSearchIndex` matched sections on their label plus their rail tooltip, and no label contains the string "ipv6ra" any more — so typing the name the section is actually filed under, the one in the URL hash, would have found nothing. Section keys now go into the haystack alongside the tip. That also fixes an existing case: `bandwidth` renders as "Shaping" and its tooltip says "rate limiting per peer or network", so searching "bandwidth" had never found it.
+
+**Test.** `TestIPv6RAHeadingIsNotTitleCasedKey` now pins the rail override as well as the heading override, and that section keys are indexed.
+
+---
+
 ## v884 — 2026-08-18
 
 **Reverted the `.gitignore` added in v883.**

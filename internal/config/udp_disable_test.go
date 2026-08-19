@@ -2,7 +2,7 @@ package config
 
 import "testing"
 
-// TestValidateUDPOffRequiresTCPFallback covers the "UDP is turned off" case
+// TestValidateUDPOffRequiresTCP covers the "UDP is turned off" case
 // behind the web admin's UDP port "-" field, and its refusal when nothing is
 // left to reach the node on.
 //
@@ -15,9 +15,9 @@ import "testing"
 //
 // The sentinel moved with the refactor: "UDP off" is now an empty udp_ports
 // list rather than primary_port == 0, and the reachability rule generalized
-// from "UDP off needs the TCP fallback on" to "udp_ports and tcp_ports must
+// from "UDP off needs the TCP on" to "udp_ports and tcp_ports must
 // not both be empty."
-func TestValidateUDPOffRequiresTCPFallback(t *testing.T) {
+func TestValidateUDPOffRequiresTCP(t *testing.T) {
 	// UDP off, TCP on — must validate.
 	c := &Config{UDPPorts: nil, TCPPorts: []int{65432}, EnableIPv4: true}
 	if err := c.Validate(); err != nil {

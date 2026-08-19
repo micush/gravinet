@@ -35,7 +35,7 @@ type joinToken struct {
 	Keys      []joinTokenKey `json:"keys"`
 	Seeds     []string       `json:"seeds,omitempty"`
 	PeerCache []string       `json:"peer_cache,omitempty"` // see NetworkToken's doc: kept apart from Seeds so it lands in the joiner's PeerCache, not its Seeds
-	TCPPort   int            `json:"tcp,omitempty"`        // mesh TCP/TLS fallback port, to dial the seeds when UDP is blocked
+	TCPPort   int            `json:"tcp,omitempty"`        // mesh TCP/TLS port, to dial the seeds when UDP is blocked
 	Exp       string         `json:"exp,omitempty"`        // token expiry (RFC3339); "" = never
 }
 

@@ -81,7 +81,7 @@ func TestMigrateLegacyTCPDisabledStaysOff(t *testing.T) {
 // from every node that never set the port explicitly, which is most of them.
 func TestMigrateLegacyTCPZeroMeansDefaultNotOff(t *testing.T) {
 	c := loadJSON(t, `{"enable_ipv4": true, "primary_port": 51820}`)
-	if got, want := c.TCPPortList(), []int{DefaultTCPFallbackPort}; !reflect.DeepEqual(got, want) {
+	if got, want := c.TCPPortList(), []int{DefaultTCPPort}; !reflect.DeepEqual(got, want) {
 		t.Errorf("TCPPortList = %v, want %v — an absent tcp_fallback_port meant the default", got, want)
 	}
 }

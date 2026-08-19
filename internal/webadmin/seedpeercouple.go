@@ -80,7 +80,7 @@ func syncSeedNodes(cfg *config.Config, owners map[uint64]map[string]string) bool
 // It deliberately keys on the address alone, dropping any port, because the
 // port a seed was configured with is frequently not the port its handshake
 // completed on: a multi-port seed ("host:65432,443") offers several
-// candidates, and a bare host expands across the whole built-in fallback set.
+// candidates, and a bare host expands across the whole built-in port set.
 // Matching on host:port would miss all of those.
 func seedHostKey(addr string) string {
 	_, hostport := config.SeedParts(addr)

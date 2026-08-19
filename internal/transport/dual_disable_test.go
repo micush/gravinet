@@ -11,7 +11,7 @@ import (
 // before this, Send unconditionally called d.UDP.Send(...), which would
 // nil-pointer-panic on literally the first send attempt to any peer once UDP
 // was ever turned off. It must now return errNoUDP instead, the same way a
-// nil TLS with no fallback available already returns errNoFallback from
+// nil TLS with no TCP available already returns errNoTCP from
 // DialTCP — an ordinary, non-fatal "try something else" signal, not a
 // crash.
 func TestDualSendNilUDP(t *testing.T) {
@@ -25,7 +25,7 @@ func TestDualSendNilUDP(t *testing.T) {
 	}
 
 	// UDP nil, TLS present but with no live connection to `to` yet: still no
-	// panic, still errNoUDP — a caller (mesh.Engine.ensureFallback) is
+	// panic, still errNoUDP — a caller (mesh.Engine.ensureTCP) is
 	// responsible for dialing TLS before there's anything to route a send
 	// through.
 	d = Dual{TLS: &TLSTransport{}}

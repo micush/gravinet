@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// TestHSPayloadCarriesTCPPort: the fallback port survives a handshake round-trip
+// TestHSPayloadCarriesTCPPort: the TCP port survives a handshake round-trip
 // alongside the web port, and an older payload without it decodes to 0.
 func TestHSPayloadCarriesTCPPort(t *testing.T) {
 	in := hsPayload{
@@ -51,7 +51,7 @@ func TestHSPayloadCarriesTCPPort(t *testing.T) {
 	}
 }
 
-// TestPeerListCarriesTCPPort: the gossip list carries per-entry fallback ports,
+// TestPeerListCarriesTCPPort: the gossip list carries per-entry TCP ports,
 // and a list without the trailing block decodes them as 0.
 func TestPeerListCarriesTCPPort(t *testing.T) {
 	in := []peerEntry{
@@ -79,9 +79,9 @@ func TestPeerListCarriesTCPPort(t *testing.T) {
 	}
 }
 
-// TestEnsureFallbackDiscoversPortFromLiveSessionOnDifferentPort reproduces
+// TestEnsureTCPDiscoversPortFromLiveSessionOnDifferentPort reproduces
 // the production scenario directly: a peer is already connected (e.g. its
-// live session settled on a TCP fallback port learned dynamically), but a
+// live session settled on a TCP port learned dynamically), but a
 // separate, stale seed entry for the same IP — e.g. an operator-configured
 // bootstrap address using the default port — keeps getting retried on the
 // wrong port and can never complete a handshake there, producing an
@@ -89,8 +89,8 @@ func TestPeerListCarriesTCPPort(t *testing.T) {
 // perfectly reachable. tcpPortForEndpoint's IP-based match on the live
 // session should let this stale seed discover and dial the peer's actual
 // working port instead of blindly guessing the default.
-func TestEnsureFallbackDiscoversPortFromLiveSessionOnDifferentPort(t *testing.T) {
-	e, f, ns := fallbackEngine(t, 65432) // our own default port is 65432
+func TestEnsureTCPDiscoversPortFromLiveSessionOnDifferentPort(t *testing.T) {
+	e, f, ns := tcpEngine(t, 65432) // our own default port is 65432
 	ip := netip.MustParseAddr("203.0.113.7")
 	liveEndpoint := netip.AddrPortFrom(ip, 443) // where the peer actually is
 	staleSeed := netip.AddrPortFrom(ip, 65432)  // e.g. a stale configured seed
@@ -99,9 +99,9 @@ func TestEnsureFallbackDiscoversPortFromLiveSessionOnDifferentPort(t *testing.T)
 	ns.byNode["peerX"] = &peerSession{net: ns, nodeID: "peerX", endpoint: liveEndpoint, tcpPort: 443}
 	ns.mu.Unlock()
 
-	e.ensureFallback(ns, staleSeed)
-	// The port discovery, seedFallback recording, and connectedTo
-	// short-circuit all happen synchronously within ensureFallback itself —
+	e.ensureTCP(ns, staleSeed)
+	// The port discovery, seedTCP recording, and connectedTo
+	// short-circuit all happen synchronously within ensureTCP itself —
 	// only the actual dial (which correctly never happens here) would be
 	// asynchronous, so no wait is needed before asserting.
 	if d := f.dials(); len(d) != 0 {
@@ -112,11 +112,11 @@ func TestEnsureFallbackDiscoversPortFromLiveSessionOnDifferentPort(t *testing.T)
 	}
 }
 
-// TestEnsureFallbackUsesAdvertisedPort: when a peer's advertised fallback port is
+// TestEnsureTCPUsesAdvertisedPort: when a peer's advertised TCP port is
 // known (here via node info) and differs from our own, the engine dials *that*
 // port — proving nodes don't need a shared port.
-func TestEnsureFallbackUsesAdvertisedPort(t *testing.T) {
-	e, f, ns := fallbackEngine(t, 65432) // our own port is 65432
+func TestEnsureTCPUsesAdvertisedPort(t *testing.T) {
+	e, f, ns := tcpEngine(t, 65432) // our own port is 65432
 	seed := netip.MustParseAddrPort("203.0.113.7:65432")
 
 	// The peer at this endpoint advertises a *different* TCP port.
@@ -124,7 +124,7 @@ func TestEnsureFallbackUsesAdvertisedPort(t *testing.T) {
 	ns.nodes["peerX"] = &nodeInfo{nodeID: "peerX", endpoint: seed, tcpPort: 8443, lastSeen: time.Now()}
 	ns.mu.Unlock()
 
-	e.ensureFallback(ns, seed)
+	e.ensureTCP(ns, seed)
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) && len(f.dials()) == 0 {
 		time.Sleep(10 * time.Millisecond)
@@ -154,21 +154,21 @@ func TestEnsureFallbackUsesAdvertisedPort(t *testing.T) {
 	}
 }
 
-// TestEnsureFallbackUsesSeedHint: with no advertised port known yet (cold start),
+// TestEnsureTCPUsesSeedHint: with no advertised port known yet (cold start),
 // the engine dials the join-token seed hint rather than its own port.
-func TestEnsureFallbackUsesSeedHint(t *testing.T) {
+func TestEnsureTCPUsesSeedHint(t *testing.T) {
 	e := NewEngine(Options{
-		NodeID:          "self",
-		TCPFallbackPort: 65432, // our own port
+		NodeID:  "self",
+		TCPPort: 65432, // our own port
 		Nets: []NetSpec{{ID: 1, Name: "n", Dev: newFakeDev("d"),
 			Subnet4: netip.MustParsePrefix("10.0.0.0/24"), SeedTCPPort: 443}}, // token hint
 	})
-	f := &fakeFallback{has: map[netip.AddrPort]bool{}}
+	f := &fakeTCP{has: map[netip.AddrPort]bool{}}
 	e.Attach(f)
 	ns := e.netSnapshot()[1]
 
 	seed := netip.MustParseAddrPort("203.0.113.7:65432")
-	e.ensureFallback(ns, seed)
+	e.ensureTCP(ns, seed)
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) && len(f.dials()) == 0 {
 		time.Sleep(10 * time.Millisecond)
@@ -184,7 +184,7 @@ func TestEnsureFallbackUsesSeedHint(t *testing.T) {
 // dialedContains waits briefly for want to appear among the dials. The dials
 // run in goroutines, and with several candidates in flight the one under test
 // is not necessarily first.
-func dialedContains(f *fakeFallback, want netip.AddrPort) bool {
+func dialedContains(f *fakeTCP, want netip.AddrPort) bool {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		for _, d := range f.dials() {

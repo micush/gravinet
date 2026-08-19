@@ -11,8 +11,8 @@ import (
 	"gravinet/internal/logx"
 )
 
-// handleTCPPort is handlePort's TCP/TLS-fallback counterpart: the first port
-// in the list becomes the fallback port itself, any rest become extra
+// handleTCPPort is handlePort's TCP counterpart: the first port
+// in the list becomes the TCP port itself, any rest become extra
 // TCP/TLS listen ports. Writes both to the config and triggers a reload (the
 // live rebind itself is covered by the transport package's own
 // TestTLSExtraPortAcceptAndReply / TestTLSExtraPortBadPortSkipped).
@@ -55,7 +55,7 @@ func TestHandleTCPPortChangesConfigAndReloads(t *testing.T) {
 		return out
 	}
 
-	// single-port list: just changes the fallback port, same as before this
+	// single-port list: just changes the TCP port, same as before this
 	// list shape existed.
 	out := post(map[string]any{"ports": []int{443}})
 	if ok, _ := out["ok"].(bool); !ok {
@@ -75,7 +75,7 @@ func TestHandleTCPPortChangesConfigAndReloads(t *testing.T) {
 		t.Error("reload was not triggered")
 	}
 
-	// multi-port list: first is the fallback port, rest are extras.
+	// multi-port list: first is the TCP port, rest are extras.
 	out = post(map[string]any{"ports": []int{65432, 21, 80}})
 	if ok, _ := out["ok"].(bool); !ok {
 		t.Fatalf("tcp port list change rejected: %v", out)
@@ -98,7 +98,7 @@ func TestHandleTCPPortChangesConfigAndReloads(t *testing.T) {
 		t.Errorf("tcp ports changed on invalid input: %d", p)
 	}
 
-	// empty list rejected — a fallback port is mandatory
+	// empty list rejected — a TCP port is mandatory
 	out = post(map[string]any{"ports": []int{}})
 	if ok, _ := out["ok"].(bool); ok {
 		t.Error("an empty port list should be rejected")

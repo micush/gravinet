@@ -18,14 +18,14 @@ import (
 	"gravinet/internal/logx"
 )
 
-// tlsReadIdle bounds how long a TLS fallback connection may sit with no frame
+// tlsReadIdle bounds how long a TLS connection may sit with no frame
 // arriving before its read loop gives up and tears the connection down. This
 // is the fix for a terminal leak: readFrame (frame.go) blocks in io.ReadFull
-// with no deadline, so a fallback connection that goes silent — a TCP session
+// with no deadline, so a TCP connection that goes silent — a session
 // that completed to a peer's now-stale post-roam endpoint but over which no
 // mesh frame will ever arrive again — parks its read goroutine *forever*, and
 // because the connection stays registered in t.conns the engine believes it
-// still has a working fallback to that peer and never redials. Across repeated
+// still has a working TCP connection to that peer and never redials. Across repeated
 // roams these accumulate (observed: 30+ leaked outbound read goroutines, all
 // blocked 5+ minutes, one per stale dial), and the mesh stays partitioned
 // with every peer masked as "reachable via a dead pipe" until a restart clears
@@ -43,7 +43,7 @@ import (
 // up one the mesh has already given up on. 45s is ~2x the default peerTimeout
 // and ~4x the keepalive, so a live-but-quiet session (even across several lost
 // keepalives) is never affected, while an idle one — the stale post-suspend
-// fallback that would otherwise keep a peer masked as "reachable via a dead
+// a dead connection that would otherwise keep a peer masked as "reachable via a dead
 // pipe" and block a redial — is reclaimed in 45s rather than 90s, halving the
 // worst-case reconnection time after the host wakes from sleep. (An operator
 // who raises PeerTimeout above this via mesh.Options.PeerTimeout trades that
@@ -69,7 +69,7 @@ func readFrameIdle(c net.Conn) ([]byte, error) {
 // waiting to either coalesce with more outgoing data or piggyback on a
 // pending ACK. A steady mesh keepalive every 10s (see keepaliveInterval in
 // internal/mesh) never notices — nothing about a 20s peerTimeout cares about
-// an extra 40-200ms. But every frame on this fallback carries exactly that
+// an extra 40-200ms. But every frame on this transport carries exactly that
 // profile: small, sporadic mesh datagrams (a handshake message, a keepalive,
 // a redistributed route, an overlay ping) rather than a continuous bulk
 // stream Nagle is meant to help. Combined with delayed ACKs on the other
@@ -77,7 +77,7 @@ func readFrameIdle(c net.Conn) ([]byte, error) {
 // round-trip. For most of what rides this transport that's invisible; for
 // anything with a tight timeout budget bracketing this exact stream — e.g.
 // the web admin's overlay ping (2 probes, ~1s each) to a peer already
-// reached over this fallback because its direct UDP path is blocked, which
+// reached over TCP because its direct UDP path is blocked, which
 // is disproportionately likely to also mean a longer, real-world-noisier
 // path to begin with — it's the difference between a reply arriving in time
 // and a reported timeout despite the mesh session being perfectly healthy.
@@ -90,7 +90,7 @@ func disableNagle(c net.Conn) {
 	}
 }
 
-// TLSTransport is gravinet's TCP/TLS fallback underlay. Every node listens here
+// TLSTransport is gravinet's TCP/TLS underlay. Every node listens here
 // (default :443) in addition to the UDP transport, so a peer on a network that
 // blocks UDP can still reach the mesh over what looks like an ordinary HTTPS
 // connection. It carries the exact same datagrams as UDP, framed on the stream
@@ -155,7 +155,7 @@ type TLSOptions struct {
 	// the TCP-side equivalent of transport.Options.ExtraPorts on the UDP
 	// transport — same motivation (a peer behind a restrictive firewall can
 	// reach this node on a well-known port like 80 even if it's already using
-	// 443 for the primary fallback), same best-effort semantics: a port that
+	// 443 for the primary TCP), same best-effort semantics: a port that
 	// can't bind (privileged or in use) is logged and skipped, never fatal —
 	// see OpenTLS, which now treats Port itself the identical way.
 	// Unlike the UDP case, no reply-routing bookkeeping is needed here — every
@@ -172,7 +172,7 @@ type TLSOptions struct {
 // something else (another process, a stale gravinet instance, a privileged-
 // port restriction) is logged and skipped, and binding moves on to the next
 // configured port rather than aborting. That includes Port itself, so a busy
-// primary fallback port no longer takes every configured extra TCP port down
+// primary TCP port no longer takes every configured extra TCP port down
 // with it. OpenTLS only fails outright if nothing at all — neither Port nor
 // any ExtraPorts entry — could bind; the caller (main.go) already treats that
 // as non-fatal and continues UDP-only.
@@ -197,7 +197,7 @@ func OpenTLS(o TLSOptions) (*TLSTransport, error) {
 	ln, err := net.Listen("tcp", net.JoinHostPort(o.BindAddr, fmt.Sprintf("%d", o.Port)))
 	if err != nil {
 		if t.log != nil {
-			t.log.Warnf("transport: tls fallback port %d not bound (%v) — skipping, trying any configured extra ports", o.Port, err)
+			t.log.Warnf("transport: tls port %d not bound (%v) — skipping, trying any configured extra ports", o.Port, err)
 		}
 	} else {
 		t.ln = ln
@@ -208,7 +208,7 @@ func OpenTLS(o TLSOptions) (*TLSTransport, error) {
 		t.wg.Add(1)
 		go t.acceptLoop(t.ln)
 		if t.log != nil {
-			t.log.Infof("transport: also listening on tcp port %d (TLS fallback)", t.port)
+			t.log.Infof("transport: also listening on tcp port %d (TLS)", t.port)
 		}
 	}
 
@@ -228,7 +228,7 @@ func OpenTLS(o TLSOptions) (*TLSTransport, error) {
 		t.wg.Add(1)
 		go t.acceptLoop(eln)
 		if t.log != nil {
-			t.log.Infof("transport: also listening on tcp port %d (TLS fallback, extra)", ep)
+			t.log.Infof("transport: also listening on tcp port %d (TLS, extra)", ep)
 		}
 	}
 
@@ -401,7 +401,7 @@ func (t *TLSTransport) Send(to netip.AddrPort, payload []byte) error {
 	return nil
 }
 
-// Dial establishes an outbound TLS connection to a peer's fallback port and
+// Dial establishes an outbound TLS connection to a peer's TCP port and
 // starts reading from it, so subsequent Sends to that endpoint go over TCP. Used
 // by the engine to fall back when UDP can't reach a peer. Idempotent and safe to
 // call concurrently; a no-op if a connection already exists.
@@ -468,7 +468,7 @@ func (t *TLSTransport) Dial(to netip.AddrPort) error {
 	return nil
 }
 
-// Port returns the primary TCP fallback port. This is the configured/resolved
+// Port returns the primary TCP port. This is the configured/resolved
 // port regardless of whether it actually ended up bound — see HasPrimary —
 // since that's what the rest of gravinet advertises to peers either way
 // (ExtraPorts entries are best-effort the same way and are advertised

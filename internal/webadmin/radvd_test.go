@@ -331,10 +331,22 @@ func TestIPv6RASectionDrawsItsOwnToolbar(t *testing.T) {
 	}
 }
 
-// label() title-cases a section key, which renders 'ipv6ra' as 'Ipv6ra'.
+// label() title-cases a section key, which renders 'ipv6ra' as 'Ipv6ra' — the
+// nav rail read that way until v885 gave it its own short label. Rail and
+// heading are separate on purpose, the same split l2disco uses: the rail is
+// narrow, a standalone <h2> is not.
 func TestIPv6RAHeadingIsNotTitleCasedKey(t *testing.T) {
 	if !strings.Contains(indexHTML, "if (s==='ipv6ra') return 'IPv6 Router Advertisements';") {
 		t.Error("the section heading override is missing; the page would be titled Ipv6ra")
+	}
+	if !strings.Contains(indexHTML, "if (s==='ipv6ra') return 'v6 ra';") {
+		t.Error("the rail label override is missing; the nav entry would read Ipv6ra again")
+	}
+	// No label contains the key any more, so the search index has to carry it
+	// or typing "ipv6ra" — the name in the URL hash and the config — finds
+	// nothing.
+	if !strings.Contains(indexHTML, "{kind:'section', section:s}, tip + ' ' + s)") {
+		t.Error("section keys are no longer indexed for search; 'ipv6ra' and 'bandwidth' would be unfindable by name")
 	}
 	// The heading names the feature, so the hint must not open by naming it
 	// again — the first thing under a title should say something new.

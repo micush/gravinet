@@ -30,7 +30,7 @@ import (
 // list, the derived TCP candidate for cush2 must not be dialed.
 func TestTwoPeersOneNATDoNotCrossDial(t *testing.T) {
 	e, ns := testEngineWithNet(t)
-	e.SetFallbackPort(65432)
+	e.SetTCPPort(65432)
 	netID := ns.spec.ID
 	ep := netip.MustParseAddrPort("174.64.247.165:65432")
 
@@ -48,9 +48,9 @@ func TestTwoPeersOneNATDoNotCrossDial(t *testing.T) {
 		t.Fatal("no configured seeds in the conflict set — nothing would ever be checked against, which is how the guard silently passed before")
 	}
 
-	// What ensureFallback builds when it tries to reach cush2 over TCP.
+	// What ensureTCP builds when it tries to reach cush2 over TCP.
 	owner := ns.seedOwnerOfProto(ep, ProtoUDP)
-	for _, c := range e.fallbackCandidates(ns, ep, 65432, owner) {
+	for _, c := range e.tcpCandidates(ns, ep, 65432, owner) {
 		if c.Proto == ProtoTCP && c.Port == 65432 && !c.ConflictsWith(seeds) {
 			t.Fatalf("would dial %v for %q — that is cush1's configured TCP listener, and this is the original failure", c, c.Owner)
 		}
@@ -63,7 +63,7 @@ func TestTwoPeersOneNATDoNotCrossDial(t *testing.T) {
 // no connectivity.
 func TestSinglePeerBehindNATStillDialable(t *testing.T) {
 	e, ns := testEngineWithNet(t)
-	e.SetFallbackPort(65432)
+	e.SetTCPPort(65432)
 	netID := ns.spec.ID
 	ep := netip.MustParseAddrPort("198.51.100.7:65432")
 
@@ -79,7 +79,7 @@ func TestSinglePeerBehindNATStillDialable(t *testing.T) {
 		t.Fatalf("owner = %q, want peerA — one peer at an address is unambiguous", owner)
 	}
 	dialable := false
-	for _, c := range e.fallbackCandidates(ns, ep, 65432, owner) {
+	for _, c := range e.tcpCandidates(ns, ep, 65432, owner) {
 		if c.Proto == ProtoTCP && c.Port == 65432 && !c.ConflictsWith(seeds) {
 			dialable = true
 		}

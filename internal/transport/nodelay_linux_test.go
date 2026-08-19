@@ -10,7 +10,7 @@ import (
 
 // TestDisableNagleSetsTCPNoDelay checks the actual kernel socket option, not
 // just that SetNoDelay returned no error: disableNagle exists specifically
-// because the mesh's TCP/TLS fallback carries small, sporadic frames where
+// because the mesh's TCP/TLS carries small, sporadic frames where
 // Nagle's default-on delay is the whole problem (see disableNagle's doc
 // comment in tcptls.go) — a test that only checked for a nil error wouldn't
 // catch a wrong constant or a build tag mismatch actually leaving Nagle on.

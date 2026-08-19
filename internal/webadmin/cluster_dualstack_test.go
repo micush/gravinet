@@ -18,13 +18,13 @@ import (
 // it is the single chokepoint for peer management, remote shell, fan-out
 // capture, fan-out tshoot and upgrade push, a dual-stack peer whose v4 overlay
 // path was broken became unmanageable by all five at once even with a working
-// v6 address in the same advertisement. These tests pin the fallback, and pin
+// v6 address in the same advertisement. These tests pin the TCP, and pin
 // the guards that must survive it.
 
 // liveOnly returns a probe dialer that "connects" only to the given hostports.
 // A fake is used rather than real listeners because the v4-dead/v6-live case
 // cannot be staged on a host without usable IPv6 — which is most CI containers,
-// and precisely where this fallback needs covering.
+// and precisely where this TCP needs covering.
 func liveOnly(live ...string) func(string, time.Duration) (net.Conn, error) {
 	set := map[string]bool{}
 	for _, h := range live {
@@ -93,7 +93,7 @@ func TestResolveManagedTargetPrefersV4WhenBothAnswer(t *testing.T) {
 
 // TestResolveManagedTargetSingleCandidateIsNotProbed: with nothing to choose
 // between there is nothing to learn, so a lone address is returned untouched
-// even when dead. Behaviour identical to before the fallback existed — the
+// even when dead. Behaviour identical to before the TCP existed — the
 // caller still produces its own error, and no probe is spent first.
 func TestResolveManagedTargetSingleCandidateIsNotProbed(t *testing.T) {
 	v4 := netip.MustParseAddr("10.99.0.7")

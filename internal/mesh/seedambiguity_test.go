@@ -38,7 +38,7 @@ func TestOnePeerOnBothTransportsIsNotAmbiguous(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e, ns := testEngineWithNet(t)
-			e.SetFallbackPort(65432)
+			e.SetTCPPort(65432)
 			netID := ns.spec.ID
 			ep := netip.MustParseAddrPort(tc.addr)
 
@@ -71,7 +71,7 @@ func TestOnePeerOnBothTransportsIsNotAmbiguous(t *testing.T) {
 				t.Fatalf("owner = %q, want gn-ionos2", owner)
 			}
 			dialable := false
-			for _, c := range e.fallbackCandidates(ns, ep, 65432, owner) {
+			for _, c := range e.tcpCandidates(ns, ep, 65432, owner) {
 				if c.Proto == ProtoTCP && c.Port == 65432 && !c.ConflictsWith(seeds) {
 					dialable = true
 				}
@@ -89,7 +89,7 @@ func TestOnePeerOnBothTransportsIsNotAmbiguous(t *testing.T) {
 // from one protocol's seed must not be dialed at the other's listener.
 func TestTwoDistinctOwnersRemainAmbiguous(t *testing.T) {
 	e, ns := testEngineWithNet(t)
-	e.SetFallbackPort(65432)
+	e.SetTCPPort(65432)
 	netID := ns.spec.ID
 	ep := netip.MustParseAddrPort("174.64.247.165:65432")
 
@@ -110,7 +110,7 @@ func TestTwoDistinctOwnersRemainAmbiguous(t *testing.T) {
 	// And the end-to-end guard still refuses the cross-dial.
 	seeds := ns.seedCandidates()
 	owner := ns.seedOwnerOfProto(ep, ProtoUDP)
-	for _, c := range e.fallbackCandidates(ns, ep, 65432, owner) {
+	for _, c := range e.tcpCandidates(ns, ep, 65432, owner) {
 		if c.Proto == ProtoTCP && c.Port == 65432 && !c.ConflictsWith(seeds) {
 			t.Fatalf("would dial %v for %q — that is cush1's listener", c, c.Owner)
 		}
@@ -265,7 +265,7 @@ func TestLoopbackSeedsSurviveOwnAddressCheck(t *testing.T) {
 func TestConfiguredSelfSeedIsSweptFromBothLists(t *testing.T) {
 	self := netip.MustParseAddr("77.68.127.174")
 	mine := netip.AddrPortFrom(self, 65432)
-	minAlt := netip.AddrPortFrom(self, 23) // the multi-port fallback list
+	minAlt := netip.AddrPortFrom(self, 23) // the multi-alternate ports list
 	peer := netip.MustParseAddrPort("74.208.225.216:65432")
 
 	e := NewEngine(Options{NodeID: "self", Nets: []NetSpec{{

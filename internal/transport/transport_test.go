@@ -71,10 +71,10 @@ func TestRoundTrip(t *testing.T) {
 	}
 }
 
-// TestPortFallback drives bindGroup with a fake binder that refuses the primary
-// port, proving the daemon walks to a fallback.
-func TestPortFallback(t *testing.T) {
-	const primary, fallback = 59820, 59821
+// TestAltPortBind drives bindGroup with a fake binder that refuses the primary
+// port, proving the daemon walks to a alt.
+func TestAltPortBind(t *testing.T) {
+	const primary, alt = 59820, 59821
 	fake := func(network, addr string) (*net.UDPConn, error) {
 		host, portStr, _ := net.SplitHostPort(addr)
 		if portStr == fmt.Sprint(primary) {
@@ -87,8 +87,8 @@ func TestPortFallback(t *testing.T) {
 		}
 		return net.ListenUDP(network, la)
 	}
-	o := Options{BindAddr: "127.0.0.1", PrimaryPort: primary, FallbackPorts: []int{fallback}, EnableV4: true, Workers: 1}
-	port, c4, c6, err := bindGroup(fake, []int{primary, fallback}, o, 1)
+	o := Options{BindAddr: "127.0.0.1", PrimaryPort: primary, AltPorts: []int{alt}, EnableV4: true, Workers: 1}
+	port, c4, c6, err := bindGroup(fake, []int{primary, alt}, o, 1)
 	if err != nil {
 		t.Fatalf("bindGroup: %v", err)
 	}
@@ -98,8 +98,8 @@ func TestPortFallback(t *testing.T) {
 	for _, c := range c6 {
 		c.Close()
 	}
-	if port != fallback {
-		t.Fatalf("expected fallback to port %d, got %d", fallback, port)
+	if port != alt {
+		t.Fatalf("expected alt to port %d, got %d", alt, port)
 	}
 }
 

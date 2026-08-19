@@ -221,7 +221,7 @@ func TestResolvedConfSection(t *testing.T) {
 	}
 }
 
-// TestUnixDirectResolvConf covers the fallback path's full lifecycle: write,
+// TestUnixDirectResolvConf covers the TCP path's full lifecycle: write,
 // re-write, and the marker-gated clear. Redirects the package-level
 // resolvConfPath var to a temp file so this never touches the real
 // /etc/resolv.conf, the same technique timesyncdConfPath uses in

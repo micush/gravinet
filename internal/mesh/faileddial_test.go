@@ -10,7 +10,7 @@ import (
 // alwaysRefuse fails every dial, which is the commonest real condition: an
 // address that is configured, unreachable, and never going to answer.
 type alwaysRefuse struct {
-	*fakeFallback
+	*fakeTCP
 }
 
 func (a *alwaysRefuse) DialTCP(to netip.AddrPort) error {
@@ -20,13 +20,13 @@ func (a *alwaysRefuse) DialTCP(to netip.AddrPort) error {
 	return errors.New("connect: connection refused")
 }
 
-// v713 backed off fallbacks that connect and then fail to handshake. It left
+// v713 backed off TCP dials that connect and then fail to handshake. It left
 // the commoner case — a dial that fails outright — with no cooldown at all, so
 // an unreachable address was retried on every tick indefinitely. In the field
 // that was 780 dials a minute against a single address.
 func TestFailedDialBacksOff(t *testing.T) {
-	e, base, ns := fallbackEngine(t, 65432)
-	f := &alwaysRefuse{fakeFallback: base}
+	e, base, ns := tcpEngine(t, 65432)
+	f := &alwaysRefuse{fakeTCP: base}
 	e.Attach(f)
 
 	dead := netip.MustParseAddrPort("198.51.100.9:65432")
@@ -43,7 +43,7 @@ func TestFailedDialBacksOff(t *testing.T) {
 	if first == 0 {
 		t.Fatal("the address was never dialled at all")
 	}
-	if !ns.fallbackInBackoff(dead) {
+	if !ns.tcpInBackoff(dead) {
 		t.Fatal("a refused dial left no cooldown: this address will be retried on every tick forever, which is exactly the 13-per-second storm this fixes")
 	}
 
@@ -61,8 +61,8 @@ func TestFailedDialBacksOff(t *testing.T) {
 // the field one connected peer's other address family drew 14,113 dials in a
 // single window.
 func TestAddressesOfAConnectedPeerAreNotDialled(t *testing.T) {
-	e, base, ns := fallbackEngine(t, 65432)
-	f := &alwaysRefuse{fakeFallback: base}
+	e, base, ns := tcpEngine(t, 65432)
+	f := &alwaysRefuse{fakeTCP: base}
 	e.Attach(f)
 
 	v4 := netip.MustParseAddrPort("66.179.240.44:65432")

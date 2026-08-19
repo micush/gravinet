@@ -110,7 +110,7 @@ func TestDualPrefersTLSWhenConnExists(t *testing.T) {
 		t.Fatalf("Dial: %v", err)
 	}
 
-	// A UDP transport for the fallback leg.
+	// A UDP transport for the TCP leg.
 	udp, err := Open(Options{BindAddr: "127.0.0.1", PrimaryPort: 0, EnableV4: true, Workers: 1, Handler: func([]byte, netip.AddrPort, Family) {}})
 	if err != nil {
 		t.Fatalf("open udp: %v", err)
@@ -147,9 +147,9 @@ func TestDualFallsBackToUDP(t *testing.T) {
 	waitFor(t, udpRec.gotCh, "udp-hello")
 }
 
-// TestDualFallbackDial exercises the engine-facing fallback API on Dual:
+// TestDualTCPDial exercises the engine-facing TCP API on Dual:
 // HasTCP/DialTCP open a TLS path, after which Send routes over it.
-func TestDualFallbackDial(t *testing.T) {
+func TestDualTCPDial(t *testing.T) {
 	srvRec := newRecorder()
 	srv := openTLSLoopback(t, srvRec.handle)
 	defer srv.Close()
@@ -179,9 +179,9 @@ func TestDualFallbackDial(t *testing.T) {
 	waitFor(t, srvRec.gotCh, "ping")
 }
 
-// TestDualNoFallbackWhenTLSNil confirms the fallback API degrades safely when
+// TestDualNoTCPWhenTLSNil confirms the TCP API degrades safely when
 // the TLS listener never came up.
-func TestDualNoFallbackWhenTLSNil(t *testing.T) {
+func TestDualNoTCPWhenTLSNil(t *testing.T) {
 	udp, err := Open(Options{BindAddr: "127.0.0.1", PrimaryPort: 0, EnableV4: true, Workers: 1, Handler: func([]byte, netip.AddrPort, Family) {}})
 	if err != nil {
 		t.Fatalf("open udp: %v", err)
@@ -193,13 +193,13 @@ func TestDualNoFallbackWhenTLSNil(t *testing.T) {
 		t.Fatal("HasTCP should be false with nil TLS")
 	}
 	if err := d.DialTCP(addr); err == nil {
-		t.Fatal("expected error dialing fallback with nil TLS")
+		t.Fatal("expected error dialing TCP with nil TLS")
 	}
 }
 
 // TestTLSIdleConnectionTimesOut is the regression guard for the terminal leak
 // found via a goroutine dump: readFrame blocked in io.ReadFull with no
-// deadline, so a TLS fallback connection that went silent (a post-roam dial to
+// deadline, so a TLS connection that went silent (a post-roam dial to
 // a peer's stale endpoint that completed the TCP/TLS handshake but over which
 // no mesh frame ever arrived) parked its read goroutine forever and stayed
 // registered in t.conns, masking the peer as reachable via a dead pipe so it
@@ -237,6 +237,6 @@ func TestTLSIdleConnectionTimesOut(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("idle TLS connection was never torn down — its read goroutine is leaking in readFrame " +
-		"with no deadline (the terminal post-roam fallback leak), so the peer stays masked as reachable " +
+		"with no deadline (the terminal post-roam TCP leak), so the peer stays masked as reachable " +
 		"and is never redialed")
 }

@@ -7,7 +7,7 @@ import (
 	"sync"
 )
 
-// The TCP/TLS fallback carries the same datagrams the UDP underlay does, framed
+// The TCP/TLS carries the same datagrams the UDP underlay does, framed
 // on the stream as a 2-byte big-endian length followed by that many bytes. A
 // mesh frame is always smaller than a UDP datagram (well under 1500 bytes after
 // PMTU), so 16 bits of length is plenty and bounds per-frame allocation.

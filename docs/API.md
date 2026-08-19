@@ -250,7 +250,7 @@ cookie, or a qualifying fleet-manager mesh session — see
 | GET/POST | `/api/keepalive` | NAT keepalive interval |
 | GET/POST | `/api/peertimeout` | Dead-session timeout |
 | POST | `/api/port` | Set the UDP underlay port(s) |
-| POST | `/api/tcpport` | Set the TCP/TLS fallback port(s) |
+| POST | `/api/tcpport` | Set the TCP/TLS port(s) |
 | POST | `/api/geoip` | Toggle Geo-IP lookups in the info panel |
 | POST | `/api/upnp` | Toggle UPnP port mapping |
 | GET | `/api/interfaces` | List host network interface names |
@@ -839,15 +839,15 @@ are extra listen-only ports.
 {"disabled": true}
 ```
 
-`disabled: true` turns UDP off entirely (refused if the TCP/TLS fallback
+`disabled: true` turns UDP off entirely (refused if the TCP/TLS
 is also off — a node needs at least one transport reachable). Applied
 live; the old port keeps serving briefly during the switch.
 
 ### `POST /api/tcpport`
 
-The TCP/TLS-fallback counterpart to `/api/port`, same shape: first port in
-the list is the fallback listener itself, the rest are extra TCP/TLS
-ports; `disabled: true` turns the fallback off (refused if UDP is also
+The TCP counterpart to `/api/port`, same shape: first port in
+the list is the TCP listener itself, the rest are extra TCP/TLS
+ports; `disabled: true` turns TCP off (refused if UDP is also
 off).
 
 ### `POST /api/geoip`

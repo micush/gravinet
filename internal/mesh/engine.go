@@ -71,7 +71,7 @@ type Sender interface {
 }
 
 // tcpDialer is an optional capability of the attached Sender (implemented by
-// transport.Dual): it opens a TCP/TLS fallback connection to a peer when UDP
+// transport.Dual): it opens a TCP/TLS connection to a peer when UDP
 // can't reach it. The engine type-asserts its Sender to this; a transport
 // without it (UDP-only) simply never falls back.
 // protoSender is an optional capability of the attached Sender (implemented by
@@ -137,7 +137,7 @@ type NetSpec struct {
 	Self4     netip.Addr // this node's overlay v4 (advertised in handshakes)
 	Self6     netip.Addr
 	Seeds     []netip.AddrPort
-	TCPSeeds  []netip.AddrPort // seeds to dial over the TCP/TLS fallback directly (cold bootstrap when UDP is blocked)
+	TCPSeeds  []netip.AddrPort // seeds to dial over TCP/TLS directly (cold bootstrap when UDP is blocked)
 	// ConfiguredSeeds/ConfiguredTCPSeeds are Seeds/TCPSeeds' clean counterparts:
 	// resolved from exactly the operator's configured Seed list (config.Config's
 	// Network.Seeds), with none of PeerCache folded in the way the caller does
@@ -207,7 +207,7 @@ type NetSpec struct {
 	// learnPeers for where gossip-driven auto-dial respects it.
 	PartialMesh bool
 	Ban         config.BanPolicy
-	// SeedTCPPort is an optional fallback port to dial Seeds on at cold start when
+	// SeedTCPPort is an optional TCP port to dial Seeds on at cold start when
 	// their advertised port isn't known yet (from a join token). 0 = assume own port.
 	SeedTCPPort int
 
@@ -351,10 +351,10 @@ type Options struct {
 	// datagram between the two; when <= UnderlayMTU, discovery is off.
 	UnderlayMTUMax int
 
-	// TCPFallbackPort is the port peers are assumed to listen on for the TCP/TLS
-	// fallback (default 443). When UDP can't reach a peer, the engine dials this
-	// port at the peer's address. Zero disables outbound fallback.
-	TCPFallbackPort int
+	// TCPPort is the port peers are assumed to listen on for the TCP/TLS
+	// TCP port (default 443). When UDP can't reach a peer, the engine dials this
+	// port at the peer's address. Zero disables outbound TCP.
+	TCPPort int
 	// PrimaryPort is this node's own primary UDP listen port, used to build the
 	// host candidates it advertises (see localcand.go). 0 = UDP disabled.
 	PrimaryPort int
@@ -524,15 +524,15 @@ type Engine struct {
 	// (defaulted there if zero), read-only afterward.
 	tunWorkers int
 
-	// fallbackPort is this node's own TCP/TLS fallback listen port, advertised to
+	// tcpListenPort is this node's own TCP/TLS listen port, advertised to
 	// peers and used as the default port to dial a peer whose advertised port we
-	// don't yet know. Zero disables outbound fallback. Atomic: updated live on a
-	// fallback-port config change and read from the handshake/gossip builders.
-	fallbackPort atomic.Int64
+	// don't yet know. Zero disables outbound TCP. Atomic: updated live on a
+	// TCP-port config change and read from the handshake/gossip builders.
+	tcpListenPort atomic.Int64
 	// primaryPort is this node's own primary UDP listen port. Needed to build
 	// host candidates (localEndpoints): an interface address is only dialable
 	// paired with the port we're actually listening on, and unlike the TCP
-	// fallback port nothing else in the engine had any reason to know it —
+	// TCP port nothing else in the engine had any reason to know it —
 	// a peer's UDP port is normally learned by observing where its packets
 	// come from, but that's exactly the mechanism host candidates exist to
 	// work around. 0 means UDP is disabled (the '-' port setting).
@@ -568,9 +568,9 @@ type Engine struct {
 	lastLocalCandSig atomic.Pointer[string]
 	// extraTCPPorts/extraUDPPorts are this node's own additional advertised
 	// listen ports (config extra_tcp_listen_ports/extra_listen_ports),
-	// advertised alongside fallbackPort/the primary UDP port so peers can
-	// try them too — see ensureFallback (TCP) and the UDP seed-injection in
-	// handshake_engine.go. atomic.Pointer rather than fallbackPort's
+	// advertised alongside tcpListenPort/the primary UDP port so peers can
+	// try them too — see ensureTCP (TCP) and the UDP seed-injection in
+	// handshake_engine.go. atomic.Pointer rather than tcpListenPort's
 	// atomic.Int64 since these are lists, not scalars; same live-update
 	// contract. A nil pointer (the zero value) and an empty-but-non-nil one
 	// both mean "no extra ports" — callers use loadPortList to normalize.
@@ -739,7 +739,7 @@ type netState struct {
 	fwd      atomic.Pointer[fwdSnap]
 	pending  map[uint32]*pendingHS // by initiator index (idxI)
 	seeds    []netip.AddrPort      // mutable; grows as peers are learned
-	tcpSeeds []netip.AddrPort      // explicit TCP/TLS-fallback seeds to dial directly (ns.mu)
+	tcpSeeds []netip.AddrPort      // explicit TCP/TLS-TCP seeds to dial directly (ns.mu)
 	// configuredSeeds/configuredTCPSeeds mirror NetSpec.ConfiguredSeeds/
 	// ConfiguredTCPSeeds -- unlike seeds/tcpSeeds above, these are NOT mutable
 	// bootstrap-dial working sets (no PeerCache folded in, nothing added as
@@ -765,7 +765,7 @@ type netState struct {
 	// actually in configuredSeeds/configuredTCPSeeds (bounded: at most one
 	// entry per configured seed, never grows with gossip or NAT churn the
 	// way ns.seeds/seedOwner deliberately do), keyed by whether the
-	// completing connection was over the TCP fallback (see tcpDialer.
+	// completing connection was over TCP (see tcpDialer.
 	// HasTCP, the same check ListPeers already uses to report
 	// transport) or plain UDP.
 	configuredSeedOwnerUDP map[netip.AddrPort]string
@@ -782,8 +782,8 @@ type netState struct {
 	seedBackoff map[netip.AddrPort]time.Time // don't retry a seed before this time
 	// cands holds every dial candidate for this network and paces each one:
 	// in-flight claims, failure backoff, success. It replaces what used to be
-	// three separate maps keyed by bare netip.AddrPort — fallbackBackoff,
-	// fallbackAttempt and dialing — which between them had two problems.
+	// three separate maps keyed by bare netip.AddrPort — tcpBackoff,
+	// tcpAttempt and dialing — which between them had two problems.
 	//
 	// Keying by address alone cannot distinguish udp/65432 from tcp/65432 at
 	// one address, and those are independent NAT mappings that can reach
@@ -793,16 +793,16 @@ type netState struct {
 	// is structural.
 	//
 	// And splitting pacing across maps is what produced v780: the escalating
-	// backoff was written against the derived fallback address while the only
+	// backoff was written against the derived TCP address while the only
 	// reader checked the seed, so the ladder climbed 30s to 10m purely for the
 	// log's benefit and a flat cooldown remained the real pace. One store,
 	// keyed by what is actually dialed, means the entry written and the entry
 	// read are the same entry.
 	cands *candStore
-	// seedFallback records, per seed, the specific fallback address
-	// ensureFallback last resolved and dialed for it (same IP, a different
+	// seedTCP records, per seed, the specific TCP address
+	// ensureTCP last resolved and dialed for it (same IP, a different
 	// port). Used by connectedTo/install to recognize "this seed's peer is
-	// now connected via its fallback path" precisely — matched against this
+	// now connected via its TCP path" precisely — matched against this
 	// one resolved address, not by IP alone, which would wrongly treat any
 	// other peer sharing that IP (e.g. several nodes behind one NAT gateway,
 	// or in tests, several local peers all on 127.0.0.1) as satisfying this
@@ -837,7 +837,7 @@ type netState struct {
 	// conflicting.
 	conflictSkipSince map[CandKey]time.Time
 
-	seedFallback map[netip.AddrPort]netip.AddrPort
+	seedTCP map[netip.AddrPort]netip.AddrPort
 	// seedOwner records, for a seed entry, the node ID it's known to belong to
 	// — populated only where that's cheaply known at add time (currently:
 	// gossip-learned endpoints, which carry a node ID alongside the address).
@@ -848,7 +848,7 @@ type netState struct {
 	// explicitSeed marks which addresses came from the operator's own config
 	// (NetSpec.Seeds, at network construction or ReloadRuntime's config-seed
 	// merge — see AddExplicitSeed) rather than being discovered dynamically
-	// via gossip (AddSeedFor) or a fallback dial's own bookkeeping (AddSeed
+	// via gossip (AddSeedFor) or a TCP dial's own bookkeeping (AddSeed
 	// from dialCandidate/ban.go's unban re-dial). explicitSeedNode is
 	// the node-keyed counterpart addSeed promotes an entry into the moment a
 	// node ID becomes known for an address already in this map (via
@@ -893,7 +893,7 @@ type netState struct {
 	// of them can trigger an upgrade; without a per-node gate they all fire at
 	// once, every tick. See seedOwnerNeedsUpgrade.
 	upgradeNodeAt map[string]time.Time
-	// seedAttempt paces how often ensureFallback re-examines a seed, distinct
+	// seedAttempt paces how often ensureTCP re-examines a seed, distinct
 	// from the per-candidate pacing in cands. initSeedTick calls it for every
 	// cooling-down seed each tick; with host candidates persisting there can be
 	// dozens, and expanding a seed into candidates and claiming each is work
@@ -915,7 +915,7 @@ type netState struct {
 	// and log noise for no urgency at all.
 	directUpgradeAttempt map[netip.AddrPort]time.Time
 	// everConnected records every underlay address (a seed's own, or one of
-	// its resolved TCP/TLS fallbacks — see seedFallback) that has ever backed
+	// its resolved TCP/TLSs — see seedTCP) that has ever backed
 	// a successfully installed session, for the life of this process. This is
 	// what actually lets sweepDeadSeeds distinguish "never once worked" (safe
 	// to give up on) from "worked before, just not connected at this exact
@@ -1315,11 +1315,11 @@ type peerSession struct {
 	// field that didn't always exist).
 	bgpASN  uint32
 	webPort uint16 // peer's web-admin port (for management over the overlay)
-	tcpPort uint16 // peer's advertised TCP/TLS fallback port (0 = none/unknown)
+	tcpPort uint16 // peer's advertised TCP/TLS port (0 = none/unknown)
 	// extraTCPPorts/extraUDPPorts are the peer's additional advertised listen
 	// ports (config extra_tcp_listen_ports/extra_listen_ports on their end),
 	// tried alongside tcpPort/endpoint when the primary doesn't get through —
-	// see ensureFallback and the UDP seed-injection in handshake_engine.go.
+	// see ensureTCP and the UDP seed-injection in handshake_engine.go.
 	extraTCPPorts []uint16
 	extraUDPPorts []uint16
 	// version is the peer's build version from its handshake — see
@@ -1604,7 +1604,7 @@ const (
 // dropped handshake packet) — there's little value in the minutes-scale
 // range between "fast" and "slow", so this sits on the order of a few
 // minutes rather than being tuned finer. A var, not a const, so tests can
-// shorten it — see fallbackHandshakeGrace for the same pattern.
+// shorten it — see tcpHandshakeGrace for the same pattern.
 var directUpgradeInterval = 5 * time.Minute
 
 // upgradeNodeInterval is the minimum gap between upgrade handshakes toward the
@@ -1688,7 +1688,7 @@ func NewEngine(o Options) *Engine {
 			e.tunWorkers = 1
 		}
 	}
-	e.fallbackPort.Store(int64(o.TCPFallbackPort))
+	e.tcpListenPort.Store(int64(o.TCPPort))
 	e.primaryPort.Store(int64(o.PrimaryPort))
 	e.extraTCPPorts.Store(&o.ExtraTCPPorts)
 	e.extraUDPPorts.Store(&o.ExtraUDPPorts)
@@ -1740,7 +1740,7 @@ func (e *Engine) newNetState(spec NetSpec) *netState {
 		configuredSeeds:        append([]netip.AddrPort(nil), spec.ConfiguredSeeds...),
 		configuredTCPSeeds:     append([]netip.AddrPort(nil), spec.ConfiguredTCPSeeds...),
 		seedBackoff:            make(map[netip.AddrPort]time.Time),
-		seedFallback:           make(map[netip.AddrPort]netip.AddrPort),
+		seedTCP:                make(map[netip.AddrPort]netip.AddrPort),
 		seedOwner:              make(map[netip.AddrPort]string),
 		seedOwnerProto:         make(map[CandKey]string),
 		conflictSkipSince:      make(map[CandKey]time.Time),
@@ -2127,7 +2127,7 @@ func (e *Engine) AddSeedForProto(networkID uint64, seed netip.AddrPort, nodeID s
 
 // AddExplicitSeed is AddSeed plus marking the address as one the operator
 // configured directly (NetSpec.Seeds), rather than one discovered
-// dynamically via gossip or a fallback dial's own bookkeeping. Used only at
+// dynamically via gossip or a TCP dial's own bookkeeping. Used only at
 // network construction (newNetState) and by ReloadRuntime's config-seed
 // merge — see netState.explicitSeed's doc comment for what this unlocks.
 func (e *Engine) AddExplicitSeed(networkID uint64, seed netip.AddrPort) {

@@ -16,7 +16,7 @@ import (
 // timeout; every refusal-on-receipt in onHSResp deletes the pending handshake
 // and so never reaches it, leaving initLoop (1s) to re-dial forever.
 //
-// candstore's TCP fallback is the one path that got this right, and the reason
+// candstore's TCP is the one path that got this right, and the reason
 // is worth copying: it backs off on the *outcome* — did a session form within
 // the grace period — rather than on any enumerated cause, so failure modes
 // nobody thought of are covered too.

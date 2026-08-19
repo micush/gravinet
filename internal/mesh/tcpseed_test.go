@@ -6,10 +6,10 @@ import (
 	"time"
 )
 
-// primeTCPSeeds must dial each explicit TCP seed over the fallback and, once up,
+// primeTCPSeeds must dial each explicit TCP seed over TCP and, once up,
 // register it as a seed so the handshake loop runs over the TLS connection.
 func TestPrimeTCPSeedsDialsAndRegisters(t *testing.T) {
-	e, f, ns := fallbackEngine(t, 65432)
+	e, f, ns := tcpEngine(t, 65432)
 	seed := netip.MustParseAddrPort("198.51.100.9:8443")
 	ns.mu.Lock()
 	ns.tcpSeeds = []netip.AddrPort{seed}
@@ -48,7 +48,7 @@ func TestPrimeTCPSeedsDialsAndRegisters(t *testing.T) {
 }
 
 func TestAddTCPSeedDedupes(t *testing.T) {
-	e, _, ns := fallbackEngine(t, 65432)
+	e, _, ns := tcpEngine(t, 65432)
 	seed := netip.MustParseAddrPort("198.51.100.20:9000")
 	e.addTCPSeed(ns.spec.ID, seed)
 	e.addTCPSeed(ns.spec.ID, seed)

@@ -31,46 +31,46 @@ func testEngineWithNet(t *testing.T) (*Engine, *netState) {
 	return e, e.netSnapshot()[1]
 }
 
-// TestConnectedToRecognizesResolvedFallback reproduces the core defect behind
+// TestConnectedToRecognizesResolvedTCP reproduces the core defect behind
 // the connection-flapping loop: a peer reachable via a live session must be
-// recognized as "connected to this seed" once ensureFallback has resolved and
-// dialed a fallback address for it — even though that address's port differs
+// recognized as "connected to this seed" once ensureTCP has resolved and
+// dialed a TCP address for it — even though that address's port differs
 // from the seed's own port. Before the fix, connectedTo compared the exact
 // address:port only, so this case returned false forever, and initLoop
 // retried the already-connected peer on every tick, each retry orphaning the
 // previous live session (visible in the logs as a repeating one-second cycle
 // of "pruned dead session" / "tunnel up" / "udp appears blocked" for the same
 // peers, indefinitely).
-func TestConnectedToRecognizesResolvedFallback(t *testing.T) {
+func TestConnectedToRecognizesResolvedTCP(t *testing.T) {
 	e, ns := testEngineWithNet(t)
 	ip := netip.MustParseAddr("203.0.113.9")
 	seed := netip.AddrPortFrom(ip, 65432) // the configured (UDP-blocked) seed
-	fb := netip.AddrPortFrom(ip, 443)     // what ensureFallback resolved and dialed for it
+	fb := netip.AddrPortFrom(ip, 443)     // what ensureTCP resolved and dialed for it
 
 	// Nothing recorded yet — an unconnected seed must still report false.
 	if e.connectedTo(ns, seed) {
 		t.Fatal("connectedTo should be false before anything is connected")
 	}
 
-	// ensureFallback would have recorded this mapping when it dialed fb for
+	// ensureTCP would have recorded this mapping when it dialed fb for
 	// seed; simulate that directly rather than going through the real dialer.
 	ns.mu.Lock()
-	ns.seedFallback[seed] = fb
+	ns.seedTCP[seed] = fb
 	ns.mu.Unlock()
 
-	// Still false: knowing the resolved fallback address isn't the same as
+	// Still false: knowing the resolved TCP address isn't the same as
 	// being connected to it.
 	if e.connectedTo(ns, seed) {
-		t.Fatal("connectedTo should not report true just because a fallback address was resolved, before any session exists there")
+		t.Fatal("connectedTo should not report true just because a TCP address was resolved, before any session exists there")
 	}
 
-	// The peer connects, landing on the resolved fallback address.
+	// The peer connects, landing on the resolved TCP address.
 	ns.mu.Lock()
 	ns.byNode["peer1"] = &peerSession{net: ns, nodeID: "peer1", endpoint: fb}
 	ns.mu.Unlock()
 
 	if !e.connectedTo(ns, seed) {
-		t.Fatal("connectedTo should recognize the peer as connected to seed via its resolved fallback address")
+		t.Fatal("connectedTo should recognize the peer as connected to seed via its resolved TCP address")
 	}
 }
 
@@ -82,7 +82,7 @@ func TestConnectedToRecognizesResolvedFallback(t *testing.T) {
 // NAT gateway, or, as this test reproduces directly, several local peers all
 // on 127.0.0.1 with different ports, exactly the shape of this package's own
 // multi-node integration tests). The fix must be precise: only the specific
-// address ensureFallback actually resolved for a given seed satisfies it.
+// address ensureTCP actually resolved for a given seed satisfies it.
 func TestConnectedToDoesNotFalsePositiveAcrossPeersOnSameIP(t *testing.T) {
 	e, ns := testEngineWithNet(t)
 	ip := netip.MustParseAddr("127.0.0.1")
@@ -101,15 +101,15 @@ func TestConnectedToDoesNotFalsePositiveAcrossPeersOnSameIP(t *testing.T) {
 	}
 }
 
-// TestInstallClearsBackoffForResolvedFallback mirrors the connectedTo test
+// TestInstallClearsBackoffForResolvedTCP mirrors the connectedTo test
 // for the other half of the bug: once a peer connects via the address
-// ensureFallback resolved for a backed-off seed, that seed's backoff entry
+// ensureTCP resolved for a backed-off seed, that seed's backoff entry
 // must be cleared, or initLoop keeps treating it as still-failing and keeps
-// calling ensureFallback every tick even though the peer is already up.
+// calling ensureTCP every tick even though the peer is already up.
 // Before the fix, install() deleted ns.seedBackoff keyed by ps.endpoint (the
-// fallback address), which was never the key the entry was actually stored
+// TCP address), which was never the key the entry was actually stored
 // under (that's the original seed address), making the delete a silent no-op.
-func TestInstallClearsBackoffForResolvedFallback(t *testing.T) {
+func TestInstallClearsBackoffForResolvedTCP(t *testing.T) {
 	e, ns := testEngineWithNet(t)
 	ip := netip.MustParseAddr("203.0.113.9")
 	seed := netip.AddrPortFrom(ip, 65432)
@@ -117,7 +117,7 @@ func TestInstallClearsBackoffForResolvedFallback(t *testing.T) {
 
 	ns.mu.Lock()
 	ns.seedBackoff[seed] = time.Now().Add(seedRetryBackoff)
-	ns.seedFallback[seed] = fb
+	ns.seedTCP[seed] = fb
 	ns.mu.Unlock()
 
 	ps := &peerSession{net: ns, nodeID: "peer1", endpoint: fb, sess: testSession(t)}
@@ -127,13 +127,13 @@ func TestInstallClearsBackoffForResolvedFallback(t *testing.T) {
 	_, stillBackedOff := ns.seedBackoff[seed]
 	ns.mu.Unlock()
 	if stillBackedOff {
-		t.Fatal("install() should clear the seed's backoff entry once the peer is reachable via its resolved fallback address")
+		t.Fatal("install() should clear the seed's backoff entry once the peer is reachable via its resolved TCP address")
 	}
 }
 
 // TestInstallBackoffClearDoesNotAffectUnrelatedSeeds checks the fix is scoped
 // correctly: a backoff entry for an unrelated seed (different IP, and not
-// mapped to the installed session's address via seedFallback) must survive.
+// mapped to the installed session's address via seedTCP) must survive.
 func TestInstallBackoffClearDoesNotAffectUnrelatedSeeds(t *testing.T) {
 	e, ns := testEngineWithNet(t)
 	unrelated := netip.AddrPortFrom(netip.MustParseAddr("203.0.113.20"), 65432)
@@ -160,7 +160,7 @@ func TestInstallBackoffClearDoesNotAffectUnrelatedSeeds(t *testing.T) {
 // re-attempting every historical port forever. Once the node connects,
 // install() should prune every seed positively attributed to it (via
 // seedOwner) other than its current endpoint, and clean up their
-// backoff/fallback bookkeeping too.
+// backoff/TCP bookkeeping too.
 func TestInstallPrunesOwnedStaleSeeds(t *testing.T) {
 	e, ns := testEngineWithNet(t)
 	ip := netip.MustParseAddr("203.0.113.9")
@@ -174,7 +174,7 @@ func TestInstallPrunesOwnedStaleSeeds(t *testing.T) {
 	ns.seedOwner[stale2] = "peer1"
 	ns.seedOwner[current] = "peer1"
 	ns.seedBackoff[stale1] = time.Now().Add(seedRetryBackoff)
-	ns.seedFallback[stale2] = current
+	ns.seedTCP[stale2] = current
 	ns.mu.Unlock()
 
 	ps := &peerSession{net: ns, nodeID: "peer1", endpoint: current, sess: testSession(t)}
@@ -202,8 +202,8 @@ func TestInstallPrunesOwnedStaleSeeds(t *testing.T) {
 	if _, ok := ns.seedBackoff[stale1]; ok {
 		t.Error("seedBackoff for pruned stale1 should be cleaned up")
 	}
-	if _, ok := ns.seedFallback[stale2]; ok {
-		t.Error("seedFallback for pruned stale2 should be cleaned up")
+	if _, ok := ns.seedTCP[stale2]; ok {
+		t.Error("seedTCP for pruned stale2 should be cleaned up")
 	}
 }
 
@@ -420,7 +420,7 @@ func TestInstallDoesNotPruneUnattributedOrOtherNodesSeeds(t *testing.T) {
 // closes: a seed that's never once connected, and has been in ns.seeds well
 // past its grace period, would otherwise be retried — and logged — for as
 // long as the process stays up, restart or not. Confirms it's removed along
-// with all its associated bookkeeping (backoff, fallback mapping, owner).
+// with all its associated bookkeeping (backoff, TCP mapping, owner).
 func TestSweepDeadSeedsRemovesNeverConnected(t *testing.T) {
 	e, ns := testEngineWithNet(t)
 	seed := netip.MustParseAddrPort("192.0.2.9:65432")
@@ -429,7 +429,7 @@ func TestSweepDeadSeedsRemovesNeverConnected(t *testing.T) {
 	ns.seeds = append(ns.seeds, seed)
 	ns.seedFirstSeen[seed] = time.Now().Add(-2 * deadSeedGrace) // well past grace
 	ns.seedBackoff[seed] = time.Now().Add(seedRetryBackoff)
-	ns.seedFallback[seed] = netip.MustParseAddrPort("192.0.2.9:443")
+	ns.seedTCP[seed] = netip.MustParseAddrPort("192.0.2.9:443")
 	ns.seedOwner[seed] = "peer1"
 	ns.mu.Unlock()
 
@@ -448,8 +448,8 @@ func TestSweepDeadSeedsRemovesNeverConnected(t *testing.T) {
 	if _, ok := ns.seedBackoff[seed]; ok {
 		t.Error("seedBackoff for removed seed should be cleaned up")
 	}
-	if _, ok := ns.seedFallback[seed]; ok {
-		t.Error("seedFallback for removed seed should be cleaned up")
+	if _, ok := ns.seedTCP[seed]; ok {
+		t.Error("seedTCP for removed seed should be cleaned up")
 	}
 	if _, ok := ns.seedOwner[seed]; ok {
 		t.Error("seedOwner for removed seed should be cleaned up")
@@ -565,11 +565,11 @@ func TestSweepDeadSeedsProtectsConnectedSeed(t *testing.T) {
 	}
 }
 
-// TestSweepDeadSeedsProtectsConnectedViaFallback: the same protection, but
-// via the resolved-fallback path (a peer whose live session is on a
+// TestSweepDeadSeedsProtectsConnectedViaTCP: the same protection, but
+// via the resolved-TCP path (a peer whose live session is on a
 // different port than the seed being evaluated) — the exact scenario that
 // motivated tcpPortForEndpoint's IP-based port discovery.
-func TestSweepDeadSeedsProtectsConnectedViaFallback(t *testing.T) {
+func TestSweepDeadSeedsProtectsConnectedViaTCP(t *testing.T) {
 	e, ns := testEngineWithNet(t)
 	seed := netip.MustParseAddrPort("192.0.2.9:65432")
 	fb := netip.MustParseAddrPort("192.0.2.9:443")
@@ -577,9 +577,9 @@ func TestSweepDeadSeedsProtectsConnectedViaFallback(t *testing.T) {
 	ns.mu.Lock()
 	ns.seeds = append(ns.seeds, seed)
 	ns.seedFirstSeen[seed] = time.Now().Add(-2 * deadSeedGrace)
-	ns.seedFallback[seed] = fb
+	ns.seedTCP[seed] = fb
 	ns.byNode["peer1"] = &peerSession{net: ns, nodeID: "peer1", endpoint: fb}
-	ns.everConnected[fb] = true // what install() sets on a real connection via fallback
+	ns.everConnected[fb] = true // what install() sets on a real connection via TCP
 	ns.mu.Unlock()
 
 	e.sweepDeadSeeds(ns, time.Now())
@@ -593,7 +593,7 @@ func TestSweepDeadSeedsProtectsConnectedViaFallback(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatal("a seed connected via its resolved fallback address should never be removed")
+		t.Fatal("a seed connected via its resolved TCP address should never be removed")
 	}
 }
 
@@ -644,7 +644,7 @@ func TestSweepDeadSeedsProtectsPreviouslyConnectedSeed(t *testing.T) {
 }
 
 // TestOutboundHandshakeAttributesSeedOwner is the integration-level
-// regression test for the gap TestConnectedToRecognizesResolvedFallback and
+// regression test for the gap TestConnectedToRecognizesResolvedTCP and
 // friends didn't cover: a *plain* statically-configured UDP seed (added via
 // AddSeed, exactly like every seed loaded from the config file at startup —
 // see cmd/gravinet's buildOneNetSpec/resolveSeeds feeding NetSpec.Seeds

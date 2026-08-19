@@ -1,5 +1,5 @@
 // Package transport is gravinet's UDP underlay. It binds IPv4 and/or IPv6
-// sockets, walking a primary-then-fallback port list, and runs a worker pool
+// sockets, walking a primary-then-TCP port list, and runs a worker pool
 // (cores-1 by default) that reads datagrams into pooled buffers and dispatches
 // them to a handler with minimal allocation for low latency. Outbound sends
 // round-robin across the same REUSEPORT socket set the read workers use (see
@@ -50,16 +50,16 @@ type Handler func(payload []byte, from netip.AddrPort, fam Family)
 const defaultSocketBuffer = 4 << 20
 
 type Options struct {
-	BindAddr      string // wildcard if empty ("" => 0.0.0.0 / ::)
-	PrimaryPort   int
-	FallbackPorts []int
-	ExtraPorts    []int // additional ports bound *concurrently* with the primary (inbound only)
-	EnableV4      bool
-	EnableV6      bool
-	Workers       int // total reader goroutines; >=1
-	SocketBuffer  int // SO_RCVBUF/SO_SNDBUF target in bytes; 0 => default
-	Handler       Handler
-	Log           *logx.Logger
+	BindAddr     string // wildcard if empty ("" => 0.0.0.0 / ::)
+	PrimaryPort  int
+	AltPorts     []int
+	ExtraPorts   []int // additional ports bound *concurrently* with the primary (inbound only)
+	EnableV4     bool
+	EnableV6     bool
+	Workers      int // total reader goroutines; >=1
+	SocketBuffer int // SO_RCVBUF/SO_SNDBUF target in bytes; 0 => default
+	Handler      Handler
+	Log          *logx.Logger
 
 	// OnSendMsgSize, if non-nil, reports a datagram the kernel refused as
 	// larger than the path MTU (EMSGSIZE) on the *batched* send path. On the
@@ -159,7 +159,7 @@ type famConn struct {
 // the default (primary) send path.
 const maxSendFrom = 8192
 
-// binder abstracts socket creation so the port-fallback logic is unit-testable.
+// binder abstracts socket creation so the alternate-port logic is unit-testable.
 type binder func(network, addr string) (*net.UDPConn, error)
 
 func realBinder(network, addr string) (*net.UDPConn, error) {
@@ -198,14 +198,14 @@ func openWith(o Options, bind binder) (*Transport, error) {
 	if log == nil {
 		log = logx.Default()
 	}
-	o.Log = log // bindGroup logs best-effort fallbacks through o.Log
+	o.Log = log // bindGroup logs best-effort alternate binds through o.Log
 
 	socketsPerFamily := 1
 	if reusePort {
 		socketsPerFamily = o.Workers
 	}
 
-	candidates := append([]int{o.PrimaryPort}, o.FallbackPorts...)
+	candidates := append([]int{o.PrimaryPort}, o.AltPorts...)
 	// An ephemeral request (port 0) has to be resolved to a concrete port
 	// before the worker sockets are bound, because every one of those sets
 	// SO_REUSEPORT — and SO_REUSEPORT explicitly permits the kernel to hand

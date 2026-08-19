@@ -101,7 +101,7 @@ type PeerInfo struct {
 	// reconnect, per dropRetiredKeySessions).
 	KeyLabel string `json:"key_label,omitempty"`
 
-	Transport string `json:"transport"` // active underlay transport for this peer: "udp" or "tcp" (TLS fallback)
+	Transport string `json:"transport"` // active underlay transport for this peer: "udp" or "tcp" (TLS)
 
 	// Reconnects/LastReconnectReason/LastReconnectAgoSeconds surface
 	// nodeInfo.reconnects et al — see its doc comment. The point of these:
@@ -491,7 +491,7 @@ func (e *Engine) ManagedPeers(maxAge time.Duration) []ManagedPeer {
 		// A live-endpoint match (below) misses a seed the instant it roams to
 		// a different address or transport — a real gap, not hypothetical:
 		// confirmed on a real fleet where one seed's live session had moved
-		// to a private LAN shortcut, and another's to a TCP fallback port,
+		// to a private LAN shortcut, and another's to a TCP port,
 		// neither matching the exact address configured for it anymore.
 		// configuredSeedOwnerUDP/TCP exist almost exactly for this: a
 		// completed, authenticated handshake against a dialed address proves
@@ -679,7 +679,7 @@ func (e *Engine) announceClusterState(ns *netState) {
 	binary.BigEndian.PutUint16(wp[:], e.webPort)
 	body = append(body, wp[:]...)
 	var tp [2]byte
-	binary.BigEndian.PutUint16(tp[:], uint16(e.fallbackPort.Load()))
+	binary.BigEndian.PutUint16(tp[:], uint16(e.tcpListenPort.Load()))
 	body = append(body, tp[:]...)
 	body = appendPortList(body, loadPortList(&e.extraTCPPorts))
 	body = appendPortList(body, loadPortList(&e.extraUDPPorts))

@@ -7,7 +7,7 @@
 [gravinet] nodes find each other by gossip, but gossip has to start somewhere. **At least one node in your mesh needs to be reachable from the internet** on:
 
 - **UDP port 65432** (the primary transport — this is the one that matters)
-- **TCP port 65432** (a fallback transport, used when UDP is blocked)
+- **TCP port 65432** (a TCP transport, used when UDP is blocked)
 
 Both default to **65432** (changeable later, but there's no reason to unless something else is already using it).
 
@@ -18,7 +18,7 @@ This doesn't mean every machine needs a public IP — only one does. Think of it
 
 On a host running **firewalld** (the default on RHEL, Rocky, Alma, CentOS and Fedora), the OS firewall also has to let those packets in — `install-linux.sh` opens the underlay port (UDP + TCP) and the web admin port (TCP) in the default zone for you, reading the port numbers from your config rather than assuming the defaults. Pass `--no-firewall` to skip that and do it yourself.
 
-If a node's UDP 65432 is blocked outright, [gravinet] automatically tries a handful of well-known fallback ports (443, 4500, 3478, 1194, 500, 53). But don't rely on that for your seed node specifically — open 65432 on it deliberately.
+If a node's UDP 65432 is blocked outright, [gravinet] automatically tries a handful of well-known TCP ports (443, 4500, 3478, 1194, 500, 53). But don't rely on that for your seed node specifically — open 65432 on it deliberately.
 
 That's the client side trying alternates; the seed itself can also simply listen on more than one port at once — the **UDP port** and **TCP port** fields under Settings → Underlay each take a comma-separated list, not just one number (e.g. `65432, 443, 80`), so a node can accept connections on all of them simultaneously rather than picking just one. The first port in each list is the primary (used for outbound and advertised to peers); any more are extra ports. Extra ports are advertised too, not just listened on — peers actually try them: an extra TCP port gets dialed in parallel with the primary whenever a peer's UDP looks blocked, and an extra UDP port joins the same pool of candidate addresses ordinary seeds use, so both kinds of extra ports genuinely help a peer reach this node through a restrictive firewall, not just a manually-configured one.
 
@@ -244,9 +244,9 @@ Go to **Traffic → Shaping**. A per-network rate cap, set independently for eac
 
 Go to **Mesh → Seeds**. These are the host or host:port addresses this node dials to _find_ each network — distinct from the live Peers list below, since a seed stays configured whether or not anything is currently connected to it. A join token already embeds the seeds it knew about at the time it was generated; this page is for adding more by hand, or seeing what's already there.
 
-A seed's address can carry more than one port, comma-separated (e.g. `203.0.113.5:65432,443,53`) — each is tried as its own dial candidate against that host, on top of whatever a bare host with no port already gets (the primary port plus gravinet's own built-in fallback set). This is for a seed known to answer on a handful of specific, non-default ports — likely to make it through a restrictive firewall — rather than the built-in set.
+A seed's address can carry more than one port, comma-separated (e.g. `203.0.113.5:65432,443,53`) — each is tried as its own dial candidate against that host, on top of whatever a bare host with no port already gets (the primary port plus gravinet's own built-in port set). This is for a seed known to answer on a handful of specific, non-default ports — likely to make it through a restrictive firewall — rather than the built-in set.
 
-Each seed has a transport: **udp** seeds bootstrap over UDP, with automatic TCP/TLS fallback if UDP turns out to be blocked; **tcp** seeds are dialed straight over the TCP/TLS fallback, which is useful for cold-starting a node onto the mesh when UDP is blocked end to end and there's no point trying it first. Double-click an address to edit it, or the transport cell to flip udp/tcp. Click **+** to add a seed, tick rows and **−** to remove one — both apply live.
+Each seed has a transport: **udp** seeds bootstrap over UDP, dialing TCP/TLS alongside if UDP turns out to be blocked; **tcp** seeds are dialed straight over TCP/TLS, which is useful for cold-starting a node onto the mesh when UDP is blocked end to end and there's no point trying it first. Double-click an address to edit it, or the transport cell to flip udp/tcp. Click **+** to add a seed, tick rows and **−** to remove one — both apply live.
 
 Each seed also has a **state**, `enabled` or `disabled` — double-click it to toggle. A disabled seed stays on the page with its address, transport, and notes intact, but this node stops dialing it, stops counting it as one of its own seeds, and stops embedding it in join tokens. It's the thing to reach for when a seed is down for maintenance or you're testing whether a node can bootstrap without it, since deleting the row and retyping it later loses the notes and the transport setting.
 

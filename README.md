@@ -19,13 +19,13 @@ control plane, relay fallback, and broadcast/multicast:
 - **Config / Crypto / Protocol / TUN / Transport** — hot-reloadable config,
   AES-256-GCM + X25519 + HKDF, keyID-by-identity matching, replay protection,
   raw-ioctl Linux TUN (jumbo MTU, v4/v6, poller-managed I/O), UDP underlay with
-  port fallback and a cores-1 REUSEPORT worker pool. A node listens on a set of
+  alternate ports and a cores-1 REUSEPORT worker pool. A node listens on a set of
   UDP ports and a set of TCP/TLS ports (`udp_ports`/`tcp_ports`, or Settings →
   Underlay in the web UI) — no primary, no fallback, just two lists — so a peer
   behind a restrictive firewall can reach this node on whichever well-known
   port gets through. Best-effort per port, applied live.
   Extra ports are advertised to peers too (handshake and gossip, alongside
-  the existing per-peer TCP fallback port advertisement), so the mesh
+  the existing per-peer TCP port advertisement), so the mesh
   actually tries them: TCP dials every advertised candidate for a peer in
   parallel, and extra UDP ports join the same seed pool ordinary bootstrap
   addresses use.
@@ -356,7 +356,7 @@ gravinet network join e4ba5a47668a1465 key <KEY> peer 198.51.100.7   # join an e
                                                         # (id comes from 'network list' on a node
                                                         #  already in it; the network's name and
                                                         #  subnet are learned from the seed. no port
-                                                        #  = tries 65432 + fallbacks; restarts svc)
+                                                        #  = tries 65432 + alternates; restarts svc)
 gravinet network enable corp
 gravinet network disable corp                      # leave but keep config
 gravinet network rename corp office                # change the label (id stays; no restart)

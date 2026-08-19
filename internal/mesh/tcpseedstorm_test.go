@@ -8,7 +8,7 @@ import (
 
 // A multi-port seed list exists to *find* a port that works, not to hold a
 // connection on all of them. Until v710, primeTCPSeeds skipped a seed only on
-// an exact-address match against an existing fallback, so every other port of
+// an exact-address match against an existing TCP, so every other port of
 // the same host was re-dialled on every tick, forever.
 //
 // Measured in the field: 29,228 failed connects in twenty minutes — a steady
@@ -23,7 +23,7 @@ import (
 // With every port succeeding, the pre-v710 code also stops dialling, so a test
 // built on the plain fake passes either way and proves nothing.
 type refuseAllBut struct {
-	*fakeFallback
+	*fakeTCP
 	open netip.AddrPort
 }
 
@@ -51,7 +51,7 @@ type errConnRefused struct{}
 func (errConnRefused) Error() string { return "connect: connection refused" }
 
 func TestPrimeTCPSeedsStopsAtTheFirstWorkingPortOnAHost(t *testing.T) {
-	e, base, ns := fallbackEngine(t, 65432)
+	e, base, ns := tcpEngine(t, 65432)
 
 	host := netip.MustParseAddr("198.51.100.9")
 	ports := []int{7, 11, 13, 15, 17, 19, 21, 23, 70, 79, 443, 513, 65432}
@@ -60,7 +60,7 @@ func TestPrimeTCPSeedsStopsAtTheFirstWorkingPortOnAHost(t *testing.T) {
 		seeds = append(seeds, netip.AddrPortFrom(host, uint16(p)))
 	}
 	// Only :65432 answers, exactly as in the field.
-	f := &refuseAllBut{fakeFallback: base, open: netip.AddrPortFrom(host, 65432)}
+	f := &refuseAllBut{fakeTCP: base, open: netip.AddrPortFrom(host, 65432)}
 	e.Attach(f)
 
 	ns.mu.Lock()
@@ -94,7 +94,7 @@ func TestPrimeTCPSeedsStopsAtTheFirstWorkingPortOnAHost(t *testing.T) {
 // dialled while a different one is up. Without this the fix would trade a dial
 // storm for an unreachable mesh.
 func TestPrimeTCPSeedsStillDialsUnreachedHosts(t *testing.T) {
-	e, f, ns := fallbackEngine(t, 65432)
+	e, f, ns := tcpEngine(t, 65432)
 
 	up := netip.MustParseAddrPort("198.51.100.9:65432")
 	other := netip.MustParseAddrPort("203.0.113.7:65432")

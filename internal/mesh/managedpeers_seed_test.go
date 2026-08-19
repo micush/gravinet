@@ -169,7 +169,7 @@ func TestOutboundHandshakeAttributesConfiguredSeedOwner(t *testing.T) {
 		t.Errorf("configuredSeedOwnerUDP[%s] = %q, want %q (a plain loopback UDP handshake)", seed, udpOwner, "B")
 	}
 	if tcpOwner != "" {
-		t.Errorf("configuredSeedOwnerTCP[%s] = %q, want empty -- this connection never went over a TCP fallback", seed, tcpOwner)
+		t.Errorf("configuredSeedOwnerTCP[%s] = %q, want empty -- this connection never went over a TCP", seed, tcpOwner)
 	}
 }
 
@@ -215,7 +215,7 @@ func TestManagedPeersIsSeedResolvesTwoSeedsSharingOneAddressByTransport(t *testi
 	ns := e.netSnapshot()[1]
 	ns.configuredTCPSeeds = []netip.AddrPort{sharedSeedAddr} // "a"'s seed entry
 	ns.configuredSeeds = []netip.AddrPort{sharedSeedAddr}    // "b"'s seed entry -- same address, disambiguated only by which list it's in
-	ns.configuredSeedOwnerTCP[sharedSeedAddr] = "a"          // "a" confirmed over the TCP fallback
+	ns.configuredSeedOwnerTCP[sharedSeedAddr] = "a"          // "a" confirmed over TCP
 	ns.configuredSeedOwnerUDP[sharedSeedAddr] = "b"          // "b" confirmed over plain UDP -- a separate map, no collision
 
 	addManagedNode(ns, "a", netip.MustParseAddrPort("192.168.1.50:41000")) // roamed; recognized via configuredSeedOwnerTCP
@@ -343,7 +343,7 @@ func TestManagedPeersIsSeedIgnoresPeerCacheContamination(t *testing.T) {
 }
 
 // A configuredTCPSeeds entry counts exactly the same as a configuredSeeds
-// one -- an operator dialing a network's TCP/TLS-fallback seed directly is
+// one -- an operator dialing a network's TCP/TLS-TCP seed directly is
 // still reaching one of its bootstrap points, not just any peer.
 func TestManagedPeersIsSeedMatchesTCPSeedsToo(t *testing.T) {
 	tcpSeed := netip.MustParseAddrPort("203.0.113.9:65432")

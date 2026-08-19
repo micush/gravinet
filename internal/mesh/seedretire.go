@@ -143,7 +143,7 @@ func (e *Engine) applyRetiredSeeds(ns *netState, retired, retiredTCP []netip.Add
 		delete(ns.explicitSeed, s)
 		delete(ns.seedFirstSeen, s)
 		delete(ns.seedBackoff, s)
-		delete(ns.seedFallback, s)
+		delete(ns.seedTCP, s)
 		delete(ns.everConnected, s)
 	}
 	// The complement of the roaming case above: a session whose endpoint is

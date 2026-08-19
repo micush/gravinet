@@ -113,7 +113,7 @@ func TestHandlePortChangesConfigAndReloads(t *testing.T) {
 
 // TestHandlePortDisableInteraction covers the "-" sentinel (sent as
 // {disabled:true}): turning UDP off must clear the UDP port list,
-// must be refused while the TCP/TLS fallback is also off (a node can't have
+// must be refused while the TCP/TLS is also off (a node can't have
 // neither), and re-enabling UDP with a normal port list must work again
 // afterward. The TCP side of the same interaction is exercised at the config
 // layer by the both-empty check in Validate; this test is the
@@ -161,11 +161,11 @@ func TestHandlePortDisableInteraction(t *testing.T) {
 		return out
 	}
 
-	// Turning UDP off while the TCP fallback is on (the default) must
+	// Turning UDP off while the TCP is on (the default) must
 	// succeed and clear the whole UDP port list.
 	out := postTo("/api/port", map[string]any{"disabled": true})
 	if ok, _ := out["ok"].(bool); !ok {
-		t.Fatalf("disabling udp with tcp fallback enabled should succeed: %v", out)
+		t.Fatalf("disabling udp with tcp enabled should succeed: %v", out)
 	}
 	got, err := config.Load(cfgPath)
 	if err != nil {
@@ -175,11 +175,11 @@ func TestHandlePortDisableInteraction(t *testing.T) {
 		t.Errorf("udp ports = %v, want empty after disabling udp", got.UDPPortList())
 	}
 
-	// With UDP now off, disabling the TCP fallback too must be refused —
+	// With UDP now off, disabling the TCP too must be refused —
 	// the node would have no way to be reached.
 	out = postTo("/api/tcpport", map[string]any{"disabled": true})
 	if ok, _ := out["ok"].(bool); ok {
-		t.Fatal("disabling tcp fallback while udp is already off should be refused")
+		t.Fatal("disabling tcp while udp is already off should be refused")
 	}
 	got, _ = config.Load(cfgPath)
 	if !got.TCPEnabled() {
@@ -197,20 +197,20 @@ func TestHandlePortDisableInteraction(t *testing.T) {
 		t.Errorf("advertised udp port = %d, want 51820 after re-enabling udp", p)
 	}
 
-	// Now that both are on again, disabling the TCP fallback must succeed.
+	// Now that both are on again, disabling the TCP must succeed.
 	out = postTo("/api/tcpport", map[string]any{"disabled": true})
 	if ok, _ := out["ok"].(bool); !ok {
-		t.Fatalf("disabling tcp fallback with udp enabled should succeed: %v", out)
+		t.Fatalf("disabling tcp with udp enabled should succeed: %v", out)
 	}
 	got, _ = config.Load(cfgPath)
 	if got.TCPEnabled() {
 		t.Errorf("tcp ports = %v, want empty after disabling tcp", got.TCPPortList())
 	}
 
-	// And with the TCP fallback now off, disabling UDP too must be refused.
+	// And with the TCP now off, disabling UDP too must be refused.
 	out = postTo("/api/port", map[string]any{"disabled": true})
 	if ok, _ := out["ok"].(bool); ok {
-		t.Fatal("disabling udp while tcp fallback is already off should be refused")
+		t.Fatal("disabling udp while tcp is already off should be refused")
 	}
 	got, _ = config.Load(cfgPath)
 	if p := got.AdvertisedUDPPort(); p != 51820 {

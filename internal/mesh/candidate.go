@@ -22,11 +22,11 @@ import (
 // that pretended otherwise was working around not having asked the right
 // question:
 //
-//   - fallbackPort.Load() guessed the peer's port from our own config.
+//   - tcpListenPort.Load() guessed the peer's port from our own config.
 //   - SeedTCPPort added a second, parallel hint channel for join tokens.
 //   - tcpPortForEndpoint walked live sessions for one whose endpoint shared an
 //     IP and borrowed its port.
-//   - seedFallback mapped each seed to the single derived address it became.
+//   - seedTCP mapped each seed to the single derived address it became.
 //
 // That last pair is what made this worth doing rather than worth renaming. Two
 // nodes behind one NAT — one reached over TCP/65432, the other over UDP/65432,

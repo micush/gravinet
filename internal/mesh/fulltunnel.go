@@ -281,8 +281,8 @@ func (e *Engine) resyncAllBypassRoutes(ns *netState) {
 // before any session exists to cover them the way syncPeerBypassRoute does)
 // so a seed address is never dialed while a full-tunnel default could
 // swallow that very dial. Only the address matters, not the port — a TCP
-// fallback dial and its UDP seed share one /32 automatically, and a
-// resolved fallback address (same IP, different port; see seedFallback's
+// TCP dial and its UDP seed share one /32 automatically, and a
+// resolved TCP address (same IP, different port; see seedTCP's
 // doc comment) needs nothing extra here for the same reason. Meant to be
 // called once per initLoop tick, right before that tick's seeds are dialed.
 func (e *Engine) syncSeedBypassRoutes(ns *netState) {

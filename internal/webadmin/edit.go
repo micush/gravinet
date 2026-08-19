@@ -1085,7 +1085,7 @@ func (s *Server) handleUDPGSOSetting(w http.ResponseWriter, r *http.Request) {
 //
 // disabled:true (the web UI's "-" sentinel) turns UDP off entirely instead
 // of setting a port list — sets primary_port to 0 and clears the extra list.
-// Refused if the TCP/TLS fallback is also off, since the node would then
+// Refused if the TCP/TLS is also off, since the node would then
 // have no way to be reached at all; Config.Validate enforces this as a
 // backstop too. Applied live the same way (main.go's reload closes the live
 // UDP socket — see the newCfg.PrimaryPort == 0 branch there).
@@ -1120,7 +1120,7 @@ func (s *Server) handlePort(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleTCPPort is handlePort's TCP counterpart. Both write a plain list of
-// ports: there is no fallback listener and no extras, just the set of TCP
+// ports: there is no TCP listener and no extras, just the set of TCP
 // ports this node answers on, exactly as handlePort writes the UDP set.
 //
 // Applied live — the daemon rebinds to the new set; the old sockets keep
@@ -1146,7 +1146,7 @@ func (s *Server) handleTCPPort(w http.ResponseWriter, r *http.Request) {
 			return nil
 		}
 		if len(req.Ports) == 0 {
-			return fmt.Errorf("at least one port is required (or \"-\" to turn the TCP fallback off)")
+			return fmt.Errorf("at least one port is required (or \"-\" to turn TCP off)")
 		}
 		for _, p := range req.Ports {
 			if p < 1 || p > 65535 {

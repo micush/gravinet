@@ -88,7 +88,7 @@ func cmdSettingsUPnP(args []string) {
 	switch action {
 	case "on", "enable":
 		cfg.EnableUPnP = true
-		fmt.Println("UPnP ON — on startup this node asks the LAN router to forward every port it listens on (UDP, TCP fallback, extras) from the WAN side automatically; best-effort, a silent no-op if the router doesn't offer UPnP")
+		fmt.Println("UPnP ON — on startup this node asks the LAN router to forward every port it listens on (UDP, TCP, extras) from the WAN side automatically; best-effort, a silent no-op if the router doesn't offer UPnP")
 		commitCfgStructural(cfg, path, noRestart)
 	case "off", "disable":
 		cfg.EnableUPnP = false

@@ -165,7 +165,7 @@ func TestApplySeedStateNoDisabledSeeds(t *testing.T) {
 	}
 }
 
-// A disabled tcp:// seed retires on the TCP side, where the fallback dialer
+// A disabled tcp:// seed retires on the TCP side, where the TCP dialer
 // would otherwise keep priming it independently of the UDP seed set.
 func TestApplySeedStateRetiresDisabledTCPSeed(t *testing.T) {
 	n := config.Network{Seeds: config.SeedList{
