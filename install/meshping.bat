@@ -10,6 +10,10 @@
 :: pattern matches a substring rather than requiring an exact line, so
 :: multiple per-network blocks (each with its own tag) are all picked up.
 ::
+:: Columns are Hostname, IP Address, Status, measured from the data before
+:: anything is pinged and fitted to an 80-column console - the same as the
+:: POSIX script. See the comment on :measure_line below.
+::
 :: Usage:
 ::   meshping.bat            ping both IPv4 and IPv6 entries
 ::   meshping.bat -4         ping only IPv4 entries
@@ -45,11 +49,42 @@ if not exist "%HOSTS_FILE%" (
     exit /b 1
 )
 
-set "SEP=---------------------------------------------------------------"
-echo %SEP%
-call :print_row "IP Address" "Hostname" "Status"
-echo %SEP%
+:: The table is laid out for an 80-column console. TABLE_W is a ceiling, not a
+:: target: a mesh of short names produces a narrow table rather than one padded
+:: out to 80.
+set "TABLE_W=80"
 
+:: First pass: measure the columns. Nothing is pinged here, so this costs a
+:: read of the hosts file and no network time.
+set "IP_W=10"
+set "HOST_W=8"
+set "STATUS_W=6"
+set "INSIDE=0"
+for /f "usebackq delims=" %%L in ("%HOSTS_FILE%") do call :measure_line "%%L"
+
+:: Fitting to TABLE_W takes the space out of the hostname column and never out
+:: of the address, for the reasons given on :handle_line's truncation below.
+set /a HOST_MAX=TABLE_W - IP_W - 2 - 2 - STATUS_W
+if !HOST_MAX! lss 8 set "HOST_MAX=8"
+if !HOST_W! gtr !HOST_MAX! set "HOST_W=!HOST_MAX!"
+
+:: The rule and the padding string are both built to the measured total, since
+:: a hardcoded one no longer matches. PAD is at least as long as either column
+:: because SEP_W is the sum of both plus the separators.
+set /a SEP_W=HOST_W + 2 + IP_W + 2 + STATUS_W
+set "SEP="
+set "PAD="
+for /l %%N in (1,1,%SEP_W%) do (
+    set "SEP=!SEP!-"
+    set "PAD=!PAD! "
+)
+
+echo !SEP!
+call :print_row "Hostname" "IP Address" "Status"
+echo !SEP!
+
+:: Second pass: ping and print. Rows appear as each ping returns, rather than
+:: the table being buffered until the last dead host has timed out.
 set "INSIDE=0"
 for /f "usebackq delims=" %%L in ("%HOSTS_FILE%") do call :handle_line "%%L"
 
@@ -58,12 +93,20 @@ exit /b 0
 
 :: --- subroutines ------------------------------------------------------------
 
-:: handle_line processes a single hosts-file line, tracking whether we're
+:: parse_line examines a single hosts-file line, tracking whether we're
 :: currently inside a "# BEGIN gravinet ..." / "# END gravinet ..." block
 :: (INSIDE persists across calls since this isn't wrapped in its own
-:: setlocal) and, for data lines inside such a block, pinging the address.
-:handle_line
+:: setlocal). It sets ROW_IP / ROW_HOST / ROW_IS6 when the line is a data row
+:: inside such a block that the -4/-6 flags select, and clears ROW_IP
+:: otherwise. Both passes go through it, so the pass that measures the
+:: columns and the pass that prints them can never disagree about which rows
+:: are in the table - a -4 run must not size the address column around IPv6
+:: rows it then skips.
+:parse_line
 set "LINE=%~1"
+set "ROW_IP="
+set "ROW_HOST="
+set "ROW_IS6=0"
 
 if "!LINE:~0,16!"=="# BEGIN gravinet" (
     set "INSIDE=1"
@@ -94,10 +137,30 @@ echo !IP! | findstr /c:":" >nul 2>&1 && set "IS6=1"
 if "!IS6!"=="1" if "!PING_6!"=="0" goto :eof
 if "!IS6!"=="0" if "!PING_4!"=="0" goto :eof
 
-if "!IS6!"=="1" (
-    ping -6 -n 1 -w 2000 !IP! >nul 2>&1
+set "ROW_IP=!IP!"
+set "ROW_HOST=!HOST!"
+set "ROW_IS6=!IS6!"
+goto :eof
+
+:: measure_line widens the columns to fit one row, if that row needs it.
+:measure_line
+call :parse_line %1
+if "!ROW_IP!"=="" goto :eof
+call :strlen ROW_IP N
+if !N! gtr !IP_W! set "IP_W=!N!"
+call :strlen ROW_HOST N
+if !N! gtr !HOST_W! set "HOST_W=!N!"
+goto :eof
+
+:: handle_line pings one row's address and prints it.
+:handle_line
+call :parse_line %1
+if "!ROW_IP!"=="" goto :eof
+
+if "!ROW_IS6!"=="1" (
+    ping -6 -n 1 -w 2000 !ROW_IP! >nul 2>&1
 ) else (
-    ping -4 -n 1 -w 2000 !IP! >nul 2>&1
+    ping -4 -n 1 -w 2000 !ROW_IP! >nul 2>&1
 )
 
 if !errorlevel! equ 0 (
@@ -106,19 +169,52 @@ if !errorlevel! equ 0 (
     set "STATUS=DEAD"
 )
 
-call :print_row "!IP!" "!HOST!" "!STATUS!"
+:: A name too long for the fitted column is cut and marked with a trailing "~",
+:: so a shortened name is never mistaken for the real one. The address is never
+:: cut: it is bounded at 45 characters where a FQDN can be 253, and a cut
+:: address is useless to paste into a ping where a cut name is still
+:: recognisable.
+call :strlen ROW_HOST N
+if !N! gtr !HOST_W! (
+    set /a CUT=HOST_W - 1
+    for %%C in (!CUT!) do set "ROW_HOST=!ROW_HOST:~0,%%C!~"
+)
+
+call :print_row "!ROW_HOST!" "!ROW_IP!" "!STATUS!"
 goto :eof
 
-:: print_row prints three columns padded/truncated to the same widths as
-:: the POSIX script's `printf "%-40s %-15s %s\n"`.
+:: strlen measures the string held in the named variable into the named
+:: result variable. Batch has no length operator, so this walks decreasing
+:: powers of two, chopping the prefix off each time one fits. 64 is the
+:: largest step because nothing in a hosts file line is near that long - a
+:: full-length IPv6 literal is 45 characters.
+:strlen
+setlocal EnableDelayedExpansion
+set "s=!%~1!#"
+set "len=0"
+for %%A in (64 32 16 8 4 2 1) do (
+    if "!s:~%%A!" NEQ "" (
+        set /a len+=%%A
+        set "s=!s:~%%A!"
+    )
+)
+endlocal & set "%~2=%len%"
+goto :eof
+
+:: print_row prints hostname, address and status at the measured widths, the
+:: same layout as the POSIX script's
+:: `printf "%-${HOST_W}s  %-${IP_W}s  %s\n"`. Status is last and needs no
+:: padding of its own. Any shortening of the hostname has already happened in
+:: :handle_line, where it can be marked; the clamp here only guards the
+:: padding. The previous fixed 15-character hostname field truncated silently,
+:: printing hw-macmini-macos as hw-macmini-maco with nothing to show for it.
 :print_row
 set "C1=%~1"
 set "C2=%~2"
 set "C3=%~3"
-set "PAD=                                                                "
 set "C1=!C1!!PAD!"
-set "C1=!C1:~0,40!"
+for %%W in (!HOST_W!) do set "C1=!C1:~0,%%W!"
 set "C2=!C2!!PAD!"
-set "C2=!C2:~0,15!"
-echo !C1! !C2! !C3!
+for %%W in (!IP_W!) do set "C2=!C2:~0,%%W!"
+echo !C1!  !C2!  !C3!
 goto :eof

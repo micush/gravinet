@@ -31,15 +31,91 @@ fi
 
 OS=$(uname -s)
 
-# Safe printf formatting to prevent interpretation of dashes as options
-printf '%s\n' "---------------------------------------------------------------"
-printf "%-40s %-15s %s\n" "IP Address" "Hostname" "Status"
-printf '%s\n' "---------------------------------------------------------------"
+# want_family reports whether an address should be pinged, given -4/-6. Both
+# passes below call it, so the pass that measures the columns and the pass
+# that prints them can never disagree about which rows are in the table — a
+# -4 run must not size the address column around IPv6 rows it then skips.
+want_family() {
+    case "$1" in
+        *:*) [ "$PING_6" -eq 1 ] ;;
+        *)   [ "$PING_4" -eq 1 ] ;;
+    esac
+}
 
-sed -n '/# BEGIN gravinet/,/# END gravinet/p' "$HOSTS_FILE" | grep -v '^#' | \
+ROWS=$(sed -n '/# BEGIN gravinet/,/# END gravinet/p' "$HOSTS_FILE" | grep -v '^#')
+
+# The table is laid out for an 80-column terminal. TABLE_W is a ceiling, not a
+# target: a mesh of short names produces a narrow table rather than one padded
+# out to 80.
+TABLE_W=80
+
+# Column widths are measured from the rows about to be printed rather than
+# fixed at a guess. The old %-40s address field was sized for an address far
+# longer than a gravinet overlay ever is (fd00:203::35, 192.168.203.35), and
+# spent the remaining ~25 columns on whitespace; the old %-15s hostname field
+# was too narrow at the same time, so any name of 16 or more overflowed it and
+# pushed Status one column right on that row alone.
+#
+# Both columns can be measured before anything is pinged, because the address
+# and the hostname both come out of the hosts file - Status is the only column
+# that has to be waited for. So rows still stream out as each ping returns,
+# instead of the whole table being buffered until the last dead host has timed
+# out.
+IP_W=10     # never narrower than the "IP Address" header
+HOST_W=8    # never narrower than the "Hostname" header
+STATUS_W=6  # "Status", which is longer than either ALIVE or DEAD
+
+while read -r ip host extra; do
+    if [ -z "$ip" ] || [ -z "$host" ]; then
+        continue
+    fi
+    if ! want_family "$ip"; then
+        continue
+    fi
+    [ "${#ip}" -gt "$IP_W" ] && IP_W=${#ip}
+    [ "${#host}" -gt "$HOST_W" ] && HOST_W=${#host}
+done <<EOF
+$ROWS
+EOF
+
+# Fitting to TABLE_W takes the space out of the hostname column and never out
+# of the address. An address is bounded - 45 characters at the very worst, and
+# a gravinet overlay is nowhere near it - while a FQDN can be 253, so the
+# hostname is the only column that can genuinely run away. It is also the one
+# that survives being shortened: a cut address is useless to paste into a ping,
+# whereas a cut name is still recognisable. Anything cut ends in "~" so a
+# shortened name is never mistaken for the real one.
+HOST_MAX=$((TABLE_W - IP_W - 2 - 2 - STATUS_W))
+if [ "$HOST_MAX" -lt 8 ]; then
+    HOST_MAX=8
+fi
+if [ "$HOST_W" -gt "$HOST_MAX" ]; then
+    HOST_W=$HOST_MAX
+fi
+
+# Two spaces between columns, so the widest entry in a padded column still has
+# a visible gap after it instead of butting against its neighbour. Status is
+# last and needs no padding of its own; STATUS_W is what the header costs.
+SEP_W=$((HOST_W + 2 + IP_W + 2 + STATUS_W))
+SEP=''
+i=0
+while [ "$i" -lt "$SEP_W" ]; do
+    SEP="$SEP-"
+    i=$((i + 1))
+done
+
+# Safe printf formatting to prevent interpretation of dashes as options
+printf '%s\n' "$SEP"
+printf "%-${HOST_W}s  %-${IP_W}s  %s\n" "Hostname" "IP Address" "Status"
+printf '%s\n' "$SEP"
+
 while read -r ip host extra; do
     
     if [ -z "$ip" ] || [ -z "$host" ]; then
+        continue
+    fi
+
+    if ! want_family "$ip"; then
         continue
     fi
 
@@ -48,14 +124,6 @@ while read -r ip host extra; do
         *:*) is_ipv6=1 ;;
         *)   is_ipv6=0 ;;
     esac
-
-    # Skip addresses based on user flags
-    if [ "$is_ipv6" -eq 1 ] && [ "$PING_6" -eq 0 ]; then
-        continue
-    fi
-    if [ "$is_ipv6" -eq 0 ] && [ "$PING_4" -eq 0 ]; then
-        continue
-    fi
 
     # Execute platform-specific ping execution
     if [ "$OS" = "Linux" ]; then
@@ -100,7 +168,13 @@ while read -r ip host extra; do
         status="DEAD"
     fi
 
-    printf "%-40s %-15s %s\n" "$ip" "$host" "$status"
-done
+    if [ "${#host}" -gt "$HOST_W" ]; then
+        host=$(printf "%.$((HOST_W - 1))s~" "$host")
+    fi
 
-printf "%s\n"
+    printf "%-${HOST_W}s  %-${IP_W}s  %s\n" "$host" "$ip" "$status"
+done <<EOF
+$ROWS
+EOF
+
+printf '\n'

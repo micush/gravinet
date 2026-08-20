@@ -2,6 +2,68 @@
 
 ---
 
+## v894 — 2026-08-20
+
+**`meshping`'s columns are Hostname, IP Address, Status, fitted to 80.**
+
+v893 sized the columns to their contents, which fixed the reported gap but only moved the mechanism. A column with anything after it has to be padded to its own longest value, and that value is then charged to every other row — so one `prod-db-replica-07.internal.corp.example.com` in a mesh of `hw-rpi4-fedora`s produced a 44-column hostname field and put thirty columns of whitespace on every short row. That is the same defect as the fixed `%-40s` it replaced, just data-driven instead of hardcoded. A wide address did it too: three full-form IPv6 literals stretched the address column to 39 and left the v4 rows trailing.
+
+**The table now has a ceiling.** `TABLE_W` is 80, and it is a ceiling rather than a target — a mesh of short names still produces a narrow table rather than one padded out to 80. Measured widths are used as-is when they fit, which is the ordinary case.
+
+**When they don't fit, the hostname column gives up the space and the address never does.** An address is bounded — 45 characters at the very worst, and a gravinet overlay is nowhere near it — while a FQDN can be 253, so the hostname is the only column that can genuinely run away. It is also the one that survives being shortened: a cut address is useless to paste into a `ping`, whereas a cut name is still recognisable. A shortened name ends in `~`, so it is never mistaken for the real one. This is a different thing from the truncation removed in v893, which was silent, fixed at 15, and narrower than hostnames people actually have.
+
+`Status` moved to the end, where it needs no padding of its own; `STATUS_W` is only what the header costs.
+
+### The trade-off this keeps
+
+**A long hostname still pads every row.** Hostname is the unbounded field and it is now first, so its longest value sets the column for the whole table — 44 wide for a single long name, if that fits under 80. Putting the unbounded field *last* is what removes that entirely, since a column with nothing after it needs no padding at all and a long name would cost only its own row. This layout was asked for directly; the alternative is one line in `printf` and the note is here so the choice is visible rather than rediscovered.
+
+### Verification
+
+`go build ./...` clean; `gofmt` clean on every file touched. `cmd/gravinet`, `internal/webadmin`, `internal/config` and `internal/service` pass in full. No Go file changed except the version constant.
+
+The POSIX script was run under `dash`, `bash` and `sh` with `ping` stubbed: byte-identical output from all three. Six hosts files × three flag modes, checked for the property that actually matters — **no row exceeds 80 columns in any of the eighteen runs**, and none is padded out to 80 that doesn't need it. The fixtures include a 44-character FQDN beside 14-character names (the case v893 got wrong), full-form IPv6 mixed with v4, both long at once (fits at exactly 80, hostname cut to 31 plus `~`, address intact), and an empty gravinet block (28 columns, header widths).
+
+`shellcheck -s sh` reports the same two pre-existing findings as v893 and nothing new.
+
+**`meshping.bat` has still not been run** — no Windows host here. Every `call :` target resolves to a label that exists, and the algorithm was reimplemented in Python — the `:strlen` chop, the `HOST_MAX` fit, the `~` marking and the `:print_row` padding — and produces output byte-identical to the POSIX script across all eighteen fixture/flag combinations. That validates the arithmetic, not the batch syntax.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
+## v893 — 2026-08-20
+
+**`meshping`'s table is sized to what's in it.**
+
+The layout was two fixed fields, `printf "%-40s %-15s %s\n"`, and both were the wrong size in opposite directions.
+
+**The address column was 40 wide** for addresses that are never close to it. A gravinet overlay address is a ULA and a private v4 — `fd00:203::35` is twelve characters, `192.168.203.35` is fourteen — so roughly twenty-five columns of every row were padding, and the hostname column sat that far off to the right with nothing in between.
+
+**The hostname column was 15 wide**, which is narrower than hostnames people actually have. `hw-macmini-macos`, `vm-pve10-freebsd`, `vm-pve10-manjaro` and `vm-pve10-openbsd` are all sixteen. `%-15s` does not truncate, so those rows ran one character long and pushed `Status` one column right — on those rows only, which is why the column looked *almost* aligned. `meshping.bat` mirrored the same widths deliberately but implemented them by truncation (`!C2:~0,15!`), so on Windows the same four rows silently printed as `hw-macmini-maco`.
+
+**Both columns are now measured from the rows about to be printed**, with the header lengths as floors so a short mesh can't produce a column narrower than its own title. Column separation went from one space to two, so the widest entry in a column still has a gap after it rather than butting against its neighbour, and the rule above and below the header is built to the measured total instead of being a hardcoded run of 63 dashes that no longer described anything.
+
+**Measuring does not cost the streaming.** The obvious way to size a table is to buffer it, and that would have been the wrong trade here: a dead host costs a two-second ping timeout, so a mesh with a few of them would have shown nothing at all for ten or twenty seconds and then everything at once. It isn't necessary — the address and the hostname both come out of the hosts file, and `Status` is the only column that has to be waited for. So the first pass reads the file and measures, the second pass pings and prints, and rows still appear one at a time as each ping returns.
+
+**Both passes select rows through one function** — `want_family` in the POSIX script, `:parse_line` in the batch one — rather than each repeating the `-4`/`-6` test. A `meshping -4` must not size its address column around the IPv6 rows it is about to skip, and that is exactly the bug that two copies of a filter drift into.
+
+`meshping.bat` needed a `:strlen` to do any of this, batch having no length operator; it is the usual binary chop, stepping 64 down to 1. `:handle_line` lost its parsing to `:parse_line` and kept the pinging. `:print_row` still pads to a width, but the width is now measured rather than fixed, which means the truncation is gone as a side effect: no value can overflow a column derived from the longest value present.
+
+### Verification
+
+`go build ./...` clean; `gofmt` clean on every file touched. `cmd/gravinet`, `internal/webadmin`, `internal/config` and `internal/service` pass in full. No Go file changed here except the version constant.
+
+The POSIX script was run under `dash`, `bash` and `sh` against a hosts file reproducing the reported mesh, with `ping` stubbed so the run is deterministic: all three shells produce byte-identical output. Checked with no flags, `-4` and `-6`; with a 39-character IPv6 literal and a 44-character hostname, which widen the table without overflowing it; and with an empty gravinet block, which degrades to the header widths rather than dividing by zero. In every case no row is longer than the rule above it — the specific thing that was wrong before.
+
+`shellcheck -s sh` reports two findings, both of which predate this release (the `extra` field absorbed by `read`, and one `$?` test). The third it used to report is gone: the final `printf "%s\n"` passed no argument for its own conversion and is now `printf '\n'`.
+
+**`meshping.bat` has not been run.** There is no Windows host in the loop here, and batch is not something the Go suite covers. What was checked is that every `call :` target resolves to a label that exists, and that the algorithm is right: the `:strlen` chop and the `:print_row` padding were reimplemented in Python against the same hosts file and produce output byte-identical to the POSIX script's, under all three flag modes. That validates the arithmetic, not the batch syntax — worth a run on Windows before trusting it.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
 ## v892 — 2026-08-19
 
 **The System page called `l2disco` is `lldp` now, and one hardware vendor's name is gone from the tree.**
