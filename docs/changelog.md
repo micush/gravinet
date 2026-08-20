@@ -2,6 +2,189 @@
 
 ---
 
+## v891 — 2026-08-19
+
+**The column chooser's dropdown was being clipped to a single entry.**
+
+v890 nested the panel inside the gear and exempted `th.gear-th` from `overflow:hidden`, on the theory that the header cell was the thing that would clip it. It was not the only thing. The Networks table lives in a `.tscroll` wrapper, and `overflow-x:auto` makes the computed `overflow-y` `auto` as well — so the scroll container clipped the panel at the bottom of the table. On a one-row table that left exactly one entry visible, plus the vertical scrollbar the overflow produced.
+
+The v890 notes called the dropdown out as the thing to watch and named the specificity tie it depended on. That guard was real but aimed one level too low: the clip can come from *any* ancestor, and no set of per-ancestor exemptions fixes that in general.
+
+**The panel is now parented to `<body>` and positioned `fixed`,** from the gear's own bounding rect on open, so it has no clipping ancestor to escape. That brings the obligations that come with living outside the tree it describes:
+
+- **It is removed from the body on close**, or every open would leave another one behind.
+- **It re-positions on scroll and resize**, with the scroll listener captured, because a scroll inside `.tscroll` does not bubble and the panel would otherwise sit still while the gear it points at slid out from under it.
+- **It flips above the gear** when there is not room below, so a table near the bottom of a long page does not open its chooser off screen.
+- **It is re-positioned after a toggle**, since hiding a column moves the gear and reflows the table, and the panel follows nothing on its own.
+- **A panel whose table has been re-rendered is closed** on the next `addColumnChooser`. Focus parking stops the four-second poll from doing this, but any other path that calls `renderSection` can, and nothing else would take the panel down.
+
+**The gear column reserves 26px of right padding.** The gear overlays the right edge of the last visible header cell, and without the reservation it sat on top of the heading — visible on `notes` in the report.
+
+### Verification
+
+`go build ./...` clean; `go vet` and `gofmt` clean on every file touched. `internal/webadmin` passes in full.
+
+`TestColumnMenuEscapesItsContainer` guards the fixed positioning, the body parenting, the detach on close, the orphan check, the captured scroll listener and the flip — and fails on the specific regression of nesting the panel back in the gear.
+
+The jsdom harness is at 104 checks. The chooser tests were rewritten around the panel being reachable only while open, and gained assertions that it is parented to the body rather than inside the table, and that nothing is left behind after close. Reverting `document.body.appendChild(menu)` to `gear.appendChild(menu)` fails two of them.
+
+**Not rendered**, as with v888–v890. This is the second bug in this feature that only shows up under real layout, and both were clipping: the harness has no layout engine, so it can prove the panel is attached to the body and positioned from the gear, but not that it is visible. Worth a look at Networks specifically, since `.tscroll` is what clipped it.
+
+The two pre-existing failures from v887 are unchanged: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
+## v890 — 2026-08-19
+
+**Every table now has a gear in its header that shows or hides columns.**
+
+It goes in `enhanceTable` beside the filter, the sort and the resize grips, so it reaches every table in the admin UI the same way those did — the blanket pass in `renderSection` plus the twelve explicit calls for the sections that build their tables asynchronously. No table opts in.
+
+**The gear sits in the last visible header cell**, which is the one column that has no resize grip — so the two controls never compete for the same 9px of edge. When the rightmost column is hidden the gear moves left to whichever column is now last, and it is *moved* rather than rebuilt, so hiding a column with the menu open does not also close the menu.
+
+**Only columns with a heading are offered.** A blank heading is a checkbox or action column: there is nothing to name it in the list, and hiding the selection column would take the row selection out from under the toolbar buttons that act on it. A table with fewer than two labelled columns gets no gear at all.
+
+**The last visible column cannot be unticked.** Its checkbox disables itself and the row greys out. A table with every column hidden shows nothing and offers no way back, because the gear that would undo it lives in a header cell that no longer exists. "Show all" at the foot of the menu restores everything in one click.
+
+**Hidden columns survive a re-render**, in `state.tableView` beside the sort, filter and widths, and for the identical reason: `renderSection` destroys and rebuilds every table, and the four-second status poll does it unprompted on Mesh › peers, Monitor › Mesh Peers and Bans. Visibility is restored *before* the widths and the grips, both of which read it.
+
+**The `<col>` is hidden along with the cells.** Under `table-layout:fixed` a column's width comes from the col rather than from its cells, so hiding only the cells empties the column but leaves the gap it occupied. Rows whose cell count disagrees with the header — the "no rows yet" placeholders that span the table with a colspan — are skipped rather than indexed into.
+
+**The resize math was taught about hidden columns** in three places: grips stop at the last *visible* column rather than the last cell; a hidden column's floor is zero, so its label's width is not held back for a column that is not on screen; and the distribution loop passes over hidden columns entirely, since the giving branch would otherwise hand a leftward drag's whole surplus to the first one it met and park it off screen.
+
+### What this deliberately does not do
+
+**Changing which columns are visible clears that table's dragged widths and returns it to auto layout.** The alternative is maintaining widths in two coordinate spaces at once — a base over every column, and a rendering normalised over the visible ones — and converting between them on every drag and every toggle. That conversion is where the subtle bugs would live, and auto layout re-fits the remaining columns sensibly on its own, which is most of what the stored widths were doing. Widths dragged *after* a toggle are kept as normal.
+
+**The filter still searches hidden columns.** It matches on the row's whole text, so a query can hit a value in a column that is not on screen. Left as-is: the filter has always been "match the row", and making it depend on which columns are shown would make the same query mean different things on two nodes.
+
+### Verification
+
+`go build ./...` clean; `go vet` and `gofmt` clean on every file touched. `internal/webadmin` passes in full, including `TestUIScriptParses`.
+
+Two new guards. `TestColumnChooserWiring` covers the labelled-columns filter, the locked last column, the click that must not reach the sort handler, the focus park, and the width reset. `TestColumnVisibilitySurvivesRerender` covers the restore, the ordering it depends on, the col hiding, and the three places the resize math reads the hidden set.
+
+Two guards from v887 and v889 asserted expressions this release legitimately rewrote — "the last cell" became "the last visible cell", and the floor gained a hidden-column branch. Both were re-pointed at the current text rather than relaxed; they still fail when the behaviour they describe is removed. This is the second time that has happened, and it is the standing cost of pinning wiring by substring: the guard cannot tell a rewrite from a removal, so every change to a guarded line has to be read rather than just re-run.
+
+The jsdom harness grew a column-chooser section and now runs 101 checks: gear placement and the entries the menu offers, open/close by click, outside-mousedown and Escape, that unticking hides every cell in the column and nothing in any other, that hiding the rightmost column moves both the gear and the point where grips stop, that the survivor locks, that "show all" restores, that a toggle drops the widths and unpins, and that a colspan placeholder row is not indexed into.
+
+**Not rendered.** No browser is available here, so as with v888 and v889 the CSS is reasoned and guarded rather than seen. Worth a look at the dropdown specifically: it escapes the header cell's `overflow:hidden` by a source-order specificity tie, which the guards check for presence but cannot check for effect.
+
+The two pre-existing failures from v887 are unchanged: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
+## v889 — 2026-08-19
+
+**Resizing a column no longer reformats another column's heading.**
+
+Two causes, both introduced by the resize work and both visible at once on Networks: `name` rendered as four letters stacked vertically, `seeds` broke after "seed", and the id column came apart two characters to a line.
+
+**v888's wrap rule covered `th` as well as `td`.** That was wrong on its face. A data cell holds an address or a CIDR — an unbreakable string that has to go somewhere, and wrapping it is the least-bad option. A header holds a fixed, short label chosen to be read at a glance, and there is no width at which breaking one is the right answer. The rule is now `td` only. Headers are held to a single line, with `text-overflow:ellipsis` as a backstop that should never fire.
+
+**The floor a column could be dragged to was a flat 24px**, which is narrower than nearly every label in the UI. So the fix above is not sufficient on its own: a header pinned to one line in a column too narrow for it just clips instead of stacking, which is less ugly and equally useless. The real problem was that a drag on one column was allowed to squeeze its neighbours past the width their own headings needed.
+
+**A column's minimum is now its own header's label**, measured by `headerMinPx` — text width, plus cell padding, plus the sort arrow's 14px where the column is sortable. `mtu` may go to 44px; `overlay4` may not go below 84px; the checkbox column has no label and keeps the 24px `COL_MIN` floor. This is what makes the guarantee hold in the direction that was actually reported: it constrains the *neighbours* a drag takes width from, not just the column under the cursor. Dragging a column narrower than its own label is stopped at the same floor.
+
+The measurement is taken against an off-screen probe rather than the header cell itself. Reading the cell back would be circular — by the time a column is too narrow its header has already wrapped or clipped, so the cell reports the squeezed width and ratifies whatever damage was done. The probe is `white-space:pre` for the same reason.
+
+The arrow allowance is reserved on every sortable column rather than only the sorted one, so a column does not jump narrower the moment its sort is cleared.
+
+### Verification
+
+`go build ./...` clean; `go vet` and `gofmt` clean on every file touched. `internal/webadmin` passes in full, including `TestUIScriptParses`.
+
+`TestHeaderLabelsAreNotReformatted` guards both halves: that the wrap rule does not cover `th` again, that pinned headers stay on one line, that the floor is indexed per column in all three places the drag math uses it, and that `headerMinPx` measures a probe it cleans up rather than the cell.
+
+Two v887/v888 guards asserted the old flat-floor expressions and were updated to the indexed form. They were checking the right properties against the wrong text, which is the failure mode of pinning wiring by substring; both still fail when the behaviour they describe is removed.
+
+The jsdom harness grew a text-width model so the floors are measurable, and now runs 62 checks. New ones reproduce the reported case directly — a five-column table with `name` beside a wide `mesh`, dragged to the stop — and assert that no column ends below its own label, that a long label keeps more room than a short one, that a squeezed column stops *exactly* on its floor rather than somewhere else, that an empty header still gets `COL_MIN`, and that `headerMinPx` returns the same value before and after its column is crushed to 24px. Reverting the per-column floor to a flat `COL_MIN` reproduces the bug in the harness: `name` lands at 3% against the 6.5% its label needs.
+
+**Still not rendered.** No browser is available here, so as with v888 the CSS half is reasoned and guarded rather than seen. The arithmetic half is now covered properly.
+
+The two pre-existing failures from v887 are unchanged: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
+## v888 — 2026-08-19
+
+**A resized column no longer paints its contents over the column beside it.**
+
+v887's resizing pins a table to `table-layout:fixed` on first drag. A fixed column does not grow to fit, and the default `overflow` is `visible` — so anything longer than its column overflowed the cell and was painted straight across whatever was to its right, rather than being contained by it.
+
+On Seeds this hit every row at once. The address column holds `host:udp,tcp` strings, and a full IPv6 endpoint — `[2001:579:3f00:1800:6cd6:47b9:b3d8:adc6]:65432` — is roughly twice the width the column gets on an ordinary window. The `transport` value underneath it was still rendered and still correct; it was simply covered up. The tell is that a short IPv6 seed like `[2402:d0c0:12:2e1a::1]` showed its `tcp` normally, so it was never about address family, only about length.
+
+**Cells in a pinned table now wrap on any character.** Wrapped rather than clipped with an ellipsis, following the two places this codebase had already made the same call: `td.cidr-cell`, for IPv6 prefixes that "would rather overflow rt-col2's fixed 296px than shrink to fit", and `td.tgt-cell`, which chose wrapping explicitly because an ellipsis "would eat the id — the part this table exists to let you copy". An address column is that case exactly. A wrapped row is taller; a clipped one is wrong.
+
+**The rule is written above the `peers-table` and `routes-table` blocks, and that placement is load-bearing.** `table[data-pinned] td` and `table.peers-table td` have identical specificity, so source order alone decides which wins. Both of those tables were already fixed-layout and already set `nowrap` + `text-overflow:ellipsis` on purpose; written below them, the generic rule would quietly take that away. `TestPinnedTableContainsItsContent` asserts the ordering rather than just the rule's presence, because an edit that moves it would look harmless at the point it was made.
+
+**Inline editors shrink with their column too.** `overflow-wrap` does nothing to a form control, and `input.cell-edit` carries `min-width:90px` of its own — well above the 24px a column can be dragged to. Opening an editor in a column narrower than that would have overflowed it the same way the text did. In a pinned table the width the operator dragged is the authority, so the floor is lifted. A column too narrow to edit in is one they can widen again.
+
+### Scope
+
+Only tables that have actually been resized are affected: the rule keys off `data-pinned`, which `applyColWidths` sets on first write. A table nobody has dragged is still auto-layout and still sizes its columns to its content, exactly as before v887.
+
+### Verification
+
+`go build ./...` clean; `go vet` and `gofmt` clean on every file touched. `internal/webadmin` passes in full, including `TestUIScriptParses`.
+
+One new guard, `TestPinnedTableContainsItsContent`, covering the rule, the editor floor, and the source ordering. Confirmed to fail when the rule is moved below the `peers-table` block — the failure mode it exists for — as well as when it is removed.
+
+**This fix is reasoned from CSS semantics and pinned by guards; it has not been rendered.** No browser is available in the environment this was built in — the headless Chromium download is blocked — and the jsdom harness v887 used for the drag arithmetic implements no layout, so it cannot show an overflow or prove one is gone. The drag math from v887 was re-run against it and is unchanged. Worth an eye on Seeds and Monitor › Mesh Peers specifically, since those are the tables with unbreakable values long enough to have shown the original bug.
+
+The two pre-existing failures noted in v887 are unchanged and still not addressed here: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
+## v887 — 2026-08-19
+
+**Every table in the admin UI now has draggable column boundaries.**
+
+`enhanceTable` was already the one place every table passes through — the blanket `c.querySelectorAll('table').forEach(enhanceTable)` in `renderSection`, plus twelve explicit calls for the sections that build their tables asynchronously and miss that sweep. Sort and filter were added there and reached every table for free; resizing goes in beside them and does the same. No table opts in, and none had to be found.
+
+**The width is a redistribution, not an addition.** Dragging the boundary after a column widens it by taking from the columns to its right, one at a time, each down to a 24px floor before the next is touched — and gives it back in the same order, so a drag out and back leaves every column where it started. The table's total width never changes. The alternative, letting the table grow and scroll, was rejected because it would let any card on the page sprout a horizontal scrollbar: `.tscroll` is used on exactly two tables here, and a table that cannot outgrow its card cannot break the page it is on. It also matches what the complaint actually is on Monitor › Mesh Peers — `endpoint` is too narrow to read and `rtt` is wider than a number needs — which is a request to move width between columns, not to add it.
+
+The last column has no grip. There is nothing to its right to trade with; it is the column that absorbs whatever the others give up.
+
+**Widths survive a re-render**, via the `state.tableView` record v885 built for the sort and filter. This is the same bug those had: every table is destroyed and rebuilt by `renderSection()`, and on Mesh › peers, Monitor › Mesh Peers and Bans the four-second status poll rebuilds them whether or not anything was edited — a dragged column would have been reset before the next one could be dragged. `tableViewKey` needed no change, and the column signature it already folds in is what makes a stale entry harmless rather than dangerous: a table that gains or renames a column looks up a different key and never finds the old widths at all.
+
+**The table is pinned to `table-layout:fixed` on the first write, not up front.** Under the default auto layout a column width is a suggestion the browser re-weighs against cell content, so a column dragged narrow springs back open the moment a long endpoint lands in it. Deferring the switch to the first actual drag means a table nobody has touched keeps the sizing it has always had — `peers-table` and `routes-table` included, both of which were already fixed and already carried their widths as classes on `<col>`.
+
+Those two are why `tableColEls` reuses an existing colgroup rather than building one: an inline width on a `col` overrides the class rule, which is the override wanted, while `c-sel`, `c-target`, `rt-col2` and the rest survive untouched. A colgroup whose length disagrees with the header is replaced instead of trusted, for the same reason as the colspan guard below.
+
+**Widths are stored as percentages of the table**, so a view restores correctly at a window width other than the one it was saved at, and a pinned table still tracks its card. The exception is a table inside `.tscroll`, which is allowed to be wider than its container (`width:auto`, `min-width:100%`); a percentage there would resolve against a width derived from the content it is about to change, so the current total is pinned in px first to give it a stable base.
+
+**Double-click any grip to reset that table.** This is the only way back — nothing else on the page restores a column dragged to its floor.
+
+### Details that are not arbitrary
+
+**The grip sits wholly inside its header cell**, at `right:0` rather than straddling the border. `table.peers-table td, table.peers-table th` sets `overflow:hidden`, and a grip hanging past the edge would be clipped down the middle on the widest table in the UI — the one most worth resizing. The grab area is 9px; the hairline that appears on hover is a 1px child of it, because a 9px mark would read as a column border of its own.
+
+**A header cell also sorts on click**, so `click` and `pointerdown` are both stopped on the grip. They are stopped there rather than filtered inside the sort handler because the grip is the part that knows a click on it was aimed at the boundary — the sort handler stays unaware any of this exists. Without it, releasing a drag would also re-sort the table.
+
+**`body.col-resizing` holds the `col-resize` cursor for the duration of a drag.** Once the pointer is captured it travels far outside the 9px grip, and without this the cursor reverts to whatever it is over and the drag looks like it has already ended.
+
+**A header with a `colspan` disables resizing on that table entirely.** Everything here addresses a column by its header-cell index, and a spanning cell breaks that correspondence for every cell after it, so a width computed for cell *i* would be written onto a different column than the edge that was dragged. Those tables keep sort and filter and simply do not resize. A table that has never been laid out — a section that is not on screen — is declined for the same reason in `tableWidthPct`, since every column would otherwise pin to zero.
+
+### What this deliberately does not do
+
+**Widths do not survive a page reload.** They live in `state.tableView`, which is memory, exactly like the sort and the filter beside them. Persisting them would mean introducing storage that no other view state here uses, and a column width that outlives the tab is a different feature from one that outlives a poll; this is the second.
+
+### Verification
+
+`go build ./...` clean. `go vet` and `gofmt` clean on every file this release touches. `internal/webadmin` passes in full, including `TestUIScriptParses` — the whole UI is one embedded script, and a syntax error anywhere in it renders every page blank.
+
+Two failures predate this release and are unchanged by it, both reproducible against the v886 tree:
+
+- **`internal/mesh` test files do not compile.** v886's four test renames copied rather than moved, so `fallback_test.go`, `fallbackbackoff_test.go`, `fallbackdial_backoff_test.go` and `fallback_extraports_test.go` are all still present beside `tcpdial_test.go`, `tcpbackoff_test.go`, `tcpdial_backoff_test.go` and `tcpdial_extraports_test.go`. `waitFor` is declared twice and the surviving copies call `fallbackEngine`, `watchFallbackHandshake` and the rest of the pre-rename names, so `go vet ./internal/mesh` and `go test ./internal/mesh` both fail to build. Deleting the four old files is the whole fix; it is left out of this release because it is not this release's change to make.
+- **Six files are not `gofmt` clean**: `internal/netfilter/netfilter_pat_test.go`, `internal/resolver/resolver_freebsd_test.go`, `internal/tun/gateway_windows.go`, `internal/tun/tun_freebsd.go`, `internal/tun/tun_openbsd.go`, `internal/tun/tun_windows.go`. None is touched here.
+
+Five new guards in `tableview_test.go`, in the same shape as the sort/filter ones: they scan the served page, so they pin the wiring and not the behaviour. Each was confirmed to fail when the line it names is removed.
+
+The behaviour itself was checked separately against a jsdom table with a stubbed layout engine, driving real pointer events through the real functions: the widths sum to 100% after every drag, no column crosses the floor, an exhausted neighbour hands off to the next column along, an overshoot clamps at the room that exists, a drag out and back is a no-op, an existing colgroup keeps its classes, a grip click does not reach the sort handler, and a saved set of widths reapplies to a freshly built table. That harness needs jsdom and is not part of the suite; the guards above are what ships.
+
+---
+
 ## v886 — 2026-08-18
 
 **"Fallback" is gone as a name for a port or a transport. A port is a port: UDP, TCP, whatever.**

@@ -197,6 +197,45 @@ const indexHTML = `<!doctype html>
   .card h3 .net-id { color:var(--acc); text-transform:none; letter-spacing:0; }
   .card h3 .net-name { color:var(--fg); text-transform:none; letter-spacing:0; }
   table { width:100%; border-collapse:collapse; }
+  /* A resized table is table-layout:fixed (see applyColWidths), and a fixed
+     column does not grow to fit its content — content that no longer fits
+     overflows the cell and paints straight over the next column, because the
+     default overflow is visible. Addresses, CIDRs and keys have no spaces to
+     wrap on, so this is not a rare case: it is what every row of the Seeds
+     table does the moment its address column is dragged narrower than the
+     longest IPv6 endpoint in it.
+
+     Wrapped rather than clipped with an ellipsis, following td.cidr-cell and
+     td.tgt-cell below: these columns hold the identifiers the table exists to
+     let you read and copy, and truncating one hides the part that
+     distinguishes it. A wrapped row is taller; a clipped one is wrong.
+
+     Deliberately placed above the peers-table and routes-table blocks. Those
+     match at the same specificity and set nowrap/ellipsis on purpose, so
+     source order is what lets them keep winning — moving this rule below them
+     would silently take their tuned overflow behaviour away.
+
+     Data cells only. A header is a fixed, short label, not content — breaking
+     one is never the right answer, and applying this to th as well is what
+     stacked "name" down the page one letter per line. Headers are kept on a
+     single line below, and the floor a column can be dragged to is its own
+     header's width (see headerMinPx), so a label should never have to be
+     broken or clipped in the first place. */
+  table[data-pinned] td { overflow-wrap:anywhere; }
+  /* The ellipsis is a backstop that should never be reached: headerMinPx stops
+     a drag before a label runs out of room. It matters when a width is
+     restored that was measured under a different font or zoom, where the
+     stored percentage can land just under what the label now needs. Clipping
+     one character off "overlay4" is recoverable and obvious; stacking it
+     vertically is neither. */
+  table[data-pinned] th { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  /* overflow-wrap does nothing for a form control, and input.cell-edit carries
+     min-width:90px — so an inline editor opened in a column dragged narrower
+     than that would hang out over its neighbour exactly like the text above
+     did. In a pinned table the width the operator dragged is the authority, so
+     the editor shrinks to it instead. A column narrow enough to make one
+     unusable is a column they can widen again. */
+  table[data-pinned] input.cell-edit { min-width:0; }
   /* Fixed, explicit widths so this table's columns line up identically
      across every network's card — with the default auto layout, each
      table sizes its own columns from its own content, so two networks
@@ -353,6 +392,50 @@ const indexHTML = `<!doctype html>
   th.sortable-th:hover { color:var(--fg); }
   th.sortable-th[data-sort]::after { content:'▲'; font-size:9px; margin-left:5px; opacity:.7; }
   th.sortable-th[data-sort="desc"]::after { content:'▼'; }
+  /* Column resize grips. The grip sits wholly inside its header cell rather
+     than straddling the border between two, because peers-table sets
+     overflow:hidden on th and anything hanging past the edge would be clipped
+     down the middle. The cost is that the grab zone ends ~1px short of the
+     line it appears to move, which nobody can feel at 9px wide. */
+  th.res-th { position:relative; }
+  th.res-th > .colgrip { position:absolute; top:0; bottom:0; right:0; width:9px; cursor:col-resize; user-select:none; touch-action:none; z-index:2; }
+  /* The visible hairline is a child of the grip, not the grip itself, so the
+     grab area can stay 9px wide while the mark stays 1px — a 9px bar would
+     read as a column border of its own. */
+  th.res-th > .colgrip::after { content:''; position:absolute; top:4px; bottom:4px; right:3px; width:1px; background:var(--acc); opacity:0; }
+  th.res-th > .colgrip:hover::after, th.res-th > .colgrip.grip-live::after { opacity:.85; }
+  /* Held on <body> for the duration of a drag: once the pointer is captured
+     it can travel far outside the 9px grip, and without this the cursor
+     reverts to whatever it is over and the drag looks like it has ended. */
+  body.col-resizing, body.col-resizing * { cursor:col-resize !important; user-select:none !important; }
+  /* Column chooser. The gear sits in the last visible header cell — the one
+     column that has no resize grip, so the two never compete for the same
+     9px of edge. Written after the peers-table block on purpose: the
+     table th.gear-th selector ties with table.peers-table th on specificity,
+     and it has to win, because that rule's overflow:hidden would otherwise
+     clip the dropdown to the height of a header cell. */
+  table th.gear-th { position:relative; overflow:visible; padding-right:26px; }
+  table th.gear-th > .colgear { position:absolute; top:0; bottom:0; right:2px; width:18px; display:flex; align-items:center; justify-content:center; cursor:pointer; color:var(--mut); font-size:12px; line-height:1; user-select:none; z-index:3; }
+  table th.gear-th > .colgear:hover, table th.gear-th > .colgear.open { color:var(--acc); }
+  /* Fixed, and parented to <body> rather than to the gear, because an
+     absolutely-positioned menu is clipped by any ancestor that scrolls — and
+     the Networks table lives in .tscroll, whose overflow-x:auto makes its
+     computed overflow-y auto as well. The menu was cut off at the bottom of
+     the container, which on a one-row table meant a single entry was visible.
+     Exempting th.gear-th from overflow:hidden was necessary but nowhere near
+     sufficient: the clip can come from any ancestor, so the only reliable fix
+     is not to have one. Coordinates are computed from the gear on open.
+     Borrows the search-select dropdown's look (.ss-list). */
+  .colmenu { display:none; position:fixed; min-width:170px; max-height:280px; overflow-y:auto; background:var(--panel); border:1px solid var(--line); border-radius:6px; box-shadow:0 8px 24px rgba(0,0,0,.35); z-index:1100; }
+  .colmenu.show { display:block; }
+  /* A th is bold and its text may be centred or uppercased by a section's own
+     rules; the menu is a list, not a heading, so it resets what it inherits. */
+  .colmenu-opt { display:flex; align-items:center; gap:8px; padding:6px 10px; font-size:13px; font-weight:normal; text-transform:none; letter-spacing:0; text-align:left; color:var(--fg); cursor:pointer; white-space:nowrap; }
+  .colmenu-opt:hover { background:var(--hover); }
+  .colmenu-opt input { width:14px; height:14px; margin:0; accent-color:var(--acc); cursor:pointer; flex:none; }
+  .colmenu-opt.locked { opacity:.45; cursor:not-allowed; }
+  .colmenu-foot { border-top:1px solid var(--line); padding:6px 10px; font-size:12px; font-weight:normal; text-transform:none; letter-spacing:0; text-align:left; color:var(--mut); cursor:pointer; }
+  .colmenu-foot:hover { color:var(--fg); background:var(--hover); }
   input.tfilter { width:440px; max-width:100%; padding:5px 9px; font-size:12px; }
   .tbar { display:flex; gap:6px; align-items:center; margin-bottom:9px; }
   .tbar-btn { width:28px; height:25px; padding:0; font-size:15px; text-align:center; display:inline-flex; align-items:center; justify-content:center; }
@@ -2564,6 +2647,9 @@ function evalFilterAst(node, haystack){
 }
 
 const filterTitle = 'AND / OR / NOT (or -term), "quoted phrase", (parentheses)';
+// Says what the double-click does because nothing else on the page does: a
+// column dragged down to its floor has no other way back.
+const colGripTitle = 'drag to resize this column \u2014 double-click to reset the table';
 
 // tableViewKey names a table stably across re-renders, so enhanceTable can put
 // back the sort and filter the operator chose. It cannot be an index into the render,
@@ -2593,10 +2679,451 @@ function tableViewKey(table){
   return base + ' #' + n;
 }
 
-// enhanceTable gives a rendered table a live cross-column filter box and
-// click-to-sort headers. It only reorders/hides existing <tr> nodes — never
-// rebuilds them — so handlers, checkboxes, and inline editors already wired to
-// rows keep working. No-ops on empty tables (header only / placeholder rows).
+// COL_MIN is the narrowest a column can be dragged, in px. Two 10px td
+// paddings mean this leaves ~4px of content, which is deliberately almost
+// nothing: dragging a column to its floor is how an operator gets an
+// uninteresting one out of the way, and a floor generous enough to keep a
+// column readable would defeat the point of dragging it there.
+const COL_MIN = 24;
+
+// tableHeadCells returns the header cells a resize may act on, or null when
+// the header is not one plain cell per column.
+//
+// The colspan guard is the important one. Everything below addresses a column
+// by its header-cell index, and a header cell that spans two columns breaks
+// that correspondence for every cell after it — so a width computed for cell
+// i would be written onto a different column than the one whose edge was
+// dragged. Tables like that keep sort and filter and simply do not resize.
+function tableHeadCells(table){
+  const header = table.rows[0]; if (!header) return null;
+  const cells = [].slice.call(header.cells);
+  if (cells.length < 2) return null;                 // nothing to trade width with
+  if (cells.some(c => c.colSpan > 1)) return null;
+  return cells;
+}
+
+// tableColEls returns one <col> per column, reusing the table's own colgroup
+// when it already has the right shape.
+//
+// Reuse rather than replacement is what keeps peers-table and routes-table
+// looking as they did: their colgroups carry the classes that CSS hangs their
+// widths on, and those two are the tables most worth resizing. An inline
+// width on a col overrides the class rule — the override wanted here — while
+// every other class on the element survives untouched.
+//
+// A colgroup whose length disagrees with the header is replaced instead of
+// trusted, for the same reason as the colspan guard above: a width written
+// into a col that does not correspond to column i moves the wrong edge.
+// Callers measure before they call, so a replacement is handed real widths in
+// the same frame and the swap never shows.
+function tableColEls(table, n){
+  let cg = table.querySelector('colgroup');
+  if (cg && cg.children.length !== n){ cg.parentNode.removeChild(cg); cg = null; }
+  if (!cg){
+    cg = document.createElement('colgroup');
+    for (let i = 0; i < n; i++) cg.appendChild(document.createElement('col'));
+    table.insertBefore(cg, table.firstChild);
+  }
+  return [].slice.call(cg.children);
+}
+
+// tableWidthPct measures what proportion of the table each column currently
+// occupies. Percentages rather than pixels are the unit everything below
+// works in, because they are what makes a width worth remembering: a view
+// saved at one window size restores correctly at another, and a pinned table
+// still tracks its card when the browser is resized.
+function tableWidthPct(table){
+  const cells = tableHeadCells(table); if (!cells) return null;
+  const px = cells.map(c => c.getBoundingClientRect().width);
+  const total = px.reduce((a,b) => a+b, 0);
+  if (!(total > 0)) return null;   // never laid out (hidden section): nothing to measure
+  return px.map(w => w / total * 100);
+}
+
+// applyColWidths writes a set of proportions onto a table, switching it to
+// fixed layout on the way if it is not already there.
+//
+// The switch is what makes a dragged width stick. Under the default auto
+// layout a width is a suggestion the browser re-weighs against cell content,
+// so a column dragged narrow springs back open the moment a long endpoint
+// lands in it. Pinning is deferred to the first actual write — an untouched
+// table keeps auto layout and the sizing it has always had.
+//
+// A table inside .tscroll gets its total width pinned in px first. Those are
+// allowed to be wider than their container (width:auto, min-width:100%), so a
+// percentage there would resolve against a width derived from the content it
+// is about to change — reading its own output. Fixing the total first gives
+// the percentages a stable base and preserves the width the table already had.
+function applyColWidths(table, pct){
+  const cols = tableColEls(table, pct.length);
+  if (!table.dataset.pinned){
+    if (table.closest && table.closest('.tscroll')){
+      const w = table.getBoundingClientRect().width;
+      if (w > 0) table.style.width = w + 'px';
+    }
+    table.style.tableLayout = 'fixed';
+    table.dataset.pinned = '1';
+  }
+  cols.forEach((c, i) => { c.style.width = pct[i].toFixed(4) + '%'; });
+}
+
+// unpinTable returns a table to the sizing it had before anyone touched it.
+// This is the only way back: there is no other affordance that restores a
+// column an operator has dragged to 24px, so the grips carry it on
+// double-click.
+function unpinTable(table){
+  const cg = table.querySelector('colgroup');
+  if (cg) [].slice.call(cg.children).forEach(c => { c.style.width = ''; });
+  table.style.tableLayout = '';
+  table.style.width = '';
+  delete table.dataset.pinned;
+}
+
+// headerMinPx is the narrowest a column may be dragged: whatever its own
+// header label needs to render on one line, padding and sort arrow included.
+//
+// This is what stops a resize from reformatting a column other than the one
+// being dragged. With a flat floor, widening any column eventually squeezed
+// the ones beside it past the point their labels fit, and "name" came apart
+// into a vertical stack of single letters — a table you can no longer read the
+// headings of is worse than one whose columns are the wrong width.
+//
+// Measured against an off-screen probe rather than the cell itself, because
+// the cell's own width is the thing being constrained: once a column is narrow
+// its header has already wrapped or clipped, so reading it back would return
+// the squeezed width and confirm whatever damage had been done.
+function headerMinPx(th){
+  const cs = getComputedStyle(th);
+  const probe = document.createElement('span');
+  probe.style.position = 'absolute';
+  probe.style.left = '-9999px';
+  probe.style.top = '0';
+  probe.style.visibility = 'hidden';
+  probe.style.whiteSpace = 'pre';
+  probe.style.fontFamily = cs.fontFamily;
+  probe.style.fontSize = cs.fontSize;
+  probe.style.fontWeight = cs.fontWeight;
+  probe.style.letterSpacing = cs.letterSpacing;
+  probe.textContent = th.textContent.trim();
+  document.body.appendChild(probe);
+  const text = probe.getBoundingClientRect().width;
+  document.body.removeChild(probe);
+  const pad = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+  // th.sortable-th[data-sort]::after is the ▲/▼, which only occupies space
+  // once the column is the sorted one — but reserving it always means a
+  // column does not jump narrower the moment its sort is cleared.
+  const arrow = th.classList.contains('sortable-th') ? 14 : 0;
+  // The gear overlays the right edge of whichever column is last on screen,
+  // so that column needs room for its label and the gear both.
+  const gear = th.classList.contains('gear-th') ? 20 : 0;
+  return text + pad + arrow + gear;
+}
+
+// applyColHidden writes a hidden/shown decision onto a table's cells.
+//
+// Rows whose cell count disagrees with the header are skipped rather than
+// guessed at: those are the "no rows yet" placeholders that span the table
+// with a colspan, and hiding a cell by index in one would remove the wrong
+// part of it. They span whatever columns remain visible, which is already the
+// behaviour wanted.
+//
+// The <col> elements are hidden alongside the cells because a column's width
+// under table-layout:fixed comes from the col, not from the cells — leaving it
+// behind would collapse the content but keep the empty gap it sat in.
+function applyColHidden(table, hidden){
+  [].slice.call(table.rows).forEach(r => {
+    const cs = r.cells;
+    if (cs.length !== hidden.length) return;
+    for (let i = 0; i < cs.length; i++) cs[i].style.display = hidden[i] ? 'none' : '';
+  });
+  const cg = table.querySelector('colgroup');
+  if (cg && cg.children.length === hidden.length){
+    [].slice.call(cg.children).forEach((c, i) => { c.style.display = hidden[i] ? 'none' : ''; });
+  }
+}
+
+// lastVisibleCol is where the gear goes and where the grips stop. Both need
+// the last column that is actually on screen, which stops being the last cell
+// in the row as soon as anything is hidden.
+function lastVisibleCol(hidden, n){
+  for (let i = n - 1; i >= 0; i--) if (!hidden[i]) return i;
+  return -1;
+}
+
+// placeColGear moves the gear into the last visible header cell. It moves
+// rather than being rebuilt so that the open menu inside it survives the
+// toggle that caused the move — hiding the rightmost column with the menu open
+// should not also close the menu.
+function placeColGear(table, gear, hidden){
+  const cells = tableHeadCells(table); if (!cells) return;
+  const last = lastVisibleCol(hidden, cells.length);
+  if (last < 0) return;
+  cells.forEach(c => c.classList.remove('gear-th'));
+  cells[last].classList.add('gear-th');
+  cells[last].appendChild(gear);
+}
+
+// closeColMenu shuts whichever chooser is open and takes its panel back out of
+// <body>. Kept as one global rather than per-menu state because only one can
+// usefully be open at a time, and because a menu parented to the body outlives
+// the table it belongs to — a re-render underneath an open one would otherwise
+// leave a panel floating over a table it can no longer act on.
+let openColMenu = null;
+function closeColMenu(){
+  if (!openColMenu) return;
+  const m = openColMenu.menu;
+  m.classList.remove('show');
+  if (m.parentNode) m.parentNode.removeChild(m);
+  openColMenu.gear.classList.remove('open');
+  document.removeEventListener('mousedown', openColMenu.away, true);
+  document.removeEventListener('keydown', openColMenu.esc, true);
+  window.removeEventListener('resize', openColMenu.place, true);
+  window.removeEventListener('scroll', openColMenu.place, true);
+  openColMenu = null;
+}
+
+// addColumnChooser puts a gear in the last visible header cell that opens a
+// tick-list of the table's columns.
+//
+// Only columns with a heading are offered. A blank heading is a checkbox or
+// action column — there is nothing to label it with in the list, and hiding
+// the select column would take away the row selection the toolbar buttons act
+// on. A table with fewer than two labelled columns gets no gear, since the one
+// column it has cannot be hidden anyway.
+function addColumnChooser(table, view){
+  const cells = tableHeadCells(table); if (!cells) return;
+  // A menu whose table has just been replaced is pointing at a header that is
+  // no longer on the page. The poll normally cannot re-render while the menu
+  // holds focus (see below), but any other path that calls renderSection can,
+  // and the panel lives in <body> so nothing else would take it down.
+  if (openColMenu && !document.contains(openColMenu.table)) closeColMenu();
+  const hidden = view.hidden || (view.hidden = cells.map(() => false));
+  const hideable = [];
+  cells.forEach((c, i) => { if (c.textContent.trim()) hideable.push(i); });
+  if (hideable.length < 2) return;
+
+  const gear = $('<div class="colgear" title="show or hide columns">\u2699</div>');
+  const menu = $('<div class="colmenu"></div>');
+  const boxes = {};
+
+  // Changing which columns exist throws away the dragged widths and returns
+  // the table to auto layout. The alternative is keeping widths in two
+  // coordinate spaces at once — a base over every column, and a rendering
+  // normalised over the visible ones — and converting between them on every
+  // drag and every toggle. Auto layout re-fits the remaining columns sensibly
+  // on its own, which is most of what the stored widths were doing anyway.
+  const commit = () => {
+    delete view.widths;
+    unpinTable(table);
+    applyColHidden(table, hidden);
+    placeColGear(table, gear, hidden);
+    syncLocks();
+    // Hiding a column moves the gear and reflows the table, so the panel has
+    // to be told where its anchor went; it is in <body> and will not follow on
+    // its own.
+    placeMenu();
+  };
+  // The last visible column cannot be unticked: a table with no columns shows
+  // nothing at all and offers no way back, since the gear that would undo it
+  // lives in a header cell that no longer exists.
+  const syncLocks = () => {
+    const shown = hideable.filter(j => !hidden[j]);
+    hideable.forEach(j => {
+      const only = shown.length === 1 && !hidden[j];
+      boxes[j].disabled = only;
+      boxes[j].parentNode.classList.toggle('locked', only);
+      boxes[j].parentNode.title = only ? 'the last visible column cannot be hidden' : '';
+    });
+  };
+
+  hideable.forEach(i => {
+    const opt = $('<label class="colmenu-opt"></label>');
+    const cb = $('<input type="checkbox">');
+    cb.checked = !hidden[i];
+    cb.onchange = () => { hidden[i] = !cb.checked; commit(); };
+    opt.appendChild(cb);
+    opt.appendChild(document.createTextNode(cells[i].textContent.trim()));
+    menu.appendChild(opt);
+    boxes[i] = cb;
+  });
+
+  const foot = $('<div class="colmenu-foot">show all</div>');
+  foot.onclick = () => {
+    hideable.forEach(j => { hidden[j] = false; boxes[j].checked = true; });
+    commit();
+  };
+  menu.appendChild(foot);
+
+  // A click anywhere in the menu must not reach the header underneath, which
+  // would sort the table every time a column was ticked.
+  menu.addEventListener('click', e => { e.stopPropagation(); });
+  menu.addEventListener('dblclick', e => { e.stopPropagation(); });
+
+  // placeMenu puts the panel under the gear in viewport coordinates, since it
+  // is parented to <body> and shares no coordinate space with the table. It
+  // flips above the gear when there is not room below, so the chooser on a
+  // table near the bottom of a long page opens upward instead of off screen.
+  const placeMenu = () => {
+    if (!menu.parentNode) return;
+    const r = gear.getBoundingClientRect();
+    menu.style.right = Math.max(4, document.documentElement.clientWidth - r.right) + 'px';
+    menu.style.top = (r.bottom + 4) + 'px';
+    const h = menu.getBoundingClientRect().height;
+    if (r.bottom + 4 + h > window.innerHeight - 4){
+      menu.style.top = Math.max(4, r.top - 4 - h) + 'px';
+    }
+  };
+
+  gear.addEventListener('click', e => {
+    e.stopPropagation(); e.preventDefault();
+    if (openColMenu && openColMenu.menu === menu){ closeColMenu(); return; }
+    closeColMenu();
+    document.body.appendChild(menu);
+    menu.classList.add('show');
+    gear.classList.add('open');
+    placeMenu();
+    const away = ev => { if (!menu.contains(ev.target) && ev.target !== gear) closeColMenu(); };
+    const esc = ev => { if (ev.key === 'Escape') closeColMenu(); };
+    // Captured, so the menu closes before a click on something else is acted
+    // on rather than after it.
+    document.addEventListener('mousedown', away, true);
+    document.addEventListener('keydown', esc, true);
+    // Captured for scroll too: a scroll inside .tscroll or any other container
+    // does not bubble, and the panel would otherwise stay put while the gear
+    // it is pointing at slides away underneath.
+    window.addEventListener('resize', placeMenu, true);
+    window.addEventListener('scroll', placeMenu, true);
+    openColMenu = { menu: menu, gear: gear, table: table, away: away, esc: esc, place: placeMenu };
+    openColMenu = { menu: menu, gear: gear, away: away, esc: esc };
+    // Focusing a checkbox parks an INPUT in document.activeElement, which is
+    // what the four-second status poll checks before it re-renders a section
+    // (see startPolling). Without it the poll would tear the table, the gear
+    // and this menu down mid-choice on the peers pages.
+    const first = menu.querySelector('input');
+    if (first) first.focus();
+  });
+  gear.addEventListener('dblclick', e => { e.stopPropagation(); e.preventDefault(); });
+
+  menu.classList.remove('show');
+  placeColGear(table, gear, hidden);
+  syncLocks();
+}
+
+// addColumnResizers puts a drag grip on the right edge of every header cell
+// but the last.
+//
+// The model is that the table's total width never changes: widening column i
+// takes that width from the columns to its right, one at a time, each down to
+// COL_MIN before the next is touched. The alternative — letting the table
+// grow and scroll — was rejected because it would let any card on the page
+// sprout a horizontal scrollbar, and .tscroll is used on exactly two tables
+// here; a table that cannot outgrow its card cannot break the layout of the
+// page it is on. It also means the drag is a redistribution, which is what
+// the actual complaint usually is: endpoint is too narrow and rtt is wider
+// than a number needs.
+//
+// The last column has no grip because there is nothing to its right to trade
+// with. It is the column that absorbs whatever the others give up.
+function addColumnResizers(table, view){
+  const cells = tableHeadCells(table); if (!cells) return;
+  const hidden = view.hidden || cells.map(() => false);
+  // The grip belongs on the last visible column's left-hand neighbours, not
+  // the row's last cell: hiding the rightmost column would otherwise leave a
+  // grip on a boundary with nothing beyond it to trade width with.
+  const lastVis = lastVisibleCol(hidden, cells.length);
+  cells.forEach((th, i) => {
+    if (hidden[i] || i >= lastVis) return;
+    th.classList.add('res-th');
+    const grip = $('<div class="colgrip" title="'+esc(colGripTitle)+'"></div>');
+    // A header cell also sorts on click. Both events are stopped on the grip
+    // rather than filtered inside the sort handler, because the grip is the
+    // part that knows a click on it was aimed at the boundary and not at the
+    // column — and stopping them here keeps the sort handler unaware that any
+    // of this exists.
+    grip.addEventListener('click', e => { e.stopPropagation(); });
+    grip.addEventListener('dblclick', e => {
+      e.stopPropagation(); e.preventDefault();
+      delete view.widths;
+      unpinTable(table);
+    });
+    grip.addEventListener('pointerdown', e => {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      e.preventDefault(); e.stopPropagation();
+      const start = tableWidthPct(table);
+      const totalPx = table.getBoundingClientRect().width;
+      if (!start || !(totalPx > 0)) return;
+      // Freeze at the current proportions before the first move, so the drag
+      // starts from exactly what is on screen rather than from whatever the
+      // browser recomputes once the layout mode changes under it.
+      applyColWidths(table, start);
+      // One floor per column, not one for the table: a column's minimum is
+      // set by its own label, so "mtu" may go far narrower than "overlay4"
+      // and neither is allowed to be squeezed into illegibility by a drag
+      // happening somewhere else.
+      // A hidden column has no floor and takes no part: it measures 0 wide,
+      // and reserving its label's width would hold back space for a column
+      // that is not on screen.
+      const minPct = cells.map((c, j) => hidden[j] ? 0 : Math.max(COL_MIN, headerMinPx(c)) / totalPx * 100);
+      const x0 = e.clientX;
+      const cur = start.slice();
+      grip.setPointerCapture(e.pointerId);
+      grip.classList.add('grip-live');
+      document.body.classList.add('col-resizing');
+      const move = ev => {
+        let want = (ev.clientX - x0) / totalPx * 100;
+        // Clamp against the room that actually exists before distributing
+        // any of it. Letting the loop below discover the shortfall instead
+        // would leave the columns summing to something other than 100% and
+        // hand the rounding error to the browser to spread as it likes.
+        if (want > 0){
+          let room = 0;
+          for (let j = i+1; j < start.length; j++) room += Math.max(0, start[j] - minPct[j]);
+          want = Math.min(want, room);
+        } else {
+          want = Math.max(want, minPct[i] - start[i]);
+        }
+        cur[i] = start[i] + want;
+        // rem is what the right-hand columns owe (negative) or are owed
+        // (positive). Taken from the nearest neighbour outward and given back
+        // in the same order, so a drag out and back returns every column to
+        // where it started rather than leaving width parked on a column that
+        // never asked for it.
+        let rem = -want;
+        for (let j = i+1; j < start.length; j++){
+          // Hidden columns are passed over entirely. They already measure 0,
+          // so the taking branch would skip them anyway, but the giving branch
+          // would happily hand the whole surplus to the first one it met and
+          // park it off screen.
+          if (hidden[j]){ cur[j] = start[j]; continue; }
+          if (rem > 0){ cur[j] = start[j] + rem; rem = 0; }
+          else if (rem < 0){
+            const take = Math.min(-rem, Math.max(0, start[j] - minPct[j]));
+            cur[j] = start[j] - take; rem += take;
+          } else cur[j] = start[j];
+        }
+        applyColWidths(table, cur);
+      };
+      const up = () => {
+        grip.removeEventListener('pointermove', move);
+        grip.removeEventListener('pointerup', up);
+        grip.removeEventListener('pointercancel', up);
+        grip.classList.remove('grip-live');
+        document.body.classList.remove('col-resizing');
+        view.widths = cur.slice();
+      };
+      grip.addEventListener('pointermove', move);
+      grip.addEventListener('pointerup', up);
+      grip.addEventListener('pointercancel', up);
+    });
+    th.appendChild(grip);
+  });
+}
+
+// enhanceTable gives a rendered table a live cross-column filter box,
+// click-to-sort headers, and drag-to-resize column boundaries. It only
+// reorders/hides existing <tr> nodes — never rebuilds them — so handlers,
+// checkboxes, and inline editors already wired to rows keep working. No-ops on
+// empty tables (header only / placeholder rows).
 function enhanceTable(table){
   if (table.dataset.enh) return; table.dataset.enh = '1';
   const header = table.rows[0]; if (!header) return;
@@ -2693,6 +3220,20 @@ function enhanceTable(table){
   const sortable = view.col !== undefined && ths[view.col] && ths[view.col].classList.contains('sortable-th');
   if (sortable) sortBy(view.col, view.dir);
   else applyFilter(); // no sort to restore, but a restored filter still has to be applied
+
+  // Column widths come back the same way, and for the same reason, as the
+  // sort above: the table does not survive a re-render, so the widths have to
+  // be written onto the rebuilt one from state.tableView. The count check is
+  // belt-and-braces — tableViewKey already folds the column signature in, so
+  // a table that changed shape looks up a different key and never reaches a
+  // stale array in the first place.
+  // Column visibility is restored before the widths and the grips, both of
+  // which read it: the grips to know where the last visible column is, and
+  // applyColWidths to know which columns are getting none.
+  if (view.hidden && view.hidden.length === ths.length) applyColHidden(table, view.hidden);
+  if (view.widths && view.widths.length === ths.length) applyColWidths(table, view.widths);
+  addColumnResizers(table, view);
+  addColumnChooser(table, view);
 }
 
 // addLineFilter inserts a filter box (matching the table filter's look) above a
