@@ -2,6 +2,40 @@
 
 ---
 
+## v895 — 2026-08-20
+
+**`meshping` asks the terminal how wide it is, instead of assuming 80.**
+
+v894 capped the table at a hardcoded 80. That is the right number when nothing better is known - it is what a VT100 is, and what a serial console that cannot report a size almost certainly is - but as a constant it was wrong in both directions. On a 120- or 200-column terminal it shortened hostnames with room to spare. On a console narrower than 80 it did not protect the thing it existed to protect. And redirected into a file or piped into `grep`, where there is no width at all, it still shortened names for the benefit of a terminal that was not there.
+
+**The ceiling is now measured.** `stty size` first, since that reports the kernel's current window size and follows a resize; `tput cols` after it, since terminfo describes the terminal *type* and on a serial line is usually just what the `TERM` entry claims. Anything that fails, returns nothing, or answers implausibly narrow - a serial console with no window size set answers `0` - falls back to **80**, which is where v894's constant now lives: as the answer for a terminal that cannot say, rather than the answer for every terminal.
+
+**Output that isn't a terminal has no ceiling at all.** `meshping > report.txt` and `meshping | grep DEAD` now keep every hostname in full, because there is no width to respect and nothing to gain by shortening.
+
+### The descriptor this turns on
+
+`term_width` runs inside a command substitution, and inside one, **descriptor 1 is the capture pipe rather than the terminal**. Both halves of the obvious implementation are silently wrong there: `[ -t 1 ]` tests the pipe and always says "not a terminal", and `stty size` reading from descriptor 1 measures the pipe too. The first version of this did exactly that and reported no ceiling at every width - it looked like it worked, because "no ceiling" and "wide terminal" produce identical output on anything that fits.
+
+So the `-t` test happens in the main body, where 1 is still the real thing, and standard output is duplicated onto descriptor 3 for the substitution to read through. This was caught by running the script under an actual pty at 40, 80, 120 and 200 columns and noticing the answer never changed.
+
+### What is deliberately not protected
+
+**An address is never shortened, so a narrow enough console still overflows.** A full-form IPv6 literal is 39 characters; on a 40-column console that leaves nothing for a hostname column and the row runs to 57. The alternative is cutting the address, and a cut address is not a shorter address - it is a different one, that resolves to nothing and pastes into `ping` as a lie. A row that runs long wraps and stays true. A gravinet overlay address is nowhere near 39 characters, so this is the pathological case rather than the ordinary one: the reported mesh fits 40 columns exactly.
+
+**`meshping.bat` stays pinned at 80.** `cmd.exe` will report a width through `mode con`, but only as localised prose that has to be parsed, so a machine running in any other language reads back nothing usable and the fallback ends up doing the work regardless. 80 is that fallback, chosen directly and documented in the file.
+
+### Verification
+
+`go build ./...` clean; `gofmt` clean on every file touched. `cmd/gravinet`, `internal/webadmin`, `internal/config` and `internal/service` pass in full. No Go file changed except the version constant.
+
+Run under a real pty at 40, 80, 120 and 200 columns, and piped: the table is 40 wide on the reported mesh at both 40 and 80 columns, opens to its natural 93 at 120 and above, and stays at 93 when piped. `dash`, `bash` and `sh` produce byte-identical output under the same pty. `shellcheck -s sh` reports the same two pre-existing findings and nothing new.
+
+`install/meshping` is back to pure ASCII. Three em dashes had gone into comments across v893-v894; the file shipped by v891 had none, and this is a script that gets read on the kind of console this release is about.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
 ## v894 — 2026-08-20
 
 **`meshping`'s columns are Hostname, IP Address, Status, fitted to 80.**

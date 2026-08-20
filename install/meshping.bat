@@ -11,8 +11,15 @@
 :: multiple per-network blocks (each with its own tag) are all picked up.
 ::
 :: Columns are Hostname, IP Address, Status, measured from the data before
-:: anything is pinged and fitted to an 80-column console - the same as the
-:: POSIX script. See the comment on :measure_line below.
+:: anything is pinged and fitted to the console width - the same as the POSIX
+:: script. See the comment on :measure_line below.
+::
+:: One deliberate divergence: the POSIX script asks the terminal its width and
+:: falls back to 80, while this one is pinned at 80 outright. cmd.exe can
+:: report a width through `mode con`, but only as localised text that has to be
+:: parsed, so a machine in any other language reads back nothing useful and the
+:: fallback would be doing the work anyway. 80 is that fallback, chosen
+:: directly.
 ::
 :: Usage:
 ::   meshping.bat            ping both IPv4 and IPv6 entries

@@ -33,7 +33,7 @@ OS=$(uname -s)
 
 # want_family reports whether an address should be pinged, given -4/-6. Both
 # passes below call it, so the pass that measures the columns and the pass
-# that prints them can never disagree about which rows are in the table — a
+# that prints them can never disagree about which rows are in the table - a
 # -4 run must not size the address column around IPv6 rows it then skips.
 want_family() {
     case "$1" in
@@ -42,12 +42,51 @@ want_family() {
     esac
 }
 
+# term_width asks the terminal how wide it is, and is only called when there is
+# one. It reads through descriptor 3 rather than 1: it runs inside a command
+# substitution, where descriptor 1 is the capture pipe and not the terminal at
+# all, so measuring it would measure the pipe. See TABLE_W below, which is
+# where 3 is opened and where the not-a-terminal case is decided.
+#
+# stty is tried first because it reports the kernel's current window size,
+# which follows a resize; tput reads terminfo, which describes the terminal
+# *type* and on a serial line is usually just whatever the TERM entry claims.
+# stty takes its size from standard input, hence the redirect from 3.
+#
+# Either can fail or answer nonsense: a serial console with no window size set
+# answers 0. So anything implausibly narrow falls back to 80, which is what a
+# terminal that cannot say how wide it is almost certainly is.
+term_width() {
+    tw=$(stty size 2>/dev/null <&3 | cut -d' ' -f2)
+    case "$tw" in
+        '' | *[!0-9]*) tw=$(tput cols 2>/dev/null) ;;
+    esac
+    case "$tw" in
+        '' | *[!0-9]*) tw=80 ;;
+    esac
+    if [ "$tw" -lt 20 ]; then
+        tw=80
+    fi
+
+    printf '%s\n' "$tw"
+}
+
 ROWS=$(sed -n '/# BEGIN gravinet/,/# END gravinet/p' "$HOSTS_FILE" | grep -v '^#')
 
-# The table is laid out for an 80-column terminal. TABLE_W is a ceiling, not a
-# target: a mesh of short names produces a narrow table rather than one padded
-# out to 80.
-TABLE_W=80
+# TABLE_W is a ceiling, not a target: a mesh of short names produces a narrow
+# table rather than one padded out to fill the terminal. 0 means unbounded.
+#
+# Output that isn't a terminal - redirected into a file, piped into grep - has
+# no width to respect and no reason to shorten anything, so it stays at 0 and
+# every hostname survives in full. When it is a terminal, descriptor 1 is
+# duplicated onto 3 so term_width can still reach it from inside the command
+# substitution, where 1 has been replaced by the capture pipe.
+TABLE_W=0
+if [ -t 1 ]; then
+    exec 3>&1
+    TABLE_W=$(term_width)
+    exec 3>&-
+fi
 
 # Column widths are measured from the rows about to be printed rather than
 # fixed at a guess. The old %-40s address field was sized for an address far
@@ -78,19 +117,21 @@ done <<EOF
 $ROWS
 EOF
 
-# Fitting to TABLE_W takes the space out of the hostname column and never out
-# of the address. An address is bounded - 45 characters at the very worst, and
+# Fitting to TABLE_W, when there is one, takes the space out of the hostname
+# column and never out of the address. An address is bounded - 45 characters at the very worst, and
 # a gravinet overlay is nowhere near it - while a FQDN can be 253, so the
 # hostname is the only column that can genuinely run away. It is also the one
 # that survives being shortened: a cut address is useless to paste into a ping,
 # whereas a cut name is still recognisable. Anything cut ends in "~" so a
 # shortened name is never mistaken for the real one.
-HOST_MAX=$((TABLE_W - IP_W - 2 - 2 - STATUS_W))
-if [ "$HOST_MAX" -lt 8 ]; then
-    HOST_MAX=8
-fi
-if [ "$HOST_W" -gt "$HOST_MAX" ]; then
-    HOST_W=$HOST_MAX
+if [ "$TABLE_W" -gt 0 ]; then
+    HOST_MAX=$((TABLE_W - IP_W - 2 - 2 - STATUS_W))
+    if [ "$HOST_MAX" -lt 8 ]; then
+        HOST_MAX=8
+    fi
+    if [ "$HOST_W" -gt "$HOST_MAX" ]; then
+        HOST_W=$HOST_MAX
+    fi
 fi
 
 # Two spaces between columns, so the widest entry in a padded column still has
