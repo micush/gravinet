@@ -88,10 +88,11 @@ func safeToken(t string) bool {
 
 // isIPv6Peer reports whether a neighbor's peer address is an IPv6 literal
 // (vs. IPv4 or something unparsable, e.g. an interface name for an
-// unnumbered peer). FRR — like Cisco, which it mirrors here — activates
-// every configured neighbor under `address-family ipv4 unicast` by default,
-// regardless of the peer's own address family: an IPv6-addressed neighbor
-// gets swept into that same implicit activation unless it's explicitly
+// unnumbered peer). FRR — mirroring traditional vendor behavior here
+// — activates every configured neighbor under `address-family ipv4
+// unicast` by default, regardless of the peer's own address family: an
+// IPv6-addressed neighbor gets swept into that same implicit activation
+// unless it's explicitly
 // deactivated there. Left alone, that's a peer with an IPv6 transport
 // session negotiating the IPv4 unicast AFI/SAFI, which is not what an
 // operator adding a v6 neighbor wants.

@@ -55,7 +55,7 @@
 #   --no-lldp      don't install the link-layer discovery agent. By default, if lldpd
 #                  isn't already on the host, this installs the "lldpd" package (the
 #                  same name on every distro this installer supports, unlike snmpd)
-#                  via the distro's package manager, for gravinet's System > L2 Disco
+#                  via the distro's package manager, for gravinet's System > LLDP
 #                  page. Pass this if you don't use LLDP/CDP and don't want this
 #                  host's package set changed.
 #   --no-radvd     don't install radvd. By default, if radvd isn't already on the
@@ -491,7 +491,7 @@ NOTE
 }
 
 # lldpd_installed reports whether lldpd (the link-layer discovery agent
-# gravinet's System > L2 Disco page configures and starts) is already on
+# gravinet's System > LLDP page configures and starts) is already on
 # this host — deliberately the same handful of paths
 # internal/service/lldp.go's own lldpdBinary() checks, so "installed" here
 # means exactly what it means there.
@@ -520,7 +520,7 @@ ensure_lldpd() {
   fi
   cat <<'NOTE' >&2
     warning: could not install the link-layer discovery agent automatically
-             on this host. gravinet's System > L2 Disco page will still let
+             on this host. gravinet's System > LLDP page will still let
              you author a config, but nothing will actually run until
              lldpd is installed some other way. Check that this host's
              package manager can reach its repos and that a package named
@@ -543,7 +543,7 @@ radvd_installed() {
 
 # ensure_radvd installs radvd if it isn't already present, so Traffic > IPv6 RA
 # is usable. That page is gated on the daemon being installed and is hidden
-# without it, so unlike BGP/SNMP/L2 Disco there is no "author a config now,
+# without it, so unlike BGP/SNMP/LLDP there is no "author a config now,
 # install the daemon later" path here — skipping this hides the feature
 # outright rather than leaving it half-usable.
 ensure_radvd() {
@@ -985,7 +985,7 @@ echo "==> link-layer discovery agent (lldpd)"
 if [ "$INSTALL_LLDP" = 1 ]; then
   ensure_lldpd
 else
-  echo "    --no-lldp passed; leaving lldpd alone. gravinet's System > L2 Disco page will"
+  echo "    --no-lldp passed; leaving lldpd alone. gravinet's System > LLDP page will"
   echo "    still let you author a config, but nothing runs until lldpd is installed yourself."
 fi
 

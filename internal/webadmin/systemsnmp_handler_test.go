@@ -191,7 +191,7 @@ func TestSystemSNMPNavPlacement(t *testing.T) {
 // than the old single-community field, so this doesn't regress back.
 func TestSystemSNMPTableShape(t *testing.T) {
 	fn := indexHTML[strings.Index(indexHTML, "function secSNMP("):]
-	fn = fn[:strings.Index(fn, "\nfunction secL2Disco(")]
+	fn = fn[:strings.Index(fn, "\nfunction secLLDP(")]
 	for _, want := range []string{"<th>state</th>", "<th>community</th>", "_rowAdd", "_rowRemove", "sn-community"} {
 		if !strings.Contains(fn, want) {
 			t.Errorf("secSNMP is missing %q — expected a manageable communities table, not the old single-community field", want)

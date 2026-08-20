@@ -293,12 +293,12 @@ func (s *Server) handleLocalRoutes(w http.ResponseWriter, r *http.Request) {
 // handleL2Neighbors is the Monitor › L2 Peers endpoint: live LLDP/CDP
 // neighbor state, read-only — the link-layer analogue of handleLocalRoutes
 // above and handleBGP/handleBFD (bgp.go), each of which splits "configure"
-// (System > L2 Disco's own /api/system/l2disco, Traffic > BGP's
+// (System > LLDP's own /api/system/lldp, Traffic > BGP's
 // /api/bgp/config) from "observe" (this endpoint, /api/bgp, /api/bfd) into
 // its own page and its own GET, rather than folding live state into the
 // config page's response.
 //
-// Deliberately reuses systemL2DiscoJSON — the exact function System > L2
+// Deliberately reuses systemLLDPJSON — the exact function System > L2
 // Disco's own GET already calls — instead of a second implementation: the
 // neighbor list, the running/neighbors_available reconciliation, and the
 // stray-process detection are all real logic (see that function's own doc
@@ -306,7 +306,7 @@ func (s *Server) handleLocalRoutes(w http.ResponseWriter, r *http.Request) {
 // disagree, and why strays needs its own separate check), and duplicating
 // any of it here risks the two pages quietly drifting apart on what
 // "available" or "running" means. The reply carries a few fields this page
-// has no use for (interfaces, enabled — System > L2 Disco's own config
+// has no use for (interfaces, enabled — System > LLDP's own config
 // state) alongside the ones it does (neighbors, neighbors_available,
 // neighbors_hint, running, supported, hint, strays, stray_hint); harmless
 // to include, and far simpler than trimming the shape per caller.
@@ -316,7 +316,7 @@ func (s *Server) handleL2Neighbors(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, systemL2DiscoJSON(cfg.Discovery))
+	writeJSON(w, http.StatusOK, systemLLDPJSON(cfg.Discovery))
 }
 
 // osVersion is a best-effort human-readable OS version. On Linux it reads the

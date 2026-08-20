@@ -218,7 +218,7 @@ func TestBGPEditorTogglesSaveOnChange(t *testing.T) {
 	}
 }
 
-// TestBGPEditorHasTitlePill guards the SNMP/L2Disco/Syslog-style
+// TestBGPEditorHasTitlePill guards the SNMP/LLDP/Syslog-style
 // enable/disable pill placement decision: like those pages, Enable BGP
 // must be the title pill next to the page's own <h2>, not an inline
 // checkbox row — and it must be looked up (not recreated) so
@@ -227,7 +227,7 @@ func TestBGPEditorTogglesSaveOnChange(t *testing.T) {
 // same title.
 func TestBGPEditorHasTitlePill(t *testing.T) {
 	if strings.Contains(indexHTML, "'Enable BGP'") {
-		t.Error("\"Enable BGP\" is still a rowTog row; it should be the title pill instead, like SNMP/L2Disco/Syslog")
+		t.Error("\"Enable BGP\" is still a rowTog row; it should be the title pill instead, like SNMP/LLDP/Syslog")
 	}
 	if !strings.Contains(indexHTML, "host.parentElement.querySelector('h2.sec')") {
 		t.Error("the BGP editor's pill isn't looked up via host.parentElement's h2.sec")

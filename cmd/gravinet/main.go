@@ -48,7 +48,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "891"
+	version = "892"
 	commit  = "none"
 )
 
@@ -194,7 +194,7 @@ one group per NAV_GROUPS entry, one section per page, in the rail's order:
   naming     dns, hosts
   monitor    metrics, mesh-peers, capture, speedtest, latency, route-table,
              bgp-peers, l2-peers, hosts-file, dns-state, logs
-  system     upgrade, resolver, time, snmp, l2disco, syslog, users,
+  system     upgrade, resolver, time, snmp, lldp, syslog, users,
              config-history, power
   info       readme, getting-started, api, license, about
   settings   the web admin's Settings page (the gear, not the rail):

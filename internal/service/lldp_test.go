@@ -492,7 +492,7 @@ func TestStrayLLDPProcsRules(t *testing.T) {
 // which is fine when the only thing that could ever be named exactly
 // "lldpd" is something gravinet itself started, but not once OpenBSD 7.8's
 // unrelated base lldpd(8) can be running independently, for an operator's
-// own reasons, while gravinet's own L2 Disco happens to be off (the
+// own reasons, while gravinet's own LLDP happens to be off (the
 // default state). Without this filter, gravinet's once-at-startup reaper
 // would kill that unrelated daemon outright.
 func TestExcludeOpenBSDBaseLLDPD(t *testing.T) {

@@ -8,12 +8,12 @@ import (
 )
 
 // TestL2NeighborsGet checks the read shape Monitor > L2 Peers draws from.
-// Read-only all the way down (systemL2DiscoJSON's own service.* calls only
-// ever query live state — see TestSystemL2DiscoGet's identical reasoning),
+// Read-only all the way down (systemLLDPJSON's own service.* calls only
+// ever query live state — see TestSystemLLDPGet's identical reasoning),
 // so this is safe regardless of whether lldpd happens to be installed on
 // the machine running the test suite.
 func TestL2NeighborsGet(t *testing.T) {
-	ts, c := l2discoTestServer(t)
+	ts, c := lldpTestServer(t)
 	req, _ := http.NewRequest("GET", ts.URL+"/api/l2neighbors", nil)
 	req.AddCookie(c)
 	resp, err := http.DefaultClient.Do(req)
@@ -28,8 +28,8 @@ func TestL2NeighborsGet(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
-	// Same shape as /api/system/l2disco (handleL2Neighbors deliberately
-	// reuses systemL2DiscoJSON — see its own doc comment) — the page reads
+	// Same shape as /api/system/lldp (handleL2Neighbors deliberately
+	// reuses systemLLDPJSON — see its own doc comment) — the page reads
 	// neighbors/neighbors_available/neighbors_hint/supported/hint/
 	// strays/stray_hint directly, plus protocol per neighbor row.
 	for _, k := range []string{"supported", "hint", "running", "neighbors", "neighbors_available", "neighbors_hint", "strays", "stray_hint"} {
@@ -47,7 +47,7 @@ func TestL2NeighborsGet(t *testing.T) {
 // flag, not a hardcoded position), and checks the render is actually wired
 // end to end: dispatch table entry, page function, label, gating, the
 // /api/l2neighbors fetch, and a protocol column that can tell LLDP and CDP
-// apart — the whole point of this page over what System > L2 Disco already
+// apart — the whole point of this page over what System > LLDP already
 // silently computed but never displayed.
 func TestL2PeersNavAndWiring(t *testing.T) {
 	block := indexHTML[strings.Index(indexHTML, "{ name:'monitor'"):]
@@ -69,11 +69,11 @@ func TestL2PeersNavAndWiring(t *testing.T) {
 	if !strings.Contains(indexHTML, "s==='l2-peers') return 'L2 Peers'") {
 		t.Error("label() has no l2-peers -> 'L2 Peers' case")
 	}
-	// Gated on the same l2discoSupported flag as System > L2 Disco itself —
+	// Gated on the same lldpSupported flag as System > LLDP itself —
 	// not a separate capability, since both ultimately depend on the same
 	// lldpd/lldpcli presence.
-	if !strings.Contains(indexHTML, "sec === 'l2disco' || sec === 'l2-peers') return !!state.l2discoSupported") {
-		t.Error("sectionVisible() no longer gates l2-peers on state.l2discoSupported")
+	if !strings.Contains(indexHTML, "sec === 'lldp' || sec === 'l2-peers') return !!state.lldpSupported") {
+		t.Error("sectionVisible() no longer gates l2-peers on state.lldpSupported")
 	}
 	if !strings.Contains(indexHTML, "api('/api/l2neighbors')") {
 		t.Error("secL2Peers no longer fetches /api/l2neighbors")
@@ -127,7 +127,7 @@ func TestL2PeersNoTitleAlwaysFiltered(t *testing.T) {
 	}
 }
 
-// TestL2NeighborsIsProxyable mirrors TestSystemL2DiscoIsProxyable: Monitor >
+// TestL2NeighborsIsProxyable mirrors TestSystemLLDPIsProxyable: Monitor >
 // L2 Peers follows the currently selected node like every other Monitor
 // page (BGP Peers, Route Table, ...), so its endpoint must NOT be pinned in
 // the client's LOCAL_API list.

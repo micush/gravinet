@@ -95,10 +95,12 @@ func cliGroups() map[string][]groupLeaf {
 }
 
 // leafNames maps GUI section keys to the CLI leaf that covers them where the
-// two legitimately differ. Only two do, and both are cases where the CLI name
+// two legitimately differ. Only one does, and it is a case where the CLI name
 // matches what the GUI *displays* rather than its internal key: ui.go's
-// label() renders the 'bandwidth' section as "Shaping", and 'l2disco' as
-// "L2 Disco". Keeping this map tiny is deliberate — it's the exemption list,
+// label() renders the 'bandwidth' section as "Shaping". ('lldp' was listed
+// here too until v892, when the section key stopped being 'l2disco' and
+// started matching its own CLI leaf outright.)
+// Keeping this map tiny is deliberate — it's the exemption list,
 // and every entry is a place where someone reading the rail and typing the
 // obvious command gets it wrong, so an entry has to earn itself.
 var guiSectionToCLILeaf = map[string]string{

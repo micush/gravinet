@@ -280,7 +280,7 @@ var systemGroup = []groupLeaf{
 	{"resolver", "this host's hostname and default DNS servers", cmdSystemResolver},
 	{"time", "this host's clock, timezone, and NTP synchronization", cmdSystemTime},
 	{"snmp", "read-only SNMPv2c monitoring agent", cmdSystemSNMP},
-	{"l2disco", "link-layer discovery (LLDP/CDP) configuration", cmdSystemL2Disco},
+	{"lldp", "link-layer discovery (LLDP/CDP) configuration", cmdSystemLLDP},
 	{"syslog", "forward this host's syslog to a remote collector", cmdSystemSyslog},
 	{"users", "local OS accounts permitted to sign in to this console", cmdSystemUsers},
 	{"config-history", "snapshots of past configurations: list|diff|restore|snapshot", cmdSystemConfigHistory},
@@ -689,7 +689,7 @@ func cmdInfoAPI(args []string) { printDocFile(args, "api", (*config.Config).APID
 // neighbor table, read via service.LLDPNeighbors (the same call the web
 // page's handler makes). Read-only, and the read-only half of a pair, exactly
 // like monitor bgp-peers: the editor for *which* interfaces run LLDP/CDP is
-// "gravinet system l2disco", mirroring the rail's own split.
+// "gravinet system lldp", mirroring the rail's own split.
 func cmdMonitorL2Peers(args []string) {
 	fs := flag.NewFlagSet("monitor l2-peers", flag.ExitOnError)
 	fs.Parse(args)

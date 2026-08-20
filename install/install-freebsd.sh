@@ -54,7 +54,7 @@
 #                        host's package set changed.
 #   --no-lldp            don't install the link-layer discovery agent. By default,
 #                        if lldpd isn't already on the host, this installs it via
-#                        pkg for gravinet's System > L2 Disco page. Pass this if
+#                        pkg for gravinet's System > LLDP page. Pass this if
 #                        you don't use LLDP/CDP and don't want this host's
 #                        package set changed.
 #   --no-ifqmaxlen       don't touch net.link.ifqmaxlen. By default, if it isn't
@@ -666,7 +666,7 @@ lldpd_installed() {
 }
 
 # ensure_lldpd installs lldpd via pkg if it isn't already present, for
-# gravinet's System > L2 Disco page.
+# gravinet's System > LLDP page.
 ensure_lldpd() {
   if lldpd_installed; then
     echo "    lldpd is already installed"
@@ -676,12 +676,12 @@ ensure_lldpd() {
   echo "    lldpd is not installed; installing it"
   if pkg install -y lldpd >/dev/null 2>&1 && lldpd_installed; then
     echo "    installed lldpd"
-    echo "    L2 Disco is ready — configure it from gravinet's System > L2 Disco page."
+    echo "    LLDP is ready — configure it from gravinet's System > LLDP page."
     return 0
   fi
   cat <<'NOTE' >&2
     warning: could not install the link-layer discovery agent automatically.
-             gravinet's System > L2 Disco page will still let you author a
+             gravinet's System > LLDP page will still let you author a
              config, but nothing will actually run until lldpd is installed
              some other way — check that pkg can reach its repos and that
              lldpd exists for this release.

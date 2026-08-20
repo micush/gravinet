@@ -299,7 +299,7 @@ cookie, or a qualifying fleet-manager mesh session — see
 | GET/POST | `/api/system/time` | Read/set the host's clock, timezone, and NTP sync |
 | GET/POST | `/api/system/users` | Manage OS accounts permitted to sign in (pam/bsd_auth/windows auth modes) |
 | GET/POST | `/api/system/snmp` | Read-only SNMPv2c monitoring agent (net-snmp's snmpd) |
-| GET/POST | `/api/system/l2disco` | Link-layer discovery (LLDP/CDP) config and live neighbor status |
+| GET/POST | `/api/system/lldp` | Link-layer discovery (LLDP/CDP) config and live neighbor status |
 | GET/POST | `/api/system/syslog` | Forward this host's syslog to a remote collector |
 | GET | `/api/about` | Version/OS/architecture/Go runtime info |
 | GET | `/api/readme` | This node's bundled README.md |
@@ -396,7 +396,7 @@ first to see current values before deciding what to send.
   "shell_supported": true,
   "bgp_supported": true,
   "snmp_supported": true,
-  "l2disco_supported": true,
+  "lldp_supported": true,
   "syslog_supported": true,
   "log_level": "info",
   "log_max_size": "200M",
@@ -411,7 +411,7 @@ first to see current values before deciding what to send.
 it; `distributed` mirrors whether this slot is currently being kept in
 sync mesh-wide (see [Keys](#keys)).
 
-`bgp_supported`/`snmp_supported`/`l2disco_supported`/`syslog_supported`
+`bgp_supported`/`snmp_supported`/`lldp_supported`/`syslog_supported`
 report whether the corresponding System/Traffic page has anything to show
 on the currently selected node at all — FRR's `vtysh`, `snmpd`, `lldpd`,
 and a syslog daemon this endpoint knows how to drive, respectively, each
@@ -1429,9 +1429,9 @@ similarly for other platforms), possibly with an `error` field.
 
 Live LLDP/CDP neighbor state for Monitor > L2 Peers — the link-layer
 analogue of `/api/localroutes` above and `/api/bgp`/`/api/bfd` (BGP's own
-"configure vs observe" split: the editor is `/api/system/l2disco`, this is
+"configure vs observe" split: the editor is `/api/system/lldp`, this is
 the read-only view). Read-only all the way down; the response is exactly
-`/api/system/l2disco`'s own shape (see that endpoint's own doc comment for
+`/api/system/lldp`'s own shape (see that endpoint's own doc comment for
 why the two share one implementation), so every field documented there —
 `neighbors`/`neighbors_available`/`neighbors_hint`/`running`/`supported`/
 `hint`/`strays`/`stray_hint` — means the same thing here, `interfaces`/
@@ -1841,10 +1841,10 @@ never as a `400` — an operator fixing a stuck `snmpd` package shouldn't
 have to re-enter every field because the save itself was "rejected" for a
 reason that has nothing to do with the fields.
 
-### `POST /api/system/l2disco`
+### `POST /api/system/lldp`
 
 Reads or replaces this node's link-layer discovery (LLDP, and optionally
-Cisco CDP) configuration, and reports live neighbor status — like
+CDP) configuration, and reports live neighbor status — like
 Power/Time/Users/SNMP, follows the currently selected node. Originally
 duplicated parapet's Network > L2 Discovery config page and its separate
 Monitor > Status: LLDP/CDP neighbor table onto one page, combining config
@@ -1909,8 +1909,8 @@ same way and for the same reason as SNMP's: a reconciliation failure is a
 ### `POST /api/system/syslog`
 
 Reads or changes this node's remote-syslog-forwarding configuration —
-like Power/Time/Resolver/SNMP/L2Disco, follows the currently selected
-node. Unlike SNMP/L2Disco, nothing here is stored in gravinet's own
+like Power/Time/Resolver/SNMP/LLDP, follows the currently selected
+node. Unlike SNMP/LLDP, nothing here is stored in gravinet's own
 config: the host's own syslog daemon config is the source of truth, the
 same architecture Resolver and Time use and for the same reason (see
 hosttime.go's package comment). Enabling only ever adds gravinet's own
@@ -1926,7 +1926,7 @@ never a replacement — and disabling removes only that rule.
   when forwarding is off. `protocol` is `"udp"` or `"tcp"`.
 - `manager` names which syslog daemon this is applied through
   (`"rsyslog"` on Linux, `"syslogd"` on FreeBSD/OpenBSD), for display.
-- `supported`/`hint` mirror SNMP/L2Disco's own fields: `supported` is
+- `supported`/`hint` mirror SNMP/LLDP's own fields: `supported` is
   whether this platform and an installed syslog daemon this endpoint
   knows how to drive make the feature usable at all. Only rsyslog (Linux)
   and classic BSD `syslogd` (FreeBSD/OpenBSD) are supported — syslog-ng
@@ -1941,7 +1941,7 @@ never a replacement — and disabling removes only that rule.
 {"enabled": false}
 ```
 
-Unlike SNMP/L2Disco, a rejected request here is always a `400`, never a
+Unlike SNMP/LLDP, a rejected request here is always a `400`, never a
 partial-success `"note"` — there's no separate gravinet-side config copy
 that already accepted the request independently of whether the host's
 own syslog daemon config could be written and reloaded, the same "any
@@ -2298,7 +2298,7 @@ curl -sk -b cookies.txt -X POST $HOST/api/system/snmp \
 ### Turn on LLDP for one interface
 
 ```bash
-curl -sk -b cookies.txt -X POST $HOST/api/system/l2disco \
+curl -sk -b cookies.txt -X POST $HOST/api/system/lldp \
   -d '{"interfaces":[{"name":"eth0","lldp":true,"cdp":false}]}'
 ```
 

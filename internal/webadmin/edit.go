@@ -1532,7 +1532,7 @@ type syslogTargetView struct {
 // stored in gravinet's own config; the host's own syslog daemon config is
 // the source of truth (see hostsyslog.go's package comment), including
 // each target's enabled/disabled state. Also like Resolver and Time — and
-// unlike SNMP/L2Disco, which keep a separate always-accepted copy in
+// unlike SNMP/LLDP, which keep a separate always-accepted copy in
 // gravinet's own config.json — there's no such fallback here, so any
 // failure (bad input, or the daemon reload itself failing) is a straight
 // rejection rather than a "saved, but..." note: there is nothing
@@ -1589,7 +1589,7 @@ func (s *Server) handleSystemSyslog(w http.ResponseWriter, r *http.Request) {
 }
 
 // hostSyslogJSON flattens a service.SyslogInfo for the wire. Field naming
-// matches systemSNMPJSON/L2Disco's own shape ("supported"/"hint"), not
+// matches systemSNMPJSON/LLDP's own shape ("supported"/"hint"), not
 // TimeInfo's "can_*" convention, since this page is modeled on SNMP/L2
 // Disco's supported-gate pattern rather than Time's.
 func hostSyslogJSON(sy service.SyslogInfo) map[string]any {
@@ -2084,20 +2084,20 @@ func systemSNMPJSON(cfg config.SNMPConfig) map[string]any {
 	}
 }
 
-// handleSystemL2Disco reads or replaces this node's link-layer discovery
+// handleSystemLLDP reads or replaces this node's link-layer discovery
 // (LLDP/CDP) configuration and reports live neighbor status — the backend
-// for System > L2 Disco. Originally duplicated parapet's Network > L2
+// for System > LLDP. Originally duplicated parapet's Network > L2
 // Discovery config page and its separate Monitor > Status: LLDP/CDP
 // neighbor table onto one gravinet page, the same "config plus live status
 // together" shape Time and SNMP use here, rather than parapet's own split
 // across two different nav locations — but Monitor > L2 Peers
 // (handleL2Neighbors, sysinfo.go) has since reintroduced a version of that
 // split anyway, once it became clear the neighbor data folded into this
-// reply was never actually rendered on the System > L2 Disco page itself
+// reply was never actually rendered on the System > LLDP page itself
 // (config-page real estate turned out to be the wrong place to browse a
 // growing neighbor table). This endpoint's own reply keeps neighbors/
 // neighbors_available/etc. regardless — existing API consumers still get
-// them here — handleL2Neighbors just reuses the same systemL2DiscoJSON
+// them here — handleL2Neighbors just reuses the same systemLLDPJSON
 // rather than the two ever answering the question differently.
 //
 // Like SNMP, config is one cohesive blob (a sparse per-interface list, not
@@ -2111,7 +2111,7 @@ func systemSNMPJSON(cfg config.SNMPConfig) map[string]any {
 // — see that field's own doc comment for why) and is independent of
 // req.Interfaces: the web UI's pill flips it without touching which
 // interfaces are picked, and the interface picker's own saves carry the
-// current Enabled value through unchanged (see secL2Disco's saveL2Disco).
+// current Enabled value through unchanged (see secLLDP's saveLLDP).
 // Required on every POST, not just the pill's own toggle — a request that
 // omitted it would zero-value it to false and silently disable the feature
 // as a side effect of picking an interface.
@@ -2123,24 +2123,24 @@ func systemSNMPJSON(cfg config.SNMPConfig) map[string]any {
 // trips for what the page shows as one view.
 //
 // Like Power/Time/Users/SNMP, follows the currently selected node.
-func (s *Server) handleSystemL2Disco(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleSystemLLDP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		cfg, err := config.Load(s.configPath)
 		if err != nil {
 			writeJSON(w, http.StatusOK, map[string]any{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, systemL2DiscoJSON(cfg.Discovery))
+		writeJSON(w, http.StatusOK, systemLLDPJSON(cfg.Discovery))
 		return
 	}
 
 	var req struct {
 		// Enabled is required on every save, not just the pill's own toggle
-		// — handleSystemL2Disco replaces cfg.Discovery wholesale, so an
+		// — handleSystemLLDP replaces cfg.Discovery wholesale, so an
 		// interface-picker save that omitted this would zero-value it to
 		// false and silently disable the feature as a side effect of
 		// picking an interface. The web UI always sends the current value
-		// either way (see secL2Disco's saveL2Disco), unchanged unless this
+		// either way (see secLLDP's saveLLDP), unchanged unless this
 		// specific request is the pill's own flip.
 		Enabled    bool `json:"enabled"`
 		Interfaces []struct {
@@ -2172,12 +2172,12 @@ func (s *Server) handleSystemL2Disco(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ApplyLLDP runs before systemL2DiscoJSON builds the reply, for the same
+	// ApplyLLDP runs before systemLLDPJSON builds the reply, for the same
 	// reason handleSystemSNMP's Apply now runs first: "running" is a live
 	// service query, so building the reply first would report the state
 	// from *before* this save took effect.
 	ok, hint := service.ApplyLLDP(discovery)
-	resp := systemL2DiscoJSON(discovery)
+	resp := systemLLDPJSON(discovery)
 	resp["ok"] = true
 	if !ok {
 		resp["note"] = "saved, but the lldpd service could not be reconciled: " + hint
@@ -2185,7 +2185,7 @@ func (s *Server) handleSystemL2Disco(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// systemL2DiscoJSON flattens a DiscoveryConfig plus live service and
+// systemLLDPJSON flattens a DiscoveryConfig plus live service and
 // neighbor state for the wire. running (from LLDPServiceRunning, an OS
 // service-manager query) and neighbors_available (from LLDPNeighbors,
 // whether lldpcli could actually connect) are two independent checks that
@@ -2219,7 +2219,7 @@ func (s *Server) handleSystemL2Disco(w http.ResponseWriter, r *http.Request) {
 // (see service.ApplyLLDP) and once at daemon startup — so this reporting a
 // non-empty list means one survived being signalled, which is worth saying
 // out loud rather than a routine state to hand back as a chore.
-func systemL2DiscoJSON(cfg config.DiscoveryConfig) map[string]any {
+func systemLLDPJSON(cfg config.DiscoveryConfig) map[string]any {
 	supported, hint := service.LLDPSupported()
 	ifaces := make([]map[string]any, 0, len(cfg.Interfaces))
 	for _, i := range cfg.Interfaces {
@@ -2232,7 +2232,7 @@ func systemL2DiscoJSON(cfg config.DiscoveryConfig) map[string]any {
 	if running && !neighborsAvailable {
 		journalHint = service.LLDPJournalHint()
 	}
-	neighborsHint = reconcileL2DiscoNeighborsHint(running, neighborsAvailable, cfg.IsRunnable(), neighborsHint, journalHint)
+	neighborsHint = reconcileLLDPNeighborsHint(running, neighborsAvailable, cfg.IsRunnable(), neighborsHint, journalHint)
 	neighbors := make([]map[string]any, 0, len(neighborRows))
 	for _, n := range neighborRows {
 		neighbors = append(neighbors, map[string]any{
@@ -2263,7 +2263,7 @@ func systemL2DiscoJSON(cfg config.DiscoveryConfig) map[string]any {
 	}
 }
 
-// reconcileL2DiscoNeighborsHint resolves the cases where two independent
+// reconcileLLDPNeighborsHint resolves the cases where two independent
 // live checks (the service's own active/inactive state, and whether
 // lldpcli could actually reach it) would otherwise read as a contradiction
 // or a non-answer on screen. Pure — no IO — so it's directly testable
@@ -2284,7 +2284,7 @@ func systemL2DiscoJSON(cfg config.DiscoveryConfig) map[string]any {
 //     lldpd's control interface" is technically true and completely useless
 //     directly under a "not running" tag, when the actual reason is simply
 //     that this page is configured to leave it off. Says so instead.
-func reconcileL2DiscoNeighborsHint(running, neighborsAvailable, configured bool, rawHint, journalHint string) string {
+func reconcileLLDPNeighborsHint(running, neighborsAvailable, configured bool, rawHint, journalHint string) string {
 	if !neighborsAvailable && running {
 		base := "lldpd's service reports active, but its control interface (lldpcli) could not be reached."
 		if journalHint != "" {

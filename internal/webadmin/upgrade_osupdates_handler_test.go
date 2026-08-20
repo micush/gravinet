@@ -22,7 +22,7 @@ import (
 // legitimate code path (a node whose upgrade state directory couldn't be
 // created), not a workaround invented just for this test file. The same
 // discipline as sysusers_test.go/groups_test.go/systemsnmp_handler_test.go/
-// systeml2disco_handler_test.go, applied here to a package manager instead
+// systemlldp_handler_test.go, applied here to a package manager instead
 // of useradd/groupadd/systemctl.
 
 func osUpdatesTestServer(t *testing.T) (*httptest.Server, *http.Cookie) {
@@ -171,7 +171,7 @@ func TestUpgradeOSUpdatesSaveValidConfig(t *testing.T) {
 }
 
 // TestUpgradeOSUpdatesIsLocalOnly guards the placement decision: unlike
-// Power/Time/Users/SNMP/L2 Disco, this endpoint deliberately does NOT
+// Power/Time/Users/SNMP/LLDP, this endpoint deliberately does NOT
 // follow the selected node — it's grouped with the rest of System >
 // Upgrade's already-local-only endpoints (see handleUpgradeOSUpdates' own
 // doc comment for why).

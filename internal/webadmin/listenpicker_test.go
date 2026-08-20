@@ -102,7 +102,7 @@ func TestListenPickerUnwrapsAPIResponse(t *testing.T) {
 // indistinguishable from a dead endpoint.
 //
 // Checked across every call site rather than just this one: the picker is
-// shared by the BGP redistribute rows, Mesh Routes, L2 Disco and the upgrade
+// shared by the BGP redistribute rows, Mesh Routes, LLDP and the upgrade
 // push selector, and the mistake is equally available to all of them.
 func TestChipPickerCallSitesAppendWrap(t *testing.T) {
 	const call = "buildRouteChipPicker("

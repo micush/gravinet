@@ -2,6 +2,52 @@
 
 ---
 
+## v892 — 2026-08-19
+
+**The System page called `l2disco` is `lldp` now, and one hardware vendor's name is gone from the tree.**
+
+Two unrelated renames, done together because they touch the same page.
+
+### `l2disco` → `lldp`
+
+The section key was an abbreviation of "layer 2 discovery" that nothing else in the tree used. The agent behind it is lldpd, the service layer that drives it has been `ApplyLLDP`/`ReapStrayLLDPD`/`parseLLDPNeighborsJSON` since it was ported, and the protocol is LLDP. Only the page, its route and its CLI leaf were still spelling it the other way.
+
+**Breaking, on two surfaces.** `GET`/`POST /api/system/l2disco` is now `/api/system/lldp`, and the `l2disco_supported` flag in `/api/config` is `lldp_supported`. `gravinet system l2disco` is `gravinet system lldp`, including its `iface add|del` subcommands. No alias is kept for either: this is a node-local admin API behind session auth and a CLI on the same host as the daemon, not a mesh wire format — nothing a peer sends and nothing already on disk changes shape, so there is no upgraded-node-talking-to-old-peer case to carry an alias for. A script that drives either surface needs the one-word edit.
+
+**Identifiers.** `handleSystemL2Disco` → `handleSystemLLDP`; `systemL2DiscoJSON` → `systemLLDPJSON`; `reconcileL2DiscoNeighborsHint` → `reconcileLLDPNeighborsHint`; `cmdSystemL2Disco` → `cmdSystemLLDP`; the UI's `secL2Disco` → `secLLDP` and its `saveL2Disco` → `saveLLDP`; `state.l2discoSupported` → `state.lldpSupported`; the test helper `l2discoTestServer` → `lldpTestServer` and the `TestSystemL2Disco*` names with it. Two test files renamed — `systeml2disco_handler_test.go` → `systemlldp_handler_test.go`, `snmpl2disco_visibility_test.go` → `snmplldp_visibility_test.go` — **moved, not copied**, which is the specific way v886's four renames went wrong and left `internal/mesh` uncompilable.
+
+**The rail label and the page heading are one string again.** `label()` returned the literal `'l2disco'` and `sectionHeading()` overrode it with the fuller `'Layer 2 Discovery'`, a split that existed because the key was too ugly for a heading and the heading too long for the rail. `LLDP` is four characters and reads as itself in both places, so the override is gone and `lldp` joined `nat|qos|dns|bgp|api|snmp` in the branch of `label()` that uppercases acronym keys — a special case removed rather than one more added. The page's `<h2>` now says `LLDP`.
+
+`guiSectionToCLILeaf` in `navparity_test.go` is down to its one real entry. Its comment claimed two exemptions and listed one; `lldp` was never in the map, because the GUI key and the CLI leaf have always matched literally, and after this they match more obviously.
+
+### The vendor name removed
+
+Eight occurrences, six of them a vendor-qualified spelling of "CDP" in comments, docs and the System > LLDP hint. **CDP itself stays** — it is what the protocol is called, `DiscoveryIface.CDP` still configures it, lldpd's `-c` still enables it, and the neighbor table still reports it. Only the vendor name went.
+
+The two that were not deletions are about BGP, not discovery, and needed rewriting rather than excising: `frr.go`'s `isIPv6Peer` and v506's changelog entry both explained that FRR activates every configured neighbor under `address-family ipv4 unicast` by default *because it mirrors the traditional vendor behaviour*. That clause is the reason the function exists, so it now says "mirroring traditional vendor behavior here" instead of naming who it mirrors. `config.go`'s route-map comment lost the same qualifier and now reads "the standard FRR route-map convention", FRR being the thing gravinet actually renders for.
+
+### What deliberately kept the old name
+
+**Every historical changelog entry**, 45 mentions across the releases that built this page. They describe a section that was called `l2disco` at the time they were written; editing them would make the record describe a past that did not happen. Same treatment v886's rename got — `TCPFallbackEnabled` is still sitting in v-entries above — and the reason the mapping is written out in full here instead.
+
+**`parapet's Network > L2 Discovery`**, in `ui.go`, `docs/API.md` and the changelog. That is the name of a page in the predecessor product this one was ported from, not a name for anything in this tree. Three occurrences, all provenance. The rename was applied with a word boundary specifically so `L2 Disco` would not eat the `L2 Discovery` in front of them.
+
+**`Monitor > L2 Peers` and its `l2-peers` key**, which is the read-only neighbor table — a different section with a different route, untouched here.
+
+### Verification
+
+`go build ./...` clean. `gofmt` clean on every file this release touches. `cmd/gravinet`, `internal/webadmin`, `internal/config` and `internal/service` pass in full, including `TestUIScriptParses` and `TestCLIGroupsMatchNavGroups` — the latter is what would catch the rename landing on the rail but not the CLI, or in the wrong order in either.
+
+`TestSystemLLDPNavPlacement` kept its nav-order and dispatch-table checks and had its two labelling assertions rewritten, since both pinned source strings this release deletes. They now pin the invariant instead: that `'lldp'` is in `label()`'s uppercase branch (it would otherwise render as "Lldp"), and that `sectionHeading()` no longer special-cases the section at all. Both were confirmed to fail when the line they name is reverted. The second is scoped to the function body rather than the whole served page, because the first draft searched all of `indexHTML` for "Layer 2 Discovery" and failed on parapet's page name — the assertion was wrong, not the code.
+
+Three places needed hand-fixing after the script, in the v886 tradition of reading the substitutions back: the `Printf` column in `gravinet system lldp`'s status block, the width of that command's banner comment in `cli_system.go`, and the trailing-comment column in `webadmin.go`'s route table, all of which had been aligned around a name three characters longer. The last one `gofmt` caught on its own.
+
+**Not rendered.** The changes to the page itself are a heading string and a rail label; the served script parses and the wiring is pinned, but nobody has looked at it.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files (so `go vet ./...` and `go test ./internal/mesh` still fail to build there), and the same six files that are not `gofmt` clean.
+
+---
+
 ## v891 — 2026-08-19
 
 **The column chooser's dropdown was being clipped to a single entry.**
@@ -14463,7 +14509,7 @@ since its old assertion — that a v6 peer should never get a plain
 ## v506 — 2026-07-18
 
 **IPv6 BGP neighbors are now explicitly deactivated in
-`address-family ipv4 unicast`.** FRR (mirroring Cisco here) activates every
+`address-family ipv4 unicast`.** FRR (mirroring traditional vendor behavior here) activates every
 configured neighbor under `address-family ipv4 unicast` by default,
 regardless of the peer's own address family — so an IPv6-addressed
 neighbor was getting swept into that same implicit IPv4 unicast activation

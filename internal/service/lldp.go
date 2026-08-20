@@ -1,7 +1,7 @@
 package service
 
 // Link-layer discovery agent (lldpd) management — the backend for System >
-// L2 Disco. Ported from parapet's LldpManager (src/lldpd.rs) and its
+// LLDP. Ported from parapet's LldpManager (src/lldpd.rs) and its
 // status::discovery_json() neighbor-status reader, with the same
 // architecture change SNMP already made: parapet spawns and supervises
 // lldpd as a direct child of its own process (elaborate code exists there
@@ -51,7 +51,7 @@ package service
 // package (the same one Linux/FreeBSD/macOS use) — see lldpdBinary's own
 // doc comment for how the two same-named binaries are told apart, and
 // lldpProcs' for why the base one is also kept out of stray-process
-// detection even when gravinet's own L2 Disco is switched off.
+// detection even when gravinet's own LLDP is switched off.
 
 import (
 	"encoding/json"
@@ -90,7 +90,7 @@ func LLDPSupported() (bool, string) {
 // lldpd already present.
 func lldpNotInstalledHint() string {
 	if runtime.GOOS == "openbsd" && firstExisting("/usr/sbin/lldpd") != "" {
-		return "OpenBSD's built-in lldpd(8) (since 7.8) isn't compatible with gravinet's L2 Disco \u2014 no CDP support, no lldpcli, and OpenBSD ships it without an rc.d(8) script by design. Install the net/lldpd package instead (pkg_add lldpd)."
+		return "OpenBSD's built-in lldpd(8) (since 7.8) isn't compatible with gravinet's LLDP \u2014 no CDP support, no lldpcli, and OpenBSD ships it without an rc.d(8) script by design. Install the net/lldpd package instead (pkg_add lldpd)."
 	}
 	return "lldpd isn't installed on this host (is the lldpd package installed?)"
 }
@@ -240,7 +240,7 @@ func activeLLDPIfaces(cfg config.DiscoveryConfig) []string {
 // ValidLLDPIface mirrors parapet's valid_iface exactly: 1–15 ASCII
 // alphanumeric characters, '.', '-', '_', or '@' — so an interface name can
 // never smuggle in an extra argv token or, on Linux, break out of the
-// space-joined systemd drop-in line. Exported so handleSystemL2Disco can
+// space-joined systemd drop-in line. Exported so handleSystemLLDP can
 // reject an invalid name at the HTTP layer with a clear error, rather than
 // only defending against it here by silently dropping it from the active
 // list — both matter: silently dropping it is what keeps a bad name from
@@ -283,7 +283,7 @@ func writeLLDPFlags(cfg config.DiscoveryConfig) (bool, string) {
 		// lldpd/elldpd ships via the ports pkg_scripts mechanism instead,
 		// where `rcctl set <svc> flags ...` is rejected outright —
 		// "rcctl: <svc> is not enabled" — until the service has been
-		// enabled at least once; on a host where L2 Disco is being turned
+		// enabled at least once; on a host where LLDP is being turned
 		// on for the first time, that hasn't happened yet, since enabling
 		// only otherwise happens later, in lldpServiceStart, which this
 		// flags write always runs before (see ApplyLLDP). Best-effort and
@@ -356,11 +356,11 @@ func writeLinuxLLDPDropIn(args []string) (bool, string) {
 // extra detail is available, never an error of its own.
 //
 // Exported (not just used internally by lldpServiceStart/RestartLLDPIfRunning
-// below) so systemL2DiscoJSON can also call it directly when the service
+// below) so systemLLDPJSON can also call it directly when the service
 // reports active but lldpcli can't reach it — the same live-active-but-
 // unreachable state a failed start's error string was already describing,
 // just observed a different way, so it deserves the same specific answer
-// instead of the generic "check the log yourself" reconcileL2DiscoNeighborsHint
+// instead of the generic "check the log yourself" reconcileLLDPNeighborsHint
 // used to hand back on its own.
 func LLDPJournalHint() string {
 	out, err := exec.Command("journalctl", "-u", "lldpd.service", "-n", "20", "--no-pager", "-q").CombinedOutput()
@@ -593,7 +593,7 @@ func LLDPServiceRunning() bool {
 
 // RestartLLDPIfRunning restarts lldpd, but only if it's currently running —
 // never starts it fresh, since "should this be running at all" is System >
-// L2 Disco's own config's job to decide, not this function's. For picking
+// LLDP's own config's job to decide, not this function's. For picking
 // up an OS-level change lldpd only reads at its own startup: its LLDP
 // SysName TLV defaults to this host's hostname, read once when it starts,
 // so a rename via System > Resolver leaves it advertising the old name
@@ -684,7 +684,7 @@ func parseLLDPProcs(pgrepOutput string) []lldpProc {
 // On OpenBSD, excludeOpenBSDBaseLLDPD drops any process actually running
 // from /usr/sbin/lldpd — the OS's own unrelated base-system daemon (see
 // lldpdBinary's own doc comment) — before it ever reaches stray detection.
-// This matters even when gravinet's own L2 Disco is off: strayLLDPProcs
+// This matters even when gravinet's own LLDP is off: strayLLDPProcs
 // treats "not runnable" as "every lldpd-named process on the host is a
 // stray," which is the right call for a leftover gravinet-managed
 // instance but was never meant to reach a completely different daemon an
@@ -958,7 +958,7 @@ type LLDPNeighbor struct {
 // socket, a non-standard control-socket location, ...) — and asserting
 // "not running" as if it were a known fact directly contradicted a
 // service-status tag showing "running" right next to it, reported as a
-// real, confusing bug. systemL2DiscoJSON (which also knows the service's
+// real, confusing bug. systemLLDPJSON (which also knows the service's
 // own active/inactive state from a separate, independent check) is what
 // composes the final, contradiction-aware hint the page actually shows.
 func LLDPNeighbors() ([]LLDPNeighbor, bool, string) {

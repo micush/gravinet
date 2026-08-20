@@ -333,7 +333,7 @@ func TestIPv6RASectionDrawsItsOwnToolbar(t *testing.T) {
 
 // label() title-cases a section key, which renders 'ipv6ra' as 'Ipv6ra' — the
 // nav rail read that way until v885 gave it its own short label. Rail and
-// heading are separate on purpose, the same split l2disco uses: the rail is
+// heading are separate on purpose, the same split lldp uses: the rail is
 // narrow, a standalone <h2> is not.
 func TestIPv6RAHeadingIsNotTitleCasedKey(t *testing.T) {
 	if !strings.Contains(indexHTML, "if (s==='ipv6ra') return 'IPv6 Router Advertisements';") {

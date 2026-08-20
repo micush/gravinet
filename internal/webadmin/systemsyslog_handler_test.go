@@ -164,7 +164,7 @@ func TestSystemSyslogRejectsOneBadTargetAmongGoodOnes(t *testing.T) {
 }
 
 // TestSystemSyslogIsProxyable guards the placement decision: like
-// Power/Time/Resolver/SNMP/L2Disco/Users, this endpoint follows the
+// Power/Time/Resolver/SNMP/LLDP/Users, this endpoint follows the
 // selected node, so it must NOT be in the client's LOCAL_API
 // pin-to-this-node list.
 func TestSystemSyslogIsProxyable(t *testing.T) {
@@ -176,19 +176,19 @@ func TestSystemSyslogIsProxyable(t *testing.T) {
 }
 
 // TestSystemSyslogNavPlacementAndGating pins Syslog into the System group
-// after L2 Disco, and checks it's wired into the same sectionVisible
-// capability-gating mechanism SNMP/L2Disco/BGP already use, rather than
+// after LLDP, and checks it's wired into the same sectionVisible
+// capability-gating mechanism SNMP/LLDP/BGP already use, rather than
 // being universally shown.
 func TestSystemSyslogNavPlacementAndGating(t *testing.T) {
 	block := indexHTML[strings.Index(indexHTML, "{ name:'system'"):]
 	block = block[:strings.Index(block, "]},")]
-	for _, want := range []string{"'l2disco'", "'syslog'", "'users'"} {
+	for _, want := range []string{"'lldp'", "'syslog'", "'users'"} {
 		if !strings.Contains(block, want) {
 			t.Errorf("the system nav group is missing %s:\n%s", want, block)
 		}
 	}
-	if strings.Index(block, "'l2disco'") > strings.Index(block, "'syslog'") {
-		t.Error("Syslog must come after L2 Disco in the System group")
+	if strings.Index(block, "'lldp'") > strings.Index(block, "'syslog'") {
+		t.Error("Syslog must come after LLDP in the System group")
 	}
 	if strings.Index(block, "'syslog'") > strings.Index(block, "'users'") {
 		t.Error("Syslog must come before Users in the System group")

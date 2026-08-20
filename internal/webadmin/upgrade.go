@@ -179,7 +179,7 @@ func (s *Server) handleUpgradeHome(w http.ResponseWriter, r *http.Request) {
 // package update configuration, and can trigger an immediate run — the
 // backend for System > Upgrade's "OS updates" section. Local-only (see
 // upgradeLocalOnly), the same as every other endpoint on this page: unlike
-// Power/Time/Users/SNMP/L2 Disco, which all deliberately follow whichever
+// Power/Time/Users/SNMP/LLDP, which all deliberately follow whichever
 // node is currently selected, scheduling unattended OS patching for a
 // *remote* peer without that peer's own operator directly involved is
 // exactly the kind of thing this page's existing "no peer can trigger this"

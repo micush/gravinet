@@ -2,7 +2,7 @@ package main
 
 // The "gravinet system" group — the CLI half of internal/webadmin/ui.go's
 // NAV_GROUPS "system" entry, which had no CLI presence at all before this
-// file: nine pages in the rail (upgrade, resolver, time, snmp, l2disco,
+// file: nine pages in the rail (upgrade, resolver, time, snmp, lldp,
 // syslog, users, config-history, power) reachable only from a browser. That
 // was the single largest CLI/GUI divergence, and it's the reason the group
 // list in usage() didn't match the rail it claimed to mirror.
@@ -17,8 +17,8 @@ package main
 //
 // Restart semantics are copied from each setting's own web handler rather
 // than decided here, the same discipline cli_settings.go documents: SNMP and
-// L2 Disco reconcile their agent immediately after the config write
-// (ApplySNMP/ApplyLLDP, exactly as handleSystemSNMP/handleSystemL2Disco do),
+// LLDP reconcile their agent immediately after the config write
+// (ApplySNMP/ApplyLLDP, exactly as handleSystemSNMP/handleSystemLLDP do),
 // so they're commitCfg (live), not commitCfgStructural.
 
 import (
@@ -279,13 +279,13 @@ func activeCommunities(c config.SNMPConfig) []config.SNMPCommunity {
 	return out
 }
 
-// ---------------------------------------------------------------- l2disco
+// -------------------------------------------------------------------- lldp
 
-// cmdSystemL2Disco is "gravinet system l2disco" — link-layer discovery
-// (LLDP/CDP) configuration (System > L2 Disco). The live neighbor table it
+// cmdSystemLLDP is "gravinet system lldp" — link-layer discovery
+// (LLDP/CDP) configuration (System > LLDP). The live neighbor table it
 // sits beside in the GUI is "gravinet monitor l2-peers", the same split the
 // rail has between Traffic > BGP and Monitor > BGP Peers.
-func cmdSystemL2Disco(args []string) {
+func cmdSystemLLDP(args []string) {
 	if ok, hint := service.LLDPSupported(); !ok {
 		fmt.Printf("note: %s\n", hint)
 	}
@@ -299,7 +299,7 @@ func cmdSystemL2Disco(args []string) {
 	case "iface":
 		sub, iargs := systemAction(rest, v("add", "del", "remove"))
 		if len(iargs) != 1 {
-			fatal("system l2disco iface add|del NAME")
+			fatal("system lldp iface add|del NAME")
 		}
 		name := iargs[0]
 		switch sub {
@@ -329,10 +329,10 @@ func cmdSystemL2Disco(args []string) {
 			}
 			cfg.Discovery.Interfaces = kept
 		default:
-			fatal("system l2disco iface add|del NAME")
+			fatal("system lldp iface add|del NAME")
 		}
 	default:
-		fmt.Printf("l2disco:   %s\n", boolWord(!cfg.Discovery.Disabled, "on", "off"))
+		fmt.Printf("lldp:      %s\n", boolWord(!cfg.Discovery.Disabled, "on", "off"))
 		fmt.Printf("running:   %s\n", boolWord(service.LLDPServiceRunning(), "yes", "no"))
 		if len(cfg.Discovery.Interfaces) == 0 {
 			fmt.Println("interfaces: (none)")
@@ -355,7 +355,7 @@ func cmdSystemL2Disco(args []string) {
 // a remote collector (System > Syslog). Host state, not gravinet config: the
 // targets live in the host syslog daemon's own configuration, which is why
 // this reads and writes through service.HostSyslog/SetHostSyslog rather than
-// openCfg like SNMP and L2 Disco do.
+// openCfg like SNMP and LLDP do.
 func cmdSystemSyslog(args []string) {
 	if ok, hint := service.SyslogSupported(); !ok {
 		fmt.Printf("note: %s\n", hint)

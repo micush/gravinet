@@ -121,7 +121,7 @@ const indexHTML = `<!doctype html>
   /* route-picker: the search-to-add widget behind every redistribute
      picker (Redistribute connected/static/mesh routes on the BGP editor,
      Redistribute from BGP on Mesh Routes) and, despite the name, System >
-     L2 Disco's interface picker too — a .search-select reusing the
+     LLDP's interface picker too — a .search-select reusing the
      same .ss-input/.ss-list/.ss-opt styling every other picker in this
      file already uses, plus its own chip list for what's currently
      selected below the search box. The row it sits in stacks vertically
@@ -524,7 +524,7 @@ const indexHTML = `<!doctype html>
 <script>
 const $ = (h) => { const d=document.createElement('div'); d.innerHTML=h.trim(); return d.firstChild; };
 const app = document.getElementById('app');
-const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, geoipLookup:false, enableUpnp:false, allowRemoteShell:false, loginBanMaxFailures:3, loginBanSeconds:900, tlsSource:'self-signed', tlsCommonName:'', tlsNotAfter:'', configHistoryLimit:250, configHistoryCount:0, shellSupported:true, bgpSupported:false, snmpSupported:false, ipv6raSupported:false, l2discoSupported:false, syslogSupported:false, selfId:null, selfHostname:'', targetSeq:0, pendingBgpHighlight:null, workerThreads:0, tunQueues:0, tunQueuesSupported:true, udpGSO:false, udpGSOSupported:true, socketBufferMB:16, socketBufferMaxMB:256, perfRestartPending:false, loginBanRestartPending:false, tableView:{} };
+const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, geoipLookup:false, enableUpnp:false, allowRemoteShell:false, loginBanMaxFailures:3, loginBanSeconds:900, tlsSource:'self-signed', tlsCommonName:'', tlsNotAfter:'', configHistoryLimit:250, configHistoryCount:0, shellSupported:true, bgpSupported:false, snmpSupported:false, ipv6raSupported:false, lldpSupported:false, syslogSupported:false, selfId:null, selfHostname:'', targetSeq:0, pendingBgpHighlight:null, workerThreads:0, tunQueues:0, tunQueuesSupported:true, udpGSO:false, udpGSOSupported:true, socketBufferMB:16, socketBufferMaxMB:256, perfRestartPending:false, loginBanRestartPending:false, tableView:{} };
 // setTarget is the only place state.target is ever assigned — bumping
 // targetSeq alongside it, once, exactly when the *selection itself* actually
 // changes. load()/startPolling()/refreshCluster() each capture targetSeq
@@ -538,11 +538,11 @@ const state = { section:'networks', status:[], cfg:[], restartPending:false, sta
 // Also clears _ifaceCache (see systemInterfaces): /api/interfaces is proxied
 // per node like everything outside LOCAL_API, but that cache was keyed on
 // nothing, so switching managed nodes kept silently serving whichever node's
-// interfaces happened to be fetched first — reported as "L2 Disco's
+// interfaces happened to be fetched first — reported as "LLDP's
 // interfaces box only shows the current manager's interfaces, doesn't
 // update when I change managed nodes." Resetting it here, at the one place a
 // real switch is known to have happened, means the next systemInterfaces()
-// call — L2 Disco's picker on its next load(), or NAT's masquerade dropdown
+// call — LLDP's picker on its next load(), or NAT's masquerade dropdown
 // next time a row is opened — fetches fresh instead of reusing a stale list.
 // Also clears state.tableView (see enhanceTable): a remembered sort is
 // harmless on another node, but a remembered *filter* is not — carrying
@@ -948,7 +948,7 @@ const NAV_GROUPS = [
     ['bgp-peers', 'live BGP peer sessions reported by FRR (shown only when vtysh is present on this host)'],
     // Live LLDP/CDP neighbor table — the link-layer analogue of bgp-peers.
     // Read-only; the editor (which interfaces run LLDP/CDP) lives under
-    // System > L2 Disco. Gated on lldpd like that editor (sectionVisible),
+    // System > LLDP. Gated on lldpd like that editor (sectionVisible),
     // so it's hidden on hosts without lldpd.
     ['l2-peers', 'live LLDP/CDP neighbors seen on this host\u2019s interfaces (shown only when lldpd is present on this host)'],
     ['hosts-file', 'the live contents of this host\u2019s hosts file'],
@@ -974,15 +974,15 @@ const NAV_GROUPS = [
     ['interfaces', 'this host\u2019s network interfaces, addresses and default gateways (read-only)'],
     ['resolver', 'this host\u2019s hostname and default DNS servers'],
     ['time', 'this host\u2019s clock, timezone, and NTP synchronization'],
-    // SNMP/L2 Disco/Syslog each need a real agent on the host (snmpd/
+    // SNMP/LLDP/Syslog each need a real agent on the host (snmpd/
     // lldpd/a syslog daemon) to be anything but an empty page — same
     // "present in the model, but only shown when the host can actually
     // back it" treatment Traffic > BGP gets above. sectionVisible()
-    // (state.snmpSupported/l2discoSupported/syslogSupported, set from
+    // (state.snmpSupported/lldpSupported/syslogSupported, set from
     // /api/config) is what actually hides these; the entries stay listed
     // here unconditionally.
     ['snmp', 'read-only SNMPv2c monitoring agent (shown only when snmpd is present on this host)'],
-    ['l2disco', 'link-layer discovery (LLDP/CDP) and neighbor status (shown only when lldpd is present on this host)'],
+    ['lldp', 'link-layer discovery (LLDP/CDP) and neighbor status (shown only when lldpd is present on this host)'],
     ['syslog', 'forward this host\u2019s syslog to a remote collector (shown only when a supported syslog daemon is present)'],
     ['users', 'local OS accounts permitted to sign in to this console'],
     ['config-history', 'automatic and manual snapshots of past configurations, with diff and restore'],
@@ -1010,19 +1010,19 @@ function label(s){
   if (s==='l2-peers') return 'L2 Peers';
   if (s==='getting-started') return 'Getting Started';
   if (s==='capture') return 'Packet Capture';
-  if (s==='l2disco') return 'l2disco';
   // Rail label only. The page keeps the full "IPv6 Router Advertisements"
-  // heading (see sectionHeading), the same split l2disco uses: a nav rail is
-  // narrow, a standalone <h2> is not.
+  // heading (see sectionHeading): a nav rail is narrow, a standalone <h2>
+  // is not.
   if (s==='ipv6ra') return 'v6 ra';
-  return s==='nat'||s==='qos'||s==='dns'||s==='bgp'||s==='api'||s==='snmp' ? s.toUpperCase() : s.charAt(0).toUpperCase()+s.slice(1);
+  return s==='nat'||s==='qos'||s==='dns'||s==='bgp'||s==='api'||s==='snmp'||s==='lldp' ? s.toUpperCase() : s.charAt(0).toUpperCase()+s.slice(1);
 }
 // sectionHeading is what the content pane's own <h2> shows \u2014 label(s)
-// everywhere except l2disco, whose nav-rail button stays the literal
-// "l2disco" (menu real estate is narrow) while the page itself gets the
-// fuller "Layer 2 Discovery" a standalone heading has room for.
+// everywhere except ipv6ra, whose rail button is abbreviated to fit the
+// menu while the page itself gets the fuller heading a standalone <h2>
+// has room for. 'lldp' needed that same split before v892, when the rail
+// read the literal "l2disco" and the page said "Layer 2 Discovery"; the
+// acronym is short enough to serve as both, so it no longer does.
 function sectionHeading(s){
-  if (s==='l2disco') return 'Layer 2 Discovery';
   // label() title-cases the section key, which turns 'ipv6ra' into 'Ipv6ra'.
   if (s==='ipv6ra') return 'IPv6 Router Advertisements';
   return label(s);
@@ -1030,7 +1030,7 @@ function sectionHeading(s){
 
 // sectionVisible gates sections whose availability depends on a runtime
 // capability of the node being managed, rather than being universal: BGP
-// (needs FRR's vtysh), SNMP (needs snmpd), L2 Disco (needs lldpd), and
+// (needs FRR's vtysh), SNMP (needs snmpd), LLDP (needs lldpd), and
 // Syslog (needs a syslog daemon this package can drive) — each backed by
 // state.<x>Supported, set from /api/config. Everything else is always
 // visible. Both the rail nav and the global search index consult this, so
@@ -1040,7 +1040,7 @@ function sectionVisible(sec){
   if (sec === 'bgp' || sec === 'bgp-peers') return !!state.bgpSupported;
   if (sec === 'ipv6ra') return !!state.ipv6raSupported;
   if (sec === 'snmp') return !!state.snmpSupported;
-  if (sec === 'l2disco' || sec === 'l2-peers') return !!state.l2discoSupported;
+  if (sec === 'lldp' || sec === 'l2-peers') return !!state.lldpSupported;
   if (sec === 'syslog') return !!state.syslogSupported;
   return true;
 }
@@ -1230,7 +1230,7 @@ async function load() {
   // whose RA daemon gravinet can actually render config for, and that daemon
   // is installed on the *targeted* node. See the server's ipv6RASupported().
   state.ipv6raSupported = !!(c.body && c.body.ipv6ra_supported);
-  // Same idea for System > SNMP, System > L2 Disco, and System > Syslog:
+  // Same idea for System > SNMP, System > LLDP, and System > Syslog:
   // gates on whether snmpd / lldpd / a syslog daemon gravinet knows how to
   // drive are actually usable on the *targeted* node (see the server's
   // service.SNMPSupported/LLDPSupported/SyslogSupported, which also back
@@ -1238,7 +1238,7 @@ async function load() {
   // own host, since managing a remote peer with none of them installed is
   // exactly when hiding the entry matters most.
   state.snmpSupported = !!(c.body && c.body.snmp_supported);
-  state.l2discoSupported = !!(c.body && c.body.l2disco_supported);
+  state.lldpSupported = !!(c.body && c.body.lldp_supported);
   state.syslogSupported = !!(c.body && c.body.syslog_supported);
   state.logLevel = (c.body && c.body.log_level) || 'info';
   state.logMaxSize = (c.body && c.body.log_max_size) || '200M';
@@ -2130,7 +2130,7 @@ function startPolling(){
 
 // syncRailGating re-applies sectionVisible() to every rail button already in
 // the DOM. buildRail() only runs once, at dashboard() startup, but a
-// capability-gated section's visibility (BGP/BGP Peers, SNMP, L2 Disco — see
+// capability-gated section's visibility (BGP/BGP Peers, SNMP, LLDP — see
 // sectionVisible) is per-*target* and load() re-reads it fresh on every
 // switch. Without this, picking a peer from the managed-node list left the
 // previous target's gated tabs on screen — still visible, still clickable —
@@ -2502,7 +2502,7 @@ function scheduleLoginBanRestart(){
 function toBps(num, unit){ const bits={Gbps:1e9,Mbps:1e6,Kbps:1e3}[unit]||1e6; return Math.round(parseFloat(num)*bits/8); }
 
 // systemInterfaces fetches the currently-targeted node's interface names and
-// caches them for reuse — the NAT masquerade dropdown and L2 Disco's
+// caches them for reuse — the NAT masquerade dropdown and LLDP's
 // interface picker both call this rather than hitting /api/interfaces
 // themselves. Cached per node, not once forever: setTarget clears
 // _ifaceCache exactly when the managed-node selection actually changes, so a
@@ -3270,7 +3270,7 @@ function renderSection() {
        upgrade:secUpgrade,
        metrics:infoMetrics, 'mesh-peers':infoMeshPeers, capture:infoCapture, speedtest:infoSpeedtest, latency:infoLatency,
        'route-table':infoRoutes, 'bgp-peers':secBgpPeers, 'l2-peers':secL2Peers, 'hosts-file':infoHosts, 'dns-state':infoDNS,
-       resolver:secResolver, time:secTime, snmp:secSNMP, l2disco:secL2Disco, syslog:secSyslog, users:secUsers, power:secPower,
+       resolver:secResolver, time:secTime, snmp:secSNMP, lldp:secLLDP, syslog:secSyslog, users:secUsers, power:secPower,
        logs:secLogs, interfaces:secInterfaces, 'config-history':secConfigHistory, readme:secReadme, 'getting-started':secGettingStarted, api:secAPIDoc, license:secLicense, about:infoAbout }[state.section])(c, nets);
   }
   c.querySelectorAll('table').forEach(enhanceTable);
@@ -6553,7 +6553,7 @@ function fwCatalogCombobox(input, getNames){
 // Redistribute connected/static/mesh pickers (renderBgpEditor's
 // rowRouteList) and Mesh Routes' Redistribute from BGP subcard
 // (secRoutes). Also reused, despite the CIDR-flavored name, by System >
-// L2 Disco's interface picker (secL2Disco) \u2014 there the "value" is an
+// LLDP's interface picker (secLLDP) \u2014 there the "value" is an
 // interface name rather than a CIDR, but "pick some strings out of a
 // possibly huge list, show the picks as removable chips" is exactly the
 // same shape. Reuses the .ss-input/.ss-list/.ss-opt/.ss-empty styling
@@ -8621,8 +8621,8 @@ function secSNMP(c){
   load();
 }
 
-// secL2Disco renders System > L2 Disco: link-layer discovery (LLDP) and
-// Cisco CDP, together, on whichever interfaces are picked. Just the config
+// secLLDP renders System > LLDP: link-layer discovery (LLDP) and
+// CDP, together, on whichever interfaces are picked. Just the config
 // side of parapet's Network > L2 Discovery page — no neighbor table, no
 // live status readout of any kind; this page picks interfaces and shows
 // whether the result is enabled, full stop.
@@ -8650,18 +8650,18 @@ function secSNMP(c){
 // Interfaces at all; it just starts or stops lldpd (see service.ApplyLLDP),
 // the same "flip the flag, leave the rules alone" split NAT/QoS/Bandwidth's
 // own Enabled already uses. Both the pill and the picker save through the
-// same endpoint (handleSystemL2Disco replaces cfg.Discovery wholesale), so
+// same endpoint (handleSystemLLDP replaces cfg.Discovery wholesale), so
 // each one's save carries the other's current value unchanged — see
-// saveL2Disco below.
-function secL2Disco(c){
-  secHint(c, 'Link-layer discovery: LLDP plus Cisco CDP, advertised and listened for on whichever interfaces you pick below. Acts on the node you\u2019re currently managing.');
+// saveLLDP below.
+function secLLDP(c){
+  secHint(c, 'Link-layer discovery: LLDP plus CDP, advertised and listened for on whichever interfaces you pick below. Acts on the node you\u2019re currently managing.');
 
   const body = $('<div></div>');
   body.innerHTML = '<div class="hint">loading\u2026</div>';
   c.appendChild(body);
 
   const load = async () => {
-    const [ifNames, r] = await Promise.all([systemInterfaces(), api('/api/system/l2disco')]);
+    const [ifNames, r] = await Promise.all([systemInterfaces(), api('/api/system/lldp')]);
     if (!r.ok || !r.body){ body.innerHTML = '<div class="hint">could not read this host\u2019s L2 discovery settings.</div>'; return; }
     draw(ifNames, r.body);
   };
@@ -8679,7 +8679,7 @@ function secL2Disco(c){
     const picked = (disco.interfaces||[]).filter(i => i.lldp || i.cdp).map(i => i.name);
 
     // Enabled/disabled pill, placed next to the page's own <h2> title (a
-    // sibling of this card, built by renderSection before secL2Disco ever
+    // sibling of this card, built by renderSection before secLLDP ever
     // runs) rather than inside this card's own header \u2014 the same "pill
     // next to the name" spot NAT/QoS/Shaping's netCardHead already uses.
     // Tracks cfg.Discovery.Disabled (via disco.enabled from the API),
@@ -8698,7 +8698,7 @@ function secL2Disco(c){
     h2.appendChild(pill);
 
     // Posts the full current pick list plus the full current enabled flag
-    // on every save \u2014 handleSystemL2Disco replaces cfg.Discovery wholesale,
+    // on every save \u2014 handleSystemLLDP replaces cfg.Discovery wholesale,
     // the same "read it all, POST it all" shape SNMP's own save already
     // uses for its fields. Picking/removing an interface (via the picker's
     // onChange below) sends the current enabled unchanged; flipping the
@@ -8713,18 +8713,18 @@ function secL2Disco(c){
     // for why (a failure logs to the console rather than blocking on an
     // alert or reverting the flip; a real failure surfaces on the next
     // visit to this page, which re-reads the true state from the server).
-    const saveL2Disco = (names, en) => {
+    const saveLLDP = (names, en) => {
       const interfaces = names.map(name => ({ name, lldp:true, cdp:true }));
-      api('/api/system/l2disco', { method:'POST', body: JSON.stringify({ interfaces, enabled: en }) })
+      api('/api/system/lldp', { method:'POST', body: JSON.stringify({ interfaces, enabled: en }) })
         .then(res => {
-          if (!res.ok) { console.warn('/api/system/l2disco save failed:', (res.body&&res.body.error)||'failed'); return; }
+          if (!res.ok) { console.warn('/api/system/lldp save failed:', (res.body&&res.body.error)||'failed'); return; }
           if (res.body && res.body.note) alert(res.body.note);
         });
     };
 
     const row = $('<div class="settings-row"></div>');
     row.appendChild($('<div><div class="settings-label">Interfaces</div><div class="settings-desc">Pick which interfaces run LLDP and CDP. Saves immediately when changed.</div></div>'));
-    const picker = buildRouteChipPicker(ifNames, picked, (names) => saveL2Disco(names, enabled), {
+    const picker = buildRouteChipPicker(ifNames, picked, (names) => saveLLDP(names, enabled), {
       placeholder: 'search interfaces to add\u2026',
       noneText: 'no interfaces found on this host',
       loadingText: 'loading interfaces\u2026',
@@ -8739,7 +8739,7 @@ function secL2Disco(c){
     pill.ondblclick = () => {
       enabled = !enabled;
       setPill(enabled);
-      saveL2Disco(picker.get(), enabled);
+      saveLLDP(picker.get(), enabled);
     };
   };
 
@@ -8755,7 +8755,7 @@ function secL2Disco(c){
 // forwarding rule alongside whatever this host already logs by default
 // (see hostsyslog.go's package comment for exactly what "local logging
 // untouched" means per platform). Acts on the node you're currently
-// managing, like Resolver/Time/SNMP/L2Disco.
+// managing, like Resolver/Time/SNMP/LLDP.
 function secSyslog(c){
   secHint(c, 'Forward this host\u2019s syslog to one or more remote collectors. Local logging keeps working as before \u2014 this only adds copies going out, never a replacement. Acts on the node you\u2019re currently managing. Double-click the state tag to toggle a target, or any other cell to edit it.');
   const body = $('<div></div>');
@@ -10871,7 +10871,7 @@ async function bgpTableLiveStatus(body){
 
 // secL2Peers is the Monitor › L2 Peers view: the live LLDP/CDP neighbor
 // table lldpd reports, read-only — the link-layer analogue of Monitor ›
-// BGP Peers (secBgpPeers above). Kept separate from the System › L2 Disco
+// BGP Peers (secBgpPeers above). Kept separate from the System › LLDP
 // editor (which interfaces run LLDP/CDP) so "configure" and "observe" stay
 // cleanly split, matching the rest of the app. Gated on lldpd's presence,
 // same as the editor — see sectionVisible. No card title — the section's
@@ -10879,7 +10879,7 @@ async function bgpTableLiveStatus(body){
 // what this is; a "L2 Neighbors" <h3> above a card holding nothing else
 // was redundant with both.
 function secL2Peers(c){
-  secHint(c, 'Live LLDP/CDP neighbor table as reported by lldpd on this host. Read-only \u2014 pick which interfaces run LLDP/CDP under System \u203a L2 Disco.');
+  secHint(c, 'Live LLDP/CDP neighbor table as reported by lldpd on this host. Read-only \u2014 pick which interfaces run LLDP/CDP under System \u203a LLDP.');
   const card = $('<div class="card"></div>');
   const body = $('<div></div>'); card.appendChild(body);
   c.appendChild(card);
@@ -10975,7 +10975,7 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
 
   // Enabled/disabled pill, placed next to the page's own <h2> title —
   // replacing what used to be an inline "Enable BGP" toggle row here, now
-  // the same spot and shape secSNMP/secL2Disco/secSyslog's own pill use.
+  // the same spot and shape secSNMP/secLLDP/secSyslog's own pill use.
   // host (editWrap) and the <h2> are both children of the same content
   // container secBgp received, so it's reached via host.parentElement
   // rather than a directly passed reference. Looked up rather than
@@ -11000,7 +11000,7 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
   // field on this form already uses (declared below; hoisted, so this
   // forward reference is fine) — doSave always builds its payload from
   // current form state, bgpEnabled included, so this needs no separate
-  // "post just the flag" path the way SNMP/L2Disco's simpler forms do.
+  // "post just the flag" path the way SNMP/LLDP's simpler forms do.
   // Enabling with no AS number and AutoBGP off is a real, reachable state
   // this leaves the pill in — doSave's own validation guard below catches
   // it and reports it on this form's status line rather than posting a

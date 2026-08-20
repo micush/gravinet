@@ -454,7 +454,7 @@ type Config struct {
 	SNMP SNMPConfig `json:"snmp,omitempty"`
 
 	// Discovery runs a link-layer discovery agent (lldpd, speaking LLDP and
-	// optionally Cisco CDP) on this host — System > L2 Disco. Node-global,
+	// optionally CDP) on this host — System > LLDP. Node-global,
 	// like SNMP/BGP: one agent per host. Same architecture choice as SNMP,
 	// for the same reason: gravinet manages lldpd as an ordinary OS service
 	// rather than a child of its own process the way parapet's LldpManager
@@ -535,11 +535,12 @@ type DiscoveryIface struct {
 	Name string `json:"name"`
 	// LLDP advertises and receives IEEE 802.1AB LLDP frames on this interface.
 	LLDP bool `json:"lldp"`
-	// CDP additionally speaks Cisco CDP on this interface. Meaningful
-	// without LLDP also being on (lldpd's -c flag is a global agent-wide
-	// switch, not conditioned on a specific interface's LLDP state), but
-	// the UI nudges toward turning LLDP on too, the same as parapet's own
-	// page comment does, since CDP alone with no LLDP is an unusual choice.
+	// CDP additionally advertises and receives CDP on this interface.
+	// Meaningful without LLDP also being on (lldpd's -c flag is a global
+	// agent-wide switch, not conditioned on a specific interface's LLDP
+	// state), but the UI nudges toward turning LLDP on too, the same as
+	// parapet's own page comment does, since CDP alone with no LLDP is an
+	// unusual choice.
 	CDP bool `json:"cdp"`
 }
 
@@ -771,7 +772,7 @@ type BGPNeighbor struct {
 	// this one neighbor: a non-empty list means only those exact prefixes
 	// are permitted in that direction on this session — anything else is
 	// implicitly denied by the route-map's own trailing deny, the standard
-	// FRR/Cisco route-map convention. An empty list (the default, and every
+	// standard FRR route-map convention. An empty list (the default, and every
 	// neighbor's state before this field existed) means no filtering at all
 	// in that direction, so upgrading to a build with this field is a no-op
 	// for every session already configured — filtering is opt-in per
