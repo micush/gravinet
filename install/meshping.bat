@@ -22,14 +22,19 @@
 :: directly.
 ::
 :: Usage:
-::   meshping.bat            ping both IPv4 and IPv6 entries
+::   meshping.bat            ping IPv4 entries (the default)
 ::   meshping.bat -4         ping only IPv4 entries
 ::   meshping.bat -6         ping only IPv6 entries
+::   meshping.bat -a         ping both families
 setlocal EnableDelayedExpansion
 
 set "HOSTS_FILE=%SystemRoot%\System32\drivers\etc\hosts"
+:: IPv4 only unless asked otherwise. gravinet gives every host both an overlay
+:: v4 and an overlay v6 address, so pinging both families lists each host twice
+:: and doubles the wait - one row per address, not one per host. -a asks for
+:: both.
 set "PING_4=1"
-set "PING_6=1"
+set "PING_6=0"
 
 :: --- parse command line options -------------------------------------------
 :parse_args
@@ -46,7 +51,16 @@ if "%~1"=="-6" (
     shift
     goto parse_args
 )
-echo Usage: %~nx0 [-4] [-6] 1>&2
+if "%~1"=="-a" (
+    set "PING_4=1"
+    set "PING_6=1"
+    shift
+    goto parse_args
+)
+echo Usage: %~nx0 [-4 ^| -6 ^| -a] 1>&2
+echo   -4  IPv4 entries only ^(default^) 1>&2
+echo   -6  IPv6 entries only 1>&2
+echo   -a  both families 1>&2
 exit /b 1
 
 :args_done

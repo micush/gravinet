@@ -2,6 +2,32 @@
 
 ---
 
+## v896 — 2026-08-20
+
+**`meshping` pings IPv4 by default. `-a` asks for both families.**
+
+gravinet gives every host an overlay v4 address *and* an overlay v6 address, and the old default pinged both. That meant one row per address rather than one per host: a mesh of eleven hosts printed twenty-one rows, each host listed twice, and waited through twice as many ping timeouts to do it. The two rows of a pair almost always agree, so the second one was usually no news.
+
+**The default is now `-4`.** `-a` restores the old behaviour for the case the pairing actually matters - when the question is specifically whether one family is up and the other is not. `-6` is unchanged, and `-4` is still accepted explicitly; it now produces exactly what no argument does.
+
+**This is a behaviour change for anyone reading the default output.** A script that ran `meshping` and counted rows, or grepped for a `fd00:` address, sees half of what it used to. The fix is one flag: `meshping -a`.
+
+The usage message grew a line per flag, since three flags with one of them defaulted is past what `[-4] [-6]` conveyed.
+
+### Verification
+
+`go build ./...` clean; `gofmt` clean on every file touched. `cmd/gravinet`, `internal/webadmin`, `internal/config` and `internal/service` pass in full. No Go file changed except the version constant.
+
+Against a hosts file of eleven v4 and ten v6 entries: no argument gives 11 rows, `-4` gives 11, `-6` gives 10, `-a` gives 21, and the no-argument and `-4` outputs are byte-identical. An unrecognised flag still exits 1 and prints the usage. `dash`, `bash` and `sh` agree byte for byte under a pty. `shellcheck -s sh` reports the same two pre-existing findings and nothing new.
+
+The narrower default interacts well with v895's measured ceiling: dropping the v6 rows usually drops the address column from the width of an IPv6 literal to the width of a dotted quad, so the common table is narrower again.
+
+**`meshping.bat` has still not been run.** It received the same `-a` branch, the same default, and the same usage text; every `call :` target resolves and the file is pure ASCII. No Windows host here.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
 ## v895 — 2026-08-20
 
 **`meshping` asks the terminal how wide it is, instead of assuming 80.**

@@ -1,8 +1,15 @@
 #!/bin/sh
 
 HOSTS_FILE="/etc/hosts"
+
+# IPv4 only unless asked otherwise. gravinet gives every host both an overlay
+# v4 and an overlay v6 address, so pinging both families lists each host twice
+# and doubles the wait - one row per address, not one per host. The pair almost
+# always agree, which makes the second row of each pair no news; -a is there for
+# when the question is specifically whether one family is up and the other is
+# not.
 PING_4=1
-PING_6=1
+PING_6=0
 
 # Parse command line options using POSIX-compliant loop
 while [ $# -gt 0 ]; do
@@ -17,8 +24,16 @@ while [ $# -gt 0 ]; do
             PING_6=1
             shift
             ;;
+        -a)
+            PING_4=1
+            PING_6=1
+            shift
+            ;;
         *)
-            printf "Usage: %s [-4] [-6]\n" "$0" >&2
+            printf "Usage: %s [-4 | -6 | -a]\n" "$0" >&2
+            printf "  -4  IPv4 entries only (default)\n" >&2
+            printf "  -6  IPv6 entries only\n" >&2
+            printf "  -a  both families\n" >&2
             exit 1
             ;;
     esac
