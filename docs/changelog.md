@@ -2,6 +2,30 @@
 
 ---
 
+## v897 — 2026-08-20
+
+**The column resize grips are visible before you hover them.**
+
+A resizable column advertised itself with nothing at all. The grab zone is 9px of transparent nothing at the right edge of each header cell, and the 1px mark inside it was `opacity:0` until `:hover`. So the only route to discovering that a table column could be resized was to put the pointer inside those 9px *by accident* and notice the cursor turn into `col-resize` — which requires already suspecting the feature is there. On a touch screen there is no hover and so no route at all.
+
+**The mark is now drawn at rest and lights up on interaction.** At rest it is `--line`, the same colour as the table's own borders, so a row of them reads as quiet furniture at the column edges rather than decoration. Hover — or a drag in progress, via `.grip-live` — switches it to `--acc` at `.85`, which is exactly the lit state it always had. What changed is that it now has something to change *from*, so the hover reads as feedback rather than as an appearance out of nowhere.
+
+The mark keeps its 4px top and bottom inset, so it stays a short tick at the edge of the cell rather than a full-height rule. That matters more now that it is always on screen: a full-height line in `--line` would be indistinguishable from a column border, and the table would look like it had gained gridlines rather than gained an affordance. A `.12s` transition on colour and opacity keeps the hover from snapping.
+
+Untouched: the 9px grab width, the `col-resize` cursor, the click and pointerdown suppression that stops a finished drag from re-sorting the column, and the rule that the last visible column gets no grip.
+
+### Verification
+
+`go build ./...` clean; `gofmt` clean on every file touched. `cmd/gravinet`, `internal/webadmin`, `internal/config` and `internal/service` pass in full.
+
+`TestColumnResizeGripDoesNotSort` gained three assertions, since the thing that regressed here is exactly the kind of thing that regresses silently — an invisible control looks identical to a correctly styled one in every test that only checks the markup is present. They pin that the resting rule does not set `opacity:0`, that it draws in `--line`, and that the hover and `.grip-live` rule switches to `--acc`. The colour pins are on the variable rather than a hex value so the palette can still move. All three were confirmed to fail against a copy with the change reverted, and the second of them against a copy where hover was made identical to rest — a grip that is visible but gives no feedback when moused over is its own defect, and worth catching separately.
+
+**Not rendered.** The change is two CSS rules and the served script parses, but no one has looked at the result in a browser. Worth a glance in both themes: `--line` is `#2a3441` on dark against a `#1a2129` panel, and `#d8dee4` on light against white, and "barely visible" is doing real work in both.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
 ## v896 — 2026-08-20
 
 **`meshping` pings IPv4 by default. `-a` asks for both families.**

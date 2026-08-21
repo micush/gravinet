@@ -358,6 +358,26 @@ func TestColumnResizeGripDoesNotSort(t *testing.T) {
 	if !strings.Contains(indexHTML, "cursor:col-resize") {
 		t.Error("the grip no longer shows a col-resize cursor; a 9px invisible target with no cursor change is undiscoverable")
 	}
+
+	// The grip's mark has to be visible before it is hovered. It was opacity:0
+	// at rest until v897, which made the cursor change the only discovery
+	// route: you had to already suspect the column was resizable, and put the
+	// pointer inside 9px, to find out that it was. A touch screen has no hover
+	// and so had no route at all. Pinned as "the resting rule does not hide
+	// it" rather than on an exact colour, so the palette can move.
+	rest := indexHTML[strings.Index(indexHTML, "th.res-th > .colgrip::after"):]
+	rest = rest[:strings.Index(rest, "\n")]
+	if strings.Contains(rest, "opacity:0") {
+		t.Errorf("the resize grip is invisible until hovered again; nothing then advertises that a column can be resized:\n%s", rest)
+	}
+	if !strings.Contains(rest, "background:var(--line)") {
+		t.Errorf("the grip's resting mark no longer draws in --line, so it is either invisible or louder than the table's own borders:\n%s", rest)
+	}
+	// The lit state has to be a different colour from the resting one, or
+	// hovering a grip gives no feedback that it is the thing under the pointer.
+	if !strings.Contains(indexHTML, "th.res-th > .colgrip:hover::after, th.res-th > .colgrip.grip-live::after { background:var(--acc)") {
+		t.Error("hovering or dragging a grip no longer switches it to --acc, so the resting and active states are indistinguishable")
+	}
 }
 
 // TestPinnedTableContainsItsContent covers the regression that shipped with

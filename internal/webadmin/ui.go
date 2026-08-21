@@ -401,9 +401,20 @@ const indexHTML = `<!doctype html>
   th.res-th > .colgrip { position:absolute; top:0; bottom:0; right:0; width:9px; cursor:col-resize; user-select:none; touch-action:none; z-index:2; }
   /* The visible hairline is a child of the grip, not the grip itself, so the
      grab area can stay 9px wide while the mark stays 1px — a 9px bar would
-     read as a column border of its own. */
-  th.res-th > .colgrip::after { content:''; position:absolute; top:4px; bottom:4px; right:3px; width:1px; background:var(--acc); opacity:0; }
-  th.res-th > .colgrip:hover::after, th.res-th > .colgrip.grip-live::after { opacity:.85; }
+     read as a column border of its own.
+
+     At rest the mark is drawn in --line, the same colour as the table's own
+     borders, and inset 4px top and bottom so it reads as a short tick at the
+     column edge rather than a full-height rule. That resting state is the
+     whole point: the grab zone is 9px of transparent nothing, and until v897
+     the mark was opacity:0 until hovered, so the only way to find out a
+     column could be resized was to happen to put the pointer within those 9px
+     and notice the cursor change. On a touch screen there is no hover and so
+     no way at all. Hovering — or dragging, via .grip-live — switches it to
+     --acc at .85, which is the same lit state it had before; what changed is
+     that it now has something to change *from*. */
+  th.res-th > .colgrip::after { content:''; position:absolute; top:4px; bottom:4px; right:3px; width:1px; background:var(--line); opacity:1; transition:background-color .12s, opacity .12s; }
+  th.res-th > .colgrip:hover::after, th.res-th > .colgrip.grip-live::after { background:var(--acc); opacity:.85; }
   /* Held on <body> for the duration of a drag: once the pointer is captured
      it can travel far outside the 9px grip, and without this the cursor
      reverts to whatever it is over and the drag looks like it has ended. */
