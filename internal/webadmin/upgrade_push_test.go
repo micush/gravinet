@@ -222,3 +222,35 @@ func TestSelfNoteIsReachableOutsideThePeersTable(t *testing.T) {
 		t.Error("peerNotesFor checks self before the peer list; a real peer's note must win over a same-id self lookup")
 	}
 }
+
+// TestRolloutHintsAreSpacedFromTheResultLines pins the spacing between a
+// rollout's per-peer result lines and the notices interleaved with them.
+//
+// .hint carries a *negative* top margin — it is shaped to tuck a caption up
+// under a heading, which is what it does everywhere else in the UI. Dropped
+// into the results list it pulled itself 6px into the line above, so the
+// closing verdict arrived hard against the last peer's line and read as one
+// more result rather than as the end of the rollout. The seeds notice had
+// been given an inline margin-top to escape exactly this; the rule covers all
+// of them, so no notice depends on remembering the override.
+func TestRolloutHintsAreSpacedFromTheResultLines(t *testing.T) {
+	i := strings.Index(indexHTML, ".up-push-results > .hint {")
+	if i < 0 {
+		t.Fatal("the results box no longer overrides .hint's margin; its negative top margin pulls every notice into the line above")
+	}
+	rule := indexHTML[i:]
+	rule = rule[:strings.Index(rule, "}")]
+	if strings.Contains(rule, "margin:-") || strings.Contains(rule, "margin-top:-") {
+		t.Errorf("the override is itself negative, which is the thing being overridden: %s", strings.TrimSpace(rule))
+	}
+	// The progress count is the first child and already sits below the box's
+	// own margin; another 10px above it would open a gap at the top instead.
+	if !strings.Contains(indexHTML, ".up-push-results > .hint:first-child { margin-top:0; }") {
+		t.Error("the first-child exemption is gone; the progress line gains a top margin it does not need")
+	}
+	// If a notice keeps its own inline margin it silently stops tracking the
+	// rule, which is how the two ended up disagreeing in the first place.
+	if strings.Contains(indexHTML, "class=\"hint\" style=\"margin-top:6px\">upgrading seeds") {
+		t.Error("the seeds notice still carries an inline margin-top, so it no longer tracks the shared rule")
+	}
+}

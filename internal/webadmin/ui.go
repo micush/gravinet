@@ -354,6 +354,20 @@ const indexHTML = `<!doctype html>
   tr.lat-flash-down { animation:latFlashDown 2.5s ease-out; }
   .empty { color:var(--mut); font-style:italic; padding:6px 10px; }
   .hint { color:var(--mut); font-size:12px; margin:-6px 0 14px; }
+  /* A rollout's results box is a list of one-line entries (margin:3px 0, see
+     addResult) with .hint used for the notices between and after them: the
+     progress count at the top, "upgrading seeds one at a time" partway down,
+     and the closing verdict. .hint's own top margin is *negative* — it is
+     shaped to tuck a caption up under a heading, which is what it does
+     everywhere else — so a notice dropped into this list pulled itself 6px
+     into the line above and read as one more result rather than as a break
+     between them. The closing verdict was the visible case, arriving hard
+     against the last seed's line; the seeds notice had been given an inline
+     margin-top to escape the same thing, which this rule now covers for all
+     of them. The first child is the progress line, which already has the
+     box's own margin above it. */
+  .up-push-results > .hint { margin:10px 0 8px; }
+  .up-push-results > .hint:first-child { margin-top:0; }
   td.editable { cursor:text; }
   .bw-edit { cursor:text; text-decoration:underline dotted var(--mut); text-underline-offset:3px; }
   .bw-edit:hover { text-decoration-color:var(--acc); color:var(--acc); }
@@ -9528,7 +9542,7 @@ async function drawUpgrade(host){
         // succeeded. Only the canary can stop the rollout before it gets
         // here; nothing in this loop does either.
         if (restSeed.length){
-          resBox.appendChild($('<div class="hint" style="margin-top:6px">upgrading seeds one at a time\u2026</div>'));
+          resBox.appendChild($('<div class="hint">upgrading seeds one at a time\u2026</div>'));
           for (const seedId of restSeed){
             const applied = await pushBatch([seedId]);
             if (applied === null) return; // request-level failure: abort, touch nothing else

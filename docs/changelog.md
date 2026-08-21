@@ -2,6 +2,30 @@
 
 ---
 
+## v903 — 2026-08-20
+
+**The closing line of a rollout no longer butts against the last peer.**
+
+On System > Upgrade, "All peers applied or already up to date — upgrading this node now…" arrived hard against the last seed's result line, with none of the separation the "upgrading seeds one at a time…" notice above it had.
+
+The cause is that `.hint` has a **negative** top margin — `margin:-6px 0 14px`. That is right for what it does everywhere else in the UI, tucking a caption up under the heading it belongs to. Dropped into a list of result lines it does the same thing to the line above, so a notice meant to close the rollout pulled itself 6px into the last peer's row and read as one more result rather than as the end of them.
+
+The seeds notice looked correct only because it carried an inline `margin-top:6px` to escape exactly this. Nothing else did, so every other notice in the box — the closing verdict, both failure summaries, and the push-level error — inherited the negative margin.
+
+**One rule now covers all of them**: `.up-push-results > .hint` gets a positive margin above and below, and the inline override comes off the seeds notice so no notice depends on remembering it. The child combinator matters: a failed peer's error text is also a `.hint`, but nested inside its own result line, where the tight spacing is correct and it keeps it. The progress count at the top is exempted as `:first-child` — it already sits below the box's own margin, and another 10px there would open a gap at the top while fixing one at the bottom.
+
+### Verification
+
+`go build ./...` clean; `gofmt` clean on every file touched. `cmd/gravinet`, `internal/webadmin`, `internal/config` and `internal/service` pass in full. No Go file changed except the version constant and the new test.
+
+`TestRolloutHintsAreSpacedFromTheResultLines` pins that the override exists, that it is not itself negative, that the first-child exemption survives, and that the seeds notice no longer carries its own inline margin — the last of those because an inline margin is how the two notices came to disagree, and a re-added one would silently stop tracking the rule. Confirmed to fail with the rule removed.
+
+**Not rendered.** This is a spacing judgement — 10px above and 8px below — made from the numbers rather than from looking at it. It is one line to retune if it reads loose or still tight, and the same rule governs every notice in the box, so a single value moves all of them together.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
 ## v902 — 2026-08-20
 
 **Mesh > bans splits origin the same way v901 split the banned peer.**
