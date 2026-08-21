@@ -50,3 +50,49 @@ func TestSelfPeer(t *testing.T) {
 		t.Fatalf("SelfPeer(999) ok = true for an unconfigured network, want false")
 	}
 }
+
+// TestSelfPeerCarriesItsOwnNote covers the read path that makes a note on this
+// node's own row possible in the admin UI's peers table.
+//
+// The write path never needed anything: PeerNotes is a map keyed by node id and
+// PeerSetNotes has always accepted any non-empty id, this node's own included.
+// What was missing was a way to read one back — self is not in ListPeers and not
+// in DisabledPeers, the two places a note reaches the UI from, so a note stored
+// under this node's id existed in config and was visible nowhere. The peers
+// table, seeing nowhere to show it, declined to offer the edit at all.
+func TestSelfPeerCarriesItsOwnNote(t *testing.T) {
+	e := NewEngine(Options{NodeID: "self-id-123", Hostname: "myhost", Nets: []NetSpec{{
+		ID: 1, Name: "n", Dev: newFakeDev("d"), Subnet4: netip.MustParsePrefix("10.0.0.0/24"),
+	}}})
+	ns := e.netSnapshot()[1]
+
+	// No note set: the field is empty, not absent or defaulted to something.
+	if pi, ok := e.SelfPeer(1); !ok || pi.Notes != "" {
+		t.Fatalf("SelfPeer(1).Notes = %q with no note set, want empty", pi.Notes)
+	}
+
+	// A note keyed by this node's own id is exactly a peerNotes entry, which
+	// is how config reload delivers every other peer's note (applyPeerNotes).
+	e.applyPeerNotes(ns, map[string]string{
+		"self-id-123": "rack 3, do not reboot in hours",
+		"other-node":  "someone else's box",
+	})
+
+	pi, ok := e.SelfPeer(1)
+	if !ok {
+		t.Fatal("SelfPeer(1) ok = false, want true")
+	}
+	if pi.Notes != "rack 3, do not reboot in hours" {
+		t.Fatalf("SelfPeer(1).Notes = %q, want this node's own note", pi.Notes)
+	}
+	// The other node's note must not leak onto the self row.
+	if pi.Notes == "someone else's box" {
+		t.Fatal("SelfPeer(1) picked up another node's note")
+	}
+	// Clearing it (config drops the key entirely, per PeerSetNotes) empties
+	// the field rather than leaving the previous value behind.
+	e.applyPeerNotes(ns, map[string]string{"other-node": "someone else's box"})
+	if pi, _ := e.SelfPeer(1); pi.Notes != "" {
+		t.Fatalf("SelfPeer(1).Notes = %q after the note was cleared, want empty", pi.Notes)
+	}
+}

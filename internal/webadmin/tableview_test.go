@@ -158,7 +158,7 @@ func TestTableViewClearedOnTargetSwitch(t *testing.T) {
 // (86px for "connecting…" at 13px monospace, plus 20px of th,td padding) and
 // may be re-measured, but going back to a percentage would be the regression.
 func TestPeersStateColumnIsContentSized(t *testing.T) {
-	for _, col := range []string{"c-state-op", "c-target-op"} {
+	for _, col := range []string{"c-state-op", "c-peer-op", "c-id"} {
 		i := strings.Index(indexHTML, "table.peers-table col."+col+" {")
 		if i < 0 {
 			t.Fatalf("the %s rule is gone; that column has no explicit width under table-layout:fixed", col)
@@ -175,14 +175,22 @@ func TestPeersStateColumnIsContentSized(t *testing.T) {
 		}
 	}
 
-	// Narrowing the target column is only safe because it wraps. nodeCell puts
-	// the node id after the hostname, so ellipsis would eat the id — the part
-	// this table exists to let you copy.
-	if !strings.Contains(indexHTML, "table.peers-table td.tgt-cell {") {
-		t.Error("td.tgt-cell has no wrap rule; a long hostname would truncate the node id off the end of the cell")
+	// Narrowing these two columns is only safe because they wrap. The node id
+	// is the part this table exists to let you copy, and it now has a column of
+	// its own sized to exactly 16 hex characters — so an id that ran longer, or
+	// a hostname wider than its column, would be ellipsised away rather than
+	// wrapped onto a second line. Both cells share the one rule.
+	if !strings.Contains(indexHTML, "table.peers-table td.tgt-cell, table.peers-table td.id-cell {") {
+		t.Error("the wrap rule no longer covers both the peer and id cells; a long value would be truncated instead of wrapping")
 	}
-	if !strings.Contains(indexHTML, "'<td class=\"tgt-cell\">'+nodeCell(") {
-		t.Error("the target cell no longer carries tgt-cell, so the wrap rule does not apply to it")
+	if !strings.Contains(indexHTML, "'<td class=\"tgt-cell\">'+nodePeerCell(") {
+		t.Error("the peer cell no longer carries tgt-cell, so the wrap rule does not apply to it")
+	}
+	// No leading quote in this one: unlike the peer cell, the id cell is
+	// concatenated mid-string, so the '<td opens inside a literal rather than
+	// at its start.
+	if !strings.Contains(indexHTML, "<td class=\"id-cell\">'+nodeIdCell(") {
+		t.Error("the id cell no longer carries id-cell, so the wrap rule does not apply to it")
 	}
 
 	// The columns that genuinely hold variable-length values must stay

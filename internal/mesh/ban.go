@@ -1124,7 +1124,16 @@ func (e *Engine) SelfPeer(networkID uint64) (pi PeerInfo, ok bool) {
 		return PeerInfo{}, false
 	}
 	s4, s6 := ns.selfAddrs()
-	pi = PeerInfo{NodeID: e.nodeID, Hostname: e.hostname, BGPASN: e.bgpASN.Load(), Version: e.version}
+	// Notes is read under the same lock Peers uses for the identical lookup
+	// (see peerNotes there): it is one map, written by config reload, so a
+	// self note is exactly a peerNotes entry whose key happens to be this
+	// node's own id. Nothing about PeerSetNotes or the map itself ever
+	// distinguished the two — only the UI did, by declining to offer the
+	// edit — so surfacing it here is the whole of what "self" needed.
+	ns.mu.RLock()
+	selfNotes := ns.peerNotes[e.nodeID]
+	ns.mu.RUnlock()
+	pi = PeerInfo{NodeID: e.nodeID, Hostname: e.hostname, BGPASN: e.bgpASN.Load(), Version: e.version, Notes: selfNotes}
 	if s4.IsValid() {
 		pi.Overlay4 = s4.String()
 	}

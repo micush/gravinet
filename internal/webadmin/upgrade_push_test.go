@@ -163,3 +163,62 @@ func TestPushStreamsResultsAsPeersFinish(t *testing.T) {
 		t.Fatalf("summary pushed/total: %v", summary)
 	}
 }
+
+// TestUpgradeResultsSurviveTheLocalPhaseRedraw pins the lifetime of the
+// per-peer rollout results on System > Upgrade.
+//
+// The results are the only record that a rollout produced: once the peers have
+// restarted onto the new build, nothing on the server still distinguishes the
+// ones that applied from the ones that were already current or the ones that
+// failed and why. They used to be destroyed at the worst possible moment —
+// applyLocal finishes the local phase and calls drawUpgrade, which rebuilds the
+// section and takes the results box with it, so the list vanished exactly when
+// the last peer reported in and there was finally something to read.
+//
+// Pinned on the source rather than by rendering, since nothing here executes
+// the page: what is checked is that the three halves of the mechanism are all
+// still present, because any one of them alone silently does nothing.
+func TestUpgradeResultsSurviveTheLocalPhaseRedraw(t *testing.T) {
+	// 1. a rebuilt section repopulates its results box from the stash
+	if !strings.Contains(indexHTML, "if (host._upgradeResults) resBox.innerHTML = host._upgradeResults;") {
+		t.Error("drawUpgrade no longer restores stashed rollout results; the local phase's redraw wipes them again")
+	}
+	// 2. something writes the stash before that redraw happens
+	if !strings.Contains(indexHTML, "const stashResults = () => { if (resBox) host._upgradeResults = resBox.innerHTML; };") {
+		t.Error("stashResults is gone; there is nothing for drawUpgrade to restore")
+	}
+	if !strings.Contains(indexHTML, "stashResults();\n          await applyLocal();") {
+		t.Error("the results are no longer stashed before applyLocal, which is the redraw that destroys them")
+	}
+	// 3. and the stash is cleared when a new upgrade begins, so one rollout's
+	//    results never appear above the next one's.
+	if !strings.Contains(indexHTML, "host._upgradeResults = '';") {
+		t.Error("a new push no longer clears the previous rollout's stashed results")
+	}
+}
+
+// TestSelfNoteIsReachableOutsideThePeersTable pins that a note on this node's
+// own id resolves through the shared lookup every node-name tooltip uses.
+//
+// PeerNotes is one map keyed by node id, and neither the config nor the engine
+// ever treated this node's own id specially — PeerSetNotes accepts it and
+// SelfPeer reads it back. Mesh > peers renders it in its own notes column, so
+// a self note could be written and seen there. But peerNotesFor, which is what
+// every other node-name cell in the UI reaches a note through, searched only
+// peers and disabled_peers. Self is in neither: it arrives on the network as
+// `self`. So a note on your own node was stored correctly and displayed in
+// exactly one table, and was invisible everywhere else.
+func TestSelfNoteIsReachableOutsideThePeersTable(t *testing.T) {
+	fn := indexHTML[strings.Index(indexHTML, "function peerNotesFor(netId, nodeId){"):]
+	fn = fn[:strings.Index(fn, "\n}")]
+	if !strings.Contains(fn, "status.self") {
+		t.Errorf("peerNotesFor never consults the network's self entry, so a note on this node's own id resolves to nothing outside Mesh > peers:\n%s", fn)
+	}
+	// It must still prefer a real peer entry: self is the fallback, checked
+	// after peers and disabled_peers, not instead of them.
+	iPeers := strings.Index(fn, "status.peers")
+	iSelf := strings.Index(fn, "status.self")
+	if iPeers == -1 || iSelf < iPeers {
+		t.Error("peerNotesFor checks self before the peer list; a real peer's note must win over a same-id self lookup")
+	}
+}

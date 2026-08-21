@@ -253,18 +253,21 @@ const indexHTML = `<!doctype html>
 
      Both of its first two columns are px rather than the percentages they
      were, for the same reason: their content does not scale with the table,
-     so a percentage only bought empty space. This one holds nodeCell's
-     "hostname id" — the id is a fixed 16 hex characters (125px at the 13px
-     monospace these cells use) and the hostname is the only variable part.
-     "mcfed ff706bd5890c02c4" measures 172px, "gateway-lon-01 …" 243px; with
-     th,td's 20px of padding, 300px fits a hostname of about 18 characters
-     beside the id. At 38% the column was around 490px on an ordinary window,
-     most of it gap between the hostname and the state tag.
+     so a percentage only bought empty space.
+
+     These two were one 300px column holding nodeCell's "hostname id" until
+     the id moved into a column of its own. The split is the same total width
+     divided along the seam the content already had: an id is a fixed 16 hex
+     characters, which is 125px at the 13px monospace these cells use, so 150px
+     covers it with th,td's 20px of padding and a little slack; the hostname
+     keeps the rest, about 18 characters, which is what it had before beside
+     the id. Neither grows with the table, so both stay px.
 
      Longer values wrap rather than ellipsis — see td.tgt-cell below. The
      freed width goes to the c-fill columns (endpoint, notes), which are auto
      and do hold variable-length values. */
-  table.peers-table col.c-target-op { width:300px; }
+  table.peers-table col.c-peer-op { width:170px; }
+  table.peers-table col.c-id { width:150px; }
   /* Sized in px, not a percentage, because its content does not scale with
      the table: every value this column can hold is a fixed short label, and
      the set is closed — enabled, disabled, connecting…, this node. At the
@@ -306,7 +309,7 @@ const indexHTML = `<!doctype html>
      long value would eat the id — the part you are in this table to copy
      (matching it against a join token, per nodeCell's own comment). Wrapping
      costs a row some height; truncating would cost the cell its purpose. */
-  table.peers-table td.tgt-cell { overflow:visible; text-overflow:clip; white-space:normal; overflow-wrap:anywhere; }
+  table.peers-table td.tgt-cell, table.peers-table td.id-cell { overflow:visible; text-overflow:clip; white-space:normal; overflow-wrap:anywhere; }
   /* routes-table: shared column grid for Mesh Routes' Advertise and Reject
      subcards — they're separate <table>s, each sized from its own content
      under the default auto layout, so their columns used to drift out of
@@ -745,12 +748,31 @@ function nodeCell(host, id, netId, endpoint){
   const notes = netId ? nodeNotesTitle(netId, id, endpoint) : '';
   return notes ? '<span title="'+notes+'">'+label+'</span>' : label;
 }
-// nodeNameCell is nodeCell's Monitor > Mesh Peers counterpart: the target
-// column there shows only the node's name, not the id alongside it — Mesh >
-// Peers (nodeCell's own table) is where the id is actually needed, e.g. to
+// nodePeerCell and nodeIdCell are the two halves of what nodeCell renders as
+// one. Mesh > peers and Mesh > bans put the hostname and the node id in
+// separate columns, so each cell holds one value and each column can be sized
+// and sorted on its own — an id column sorts by id, which "hostname id" in a
+// single cell could not do.
+//
+// A node with no hostname yet gets a dash rather than nodeCell's fallback of
+// showing the id in its place: the id is in the very next column, so repeating
+// it here would put the same string twice in one row and make an unnamed peer
+// look like it had been named after its own id. The notes tooltip stays on the
+// name half, which is the one an operator reads.
+function nodePeerCell(host, id, netId, endpoint){
+  const label = host ? esc(host) : '<span class="hint">\u2014</span>';
+  const notes = netId ? nodeNotesTitle(netId, id, endpoint) : '';
+  return notes ? '<span title="'+notes+'">'+label+'</span>' : label;
+}
+function nodeIdCell(id){
+  return '<span class="net-id">'+esc(id)+'</span>';
+}
+// nodeNameCell is nodeCell's Monitor > Mesh Peers counterpart: the peer
+// column there shows only the node's name, with no id column beside it —
+// Mesh > peers and Mesh > bans are where the id is actually needed, e.g. to
 // match it against a join token, and Monitor > Mesh Peers already has a
 // dedicated version column and enough per-row detail that dropping a
-// redundant id keeps the target column narrow. Falls back to the id when no
+// redundant id keeps the peer column narrow. Falls back to the id when no
 // hostname is known yet, same as nodeCell, so a not-yet-named peer isn't
 // blank; carries the same peer/seed-notes tooltip.
 function nodeNameCell(host, id, netId, endpoint){
@@ -823,9 +845,18 @@ function seedNotesForAddr(netId, endpoint){
   }
   return hostNotes.size === 1 ? [...hostNotes][0] : '';
 }
-// peerNotesFor finds the local operator note on a network's peer by node id,
-// whether it's currently connected or just locally disabled — both carry the
-// Notes field sourced from Config.PeerNotes (see peerRowsForNet).
+// peerNotesFor finds the local operator note on a network's node by node id —
+// a connected peer, a locally disabled one, or this node itself. All three
+// carry the Notes field sourced from Config.PeerNotes (see peerRowsForNet).
+//
+// Self is checked because PeerNotes is one map keyed by node id and nothing in
+// config or the engine ever treated this node's own id specially (see
+// Config.PeerSetNotes and Engine.SelfPeer). Mesh > peers renders a self note in
+// its own notes column, so one can be written and read back there — but every
+// *other* place a node name appears reaches its note through this function,
+// and this function looked only in peers and disabled_peers, neither of which
+// contains self. A note on your own node was therefore written, stored,
+// displayed in exactly one table, and invisible everywhere else in the UI.
 function peerNotesFor(netId, nodeId){
   if (!netId || !nodeId) return '';
   const status = state.status.find(s => s.id === netId);
@@ -834,6 +865,8 @@ function peerNotesFor(netId, nodeId){
   if (p) return p.Notes||p.notes||'';
   const d = (status.disabled_peers||[]).find(x => (x.NodeID||x.node_id)===nodeId);
   if (d) return d.Notes||d.notes||'';
+  const self = status.self || {};
+  if ((self.NodeID||self.node_id||'') === nodeId) return self.Notes||self.notes||'';
   return '';
 }
 // nodeNotesTitle combines a node's seed and peer notes into one escaped
@@ -4681,7 +4714,7 @@ function peerRowsForNet(n) {
     rows.push({ id:selfID, host:self.Hostname||self.hostname||'',
       overlay:selfOv4||selfOv6||'', overlay4:selfOv4, overlay6:selfOv6,
       endpoint:(state.nat && state.nat.public) || '', endpointText:(state.nat && state.nat.public) || '', relayed:false,
-      disabled:false, self:true, notes:'',
+      disabled:false, self:true, notes:self.Notes||self.notes||'',
       // Unlike reach/key/time/transport (all session properties, meaningless
       // for yourself), a build version is a property of the node itself, so
       // the self row shows it like any other.
@@ -4894,7 +4927,7 @@ function openPeerShellFromSel(n, sec) {
 }
 
 function secPeers(c) {
-  c.appendChild($('<div class="hint" style="margin:0 0 10px">Peers connected to this node, grouped by network. This node is listed too (<b>this node</b>), tickable to look up or shell into. Double-click a peer state to enable/disable it \u2014 any seed addresses proven to reach it are set to match, so a peer\u2019s state and its addresses\u2019 states never disagree. Double-click <b>notes</b> for a local, permanent note on its node id. Select peers and click Ban to block them mesh-wide.</div>'));
+  c.appendChild($('<div class="hint" style="margin:0 0 10px">Peers connected to this node, grouped by network. This node is listed too (<b>this node</b>), tickable to look up or shell into. Double-click a peer state to enable/disable it \u2014 any seed addresses proven to reach it are set to match, so a peer\u2019s state and its addresses\u2019 states never disagree. Double-click <b>notes</b> for a local, permanent note on its node id \u2014 including on <b>this node</b>\u2019s own row, whose note stays on this node like any other. Select peers and click Ban to block them mesh-wide.</div>'));
   if (state.nat && state.nat.class && state.nat.class !== 'unknown') {
     const m = {
       open: ['directly reachable (no NAT)', 'on'],
@@ -4910,8 +4943,8 @@ function secPeers(c) {
   perNet(c, (card, n) => {
     const rows = peerRowsForNet(n);
 
-    let h = '<table class="peers-table"><colgroup><col class="c-sel"><col class="c-target-op"><col class="c-state-op"><col class="c-overlay"><col class="c-fill"><col class="c-fill"></colgroup><tr><th class="selcol"><input type="checkbox" class="rall"></th><th>target</th><th>state</th><th>overlay</th><th>endpoint</th><th>notes</th></tr>';
-    if (!rows.length) h += '<tr><td colspan="6" class="empty">no peers</td></tr>';
+    let h = '<table class="peers-table"><colgroup><col class="c-sel"><col class="c-peer-op"><col class="c-id"><col class="c-state-op"><col class="c-overlay"><col class="c-fill"><col class="c-fill"></colgroup><tr><th class="selcol"><input type="checkbox" class="rall"></th><th>peer</th><th title="this peer\'s node id \u2014 what a join token and the config file identify it by">id</th><th>state</th><th>overlay</th><th>endpoint</th><th>notes</th></tr>';
+    if (!rows.length) h += '<tr><td colspan="7" class="empty">no peers</td></tr>';
     for (const p of rows) {
       let stCls, stLabel, stTitle, stDis;
       if (p.self) { stCls=''; stLabel='this node'; stTitle='this is the node you\'re currently on'; stDis=''; }
@@ -4937,18 +4970,23 @@ function secPeers(c) {
       const ovCell = canEditOv
         ? '<td class="ov-cell peer-ov" data-peer-ov="'+esc(p.id)+'" style="cursor:pointer">'+overlayEditCellHTML(p)+'</td>'
         : '<td class="ov-cell"'+(p.overlay?' title="'+(p.self?'this node\'s own overlay address':'overlay address is set by the peer itself — change it on that node')+'"':'')+'>'+overlayCellHTML(p)+'</td>';
-      // The self row IS selectable — ticking it and using 🛈 or the shell
-      // button both work (see peerInfoRow and the shell button below); it's
-      // only Ban that refuses to act on it once selected. Its notes cell has
-      // no data-peer-notes attribute, so double-click-to-edit never attaches
-      // there — a local note on your own node's id isn't a meaningful thing
-      // to attach.
+      // The self row IS selectable: ticking it and using the info or shell
+      // buttons both work (see peerInfoRow and the shell button below); it's
+      // only Ban that refuses to act on it once selected. Its notes cell is
+      // editable too. PeerNotes is a map keyed by node id, and neither
+      // PeerSetNotes nor the config schema ever treated this node's own id
+      // specially, so the note always had somewhere to live: this table was
+      // simply declining to offer the edit, on the reasoning that a note
+      // about yourself is not meaningful. It is. "rack 3, do not reboot in
+      // hours" is exactly what an operator wants pinned to the box they are
+      // standing in, and it was the one row that could not carry it. Local
+      // in the same way every other peer note is: keyed by node id in this
+      // node's own config and never sent anywhere, so each node holds its
+      // own note about itself.
       h += '<tr class="selectable'+(p.self?' peer-self':(p.disabled?' peer-dis':''))+'"><td class="selcol"><input type="checkbox" class="rsel" data-k="'+esc(selKey(n.id,p.id))+'"'+(p.self?' title="this is the current node"':'')+'></td>'
-        + '<td class="tgt-cell">'+nodeCell(p.host,p.id,n.id,p.endpoint)+'</td><td>'+st+'</td>'
+        + '<td class="tgt-cell">'+nodePeerCell(p.host,p.id,n.id,p.endpoint)+'</td><td class="id-cell">'+nodeIdCell(p.id)+'</td><td>'+st+'</td>'
         + ovCell+'<td class="ep-cell" title="'+(p.self?'this node\'s own observed public address (same as the NAT summary above)':(p.relayed?'no direct underlay address — reached through the relay named here':'observed underlay address — for a peer behind NAT this is its public mapping as seen from here'))+'">'+esc(dispAddr(p.endpointText))+'</td>'
-        + (p.self
-          ? '<td class="hint" title="a local note on your own node\'s id isn\'t meaningful here">\u2013</td>'
-          : '<td class="peer-notes" data-peer-notes="'+esc(p.id)+'" title="double-click to edit — local-only, never sent to the peer">'+esc(p.notes||'')+'</td>')
+        + '<td class="peer-notes" data-peer-notes="'+esc(p.id)+'" title="'+(p.self?'double-click to edit \u2014 this node\u2019s own note, local to it':'double-click to edit \u2014 local-only, never sent to the peer')+'">'+esc(p.notes||'')+'</td>'
         + '</tr>';
     }
     const t = $('<div></div>'); t.innerHTML = h+'</table>'; card.appendChild(t);
@@ -5179,7 +5217,7 @@ function infoMeshPeers(c) {
   perNet(c, (card, n) => {
     const rows = peerRowsForNet(n);
 
-    let h = '<table class="peers-table"><colgroup><col class="c-sel"><col class="c-target"><col class="c-version"><col class="c-key"><col class="c-overlay"><col class="c-endpoint"><col class="c-reach"><col class="c-rtt"><col class="c-time"><col class="c-transport"></colgroup><tr><th class="selcol"><input type="checkbox" class="rall"></th><th>target</th><th title="the gravinet build this peer is running, as it advertises in its own handshake. A dash means the peer predates this field \u2014 not that it has no version.">version</th><th title="the label (from this node\'s own Keys table) of the key currently authenticating this peer\'s session">key</th><th>overlay</th><th>endpoint</th><th>reach</th><th title="round-trip time from this node\'s own keepalive traffic to this peer \u2014 passive, already happening regardless of this column, distinct from Monitor \u2192 Latency\'s active on-demand ping. Blank until the first keepalive round trip completes.">rtt</th><th title="how long the current session with this peer has been established; resets on every reconnect">time</th><th title="discovered path MTU to the peer, fragment counts (tx/rx), and fragment loss (send/reassembly), plus session decrypt drops (replay/auth) when there are any. Clean counters here, with no replay or auth drops alongside them, mean a connectivity problem is not inside the mesh.">transport</th></tr>';
+    let h = '<table class="peers-table"><colgroup><col class="c-sel"><col class="c-target"><col class="c-version"><col class="c-key"><col class="c-overlay"><col class="c-endpoint"><col class="c-reach"><col class="c-rtt"><col class="c-time"><col class="c-transport"></colgroup><tr><th class="selcol"><input type="checkbox" class="rall"></th><th>peer</th><th title="the gravinet build this peer is running, as it advertises in its own handshake. A dash means the peer predates this field \u2014 not that it has no version.">version</th><th title="the label (from this node\'s own Keys table) of the key currently authenticating this peer\'s session">key</th><th>overlay</th><th>endpoint</th><th>reach</th><th title="round-trip time from this node\'s own keepalive traffic to this peer \u2014 passive, already happening regardless of this column, distinct from Monitor \u2192 Latency\'s active on-demand ping. Blank until the first keepalive round trip completes.">rtt</th><th title="how long the current session with this peer has been established; resets on every reconnect">time</th><th title="discovered path MTU to the peer, fragment counts (tx/rx), and fragment loss (send/reassembly), plus session decrypt drops (replay/auth) when there are any. Clean counters here, with no replay or auth drops alongside them, mean a connectivity problem is not inside the mesh.">transport</th></tr>';
     if (!rows.length) h += '<tr><td colspan="10" class="empty">no peers</td></tr>';
     for (const p of rows) {
       // None of reach/key/time/transport describe a connection to yourself,
@@ -5254,8 +5292,8 @@ function secBans(c) {
   perNet(c, (card, n) => {
     const bans = (n.bans||[]).slice().sort((a,b) =>
       (a.Target||a.target||'').localeCompare(b.Target||b.target||''));
-    let h = '<table><tr><th class="selcol"><input type="checkbox" class="rall"></th><th>target</th><th>origin</th><th>notes</th></tr>';
-    if (!bans.length) h += '<tr><td colspan="4" class="empty">no bans</td></tr>';
+    let h = '<table><tr><th class="selcol"><input type="checkbox" class="rall"></th><th>peer</th><th title="the banned node\'s id">id</th><th>origin</th><th title="the issuing node\'s id">origin id</th><th>notes</th></tr>';
+    if (!bans.length) h += '<tr><td colspan="6" class="empty">no bans</td></tr>';
     for (const b of bans) {
       const tgt = b.Target||b.target||'';
       const tgtHost = b.Hostname||b.hostname||'';
@@ -5269,6 +5307,10 @@ function secBans(c) {
       const notesCell = mine
         ? '<td class="editable ban-notes" data-net="'+esc(n.id)+'" data-node="'+esc(tgt)+'" title="double-click to edit these notes — it re-floods to all nodes">'+esc(notes)+'</td>'
         : '<td title="only the node that issued this ban can edit its notes">'+esc(notes)+'</td>';
+      // Origin is split the same way as the banned peer above: both halves of a
+      // ban row name a node, so both read the same way, and the origin id is
+      // what identifies the issuing node when two nodes share a hostname —
+      // which is exactly the case where "who banned this" is worth checking.
       // Only the origin node can unban (or edit) its own ban. On other nodes the
       // row is shown read-only: the checkbox is disabled and the row greyed, so
       // it's clear you can't act on it here rather than offering an Unban that
@@ -5277,7 +5319,8 @@ function secBans(c) {
         ? '<td class="selcol"><input type="checkbox" class="rsel" data-k="'+esc(selKey(n.id,tgt))+'"></td>'
         : '<td class="selcol"><input type="checkbox" class="rsel" disabled title="only '+esc(originHost||origin||'the issuing node')+' can lift this ban"></td>';
       h += '<tr class="selectable'+(mine?'':' ban-locked')+'" data-target="'+esc(tgt)+'">'+selCell
-        + '<td>'+nodeCell(tgtHost,tgt,n.id)+'</td><td>'+nodeCell(originHost,origin,n.id)+'</td>'+notesCell+'</tr>';
+        + '<td>'+nodePeerCell(tgtHost,tgt,n.id)+'</td><td>'+nodeIdCell(tgt)+'</td>'
+        + '<td>'+nodePeerCell(originHost,origin,n.id)+'</td><td>'+nodeIdCell(origin)+'</td>'+notesCell+'</tr>';
     }
     const el = $('<div></div>'); el.innerHTML = h+'</table>'; card.appendChild(el);
     // Wire double-click editing on notes cells for locally-originated bans.
@@ -9186,6 +9229,11 @@ async function drawUpgrade(host){
   // below reaches them.
   let peerPicker = null;
   let resBox = null;
+  // stashResults preserves whatever the results box currently shows across the
+  // redraw applyLocal triggers. Called on the paths that end a rollout rather
+  // than from addResult, so a push still in flight is never stashed
+  // half-written.
+  const stashResults = () => { if (resBox) host._upgradeResults = resBox.innerHTML; };
   let targets = [];
   const ALL_PEERS = '*all*'; // sentinel; real node_ids never equal this
   // Labelled name \u00b7 id \u00b7 version: which builds are behind is the whole
@@ -9235,6 +9283,23 @@ async function drawUpgrade(host){
     // chip list there is no per-row slot to write into, and a build failure's
     // message is a compiler error, which needs more room than a chip has.
     resBox = $('<div class="up-push-results" style="margin-top:10px"></div>');
+    // A finished rollout's per-peer results survive the redraw that follows
+    // it. applyLocal calls drawUpgrade once the local phase is done, which
+    // rebuilds this whole section from scratch - so every line the rollout had
+    // just printed disappeared at the moment the last node reported in, which
+    // is precisely when there was something worth reading.
+    //
+    // Stashed as markup on host rather than rebuilt from state, because it is
+    // a record of what happened and not a view of anything the server still
+    // knows: by now the peers have restarted onto the new build, so nothing
+    // queryable still says which of them applied, which were already current,
+    // and which failed and why.
+    //
+    // host is the div secUpgrade created, so the stash lives exactly as long
+    // as the rendered section does - cleared when the next push starts (see
+    // resBox.innerHTML below), gone outright on a page refresh, which is the
+    // whole of its intended lifetime.
+    if (host._upgradeResults) resBox.innerHTML = host._upgradeResults;
     stCard.appendChild(resBox);
   }
 
@@ -9313,7 +9378,10 @@ async function drawUpgrade(host){
     try {
       if (!nodes.length){ await applyLocal(); return; }
 
+      // A new upgrade is one of the two things that clears the previous one's
+      // results; a page refresh is the other.
       resBox.innerHTML = '';
+      host._upgradeResults = '';
       const progress = $('<div class="hint"></div>');
       const totalCount = nodes.length;
       let finished = 0;
@@ -9484,6 +9552,7 @@ async function drawUpgrade(host){
         peerPicker.set(allApplied ? [] : nodes.filter(n => !done.has(n)));
         if (allApplied){
           resBox.appendChild($('<div class="hint">All peers applied or already up to date \u2014 upgrading this node now\u2026</div>'));
+          stashResults();
           await applyLocal();
         } else if (canaryFailed){
           resBox.appendChild($('<div class="hint" style="color:var(--danger,#b33)">the first peer (' + resultLabel(canary) + ') failed \u2014 the rollout stopped there before touching anything else. Fix or retry it, then upgrade this node.</div>'));
@@ -9497,6 +9566,7 @@ async function drawUpgrade(host){
       }
     } finally {
       if (pushDotsTimer) clearInterval(pushDotsTimer);
+      stashResults();
       upgradeBtn.disabled = false; upgradeBtn.textContent = 'Upgrade';
     }
   };

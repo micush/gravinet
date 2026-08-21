@@ -2,6 +2,156 @@
 
 ---
 
+## v902 — 2026-08-20
+
+**Mesh > bans splits origin the same way v901 split the banned peer.**
+
+v901 moved the banned node's id into its own column and left origin as a combined `hostname id` cell, on the narrow reading that only the peer's id had been asked for. Both halves of a ban row name a node, so both should read the same way — origin now has an `origin id` column beside it, rendered by the same `nodePeerCell` and `nodeIdCell` pair.
+
+It is the more useful half of the two, if anything. The origin id is what identifies the issuing node when two nodes share a hostname, and "which node issued this ban" is exactly the question where that ambiguity matters — a ban can only be lifted from its origin, so picking the wrong one out of a hostname collision means going to the wrong node to undo it.
+
+An origin with no known hostname gets a dash rather than its id repeated, the same rule as the banned peer's half.
+
+The table is six columns now: select, peer, id, origin, origin id, notes. It has no `colgroup` and no `peers-table` class, so it sizes from its content under the default auto layout and needed no width work — unlike Mesh > peers, where the equivalent split had to divide a fixed 300px.
+
+**Saved column state for this table resets once more.** Same mechanism as v901: `tableViewKey` is the header labels joined, so adding a sixth changes the key and any widths or sort saved against yesterday's five-column layout are orphaned. Anyone who re-saved after v901 will do it again.
+
+### Verification
+
+`go build ./...` clean; `gofmt` clean on every file touched. `cmd/gravinet`, `internal/webadmin`, `internal/config` and `internal/service` pass in full. No Go file changed except the version constant.
+
+Counted rather than eyeballed, since a ban row assembles its first and last cells from variables (`selCell`, `notesCell`) and only the middle four are inline — the easy mistake here is a header that says six and a row that builds five. Header is 6 `<th>`; the row is 4 inline `<td>` plus those two, so 6; the empty-row `colspan` is 6.
+
+**Not rendered.** Six columns of node names and ids in an auto-layout table is wider than five, and nobody has looked at where it lands.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
+## v901 — 2026-08-20
+
+**"target" is "peer", and the node id has a column of its own.**
+
+The header read `target` on Mesh > peers, Mesh > bans and Monitor > Mesh Peers. It is a peer in all three, and the tables are reached through a nav group called Mesh whose other pages already say peer. All three now say `peer`.
+
+**On Mesh > peers and Mesh > bans the node id moved out of that column into its own.** It had been rendered inside the same cell by `nodeCell`, as `hostname` followed by the id in accent styling. One cell holding two values meant the column could only ever sort by the hostname, and a filter matching an id matched a cell whose visible text was mostly something else.
+
+`nodeCell` is now two functions. `nodePeerCell` renders the hostname, `nodeIdCell` the id, and Monitor > Mesh Peers keeps `nodeNameCell` — it has no id column, only the rename, since a version column and full session detail were already the reason it dropped the id in the first place.
+
+**An unnamed peer gets a dash, not its id.** `nodeCell` fell back to showing the id when no hostname was known, which was right when that was the only cell available. With an id column immediately beside it, the same fallback would print the same string twice in one row and make a peer that has not announced a hostname look like one named after its own id.
+
+**The 300px column became 170px + 150px**, split along the seam the content already had rather than re-measured from scratch: an id is a fixed 16 hex characters, 125px at the 13px monospace these cells use, so 150px covers it with the 20px of th,td padding and a little slack, and the hostname keeps the ~18 characters it had beside the id before. Neither value grows with the table, so both stay px rather than percentages, for the reason `c-state-op` is px. The wrap rule that stops a long value being ellipsised now covers both cells — the id is the string this table exists to let you copy, and it is the one that must not lose its tail.
+
+Origin on Mesh > bans keeps its combined cell. Only the banned peer's id was asked to move, and origin has no id column of its own to move one into.
+
+**Saved column state for these three tables resets once.** `tableViewKey` is derived from the header labels joined together, so renaming a header and adding a column both change the key: any column widths, hidden columns, sort column or filter an operator had saved against the old layout will not be found under the new one and the tables come up at their defaults. Nothing is corrupted and nothing needs clearing — the old entries are simply orphaned.
+
+### Verification
+
+`go build ./...` clean; `gofmt` clean on every file touched. `cmd/gravinet`, `internal/webadmin`, `internal/config` and `internal/service` pass in full. No Go file changed except the version constant.
+
+Column counts were audited rather than eyeballed: Mesh > peers is 7 `<col>`, 7 `<th>` and a 7-wide empty row; Mesh > bans 5 and 5; Monitor > Mesh Peers unchanged at 10 and 10. No `<th>target</th>` remains anywhere.
+
+`TestPeersStateColumnIsContentSized` was pinning the old shape and is updated rather than deleted: it now requires an explicit px width on `c-peer-op` and `c-id` as well as `c-state-op`, and requires the wrap rule to cover both the peer and the id cell. Both new assertions were confirmed to fail — the first with the `c-id` width rule removed, the second with the class dropped from the td.
+
+**Not rendered.** Column widths are the kind of change that wants a look: 170px is a judgement about hostname length, and a mesh whose hostnames run longer than about eighteen characters will wrap onto a second line rather than widen.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
+## v900 — 2026-08-20
+
+**A note on this node's own id now resolves everywhere, not only in Mesh > peers.**
+
+Reported as "under peers, I cannot add notes to my own peer". What I can find is adjacent to that rather than exactly it, and the distinction is worth stating plainly.
+
+**The add path is intact.** `PeerNotes` is one map keyed by node id, and nothing in the config or the engine ever treated this node's own id specially: `PeerSetNotes` accepts it, `Validate` doesn't inspect it, the daemon copies the whole map into the NetSpec unfiltered, both engine paths apply it unfiltered, `SelfPeer` reads it back, `PeerInfo.Notes` is serialised, `/api/status` carries it as `self`, and Mesh > peers renders the self row's notes cell with its own tooltip and wires the same double-click every other row gets. `/api/peer` with `op:"notes"` accepts any non-empty node id. The auto-refresh that redraws that page every four seconds already declines to redraw while an input has focus, so it isn't eating the editor either.
+
+**What was actually broken is the read path everywhere else.** `peerNotesFor` — the lookup behind every node-name tooltip in the UI — searched a network's `peers` and `disabled_peers`. Self is in neither; it arrives as `self`. So a note written on your own node was stored correctly, shown in exactly one table, and invisible in every other place a node name appears. It now falls back to the self entry, after the two peer lists rather than before them, so a real peer's note still wins.
+
+### What this may not be
+
+If the symptom is that the editor doesn't open on the self row, or opens and reverts, this release does not explain it — the wiring for that is present and the engine-side behaviour is correct. Worth checking what actually happens on a double-click: nothing at all, an editor that reverts on blur, or an error alert. The three point at different halves of the stack.
+
+**One thing that makes this area genuinely under-tested.** `TestSelfPeerCarriesItsOwnNote` is the only coverage the self-note read path has, and it lives in `internal/mesh`, which has not compiled since v886 left duplicate test files behind. It has therefore never run in CI or anywhere else. Deleting the four stale duplicates and running it was how it got verified here — it passes — but that deletion is not in this release, and until it happens the feature's own test is dead weight.
+
+### Verification
+
+`go build ./...` clean; `gofmt` clean on every file touched. `cmd/gravinet`, `internal/webadmin`, `internal/config` and `internal/service` pass in full. No Go file changed except the version constant and the new test.
+
+`TestSelfNoteIsReachableOutsideThePeersTable` pins both halves: that `peerNotesFor` consults the self entry at all, and that it does so *after* the peer lists, since checking self first would let a self lookup shadow a real peer's note. Confirmed to fail with the fallback removed, which is the state this release found the function in.
+
+`internal/mesh`'s self-peer tests were run by temporarily removing the v886 duplicates: `TestSelfPeer` and `TestSelfPeerCarriesItsOwnNote` both pass, confirming the engine returns a self note and does not leak another node's note onto the self row.
+
+**Not rendered.** The change is one fallback in a lookup function; no tooltip has been hovered in a browser.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
+## v900 - 2026-08-20
+
+**You can put a note on your own node under Mesh > Peers.**
+
+Every row in the peers table takes a local note on double-click except one: this node's. Its notes cell rendered as a dash, with a tooltip explaining that a note on your own node id isn't meaningful.
+
+It is meaningful. "rack 3, do not reboot in hours" is exactly the sort of thing an operator wants pinned to the box they are standing in, and that was the one row that couldn't carry it.
+
+**Nothing needed to change to store one.** `Config.PeerNotes` is a map keyed by node id, `PeerSetNotes` has always accepted any non-empty id including this node's own, and `/api/peer` never guarded against it. A note written under this node's id would have been saved correctly at any point in this program's history.
+
+**What was missing was a way to read it back.** A note reaches the UI on a `ListPeers` or `DisabledPeers` entry, and this node is in neither, so a self note would have sat in config being displayed nowhere. The peers table, having nowhere to show one, declined to offer the edit — which is a reasonable thing to do about a field you cannot render, and became the reason the field looked unsupported.
+
+`SelfPeer` now carries `Notes`, read from the same `peerNotes` map under the same lock `ListPeers` uses for the identical lookup. The self row reads it like any other row and its cell is editable like any other cell. The one difference is the tooltip: a peer note says "never sent to the peer", which reads oddly about yourself, so the self row says it is this node's own note and local to it.
+
+Worth being explicit about what "local" means here, since it is the one thing that could surprise: peer notes live in the config of the node that wrote them and are never transmitted. A note on your own row is stored on that node about that node — so each node holds its own note about itself, and a note written here is not visible from another node's Peers page. That is the same rule every other note on this page already follows, applied to the row that previously had no note at all.
+
+### Verification
+
+`go build ./...` clean; `gofmt` clean on every file touched. `cmd/gravinet`, `internal/webadmin` and `internal/config` pass in full, `TestUIScriptParses` included.
+
+`TestSelfPeerCarriesItsOwnNote` covers the read path: empty when no note is set, this node's note when one is, another node's note never bleeding onto the self row, and empty again once cleared — cleared meaning the key is dropped from the map, which is what `PeerSetNotes` does with an empty string. Confirmed to fail against a copy where `SelfPeer` doesn't read the map, which is the state this release changes.
+
+**That test cannot run in this tree.** `internal/mesh` still doesn't compile, for the reason it hasn't since v887 — v886's four renamed test files were copied rather than moved, and the duplicate declarations break the whole package, every test in it, not only the ones involved. Verification above was done in a scratch copy with the four stale `fallback*` files removed; the shipped tree is unchanged, and the new test starts running the moment those files go. Four deletions, offered here again.
+
+**Not rendered.** The cell and its tooltip are markup in the served script and nobody has double-clicked the row in a browser.
+
+The two pre-existing failures from v887 are otherwise unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
+## v899 — 2026-08-20
+
+**A rollout's per-peer results stay on screen after the rollout finishes.**
+
+System > Upgrade streams a line per peer as each one reports in — applied, already up to date, or failed and why. On "all peers, then this node" those lines were destroyed the instant the last one arrived.
+
+The local phase is the cause. `applyLocal` ends by calling `drawUpgrade`, which rebuilds the whole section from scratch and takes the results box with it. So the sequence an operator actually saw was: watch the ticks accumulate, get the "upgrading this node now" alert, dismiss it, and find an empty card — the list cleared itself at exactly the moment it had finished saying something worth reading.
+
+**The results are now stashed across that redraw**, and the two things that clear them are the two that should: starting another upgrade, and refreshing the page.
+
+They are kept as markup on the section's own host element rather than rebuilt from state, because they are a record of what happened rather than a view of anything the server still knows. By the time the rollout ends the peers have restarted onto the new build, so nothing queryable still distinguishes the ones that applied from the ones that were already current or the ones that failed. If the list is gone, that information is gone.
+
+Stashing happens on the paths that end a rollout, not inside `addResult`, so a push still in flight is never captured half-written. The stash lives on the element `secUpgrade` created, which gives it exactly the intended lifetime: cleared explicitly when the next push starts, and simply not there after a reload.
+
+### What this deliberately does not change
+
+**The peer picker still clears itself on a fully successful rollout.** That is a different control with its own reasoning — on partial failure it narrows to the peers that failed so a retry targets exactly those, and on full success it empties because this node is about to restart. The results list and the picker clear on different rules; only the results list was clearing at the wrong time.
+
+### Verification
+
+`go build ./...` clean; `gofmt` clean on every file touched. `cmd/gravinet`, `internal/webadmin`, `internal/config` and `internal/service` pass in full. No Go file changed except the version constant and the new test.
+
+`TestUIScriptParses` covers the syntax. The lifetime itself was modelled directly — a host that survives redraws, a results box recreated by each one — and checked to produce: results present after the local phase's redraw, still present after a further redraw, empty once the next upgrade starts, empty on a fresh page.
+
+`TestUpgradeResultsSurviveTheLocalPhaseRedraw` pins all three halves of the mechanism, since any one of them alone silently does nothing: that a rebuilt section repopulates from the stash, that something writes the stash before `applyLocal` runs, and that a new push clears it. Confirmed to fail against a copy with the restore line deleted — which is the original bug exactly — and against one that no longer clears the stash, which would stack one rollout's results above the next one's.
+
+**Not rendered.** The change is a stash and a restore in the served script; nobody has watched an actual rollout finish in a browser.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
 ## v898 — 2026-08-20
 
 **The Linux installer no longer takes the host's DNS out from under itself.**
