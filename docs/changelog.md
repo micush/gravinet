@@ -2,6 +2,42 @@
 
 ---
 
+## v898 — 2026-08-20
+
+**The Linux installer no longer takes the host's DNS out from under itself.**
+
+Reported on TUXEDO OS: the install would set up a DNS client, and from that point every remaining package install failed. Nothing short of uninstalling and reinstalling put it right.
+
+It reproduces, and it is four defects stacked on one ordering mistake.
+
+**`ensure_resolved` ran first.** It sat at the top of the package-installing steps, above FRR, snmpd, lldpd and radvd. It is the only step in the script that can take the host's DNS away, and every step below it needs DNS to reach a mirror. It now runs after all of them. Nothing above it needs `systemd-resolved`, and gravinet itself doesn't until the daemon starts, so there was never a reason for it to go first.
+
+**The resolver was handed the host before it had anywhere to forward to.** `stub_resolv_conf` ran before `nm_hand_dns_to_resolved`, so `/etc/resolv.conf` was pointed at `127.0.0.53` while NetworkManager still believed it owned DNS and had told `systemd-resolved` nothing. resolved answers on that address with no upstream servers, and every lookup on the host fails. The two calls are now the other way round: NetworkManager hands its servers over, and only then is anything pointed at the stub.
+
+**The backup was taken too late to exist.** `stub_resolv_conf` snapshotted `/etc/resolv.conf` only if it found a regular file. On Debian and Ubuntu the `systemd-resolved` package enables the service and repoints `/etc/resolv.conf` at the stub *from its own postinst* — so by the time that code looked, the working config it meant to preserve was already a symlink to the thing that had stopped answering, and there was nothing to roll back to. The snapshot is now taken before the package install, is copied with `-L` so a symlinked resolv.conf is saved as its nameserver lines rather than as a link to a file that gets rewritten, and refuses to overwrite an older backup.
+
+**Nothing checked whether it had worked.** There is now a probe — `getent` against several well-known names, so it exercises the same nsswitch path apt does rather than testing a daemon — taken before anything is touched and again afterwards. If DNS worked going in and doesn't coming out, the previous `/etc/resolv.conf` is restored as a real file and the run continues with a warning. Sampling beforehand matters: a host that couldn't resolve to begin with (no network, a captive portal) must not be "repaired" by restoring a backup of the same broken config. The probe retries once after a pause, because a reloaded NetworkManager takes a moment to push its servers into resolved and an immediate probe can lose that race and condemn a handover that was about to succeed.
+
+**And the failure was silent.** `pkg_install` ran `apt-get update && apt-get install` with all output discarded, so a failed index refresh meant the install never ran at all — even for a package already in the cache. That is the mechanism that turned one broken resolver into four missing packages while the script still reported success. The refresh is now best-effort and the install runs regardless.
+
+Two smaller repairs in the same area: `nm_hand_dns_to_resolved` returned early when its drop-in already existed, without reloading NetworkManager — so a re-run of the installer, the obvious thing to try after a failure, could never repair a host left with the file written but the reload not applied. And the reload/restart fallback is factored into `nm_reload`, reload first because a restart drops connections, which is a rude thing to do to a host being administered over the network it is reconfiguring.
+
+### The same bug on FreeBSD
+
+`install-freebsd.sh` had the identical ordering: `DNS forwarding (local-unbound)` above FRR, snmpd and lldpd, and `local-unbound` takes over `/etc/resolv.conf` in the same way. **The ordering is fixed there too and nothing else is.** The probe-and-roll-back machinery above is specific to systemd-resolved and NetworkManager, and porting it blind to a platform not available to test on would be guessing. The reorder alone removes the cascade, which is the part that turned a DNS problem into a failed install. `install-openbsd.sh` has no DNS step in its main flow and is untouched.
+
+### Verification
+
+`go build ./...` clean; `gofmt` clean on every file touched; `cmd/gravinet`, `internal/webadmin`, `internal/config` and `internal/service` pass in full. No Go file changed except the version constant. Both installers pass `bash -n`, and `shellcheck -S warning` reports nothing on either, before or after.
+
+The resolver logic was extracted and run against stubbed `systemctl`, `apt-get` and `getent`, with the apt stub modelling the Debian postinst that enables resolved and seizes `/etc/resolv.conf`. Against **v897**, with the NetworkManager handover failing: DNS goes from resolving to not, `/etc/resolv.conf` is left reading `nameserver 127.0.0.53`, and the next `pkg_install` fails — the reported bug, reproduced. Against this release, the same scenario ends with DNS resolving, `/etc/resolv.conf` restored to its original server, and the next `pkg_install` succeeding. Also checked: a successful handover is left alone rather than rolled back, and a host with no DNS to begin with is neither blamed nor "restored".
+
+**Not run on a real host.** This is a simulation of the failure, not a TUXEDO OS install. It reproduces the reported symptom from the code as written and shows the change clearing it, which is good evidence about the mechanism and no evidence at all about the twenty other things a real install touches. Worth a run on the machine that hit it.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
 ## v897 — 2026-08-20
 
 **The column resize grips are visible before you hover them.**

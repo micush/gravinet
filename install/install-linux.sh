@@ -177,7 +177,14 @@ SRC_VER="$(source_version)"
 # assumption is ever wrong for a particular install.
 pkg_install() {
   if command -v apt-get >/dev/null; then
-    apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" >/dev/null 2>&1
+    # The index refresh is best-effort and deliberately not chained to the
+    # install with &&. It needs working DNS, and gating on it turned "the
+    # index is stale" into "the package was silently not installed" — with
+    # the output discarded, the caller's own `&& thing_installed` check was
+    # then the only thing that noticed. That is the mechanism by which one
+    # broken resolver took out every later step of this script.
+    apt-get update -qq >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" >/dev/null 2>&1
   elif command -v dnf >/dev/null; then dnf install -y "$@" >/dev/null 2>&1
   elif command -v yum >/dev/null; then yum install -y "$@" >/dev/null 2>&1
   elif command -v zypper >/dev/null; then zypper --non-interactive install "$@" >/dev/null 2>&1
@@ -326,6 +333,70 @@ EOF
 
 resolved_active() { systemctl is-active --quiet systemd-resolved 2>/dev/null; }
 
+# dns_resolves reports whether this host can still turn a name into an address.
+# It goes through getent, so it exercises the same nsswitch path apt and curl
+# will use rather than testing a resolver directly — the question being asked is
+# "can the rest of this script still install packages", not "is some daemon up".
+# Several names, because any one of them may be unreachable for reasons that
+# have nothing to do with the resolver.
+dns_resolves() {
+  local n
+  for n in deb.debian.org archive.ubuntu.com download.fedoraproject.org one.one.one.one; do
+    getent hosts "$n" >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+
+RESOLV_BACKUP=/etc/resolv.conf.gravinet-backup
+
+# backup_resolv_conf snapshots the working resolver config before anything is
+# allowed to take it over. -L so a symlinked resolv.conf is copied as its
+# contents: the point of the backup is the nameserver lines, and a saved
+# symlink pointing at a file that a resolver has since rewritten restores
+# nothing. Never overwrites an existing backup — on a re-run the useful one is
+# the oldest, taken before the first takeover.
+backup_resolv_conf() {
+  [ -e "$RESOLV_BACKUP" ] && return 0
+  [ -e /etc/resolv.conf ] || return 0
+  cp -aL /etc/resolv.conf "$RESOLV_BACKUP" 2>/dev/null || cp /etc/resolv.conf "$RESOLV_BACKUP" 2>/dev/null || return 0
+  echo "    backed up the previous /etc/resolv.conf to $RESOLV_BACKUP"
+}
+
+# restore_resolv_conf puts the snapshot back as a real file. Not a symlink:
+# whatever the symlink pointed at is exactly what stopped answering.
+restore_resolv_conf() {
+  [ -f "$RESOLV_BACKUP" ] || return 1
+  rm -f /etc/resolv.conf
+  cp -a "$RESOLV_BACKUP" /etc/resolv.conf 2>/dev/null || return 1
+  return 0
+}
+
+# resolv_guard undoes the handover if it cost the host its DNS.
+#
+# $1 is whether DNS worked before this function's caller touched anything. If
+# it didn't, a still-broken resolver is not this script's doing and restoring a
+# backup of an already-broken config helps nobody.
+#
+# The retry exists because a reloaded NetworkManager takes a moment to push its
+# servers into resolved, and a probe fired immediately after the reload can lose
+# that race and condemn a handover that was about to work.
+resolv_guard() {
+  [ "$1" = 1 ] || return 0
+  dns_resolves && return 0
+  sleep 2
+  dns_resolves && return 0
+  echo "    warning: DNS stopped resolving after handing it to systemd-resolved." >&2
+  if restore_resolv_conf; then
+    echo "    restored the previous /etc/resolv.conf; gravinet's per-network DNS forwarding" >&2
+    echo "    will not work until systemd-resolved is given upstream servers, but the rest" >&2
+    echo "    of this install can proceed. Re-run with --no-systemd-resolved to skip it." >&2
+  else
+    echo "    could not restore a previous /etc/resolv.conf (no backup was taken)." >&2
+    echo "    Point /etc/resolv.conf at a working nameserver by hand." >&2
+  fi
+  return 0
+}
+
 # stub_resolv_conf points /etc/resolv.conf at systemd-resolved's stub. Without
 # this, resolved runs but nothing on the host actually asks it anything, so a
 # routing domain registered on the mesh link is never consulted and DNS forwarding
@@ -337,10 +408,7 @@ stub_resolv_conf() {
     echo "    /etc/resolv.conf already points at systemd-resolved's stub"
     return 0
   fi
-  if [ -e /etc/resolv.conf ] && [ ! -L /etc/resolv.conf ]; then
-    cp -a /etc/resolv.conf "/etc/resolv.conf.gravinet-backup" 2>/dev/null || true
-    echo "    backed up the previous /etc/resolv.conf to /etc/resolv.conf.gravinet-backup"
-  fi
+  backup_resolv_conf
   ln -sf "$stub" /etc/resolv.conf && echo "    pointed /etc/resolv.conf at $stub"
 }
 
@@ -353,7 +421,12 @@ nm_hand_dns_to_resolved() {
   local d=/etc/NetworkManager/conf.d f=/etc/NetworkManager/conf.d/10-gravinet-resolved.conf
   [ -d "$d" ] || mkdir -p "$d"
   if [ -f "$f" ]; then
+    # Present but still reloaded. A previous run that wrote this file and then
+    # failed leaves NetworkManager running with the old dns backend, and an
+    # early return here meant re-running the installer — the obvious thing to
+    # try — could never repair it.
     echo "    NetworkManager already handing DNS to systemd-resolved (gravinet drop-in present)"
+    nm_reload
     return 0
   fi
   cat > "$f" <<'NMEOF'
@@ -365,34 +438,71 @@ nm_hand_dns_to_resolved() {
 dns=systemd-resolved
 NMEOF
   echo "    wrote $f (dns=systemd-resolved)"
-  systemctl reload NetworkManager >/dev/null 2>&1 || systemctl restart NetworkManager >/dev/null 2>&1 || \
-    echo "    warning: could not reload NetworkManager; do it yourself for the DNS change to stick" >&2
+  nm_reload
 }
 
+# nm_reload makes NetworkManager pick up the dns= change. Reload first, restart
+# only if that fails: a restart briefly drops connections, which is a rude thing
+# to do to a host being administered over the network it is about to reconfigure.
+nm_reload() {
+  systemctl reload NetworkManager >/dev/null 2>&1 && return 0
+  systemctl restart NetworkManager >/dev/null 2>&1 && return 0
+  echo "    warning: could not reload NetworkManager; do it yourself for the DNS change to stick" >&2
+}
+
+# ensure_resolved makes systemd-resolved the host's resolver so gravinet can
+# register per-link routing domains with it.
+#
+# The ordering inside here is not arbitrary. Handing DNS to a resolver that has
+# no upstream servers yet is how this breaks: resolved answers on 127.0.0.53,
+# /etc/resolv.conf points at it, NetworkManager still believes it owns DNS and
+# has told resolved nothing, and every name lookup on the host fails. So
+# NetworkManager is told to hand its servers over *before* anything is pointed
+# at the stub, and the result is probed afterwards and rolled back if the host
+# came out worse than it went in.
+#
+# had_dns is sampled before anything is touched. Without it a host that could
+# not resolve to begin with — no network, a captive portal — would be "repaired"
+# by restoring a backup of the same broken config, and the warning would blame
+# the wrong thing.
 ensure_resolved() {
+  local had_dns=0
+  dns_resolves && had_dns=1
+
   if resolved_active; then
     echo "    systemd-resolved is already running"
-    stub_resolv_conf
+    backup_resolv_conf
     nm_hand_dns_to_resolved
+    stub_resolv_conf
+    resolv_guard "$had_dns"
     return 0
   fi
   # RHEL 9+ and Fedora ship systemd-resolved as its own package, split out of
   # systemd; on older RHEL/CentOS the unit is already there, just not enabled.
   if ! systemctl cat systemd-resolved.service >/dev/null 2>&1; then
     echo "    systemd-resolved is not installed; installing it"
+    # Before the install, not after. On Debian and Ubuntu the systemd-resolved
+    # package enables the service and repoints /etc/resolv.conf at the stub
+    # from its own postinst, so by the time stub_resolv_conf looks, the working
+    # config it was meant to preserve is already gone and there is nothing left
+    # to roll back to.
+    backup_resolv_conf
     pkg_install systemd-resolved || true
   fi
   if ! systemctl cat systemd-resolved.service >/dev/null 2>&1; then
     echo "    warning: systemd-resolved is unavailable on this host; gravinet's per-network DNS" >&2
     echo "    forwarding (if any network uses it) will fail with \"The name is not activatable\"" >&2
+    resolv_guard "$had_dns"
     return 0
   fi
   if systemctl enable --now systemd-resolved >/dev/null 2>&1; then
     echo "    enabled and started systemd-resolved"
-    stub_resolv_conf
     nm_hand_dns_to_resolved
+    stub_resolv_conf
+    resolv_guard "$had_dns"
   else
     echo "    warning: could not enable systemd-resolved; DNS forwarding will not work" >&2
+    resolv_guard "$had_dns"
   fi
 }
 
@@ -948,23 +1058,6 @@ else
   echo "    firewall is in the way."
 fi
 
-echo "==> DNS forwarding (systemd-resolved)"
-if [ "$ENABLE_RESOLVED" = 1 ]; then
-  ensure_resolved
-else
-  cat <<'NOTE'
-    note: skipped enabling systemd-resolved (--no-systemd-resolved was passed). DNS
-          here is left as-is. gravinet's optional per-network DNS forwarding is
-          implemented on Linux only via systemd-resolved's per-link routing domains
-          (resolvectl), so without it a network using that feature will log:
-              resolver: set dns on <iface>: ... The name is not activatable
-          Enable it yourself if you end up wanting the feature:
-              systemctl enable --now systemd-resolved
-              ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
-          Skip this if you don't use gravinet's DNS-forwarding feature.
-NOTE
-fi
-
 echo "==> FRR (BGP/BFD)"
 if [ "$INSTALL_FRR" = 1 ]; then
   ensure_frr
@@ -996,6 +1089,33 @@ else
   echo "    --no-radvd passed; leaving radvd alone. gravinet's Traffic > IPv6 RA page is"
   echo "    hidden until radvd is installed, so the feature stays unavailable."
 fi
+
+# Last on purpose. This is the only step here that can take the host's DNS away,
+# and every ensure_* above it installs packages — which on apt begins with an
+# index refresh, and on every manager needs to reach a mirror. Running it first,
+# as this script did until v898, meant a resolver handover that went wrong took
+# FRR, snmpd, lldpd and radvd down with it: each pkg_install failed to resolve
+# its mirror, and because their output is discarded the whole run still reported
+# success with four packages quietly missing. Nothing above needs resolved, and
+# gravinet itself does not need it until the daemon starts, so the step that can
+# break name resolution now runs after everything that depends on it.
+echo "==> DNS forwarding (systemd-resolved)"
+if [ "$ENABLE_RESOLVED" = 1 ]; then
+  ensure_resolved
+else
+  cat <<'NOTE'
+    note: skipped enabling systemd-resolved (--no-systemd-resolved was passed). DNS
+          here is left as-is. gravinet's optional per-network DNS forwarding is
+          implemented on Linux only via systemd-resolved's per-link routing domains
+          (resolvectl), so without it a network using that feature will log:
+              resolver: set dns on <iface>: ... The name is not activatable
+          Enable it yourself if you end up wanting the feature:
+              systemctl enable --now systemd-resolved
+              ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+          Skip this if you don't use gravinet's DNS-forwarding feature.
+NOTE
+fi
+
 
 echo "==> /dev/net/tun"
 if [ -e /dev/net/tun ]; then

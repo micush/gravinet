@@ -689,6 +689,32 @@ NOTE
 }
 
 
+echo "==> FRR (BGP/BFD)"
+if [ "$INSTALL_FRR" = 1 ]; then
+  ensure_frr
+else
+  echo "    --no-frr passed; leaving FRR alone."
+fi
+
+echo "==> SNMP agent (snmpd)"
+if [ "$INSTALL_SNMP" = 1 ]; then
+  ensure_snmpd
+else
+  echo "    --no-snmp passed; leaving snmpd alone."
+fi
+
+echo "==> link-layer discovery agent (lldpd)"
+if [ "$INSTALL_LLDP" = 1 ]; then
+  ensure_lldpd
+else
+  echo "    --no-lldp passed; leaving lldpd alone."
+fi
+
+# Last of the package-installing steps on purpose, for the same reason as the
+# Linux installer's: this is the only one that can take the host's DNS away
+# (local-unbound takes over /etc/resolv.conf), and every ensure_* above it runs
+# pkg install, which needs to reach a mirror. Running it first meant a
+# forwarder that came up wrong took FRR, snmpd and lldpd down with it.
 echo "==> DNS forwarding (local-unbound)"
 if local_unbound_configured; then
   echo "    local-unbound is already configured on this host"
@@ -723,27 +749,6 @@ else
               sysrc local_unbound_enable=YES && service local_unbound start
           Skip this if you don't use gravinet's DNS-forwarding feature.
 NOTE
-fi
-
-echo "==> FRR (BGP/BFD)"
-if [ "$INSTALL_FRR" = 1 ]; then
-  ensure_frr
-else
-  echo "    --no-frr passed; leaving FRR alone."
-fi
-
-echo "==> SNMP agent (snmpd)"
-if [ "$INSTALL_SNMP" = 1 ]; then
-  ensure_snmpd
-else
-  echo "    --no-snmp passed; leaving snmpd alone."
-fi
-
-echo "==> link-layer discovery agent (lldpd)"
-if [ "$INSTALL_LLDP" = 1 ]; then
-  ensure_lldpd
-else
-  echo "    --no-lldp passed; leaving lldpd alone."
 fi
 
 echo "==> outbound queue depth (net.link.ifqmaxlen)"
