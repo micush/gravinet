@@ -2,6 +2,42 @@
 
 ---
 
+## v914 — 2026-08-23
+
+**Fix (the real one): a suppressed browser dialog silently answered "no" for the operator.**
+
+v913 diagnosed the wrong cause. It found a genuine defect — `try`/`finally` with no `catch` — and fixing it was worth doing, but it was not this. Reported again after v913 as "same issue, it never gets to pushing", which is the detail that ruled the previous theory out: the button label is set to *Pushing* before the first request, so a failure in the push path could not explain never reaching it. The handler was dying earlier, and nothing was throwing.
+
+**Root cause.** Chrome and Firefox both offer *"prevent this page from creating additional dialogs"* once a page has shown a few, and this page shows a great many — nearly every action reports its outcome through `alert()`, 198 of them across the file. Once that box is ticked, or the browser applies it on its own, `window.confirm` renders nothing and **returns false**, and `window.alert` becomes a no-op.
+
+The rollout's first statement was a `confirm()` guard. Suppressed, it returned immediately: no dialog, no push, no message, and the button never left its idle state. Indistinguishable from a broken button, and it explains every symptom that did not fit before — intermittent (only once suppression engages), never reaches pushing, silent, and unaffected by v913's catches.
+
+**And the stale progress line completed the illusion.** `stashResults()` preserves a finished rollout's results across the redraw `applyLocal` triggers, so *Building on 17 peer(s)… 0 of 17 finished so far.* survived into the next render. A click that then returned early left it on screen, where it reads as a live rollout stuck at zero rather than as a record of the last one. That is why the page looked mid-rollout while nothing was running.
+
+### The fix
+
+`confirmModal` and `noticeModal` are built on the app's own `showModal`, which no browser can suppress. Every `confirm()` and `alert()` on the upgrade path — two and eight — now goes through them. Dismissing still means no: Escape, backdrop and close all resolve false, the difference being that a person did it. The handler also clears the previous rollout's results before any guard can return, so no early exit can leave a stale progress line behind.
+
+**Reproduced and verified by execution, not by reading.** The UI was loaded into jsdom with `window.confirm` stubbed to return false, and the real `drawUpgrade` handler driven with a 17-peer fleet and the "all peers, then this node" selection made through the actual picker. The old code reproduced the report exactly — click accepted, handler returned, button idle, no push, nothing said. The new code shows the in-app modal and pushes correctly: canary alone, then the fourteen non-seed peers, then the two seeds one at a time.
+
+### Scope
+
+Only the upgrade path is converted. The other **196 `alert()` and 15 `confirm()` calls across the UI have the same exposure**, and every one of those confirms is a guard on an action that will silently do nothing once a browser starts suppressing. They are worth converting, but as their own change rather than folded into a bug fix.
+
+### Verification
+
+`go build ./...` clean; `gofmt` clean across `internal/webadmin` and `cmd/gravinet`. All four suites pass.
+
+`dialogsuppression_test.go` fails on any native `confirm` or `alert` reappearing anywhere on the rollout path; on `confirmModal` not resolving when dismissed, which would hang the click instead of cancelling it, or resolving twice when OK also runs the close handler; and on the stale-results clear being moved below any guard that can return early. Each was confirmed to fail with the guard broken — including reintroducing the original `confirm()`, which fails with the exact message naming it — and to pass on restore.
+
+v913's `upgraderollout_test.go` is unchanged and still passing. Its structural check on catchless `try` blocks remains correct and worth keeping; it simply was not the cause.
+
+**One recurrence worth noting.** A backtick in a JS comment broke the Go raw string again, in a comment quoting the very `confirm()` line this entry is about. v906 recorded the same mistake and added a warning comment above `helpTopic`; the warning did not prevent it. The build catches it immediately, but the reported line is hundreds of lines away from the actual backtick.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
 ## v913 — 2026-08-23
 
 **Fix: a fleet rollout could fail silently and look like the button had not worked.**

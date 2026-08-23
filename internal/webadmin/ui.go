@@ -3446,6 +3446,48 @@ function emptyCard(c, msg){ c.appendChild($('<div class="card"><div class="empty
 // caller fills in (directly, or later via bodyEl.innerHTML once results come
 // back). Closes on the × button, clicking the backdrop, or Escape. Returns
 // {close} so a caller can dismiss it programmatically too.
+// confirmModal is showModal as a promise-returning confirm(), and exists
+// because window.confirm cannot be trusted here.
+//
+// Both Chrome and Firefox offer "prevent this page from creating additional
+// dialogs" after a page has shown a few, and this page shows a great many:
+// almost every action reports its outcome through alert(). Once an operator
+// ticks that box — or the browser applies it on its own — window.confirm stops
+// rendering anything and *returns false*. Every guarded action then becomes a
+// click that does nothing at all, with no dialog, no error and no way to tell
+// it apart from a broken button. That is how the fleet rollout came to "never
+// get to pushing": its first statement was a confirm() guard that returned
+// before the button label changed or anything was sent.
+//
+// Resolves false on Escape, backdrop click and the close button, so dismissing
+// still means no — the difference is that the operator is the one dismissing.
+function confirmModal(title, message, okLabel){
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (done) return; done = true; resolve(v); };
+    const body = $('<div></div>');
+    const p = $('<div style="white-space:pre-wrap;margin:0 0 14px"></div>');
+    p.textContent = message;
+    body.appendChild(p);
+    const row = $('<div style="display:flex;gap:8px;justify-content:flex-end"></div>');
+    const cancel = $('<button class="sm">Cancel</button>');
+    const ok = $('<button class="sm primary"></button>');
+    ok.textContent = okLabel || 'Continue';
+    row.appendChild(cancel); row.appendChild(ok);
+    body.appendChild(row);
+    const m = showModal(title, body, () => finish(false));
+    cancel.onclick = () => { finish(false); m.close(); };
+    ok.onclick = () => { finish(true); m.close(); };
+    ok.focus();
+  });
+}
+
+// noticeModal is the alert() half of the same problem: a suppressed alert is a
+// silent no-op, so an outcome an operator needs to read simply never appears.
+function noticeModal(title, message){
+  return confirmModal(title, message, 'OK');
+}
+
 function showModal(title, bodyEl, onClose){
   const bg = $('<div class="modal-backdrop"></div>');
   const panel = $('<div class="modal-panel"></div>');
@@ -9835,7 +9877,17 @@ async function drawUpgrade(host){
   }
 
   upgradeBtn.onclick = async () => {
-    if (!fileIn.files[0]){ alert('Pick a source .tgz/.tar.gz or .zip first.'); return; }
+    // Clear the previous rollout's results before anything can return early.
+    // stashResults() preserves them across the redraw applyLocal triggers, so
+    // a finished rollout's progress line survives into the next render — and
+    // a click that then returned early (a declined confirm, no file picked)
+    // left that stale "Building on N peer(s)… 0 of N" on screen, where it
+    // reads as a live rollout stuck at zero rather than as a record of the
+    // last one. That appearance is most of what made this bug so hard to
+    // place: the page looked mid-rollout while nothing was running.
+    if (resBox) resBox.innerHTML = '';
+    host._upgradeResults = '';
+    if (!fileIn.files[0]){ await noticeModal('Upgrade', 'Pick a source .tgz/.tar.gz or .zip first.'); return; }
     const sel = peerPicker ? peerPicker.get() : [];
     const allThenLocal = sel.indexOf(ALL_PEERS) !== -1;
     const nodes = allThenLocal ? targets.map(p => p.node_id) : sel;
@@ -9861,9 +9913,9 @@ async function drawUpgrade(host){
       const msg = allThenLocal
         ? 'Upgrade all ' + nodes.length + ' peer' + (nodes.length === 1 ? '' : 's') + ', then this node?\n\nIf the first one fails, the rollout stops there and nothing else is touched. Otherwise every peer is attempted regardless of failures elsewhere, and this node is upgraded last, only if every one of them applied.' + seedNote
         : (nodes.length === 1 ? 'Upgrade this peer?' : 'Upgrade these ' + nodes.length + ' peers? If the first one fails, the rollout stops there \u2014 otherwise every one of them is attempted regardless of failures elsewhere.') + seedNote;
-      if (!confirm(msg)) return;
+      if (!await confirmModal(allThenLocal ? 'Upgrade the fleet' : 'Upgrade peers', msg, 'Upgrade')) return;
     } else {
-      if (!confirm('Upgrade this node?')) return;
+      if (!await confirmModal('Upgrade this node', 'Build the selected archive on this node and restart into it?', 'Upgrade')) return;
     }
 
     // applyLocal builds+applies on THIS node (/api/upgrade/source) and restarts
@@ -9883,7 +9935,7 @@ async function drawUpgrade(host){
       }, 450);
       try {
         const src = fileIn.files[0];
-        if (!src){ alert('The selected file is no longer available. Pick the source archive again.'); return; }
+        if (!src){ await noticeModal('Upgrade', 'The selected file is no longer available. Pick the source archive again.'); return; }
         let resp;
         try {
           resp = await fetch('/api/upgrade/source', { method:'POST', body: src });
@@ -9893,16 +9945,16 @@ async function drawUpgrade(host){
           // a build replaced under the same name throws here instead of
           // returning an error response. Without this the request vanished
           // and the button simply re-enabled.
-          alert('The upload could not be sent: ' + (e && e.message ? e.message : e)
+          await noticeModal('Upgrade failed', 'The upload could not be sent: ' + (e && e.message ? e.message : e)
             + '\n\nNothing was applied. If the archive was rebuilt or downloaded again since you picked it, pick it again and retry.');
           return;
         }
         const body = await resp.json().catch(()=>({}));
-        if (!resp.ok){ alert(body.error || 'build failed'); return; }
+        if (!resp.ok){ await noticeModal('Upgrade failed', body.error || 'build failed'); return; }
         if (body.skipped){
-          alert('Already on ' + (body.already_on || 'this version') + ' \u2014 nothing to build or apply.');
+          await noticeModal('Nothing to do', 'Already on ' + (body.already_on || 'this version') + ' \u2014 nothing to build or apply.');
         } else {
-          alert('Applied. This node is restarting into ' + (body.applied || 'the new build') + '.\n\nIf it cannot get its peers back within the confirm window, it will revert itself.');
+          await noticeModal('Applied', 'This node is restarting into ' + (body.applied || 'the new build') + '.\n\nIf it cannot get its peers back within the confirm window, it will revert itself.');
         }
         drawUpgrade(host);
       } catch (e) {
@@ -9911,7 +9963,7 @@ async function drawUpgrade(host){
         // the response, and the redraw — which would otherwise unwind through
         // the finally, stop the dots, and leave the button reading "Building"
         // with nothing said.
-        alert('The upgrade stopped unexpectedly: ' + (e && e.message ? e.message : e) + '\n\nThis is a bug.');
+        await noticeModal('Upgrade failed', 'The upgrade stopped unexpectedly: ' + (e && e.message ? e.message : e) + '\n\nThis is a bug.');
         throw e;
       } finally {
         clearInterval(buildDotsTimer);
@@ -10170,7 +10222,7 @@ async function drawUpgrade(host){
       const msg = 'The rollout stopped unexpectedly: ' + (e && e.message ? e.message : e)
         + '\nThis is a bug. Peers listed above reported before it stopped; any others were not attempted.';
       if (resBox) resBox.appendChild($('<div class="hint" style="color:var(--danger,#b33);white-space:pre-wrap"></div>')).textContent = msg;
-      else alert(msg);
+      else await noticeModal('Rollout failed', msg);
       throw e; // still reaches the console, so it can be reported
     } finally {
       if (pushDotsTimer) clearInterval(pushDotsTimer);
