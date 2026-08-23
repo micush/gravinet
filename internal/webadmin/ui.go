@@ -10113,6 +10113,7 @@ async function drawUpgrade(host){
           if (!line.trim()) return;
           let obj;
           try { obj = JSON.parse(line); } catch { return; }
+          if (obj.keepalive) return; // traffic to keep the connection alive while peers build; carries nothing
           if (obj.done) return; // the final {"done":true,...} summary line carries nothing the per-peer lines above haven't already shown
           if (obj.ok) applied.push(obj.node);
           addResult(obj);

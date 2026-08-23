@@ -2,6 +2,43 @@
 
 ---
 
+## v917 — 2026-08-23
+
+**Fix: a fleet rollout died the moment a peer actually had to build.**
+
+Reported with the error v913 added doing its job: the canary succeeded (*1 of 17, hw-macmini-macos — already up to date*), then *The push could not be sent: NetworkError when attempting to fetch resource*. That the canary passed and the batch behind it did not is the whole diagnosis — the canary was **already up to date**, so it returned in moments, while the fourteen behind it each had to build.
+
+Two causes, both about silence.
+
+**`WriteHeader` does not put bytes on the wire.** `net/http` buffers until the handler writes a body or returns, so response headers were withheld for the entire rollout — and `fetch()` does not resolve until headers arrive. A batch that answers instantly hid this completely. A batch that is quiet for minutes leaves the browser holding a request that has produced nothing at all, and it eventually gives up. There is now a `Flush()` immediately after `WriteHeader`.
+
+**`ReadTimeout: 30 * time.Second` applies to the connection, not to the direction that is idle.** It is set server-wide so a slow-loris cannot hold a connection open trickling a request, which is right everywhere except here: by the time this handler runs, `spoolUpload` has already consumed the body, and what remains is a response that legitimately takes minutes. The deadline tore down connections whose handlers were working perfectly. Both `handleUpgradePush` and `op()` — the latter runs the local build, minutes for the same reason — now lift it with `http.ResponseController`. With nothing left to read, there is nothing for a slow-loris to exploit.
+
+A **keepalive line every 15s** keeps bytes moving during the long gaps between results, so nothing in the path decides an idle connection is dead. It is serialised against the result writer with a mutex: two goroutines on one `ResponseWriter` can interleave a keepalive into the middle of a result line, and the client parses one JSON object per line. The client ignores them.
+
+### Verification
+
+`go build ./...` clean, `go vet` clean, `gofmt` clean. All four suites pass.
+
+**Reproduced against a real `net/http` server before fixing**, rather than reasoned about — the previous two attempts at this bug were reasoned about, and both were wrong. A handler was made to stay silent past `ReadTimeout`, and driven by a client with `ResponseHeaderTimeout` set, which is what a browser does and what Go's default client does not:
+
+| | headers arrive | outcome |
+|---|---|---|
+| before | 3.001s (after the work) | transport error, no response — the reported shape |
+| after | 0s | streamed and completed |
+
+Without the flush the header is withheld for exactly as long as the work takes; with it, immediately.
+
+`upgradestream_test.go` pins the flush between `WriteHeader` and the rest of the handler, the deadline lift in both handlers with `op()`'s required to precede the build it protects, the keepalive's serialisation across all three writers, and the client's ignoring of keepalive lines. It also fails if `ReadTimeout` is ever removed from the server, since the lifts would then be dead code and the test misleading rather than protective.
+
+**Two of the five negative checks initially did not fail, and one was a real defect in the test.** The flush check looked for any `Flush()` between `WriteHeader` and the results loop — but the keepalive goroutine also calls `Flush` and is declared before that loop, so deleting the header flush left the test passing. It is now anchored on the keepalive's own declaration. The other was a bad sed that never applied. Both were re-run correctly and fail as they should.
+
+**Not reproduced on real hardware.** The mechanism is demonstrated and the fix verified in isolation, but a 17-peer rollout over a real network was not run. If it fails again, the useful detail is *where*: "could not be sent" still means no response headers, while "the connection dropped while the rollout was running" means headers arrived and the stream broke later — a different fault with a different cause.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
 ## v916 — 2026-08-23
 
 **Every native browser dialog in the UI is gone.** 14 `confirm()` and 187 `alert()` calls, converted to `confirmModal` and `noticeModal`.

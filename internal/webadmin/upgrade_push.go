@@ -172,6 +172,64 @@ func (s *Server) handleUpgradePush(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
+
+	// Flush the header immediately, before waiting on a single peer.
+	//
+	// WriteHeader does not put bytes on the wire — net/http buffers until the
+	// handler writes a body or returns — so without this the browser receives
+	// nothing at all until the first peer finishes building, and fetch() does
+	// not resolve until response headers arrive. Pushing to one peer that is
+	// already up to date returns in moments and hid this completely; pushing
+	// to fourteen that each have to build left the connection silent for
+	// minutes and the fetch was torn down before it ever resolved, surfacing
+	// in the browser as "NetworkError when attempting to fetch resource" with
+	// nothing sent.
+	if flusher != nil {
+		flusher.Flush()
+	}
+
+	// Lift this connection's read deadline for the rest of the rollout.
+	//
+	// The server sets ReadTimeout: 30s to keep a slow-loris from holding a
+	// connection open by trickling a request. That is right for every other
+	// endpoint and wrong for this one: the request body is fully read by the
+	// time we get here (spoolUpload above consumed it), and what remains is a
+	// response that legitimately takes minutes. Leaving the deadline in place
+	// tears the connection down mid-rollout, which is the other half of the
+	// failure described above. There is nothing left to read, so removing it
+	// gives a slow-loris nothing to exploit.
+	rc := http.NewResponseController(w)
+	if err := rc.SetReadDeadline(time.Time{}); err != nil {
+		// Not fatal, and not worth failing the rollout over: on a transport
+		// that does not support it the rollout still runs, and short ones
+		// still finish inside the deadline.
+		s.log.Debugf("upgrade: could not clear read deadline for the push stream: %v", err)
+	}
+
+	// keepalive keeps bytes moving while peers build. A rollout can be silent
+	// for minutes between results, which is long enough for an intermediary —
+	// or the browser itself — to decide an idle connection is dead. The client
+	// ignores these lines; they exist to be traffic, not information.
+	keepaliveDone := make(chan struct{})
+	defer close(keepaliveDone)
+	var writeMu sync.Mutex
+	go func() {
+		t := time.NewTicker(pushKeepaliveInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-keepaliveDone:
+				return
+			case <-t.C:
+				writeMu.Lock()
+				if _, err := io.WriteString(w, "{\"keepalive\":true}\n"); err == nil && flusher != nil {
+					flusher.Flush()
+				}
+				writeMu.Unlock()
+			}
+		}
+	}()
+
 	enc := json.NewEncoder(w)
 
 	pushed := 0
@@ -190,23 +248,36 @@ func (s *Server) handleUpgradePush(w http.ResponseWriter, r *http.Request) {
 		if clientGone {
 			continue
 		}
-		if err := enc.Encode(res); err != nil {
-			clientGone = true
-			continue
-		}
-		if flusher != nil {
+		// Serialised against the keepalive goroutine: two writers on one
+		// ResponseWriter can interleave a keepalive into the middle of a
+		// result line, and the client parses per line.
+		writeMu.Lock()
+		err := enc.Encode(res)
+		if err == nil && flusher != nil {
 			flusher.Flush()
+		}
+		writeMu.Unlock()
+		if err != nil {
+			clientGone = true
 		}
 	}
 
 	s.log.Infof("upgrade: pushed source (sha256 %s) to %d of %d requested peer(s)", sum[:12], pushed, len(nodes))
 	if !clientGone {
+		writeMu.Lock()
 		_ = enc.Encode(map[string]any{"done": true, "sha256": sum, "pushed": pushed, "total": len(nodes)})
 		if flusher != nil {
 			flusher.Flush()
 		}
+		writeMu.Unlock()
 	}
 }
+
+// pushKeepaliveInterval is how often the push stream emits a keepalive line
+// while peers are building. Well inside the 30s ReadTimeout this handler lifts
+// for itself, and inside the 60s idle timeouts common to reverse proxies, so a
+// silent rollout still looks alive to anything in the path.
+const pushKeepaliveInterval = 15 * time.Second
 
 // pushTransientRetries is how many extra attempts pushSourceToWithRetry makes
 // after a transport-level failure — one that never got as far as a response

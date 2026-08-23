@@ -127,6 +127,17 @@ func (s *Server) op(w http.ResponseWriter, name string, body []byte) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "this node has no upgrade control surface"})
 		return
 	}
+	// Same reasoning as handleUpgradePush's: the request body is already read
+	// by the time an op runs, and building a source archive takes minutes,
+	// which is well past the server's 30s ReadTimeout. That deadline is on the
+	// connection rather than on either direction of it, so leaving it in place
+	// lets the connection be torn down under a build that is proceeding
+	// perfectly well — the browser then reports a network error for an upgrade
+	// that may still be running on the node.
+	rc := http.NewResponseController(w)
+	if err := rc.SetReadDeadline(time.Time{}); err != nil {
+		s.log.Debugf("upgrade: could not clear read deadline for %s: %v", name, err)
+	}
 	out, err := s.upg.Op(name, body)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
