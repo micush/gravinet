@@ -2,6 +2,12 @@
 
 ---
 
+## v915 — 2026-08-23
+
+**Version bump only.** No code change; 914 to 915 so the v914 upgrade fix can be exercised against a build that differs from the running one.
+
+---
+
 ## v914 — 2026-08-23
 
 **Fix (the real one): a suppressed browser dialog silently answered "no" for the operator.**
