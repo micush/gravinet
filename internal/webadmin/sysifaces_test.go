@@ -151,10 +151,15 @@ func TestSystemInterfacesSectionEditing(t *testing.T) {
 	}
 	// The two things an operator needs to know before double-clicking: that
 	// there is no confirmation step, and that the change is persisted rather
-	// than lost at the next reboot.
+	// than lost at the next reboot. As of v904 this text is no longer printed
+	// on the page — it sits in HELP.interfaces and is revealed by the toggle —
+	// so it is checked there. The point of the check is unchanged: the facts
+	// have to exist somewhere the operator can reach from this page, and
+	// deleting them while rearranging the section should still fail.
+	topic := between(t, indexHTML, "  'interfaces': {", "  },")
 	for _, want := range []string{"no confirmation", "survive a reboot"} {
-		if !strings.Contains(sec, want) {
-			t.Errorf("hint does not say %q", want)
+		if !strings.Contains(topic, want) {
+			t.Errorf("HELP.interfaces does not say %q", want)
 		}
 	}
 }

@@ -2,6 +2,198 @@
 
 ---
 
+## v909 — 2026-08-23
+
+**System > Upgrade names the running version and links the newest one.**
+
+Between the source picker and the peer selector: *The current version of [gravinet] is **v909**. The latest version is [v903](https://github.com/micush/gravinet/archive/refs/tags/v903.tar.gz).* The tag links to its source tarball on GitHub — the same archive the picker directly above it accepts, so the link feeds back into the control it sits under. When the two match, a quiet "up to date" follows.
+
+**The lookup runs from the browser, not through the node.** The link is clicked in the browser, so a browser that cannot reach GitHub could not have downloaded the tarball either — checking there costs nothing that was not already required. It also keeps a node that is deliberately offline from making an outbound connection nobody asked it to make, which for a mesh appliance is the more important half.
+
+Releases are consulted first and tags second. A repository publishing releases marks exactly one as latest; the tags endpoint orders by the API's own rules, so the fallback picks **by number rather than by position** — as strings, v1000 sorts below v999. The result is cached on `state` for the life of the page, because this section re-renders on every visit and GitHub allows 60 unauthenticated requests an hour per address.
+
+**The running version is read explicitly from the local node.** `/api/about` is not in `LOCAL_API`, so by default it follows the peer selected in the header — while every `/api/upgrade/*` endpoint is local-only. Left to default, this line would have reported a remote node's version beside a control that upgrades the local one, which is precisely the confusion the page's existing remote-node warning exists to prevent. It passes an explicit `null` target.
+
+The line is a plain `.hint`, not `.help-desc`: it reports live state rather than explaining the page, so it stays visible with help off.
+
+### Verification
+
+`go build ./...` clean; `gofmt` clean on all three files touched. `internal/webadmin`, `cmd/gravinet`, `internal/config` and `internal/service` pass in full.
+
+`upgradeversion_test.go` pins six things: that the line renders between the picker and the peer selector; that the version comes from the local node, with a companion check that fails if `/api/about` ever joins `LOCAL_API` and makes the explicit target redundant; that the URL is the tag's `.tar.gz` with the tag URL-encoded and `rel="noopener noreferrer"` set; that a failed lookup still shows the running version, and that the GitHub call is ordered after the local one so a hang there cannot delay both; that tags are chosen numerically and the result cached; and that the line is not classed as help text.
+
+Five were confirmed to fail with the guarded thing broken — the target dropped, tags picked by position, the cache removed, the line reclassed as `help-desc`, the failed-lookup branch deleted — and to pass on restore.
+
+**Not rendered, and not exercised against GitHub.** The container has no route to `api.github.com`, so the response shapes are handled from the documented API rather than from observed traffic. The two paths worth a real look are a repository with no releases at all (should fall through to tags) and a rate-limited response, which returns 403 with a JSON body and should land in the "could not be checked" branch rather than throwing.
+
+**One judgement to confirm.** The tag is used in the URL exactly as GitHub reports it, but displayed normalised to `v` + digits. A repository that tagged `903` without the prefix would therefore display `v903` and link to `.../refs/tags/903.tar.gz`, which is correct — but if upstream tags ever take a different shape entirely, the display normalisation is the line to revisit, not the URL.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
+## v908 — 2026-08-23
+
+**v906 only caught the text that went through `secHint`. This catches the rest — and fixes a page it emptied.**
+
+### Latency lost all of its text, and this is why
+
+`infoLatency`'s hint was built by concatenation, quoting two constants:
+
+    secHint(c, '…every '+(LATENCY_POLL_MS/1000)+'s; trend covers the last '+(LATENCY_WINDOW_MS/1000)+'s; …')
+
+The script that read the old text into `HELP` matched a single quoted string. This one is a string, an expression, a string, an expression, a string — so the extractor skipped it. The script that *deleted* the calls matched the line prefix, which this line has. Extracted by neither, deleted by one: **the page shipped in v906 with no explanatory text at all**, and nothing failed, because no test knew the text was supposed to exist.
+
+It is restored from v903 and back in `HELP.latency`, with a `cols` note on `rtt` and `trend`. The two durations are now `{LATENCY_POLL_MS/1000}` placeholders resolved by `HELP_VARS` at render — a topic is data, and storing an expression in it is what produced the escaping mess that made this hard to spot in the first place.
+
+### Three kinds of text v906 did not see
+
+**Sections that never used `secHint`.** Seeds, Peers, Bans and Mesh Peers described themselves with a plain `<div class="hint">` in their card markup. All four moved into `HELP` with column notes; Mesh Peers' long column glossary (`version`, `key`, `endpoint`, `reach`, `time`) is now notes under those columns rather than a paragraph naming them.
+
+**Settings rows.** `.settings-desc` — the paragraph under a settings row's label — is now hidden with everything else, 42 sites, no per-section work. This is most of what was left: BGP's redistribute pickers and neighbor filters, Time, LLDP's interface picker, Upgrade's peer selector, Mesh Routes' BGP-learned picker and metric, and Settings' own 39. The label and its control always stay.
+
+**Sub-card prose.** Eight `.hint` blocks that describe a sub-card rather than report a state — Resolver's Hostname and Default DNS, Time's clock-by-hand and sync-conflict notes, Upgrade's source and OS-updates blurbs, SNMP's pill instruction, Power's gravinet-service note — are now `.help-desc`. That class exists because `.hint` cannot be hidden wholesale: it also carries errors, loading lines, empty states and live status.
+
+**Upgrade's "Upgrades are local-only" warning was deliberately left alone.** It is a `.hint`, it sits next to two that moved, and it looks like a description — but it only renders when a remote node is selected in the header, and it is the thing that stops someone deploying to a node they are not looking at. A conditional warning is not a description.
+
+### The toggle no longer depends on a HELP entry
+
+`.settings-desc` and `.help-desc` are hidden by CSS wherever they appear, including in sections with no `HELP` entry. A section that hid text but rendered no pill would have no way to bring it back — so `secHelp` now renders the toggle for every section except `HELP_OMIT`: the four document viewers, About, and Metrics, which is charts and a duration picker with nothing to explain.
+
+### Verification
+
+`go build ./...` clean; `gofmt` clean on all three files touched. `internal/webadmin`, `cmd/gravinet`, `internal/config` and `internal/service` pass in full. Coverage is now 35 sections with a topic, 14 with column notes, 35 notes in total.
+
+Four tests were added, each aimed at a way this went wrong rather than at the feature: that every topic's `{placeholder}` resolves and that latency has an entry at all; that `.settings-desc` and `.help-desc` are hidden while `.hint` is not hidden wholesale, and that the remote-node warning was not swept in with the descriptions; that `secHelp` does not gate on a `HELP` entry, and that nothing in `HELP_OMIT` renders hidden prose; and that the four sections which never used `secHint` have topics and no longer print them inline as well.
+
+All were confirmed to fail with the guarded thing broken and to pass on restore. **Two initially did not fail, and the checks were wrong rather than the tests.** One injected a hint into `secSeeds(c){` when the real signature is `secSeeds(c, nets){`, so it changed nothing. The other searched for the bare text "Upgrades are local-only", whose first occurrence in the file is a code comment several thousand lines above the markup — the assertion was reading the comment. That second one was a real defect in the test, not just in the check, and it now anchors on `class="hint…">Upgrades are local-only` instead.
+
+**Not rendered.** With `.settings-desc` hidden, Settings and the BGP editor become label-and-control rows with no prose between them — a large density change that was reasoned about but not looked at. If those pages now read as too tight, the row spacing rather than the hiding is the thing to adjust.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
+## v907 — 2026-08-23
+
+**The help pill always reads `help`; only its colour changes.**
+
+v904 swapped the label between `help` and `help on`. It now stays `help` and turns accent blue, border included, when the mode is on — the `.help-tog.on` rule that has been there since v904 and was previously doing that job alongside the text swap.
+
+Dropping the text is not only tidier. The pill is right-justified, so a label that grows by three characters moves the pill's *left* edge left — the element slides out from under the pointer that just clicked it, and a second click lands on the heading. Fixed-width label, fixed position.
+
+The `title` attribute still changes with state (`explain this page` / `hide the notes on this page`). That is a hover affordance rather than a visible label, so it costs no layout and is where the state is spelled out for anyone who wants it in words rather than in colour.
+
+### Verification
+
+`go build ./...` clean; `gofmt` clean on all three files touched. `internal/webadmin`, `cmd/gravinet`, `internal/config` and `internal/service` pass in full.
+
+`TestHelpModeIsCSSDriven` gained two assertions: that `.help-tog.on` carries a colour change, and that `secHelp` does not write `tog.textContent`. The second matters more than it looks — restoring the label swap is the obvious way to make the state clearer if someone later decides blue alone is too subtle, and it would silently reintroduce the moving-target problem. Both were confirmed to fail with the thing they guard broken (the label swap put back; the `on` rule changed to bold instead of blue) and to pass on restore.
+
+**Not rendered.** Whether accent blue alone reads as "on" at 11px is a judgement made from the palette, not from looking at it. If it is too subtle, the fix is to strengthen the `.help-tog.on` rule — a filled background rather than just border and text — rather than to put the label back.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
+## v906 — 2026-08-23
+
+**Every section's prose moves behind the toggle, and the pill reads `help`.**
+
+v904 did this for Interfaces as a sample. This does the other 29 and deletes `secHint`, which now has no callers. All 39 calls moved: 30 sections have a `HELP` entry, 9 of them carry column notes, 22 notes in total.
+
+The `? ` prefix is gone from the pill — it reads `help` and `help on`.
+
+### Getting there without touching 40 tables
+
+Annotation rows are now injected by **`enhanceTable`**, which every table in the UI already passes through, reading the notes against the table's own rendered `<th>` text. A section needs no code of its own to get annotations — only a `HELP` entry. The v904 arrangement, where Interfaces built an explicit `cols` list and called `helpAnnRow`, would have meant rewriting the header markup of every table in the app; that list and `helpAnnRow` are both gone, and Interfaces is back to plain `<th>`s like everything else.
+
+**A v904 bug is fixed here.** `enhanceTable`'s `isData` predicate is `r !== header && r.cells.length > 1 && !r.querySelector('[colspan]')` — an annotation row has as many cells as a data row and no colspan, so it matched. With help on, sorting a column moved the notes in among the rows and filtering hid them. It is a second header and now says so.
+
+### Prose, and what was left alone
+
+Sections with sub-tabs needed the topic to vary. `topic` may now be an object: the `_` key is true of the whole section, and the key matching the current tab is appended to it. Firewall uses this for its four tabs — Rules, Objects, Services and Allow List each had their own `secHint`, and merging them into one topic would have shown an operator on the Objects tab three paragraphs about tabs they were not looking at. `renderSection` already re-runs on every tab change, so this resolves per render with no listener.
+
+**Column notes only restate what the section's own prose already said.** Nothing here is new documentation written by reading the code. That is why only 9 sections have them: Routes' "lower metric wins" and its inclusive rule, NAT's Ø-means-except, QoS's class ordering, IPv6 RA's blank-prefixes default and "never the mesh device", Keys' distributed and expiry behaviour, Hosts' "the IP can be anything", DNS's "only queries under the domain", Route Table's gravinet-interface marker, and Interfaces from v904. Firewall, Networks, BGP Peers, L2 Peers, Logs and the rest describe buttons and behaviour rather than columns, so they get a topic and no notes.
+
+**Sections with no prose get no entry and no pill** — Peers, Bans, Seeds, Mesh Peers, Latency, Metrics. There was nothing to move, and inventing text for them is a separate job from relocating text that exists. Mesh Peers in particular already documents its columns through `title=` tooltips, which are untouched.
+
+**Settings keeps its 39 `settings-desc` blocks.** Those describe individual settings at the point of changing them, which is decision-time text rather than section prose; only the section-level `secHint` moved. Worth a separate look.
+
+### Verification
+
+`go build ./...` clean; `gofmt` clean on all four files touched. `internal/webadmin`, `cmd/gravinet`, `internal/config` and `internal/service` pass in full.
+
+The three v904/v905 tests that assumed a one-section table were generalised rather than dropped. `helpmode_test.go` now checks the whole table: that every `HELP` key names a real section (or its prose can never be shown, since the toggle only renders for `HELP[state.section]`), that every entry has a topic, that every column note matches a real `<th>` in that section's render function, and that a tabbed section's topic keys match its tab bar in both directions — a topic for a tab that does not exist, and a tab with no topic. It also pins that `secHint` stays gone and that the annotation row is excluded from `isData`.
+
+Each was confirmed to fail with the thing it guards broken — a column renamed from `match` to `matches`, a `HELP` key misspelled `bandwith`, a firewall tab key misspelled `servces`, the `isData` exclusion deleted — and to pass again on restore. The column check also fails if it parses no notes at all, so it cannot pass by silently checking nothing.
+
+**A note for whoever edits this file next.** The entire UI is a Go raw string literal. A backtick anywhere inside it ends the string — including in a JS comment, quoting an identifier. This entry's author did it twice while writing the doc comments for `helpTopic` and `HELP`, in both cases to quote the `_` key. The build catches it immediately and points at a line hundreds of lines later, which is not an obvious diagnosis; there is now a comment above `helpTopic` saying so.
+
+**Not rendered.** No page was looked at. Two things are worth checking on screen before this is considered done: whether a 22-note rollout makes any single annotation row tall enough to push its table down awkwardly (QoS and IPv6 RA have the longest notes), and whether the topic paragraphs that were three separate `secHint` blocks — Routes, DNS, Hosts — read as one paragraph now that they are joined with a blank line between them. Each of those three described a different sub-table on the page, and they are now stacked above all of the tables rather than each above its own.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
+## v905 — 2026-08-23
+
+**The `? help` toggle moves to the right edge of the section heading.**
+
+v904 appended it inline after the title, where it read as part of the heading rather than as a control belonging to the page. It now sits flush right, against the same edge as the card below it.
+
+It is **floated, not flexed**. Making `.content > h2.sec` a flex container would have been the obvious way to do it and would have been wrong: Resolver, SNMP and LLDP each append an `enabled`/`disabled` status pill to that same heading, and those pills are read as part of the title — a flex heading would have pushed them to the far edge too, silently changing three sections that this change has no business touching. A float on `.help-tog` alone reaches only the element that wants moving.
+
+The float has a second benefit over `margin-left:auto`: it is out of the heading's line box, so a long section name wraps *under* the toggle rather than pushing it off the right edge. `margin-top:1px` nudges it onto the 15px heading's optical centre, since a float aligns to the top of the line rather than the baseline.
+
+The separator space node v904 appended before the toggle is gone; a float needs no inline gap, and leaving it would have put a trailing space at the end of every heading that has one.
+
+### Verification
+
+`go build ./...` clean; `gofmt` clean on all three files touched. `internal/webadmin`, `cmd/gravinet`, `internal/config` and `internal/service` pass in full.
+
+`TestHelpModeIsCSSDriven` gained two assertions: that the toggle carries `float:right`, and that `h2.sec` has *not* been given `display:flex`. The second is the one worth having — it is a guard against the fix that looks correct in isolation, and the three status pills it protects are rendered by different sections that nobody editing the help toggle would think to check. Both were confirmed to fail with the thing they guard broken and to pass on restore.
+
+**Not rendered.** The 1px top nudge is a judgement from the type sizes — 11px pill against a 15px heading — not from looking at it. It is one value to retune if the pill sits high or low against the title.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
+## v904 — 2026-08-23
+
+**System > Interfaces no longer opens with a paragraph nobody reads twice.**
+
+The section led with a 126-word `secHint` — the longest in the UI — covering four separate things at once: what the page is, that editing applies immediately, what the address sources mean per family, and where changes are persisted. It printed in full on every visit, above the card, and cost roughly three table rows of vertical space before the first interface appeared.
+
+It is now behind a toggle. The section renders bare; a `? help` pill in the heading reveals the prose and, at the same time, a note per column inside the table itself. **Off is the default** and the mode persists per browser in `gravinet_help_mode_v1`, so an operator who never wants it never sees it and one who does turns it on once.
+
+The 126 words did not move as a block. The three sentences describing what the columns mean now sit under the columns they describe — the static/dhcp/slaac rule under `addresses`, link state under `state` — where they are read against real values rather than in the abstract. What is left in the topic is the part that is about the page rather than any one column: that edits apply with no confirmation, that editing the address you are connected over will drop your session, and that changes survive a reboot.
+
+**Visibility is CSS-only**, driven off a single `.help-on` class on `#content`. This is not a style preference — the interfaces table is built from an async `/api/system/interfaces` fetch, so the annotation row can land after the toggle was clicked, and a toggle that reached out and touched elements would have to know whether the table had arrived yet. With a class on the container the row picks up the current mode whenever it renders, in any order, with no re-render. The row is hidden as a `table-row` rather than by emptying its cells, so the table's column widths are never measured against text nobody can see.
+
+Column notes are keyed by **header text, not index**. Keying by position means a column inserted at the front silently shifts every note one place along — a failure that renders perfectly and reads as nonsense. A key matching no header simply does not appear, and one list (`cols`) now builds the header row and the annotation row together so the two cannot disagree.
+
+### Scope
+
+**Interfaces only.** `HELP` has one entry and `secHelp` returns immediately for any section without one, so the other 39 `secHint` blocks are untouched and print exactly as before. This is deliberately a sample to review, not a migration; `TestHelpTableCoversInterfacesOnly` will fail the moment a second section is added, as a prompt to revisit the shape first rather than as an objection to it.
+
+### Verification
+
+`go build ./...` clean; `gofmt` clean on all four files touched. `internal/webadmin`, `cmd/gravinet`, `internal/config` and `internal/service` pass in full.
+
+`TestSystemInterfacesSectionEditing` failed on this change and was repaired rather than relaxed. It asserted that "no confirmation" and "survive a reboot" appear in the `secInterfaces` body; both are still required, now of `HELP.interfaces`, which is where an operator can still reach them. It also gained a check that the section does not print a permanent `secHint` again, so the old arrangement cannot quietly come back alongside the new one.
+
+`helpmode_test.go` pins the four things that break silently: that an absent or unreadable `localStorage` reads as off and that reading the mode never writes it; that the four CSS rules exist and the annotation row is shown as `table-row`; that `HELP` covers one section; and that every column note matches a real header of the table it annotates. Each was confirmed to fail with the thing it guards broken — default flipped to on, a note misspelled to `gatway`, a `secHint` put back — and to pass again on restore.
+
+**Not rendered.** The layout was reasoned from the markup, not looked at. Two judgements are worth a look before this pattern goes anywhere else: the annotation row's `4px 10px 6px` padding, which sets how much the header area grows when help is on, and whether accent blue is the right colour for the notes or whether muted grey reads better against `--acc` already meaning "interactive" elsewhere in the UI.
+
+**One thing left alone deliberately.** `NAV_GROUPS` describes this section as `(read-only)`, which the page has contradicted since editing landed in v856. It is not displayed on the page — only the rail and the search index read it — so removing the `secHint` did not make it more wrong than it already was, and correcting it changes what search matches. Flagged rather than fixed.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
 ## v903 — 2026-08-20
 
 **The closing line of a rollout no longer butts against the last peer.**

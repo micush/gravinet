@@ -354,6 +354,44 @@ const indexHTML = `<!doctype html>
   tr.lat-flash-down { animation:latFlashDown 2.5s ease-out; }
   .empty { color:var(--mut); font-style:italic; padding:6px 10px; }
   .hint { color:var(--mut); font-size:12px; margin:-6px 0 14px; }
+  /* Help mode. The section renders bare and everything below is hidden until
+     the .help-tog pill in the section heading is clicked, which puts .help-on
+     on #content. Visibility is CSS-only and driven off that one class so the
+     toggle never has to know what has rendered yet: Interfaces builds its
+     table from an async fetch, and the annotation row inside it picks up the
+     current mode whenever it lands, with no re-render and no ordering
+     between the two. */
+  /* float rather than making h2.sec a flex container: Resolver, SNMP and LLDP
+     append status pills to the same heading and those belong next to the
+     title, which flex would pull apart. The float also keeps the toggle out
+     of the heading's line box, so a long section name wraps under it rather
+     than shoving it off the edge. margin-top nudges it onto the 15px
+     heading's optical centre, since a float aligns to the top of the line. */
+  .help-tog { float:right; margin-top:1px; font-size:11px; font-weight:normal;
+    letter-spacing:0; color:var(--mut); border:1px solid var(--line);
+    border-radius:4px; padding:1px 7px; cursor:pointer; user-select:none; }
+  .help-tog:hover { color:var(--fg); }
+  .help-tog.on { color:var(--acc); border-color:var(--acc); }
+  .help-topic { display:none; }
+  .help-on .help-topic { display:block; }
+  /* Sits between the header row and the first body row, so each note lands in
+     its own column. Hidden as a row rather than by emptying the cells, which
+     would leave the table's column widths measured against text nobody can
+     see. */
+  tr.help-ann { display:none; }
+  .help-on tr.help-ann { display:table-row; }
+  tr.help-ann td { color:var(--acc); font-size:11px; line-height:1.4;
+    padding:4px 10px 6px; border-bottom:1px solid var(--line); vertical-align:top; }
+  /* The other two kinds of explanatory text, hidden by the same class.
+     .settings-desc is the paragraph under a settings row's label, used by
+     Settings, BGP, Time, LLDP, Upgrade and Mesh Routes; the label and the
+     control it describes always stay. .help-desc is prose that sits inside a
+     sub-card and describes it — it exists as its own class because .hint is
+     also used for errors, loading lines, empty states and live status, none
+     of which may be hidden. */
+  .settings-desc, .help-desc { display:none; }
+  .help-on .settings-desc, .help-on .help-desc { display:block; }
+  .help-desc { color:var(--mut); font-size:12px; margin:-6px 0 14px; }
   /* A rollout's results box is a list of one-line entries (margin:3px 0, see
      addResult) with .hint used for the notices between and after them: the
      progress count at the top, "upgrading seeds one at a time" partway down,
@@ -3185,6 +3223,10 @@ function addColumnResizers(table, view){
 function enhanceTable(table){
   if (table.dataset.enh) return; table.dataset.enh = '1';
   const header = table.rows[0]; if (!header) return;
+  // Help annotations are injected here rather than by each section, so a
+  // table gets them from its own rendered headers without the section having
+  // to be rewritten to hand them over.
+  helpAnnotate(table, header);
   const key = tableViewKey(table);
   // view is this table's remembered sort and filter, kept outside the table
   // because the table itself does not survive a re-render. Created on first
@@ -3192,7 +3234,12 @@ function enhanceTable(table){
   // rather than each re-reading and re-storing a whole record.
   const view = state.tableView[key] || (state.tableView[key] = {});
   const tb = table.tBodies[0] || table;
-  const isData = (r) => r !== header && r.cells.length > 1 && !r.querySelector('[colspan]');
+  // The help annotation row has as many cells as a data row and no colspan,
+  // so without the class check it would be sorted in among the rows and
+  // hidden by a filter that did not match its prose — v904 shipped it that
+  // way. It is a second header, and belongs with the header.
+  const isData = (r) => r !== header && !r.classList.contains('help-ann')
+    && r.cells.length > 1 && !r.querySelector('[colspan]');
   const allRows = () => [].slice.call(table.rows);
   const hasData = allRows().filter(isData).length > 0;
   // The toolbar always renders. It used to be conditional on the table having
@@ -3318,6 +3365,7 @@ function renderSection() {
   if (!sectionVisible(state.section)) { state.section = 'networks'; setActiveRailTab(state.section); }
   c.innerHTML = '';
   c.appendChild($('<h2 class="sec">'+sectionHeading(state.section)+'</h2>'));
+  secHelp(c, state.section);
   restartBanner(c);
   const nets = state.status;
   if (state.section === 'settings') {
@@ -3360,9 +3408,302 @@ function showModal(title, bodyEl, onClose){
   return { close };
 }
 
-// secHint places explanatory text directly under the section title (above the
-// cards), instead of inside each per-network box.
-function secHint(c, html){ c.appendChild($('<div class="hint" style="margin:0 0 12px">'+html+'</div>')); }
+// HELP holds the on-demand explanatory text for a section: the prose that used
+// to print permanently above the cards, plus a note per column that needs one.
+// Only sections listed here get a help toggle at all — a section with nothing
+// to say (Peers, Bans, Seeds, Mesh Peers, Latency) has no entry and shows no
+// pill, rather than an empty one.
+//
+// topic is a string, or an object for a tabbed section: the _ key is true of
+// the whole section and the key matching the current tab is appended to it.
+// See helpTopic.
+//
+// cols is keyed by the column's header text rather than by index so that
+// adding, reordering or dropping a column cannot silently shift every note one
+// place to the left; a key that matches no header is simply not shown, and a
+// column with nothing worth saying gets no key. Every note here restates
+// something the section's own prose already said — none of it is new
+// documentation written from reading the code.
+const HELP = {
+  'networks': {
+    topic: 'Add, remove, and manage networks. Double-click on an existing network to edit the name, subnet, overlay address, or notes for that network, or toggle the network state to enabled or disabled.<br><br><b>+</b> creates a network, <b>=</b> joins an existing one (paste a join token, or enter id/key/seed), <b>\u25cf</b> generates a join token for a ticked network to paste on another node, <b>\u2212</b> deletes the selected networks and all associated items, and <b>\u21bb reset</b> drops the selected networks\' peer connections and immediately reconnects to their peers and seeds.',
+  },
+  'keys': {
+    topic: 'Manage network keys. Select an empty slot and use Generate or Import to fill it; select filled slots for Enable/Disable/Reveal/Copy/Delete. Double-click a label, state, or key to change it in place. All enabled keys authenticate joiners.<br><br>To rotate keys, generate a new key, tick <b>distributed</b> to push it to every connected peer (no copy/paste needed), then disable the old one once it\'s reached everyone. Untick <b>distributed</b> to retract it from every peer that has it. Renaming a distributed key\'s label, or changing its expiry, pushes the update automatically. Set a date and time to enable key expiry.',
+    cols: {
+      'slot': 'fill an empty slot with Generate or Import; select a filled one to enable, disable, reveal, copy or delete it',
+      'distributed': 'tick to push this key to every connected peer, untick to retract it from every peer that has it',
+      'expires': 'set a date and time to enable expiry; blank never expires',
+    },
+  },
+  'routes': {
+    topic: 'CIDRs advertised into the mesh from this node. Double-click a cidr or metric to edit it (lower metric wins); double-click the state tag to toggle the route.<br><br>This node\u2019s current BGP-learned routes (FRR\u2019s RIB), gossiped to this network\u2019s peers alongside the Advertise table above \u2014 the reverse of the "Redistribute mesh routes" toggle on the BGP page. Carries the metric set here (lower wins). Needs FRR/bgpd running; a route already advertised above is never redistributed back.<br><br>CIDRs rejected when advertised by other nodes. A reject matches only that exact CIDR; tick inclusive to also reject every more-specific network inside it. Double-click a cidr to edit it, the inclusive cell to toggle it, or the state tag to toggle the entry.',
+    cols: {
+      'metric': 'lower wins when the same CIDR is advertised more than once',
+      'inclusive': 'reject every more-specific network inside this CIDR too, not just the exact one',
+    },
+  },
+  'firewall': {
+    tab: 'firewallTab',
+    topic: {
+      _: 'Stateful firewall inspection per network.',
+      rules: 'Enabled = Apply firewall filtering; Disabled = all traffic passes.<br><br>Rules are evaluated top-to-bottom, first match wins. Unmatched traffic is allowed unless specifically blocked.',
+      objects: 'Reusable address objects a rule can name in its <b>src</b>/<b>dst</b>; shared by every network, edited once. <b>kind</b>: host (literal IPs), subnet (CIDRs), range (a\u2011b), fqdn (domain names, re\u2011resolved live; supports a <b>*.domain.tld</b> wildcard, learned passively from DNS traffic), or group (a bundle of other objects, by name). Double\u2011click a cell to edit; + adds a row, tick rows and \u2212 removes. Every well\u2011known domain gravinet knows about is already a row here.',
+      services: 'Reusable protocol/port bundles a rule can name in its <b>services</b> field; shared by every network, edited once. e.g. a "DNS" service carrying udp/53 and tcp/53. Write ports as <i>proto/port</i> or <i>proto/lo\u2011hi</i>, comma\u2011separated; a proto alone (like <i>icmp</i>) matches any port. Double\u2011click a cell to edit; + adds a row, tick rows and \u2212 removes. Every well\u2011known service gravinet knows about is already a row here.',
+      allowlist: 'Never allow the firewall to filter these protocols, on any network. Double-click the state tag to toggle an entry.',
+    },
+  },
+  'nat': {
+    topic: 'Network address translation rewrites addresses as traffic crosses the tunnel. IPv4 and IPv6 are both supported \u2014 write one rule per family. Use \u00d8 next to <b>source</b> or <b>dest</b> to match everything EXCEPT that prefix.',
+    cols: {
+      'source': '\u00d8 matches everything EXCEPT this prefix',
+      'dest': '\u00d8 matches everything EXCEPT this prefix',
+      'translate': 'the address traffic is rewritten to as it crosses the tunnel',
+    },
+  },
+  'qos': {
+    topic: 'Quality of Service modifies traffic priority. There are 5 priority classes - 0 = highest to 4 = lowest/bulk. Unmatched traffic uses class 3 (normal). Strict priority is maintained \u2014 higher classes drain first under contention. <b>Match</b> takes a comma-separated mix of named services and raw <code>proto</code>/<code>proto/port</code> entries (e.g. <code>https, tcp/8443, udp/53</code>); leave it blank to match anything. Use + to add a rule, double-click a rule to edit it, double-click the state tag to toggle it, tick rows and use \u2212 to remove.',
+    cols: {
+      'match': 'named services and raw proto or proto/port entries, comma-separated; blank matches anything',
+      'class': '0 is highest, 4 is lowest; unmatched traffic uses 3. Higher classes drain first under contention.',
+    },
+  },
+  'ipv6ra': {
+    topic: 'This node announces itself on a LAN so hosts autoconfigure an address (SLAAC) and learn a default route, and can hand out DNS servers and search domains in the advertisement itself \u2014 which is how a SLAAC network gets DNS without DHCPv6. Advertise on the LAN interface, never the mesh device. Leave <b>prefixes</b> blank to advertise whichever global /64s the interface already has.',
+    cols: {
+      'interface': 'the LAN interface to advertise on \u2014 never the mesh device',
+      'prefixes': 'blank advertises whichever global /64s the interface already has',
+      'dns': 'handed out in the advertisement itself, which is how a SLAAC network gets DNS without DHCPv6',
+    },
+  },
+  'bandwidth': {
+    topic: 'Limit traffic per network. Double-click a rate to set it \u2014 enter a number and pick the unit; clear the number for unlimited. Double-click the tag above to turn the cap on or off.',
+  },
+  'bgp': {
+    topic: 'BGP configuration for dynamic routing. For neighbors and advertised networks: use + to add a row, double-click a field to edit it (double-click BFD to toggle it), tick rows and \u2212 to remove. Click the \ud83d\udc41\ufe0f next to a neighbor\u2019s MD5 password to reveal or mask it. Click a neighbor\u2019s \u201cfilters\u201d pill to restrict which prefixes BGP itself accepts from, or advertises to, that one neighbor \u2014 blank means unfiltered (the default). This is separate from the Redistribute pickers below, which control what feeds into BGP, not what BGP exchanges with a neighbor.',
+  },
+  'hosts': {
+    topic: 'Custom name \u2192 IP records this node advertises to the whole mesh; every peer adds them to its hosts file, on top of the automatic peer-hostname entries. The IP can be anything: an overlay address, or a LAN service reachable over an advertised route. Double-click a name or ip to edit it, or the state tag to toggle the record.<br><br>Hostnames rejected from the mesh: a record peers advertise for one of these names is never written into this node\'s hosts file. This is a local filter (it doesn\'t affect other nodes), the host analog of rejecting a route. Double-click the state tag to toggle; use + to add, tick rows and \u2212 to remove.',
+    cols: {
+      'ip': 'anything reachable: an overlay address, or a LAN service behind an advertised route',
+    },
+  },
+  'dns': {
+    topic: 'Domains this node forwards to specific DNS servers, advertised mesh-wide. Peers register them with their OS resolver (systemd-resolved on Linux, /etc/resolver on macOS, NRPT on Windows); only queries under the domain are affected \u2014 default DNS and Hosts-based names are untouched. Double-click a domain, servers, or state to edit.<br><br>Domains never registered with this node\'s resolver, even if a peer advertises a forward for them: a local-only filter, the DNS analog of rejecting a hosts record. Double-click state to toggle; + to add, tick rows and \u2212 to remove.<br><br>Each domain above also acts as a search suffix: an unqualified query like "grafana" is retried as "grafana.corp.internal". Linux and Windows only. Windows uses just the first domain (one suffix per adapter); macOS/FreeBSD have no per-interface equivalent.',
+    cols: {
+      'domain': 'only queries under this domain are affected; default DNS and Hosts names are untouched',
+      'servers': 'the resolvers queries under this domain are forwarded to',
+    },
+  },
+  'seeds': {
+    topic: 'Seed addresses (host, host:port, or host:port,port,... for more than one) this node dials to find each network; persist whether or not a peer is connected. <b>udp</b> bootstraps over UDP, dialing TCP/TLS alongside it if UDP turns out to be blocked; <b>tcp</b> goes straight over TCP/TLS, for cold-starting when UDP\u2019s blocked entirely. Double-click <b>address</b>, <b>transport</b>, or <b>notes</b> to edit, or <b>state</b> to park a seed without deleting it \u2014 a disabled seed keeps its address and notes but isn\u2019t dialed and isn\u2019t embedded in a join token. State applies immediately and is mirrored on the peer behind that address \u2014 disable a seed and its peer is disabled too, enable it and the peer comes back, and the same in reverse from <b>Peers</b>. A seed that has never completed a handshake has no known peer, so nothing moves with it; you\u2019ll be told when that happens. + to add, tick rows and \u2212 to remove, or tick one and \ud83d\udec8 for DNS/WHOIS.',
+    cols: {
+      'address': 'host, host:port, or host:port,port,... for more than one',
+      'transport': 'udp bootstraps over UDP and dials TCP/TLS alongside it if UDP is blocked; tcp goes straight over TCP/TLS, for cold-starting where UDP is blocked entirely',
+      'state': 'a disabled seed keeps its address and notes but is not dialed and is not embedded in a join token',
+    },
+  },
+  'peers': {
+    topic: 'Peers connected to this node, grouped by network. This node is listed too (<b>this node</b>), tickable to look up or shell into. Double-click a peer state to enable/disable it \u2014 any seed addresses proven to reach it are set to match, so a peer\u2019s state and its addresses\u2019 states never disagree. Double-click <b>notes</b> for a local, permanent note on its node id \u2014 including on <b>this node</b>\u2019s own row, whose note stays on this node like any other. Select peers and click Ban to block them mesh-wide.',
+    cols: {
+      'state': 'double-click to enable or disable; any seed address proven to reach this peer is set to match',
+      'notes': 'a local, permanent note kept against the node id \u2014 it stays on this node',
+    },
+  },
+  'bans': {
+    topic: 'Banned peers, grouped by network — the banned target, the node that issued the ban (origin), and notes. Bans propagate across the mesh from the node that created them; select a peer and click Unban to remove the mesh-wide ban.',
+    cols: {
+      'origin': 'the node that issued the ban; it can only be lifted from there',
+    },
+  },
+  'mesh-peers': {
+    topic: 'Live connection detail for peers on this node, grouped by network. Peer state is read-only here; tick a row and use \u25a0 to open a shell or \ud83d\udec8 to look one up, or see Mesh \u2192 peers to enable, disable, or ban one. <b>version</b> is the gravinet build each peer reports for itself, so you can spot which nodes are behind without logging into each one (a dash means that peer predates version reporting). <b>key</b> is the label (from this node\'s own Keys table) of the key currently authenticating that peer\'s session, handy for confirming everyone has moved onto a newly-distributed key before you retire the old one. <b>endpoint</b> is the peer\'s observed underlay address; for a peer behind NAT this is its public mapping as seen from here. <b>reach</b> is <i>direct</i> when there\'s a working direct path, or <i>relayed</i> when the peer could only be reached through another node (a strong sign of a restrictive NAT or firewall). <b>time</b> is how long the current session has been established, and it resets on every reconnect.',
+    cols: {
+      'version': 'the gravinet build each peer reports for itself; a dash means it predates version reporting',
+      'key': 'the label of the key currently authenticating that peer\u2019s session',
+      'endpoint': 'the peer\u2019s observed underlay address; for a peer behind NAT, its public mapping as seen from here',
+      'reach': 'direct when there is a working direct path, relayed when the peer could only be reached through another node',
+      'time': 'how long the current session has been established; it resets on every reconnect',
+    },
+  },
+  'latency': {
+    topic: 'Round-trip time from this host to every other peer on each up network, pinged over the overlay (so it reflects the mesh path, not just the underlay). A couple of probes per peer, run concurrently; this can take a few seconds. Refreshes automatically every {LATENCY_POLL_MS/1000}s; <b>trend</b> covers the last {LATENCY_WINDOW_MS/1000}s; blue bars scale to that peer\u2019s own range, red is a miss; hover a bar for the exact reading, or the chart for how long it\u2019s held its current state. Click a trend for a bigger chart over a longer window \u2014 that one comes from the mesh\u2019s own passive keepalive RTT, sampled continuously in the background, rather than this page\u2019s live ping.',
+    cols: {
+      'rtt': 'round-trip time over the overlay, so it reflects the mesh path rather than the underlay',
+      'trend': 'recent readings; blue bars scale to that peer\u2019s own range and red is a miss. Click one for a longer window drawn from the mesh\u2019s passive keepalive RTT.',
+    },
+  },
+  'capture': {
+    topic: 'Live tcpdump-style capture on an interface of this node. Read-only; needs raw-socket privileges. The buffer keeps the most recent ~5000 packets; Download saves a .pcap of what\'s buffered.',
+  },
+  'speedtest': {
+    topic: 'Measure overlay throughput between two managed peers. The first peer runs the test against the second; download and upload are each measured for ~4s and graphed separately, with a third chart below them showing both directions\' packets/sec together, where available. Only peers in Manager mode can run a test as the first peer.',
+  },
+  'route-table': {
+    topic: 'The host kernel routing table on this node, read live and independent of config. Entries pointing at a gravinet interface are the ones installed for the mesh.',
+    cols: {
+      'iface': 'entries pointing at a gravinet interface are the ones installed for the mesh',
+    },
+  },
+  'bgp-peers': {
+    topic: 'Live BGP and BFD session status as reported by FRR on this host. Read-only \u2014 configure BGP under Traffic \u203a BGP.',
+  },
+  'l2-peers': {
+    topic: 'Live LLDP/CDP neighbor table as reported by lldpd on this host. Read-only \u2014 pick which interfaces run LLDP/CDP under System \u203a LLDP.',
+  },
+  'hosts-file': {
+    topic: 'This host\'s hosts file, including the gravinet-managed block (peer hostnames and advertised records). Read live from disk.',
+  },
+  'dns-state': {
+    topic: 'What\'s actually registered with this host\'s OS resolver right now, per network. Read live from the OS, not from gravinet\'s own records. If an expected entry is missing, the last sync may have failed \u2014 check the DNS section\'s advertise/reject lists and this node\'s logs.',
+  },
+  'logs': {
+    topic: 'Everything the daemon logs, newest first. Filter narrows by text across all columns (try a network id, <b>ERROR</b>, or <b>mesh</b>). Refresh reloads the tail of the log file.',
+  },
+  'resolver': {
+    topic: 'This host\u2019s hostname and default DNS servers \u2014 separate from Mesh > DNS (which forwards specific mesh domains to mesh-provided resolvers) and Naming > Hosts (which maps peer names to their tunnel addresses); neither is affected by anything on this page. Acts on the node you\u2019re currently managing.',
+  },
+  'time': {
+    topic: 'This host\u2019s clock, timezone, and time synchronization. [gravinet] refuses handshakes whose timestamp is too far from local time, so a node whose clock has drifted stops forming sessions rather than degrading \u2014 this is where to check that and fix it. Acts on the node you\u2019re currently managing.',
+  },
+  'snmp': {
+    topic: 'A read-only SNMPv2c monitoring agent (net-snmp\u2019s snmpd) on this host. Acts on the node you\u2019re currently managing. Double-click the state tag to toggle a community, or any other cell to edit it.',
+  },
+  'lldp': {
+    topic: 'Link-layer discovery: LLDP plus CDP, advertised and listened for on whichever interfaces you pick below. Acts on the node you\u2019re currently managing.',
+  },
+  'syslog': {
+    topic: 'Forward this host\u2019s syslog to one or more remote collectors. Local logging keeps working as before \u2014 this only adds copies going out, never a replacement. Acts on the node you\u2019re currently managing. Double-click the state tag to toggle a target, or any other cell to edit it.',
+  },
+  'users': {
+    topic: 'Manage local OS accounts allowed to sign in to this console. Acts on the node you\u2019re currently managing.',
+  },
+  'upgrade': {
+    topic: 'Deploy a new [gravinet] build to the mesh: upload it, and this node applies it and restarts.',
+  },
+  'power': {
+    topic: 'Restart or shut down this host \u2014 the whole machine [gravinet] runs on, not just the service. This acts on the node you\u2019re currently managing.',
+  },
+  'interfaces': {
+    topic: 'Every network interface on this host, with its addresses and the default gateway in use. Double-click to edit \u2014 changes are applied to the running system straight away with no confirmation, so changing the address you are connected over will drop your session. Under anything but static the address and default route come from the network, so there is nothing to type. Changes are recorded in gravinet\u2019s own configuration \u2014 so they are included in backups and come back on restore \u2014 and written to this host\u2019s network configuration so they survive a reboot.',
+    cols: {
+      'interface': 'link name; a mesh device also names its network',
+      'state': 'kernel link state, and whether it has carrier',
+      'addresses': 'IPv4 is static or dhcp; IPv6 is static, dhcp6 or slaac \u2014 a static v4 address alongside slaac v6 is an ordinary pairing. The tag after an address is where that address came from.',
+      'gateway': 'the default route in use, per family',
+      'mac': 'hardware address',
+    },
+  },
+  'config-history': {
+    topic: 'Automatic and manual snapshots of past configurations. A snapshot is taken every time a change is committed (no action needed), or on demand with the button below. Tick one to download or restore it, or two to compare them.',
+  },
+  'settings': {
+    topic: 'Console, security, and node-wide settings. <b>General</b> covers the interface and local housekeeping; <b>Security</b> covers access control, certificates, and what a Manager peer may do here; <b>Network</b> covers mesh timing, ports, NAT, relay, and seed; <b>Performance</b> is advanced tuning most setups never need to touch.',
+  },
+};
+const HELP_KEY = 'gravinet_help_mode_v1';
+function helpModeOn(){
+  // Defaults to off: absent key reads as off, and so does a storage that
+  // throws (private windows), which is the safer of the two to fall back to.
+  try { return localStorage.getItem(HELP_KEY) === '1'; } catch (_) { return false; }
+}
+function setHelpMode(on){
+  try { localStorage.setItem(HELP_KEY, on ? '1' : '0'); } catch (_) {}
+}
+
+// secHelp puts the toggle in the section heading and applies the stored mode to
+// the content pane. Called from renderSection for any section with a HELP
+// entry, before the section's own render runs, so the .help-on class is
+// already correct by the time anything below it appears.
+// HELP_VARS supplies the values a topic may interpolate with {name}. Latency's
+// prose quotes its own poll and window durations, which are constants a few
+// hundred lines away; a topic that concatenated them directly would stop being
+// data, and the escaping needed to store an expression as a string is exactly
+// the kind of thing that silently turns into a literal apostrophe.
+const HELP_VARS = {
+  'LATENCY_POLL_MS/1000': () => LATENCY_POLL_MS/1000,
+  'LATENCY_WINDOW_MS/1000': () => LATENCY_WINDOW_MS/1000,
+};
+function helpVars(s){
+  return s.replace(/\{([A-Za-z_][A-Za-z0-9_]*(?:\/[0-9]+)?)\}/g, (m, k) => (HELP_VARS[k] ? HELP_VARS[k]() : m));
+}
+
+// HELP_OMIT names the sections that render no explanatory text of any kind:
+// the four document viewers and About, which are prose end to end already, and
+// Metrics, which is charts and a duration picker with nothing to explain.
+// Everywhere else gets a toggle whether or not it has a HELP entry, because a
+// section can carry hidden text without one — .settings-desc and .help-desc
+// are hidden by CSS wherever they appear, and a section with no pill would
+// have no way to bring them back.
+const HELP_OMIT = ['readme', 'getting-started', 'api', 'license', 'about', 'metrics'];
+
+function secHelp(c, section){
+  if (HELP_OMIT.includes(section)) return;
+  const h = HELP[section] || {};
+  const h2 = c.querySelector('h2.sec'); if (!h2) return;
+
+  const tog = $('<span class="help-tog">help</span>');
+  const paint = (on) => {
+    // The label does not change with state — only the colour does. A pill
+    // whose text grows when you click it shifts its own left edge, which
+    // against a right-justified element means the thing you just clicked
+    // moves out from under the pointer.
+    tog.className = 'help-tog' + (on ? ' on' : '');
+    tog.title = on ? 'hide the notes on this page' : 'explain this page';
+    c.classList.toggle('help-on', on);
+  };
+  paint(helpModeOn());
+  tog.onclick = () => { const on = !c.classList.contains('help-on'); setHelpMode(on); paint(on); };
+  h2.appendChild(tog);
+
+  const topic = helpTopic(h);
+  if (topic) c.appendChild($('<div class="hint help-topic" style="margin:0 0 12px">'+helpVars(topic)+'</div>'));
+}
+
+// helpTopic resolves a section's prose. Most sections have one string. A
+// tabbed section (Firewall, Settings) gives an object instead: the _ key is
+// the part true of the whole section, and a key matching the current tab is
+// appended to it, so switching tabs swaps the tab-specific half without
+// repeating the shared half. renderSection re-runs on every tab change, so
+// this is re-resolved each time with no listener of its own.
+//
+// Note for anyone editing the comments in this file: the whole UI is a Go raw
+// string literal, so a backtick anywhere in here — including in a comment,
+// quoting an identifier — ends it and breaks the build.
+function helpTopic(h){
+  if (typeof h.topic === 'string') return h.topic;
+  if (!h.topic) return '';
+  const t = h.topic, part = h.tab ? t[state[h.tab]] : '';
+  return [t._, part].filter(Boolean).join('<br><br>');
+}
+
+// helpAnnotate inserts the annotation row directly under a table's header,
+// matching notes to columns by the header's own rendered text. Called from
+// enhanceTable, which every table in the UI already passes through, so a
+// section needs no code of its own to get annotations — only a HELP entry.
+//
+// Notes are matched by header text rather than by position: keying on index
+// means a column inserted at the front silently shifts every note one place
+// along, which renders perfectly and reads as nonsense. A note whose key
+// matches no header simply does not appear.
+//
+// Where a section shows several tables that share a header name, all of them
+// get the note. That is usually right — within one section a column called
+// "state" means the same thing in each table — but it is the reason cols
+// should only carry names whose meaning is unambiguous across the section.
+function helpAnnotate(table, header){
+  const h = HELP[state.section]; if (!h || !h.cols) return;
+  const names = [].map.call(header.cells, (c) => c.textContent.trim());
+  if (!names.some((n) => h.cols[n])) return;
+  const tr = document.createElement('tr');
+  tr.className = 'help-ann';
+  for (const n of names){
+    const td = document.createElement('td');
+    td.textContent = h.cols[n] || '';
+    tr.appendChild(td);
+  }
+  header.parentNode.insertBefore(tr, header.nextSibling);
+}
 
 // buildTabBar renders a small segmented control — reusing the .seg/.seg-btn
 // styling already used for the Metrics duration selector, the same
@@ -3448,7 +3789,6 @@ function buildPortListRow(id, label, desc, initialPorts, apiPath, onSaved, initi
 // now owns it.
 function secSettings(c) {
   state.settingsTab = state.settingsTab || 'general';
-  secHint(c, 'Console, security, and node-wide settings. <b>General</b> covers the interface and local housekeeping; <b>Security</b> covers access control, certificates, and what a Manager peer may do here; <b>Network</b> covers mesh timing, ports, NAT, relay, and seed; <b>Performance</b> is advanced tuning most setups never need to touch.');
   c.appendChild(buildTabBar([['general','General'],['security','Security'],['network','Network'],['performance','Performance']], state.settingsTab,
     (tab) => { state.settingsTab = tab; renderSection(); }));
 
@@ -4216,7 +4556,6 @@ function exSvcLabel(e, mgmtPort){
 }
 
 function secAlwaysAllowed(c){
-  secHint(c, 'Never allow the firewall to filter these protocols, on any network. Double-click the state tag to toggle an entry.');
   const card = $('<div class="card"></div>');
   const t = $('<div></div>');
   t.innerHTML = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>name</th><th>service</th></tr></table>';
@@ -4327,7 +4666,6 @@ async function exemptRemoveChecked(table){
 
 function secKeys(c) {
   if (!state.cfg.length) return emptyCard(c, 'No networks yet — create one first.');
-  secHint(c, 'Manage network keys. Select an empty slot and use Generate or Import to fill it; select filled slots for Enable/Disable/Reveal/Copy/Delete. Double-click a label, state, or key to change it in place. All enabled keys authenticate joiners.<br><br>To rotate keys, generate a new key, tick <b>distributed</b> to push it to every connected peer (no copy/paste needed), then disable the old one once it\'s reached everyone. Untick <b>distributed</b> to retract it from every peer that has it. Renaming a distributed key\'s label, or changing its expiry, pushes the update automatically. Set a date and time to enable key expiry.');
   for (const cf of state.cfg) {
     const card = $('<div class="card"></div>');
     card.appendChild($('<h3><span class="net-name">'+esc(cf.name)+'</span> <span class="net-id">'+esc(cf.id)+'</span></h3>'));
@@ -4479,7 +4817,6 @@ function secKeys(c) {
 
 function secNetworks(c) {
   const cfgs = state.cfg;
-  secHint(c, 'Add, remove, and manage networks. Double-click on an existing network to edit the name, subnet, overlay address, or notes for that network, or toggle the network state to enabled or disabled.<br><br><b>+</b> creates a network, <b>=</b> joins an existing one (paste a join token, or enter id/key/seed), <b>\u25cf</b> generates a join token for a ticked network to paste on another node, <b>\u2212</b> deletes the selected networks and all associated items, and <b>\u21bb reset</b> drops the selected networks\' peer connections and immediately reconnects to their peers and seeds.');
   const card = $('<div class="card"></div>');
   let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>name</th><th>id</th><th>state</th><th title="full: every node connects to every other node it learns about, as always. partial: restricted to a seed backbone \u2014 only seed\u2013seed and seed\u2013peer links form; peer\u2013peer links are refused outright. A node is a seed here when its Seed setting (Settings \u203a Relay & Seed) is on. Double-click to switch; needs a restart on every node in the network to take effect, and every node should agree.">mesh</th><th>subnet4</th><th>overlay4</th><th>subnet6</th><th>overlay6</th><th title="overlay interface MTU. Sized so a full packet fits one underlay datagram; larger than the path can carry means every packet is fragmented and reassembled.">mtu</th><th>peers</th><th>seeds</th><th>notes</th></tr>';
   if (!cfgs.length) h += '<tr><td colspan="13" class="empty">no networks — click + to create one, or = to join an existing one</td></tr>';
@@ -4941,7 +5278,6 @@ function openPeerShellFromSel(n, sec) {
 }
 
 function secPeers(c) {
-  c.appendChild($('<div class="hint" style="margin:0 0 10px">Peers connected to this node, grouped by network. This node is listed too (<b>this node</b>), tickable to look up or shell into. Double-click a peer state to enable/disable it \u2014 any seed addresses proven to reach it are set to match, so a peer\u2019s state and its addresses\u2019 states never disagree. Double-click <b>notes</b> for a local, permanent note on its node id \u2014 including on <b>this node</b>\u2019s own row, whose note stays on this node like any other. Select peers and click Ban to block them mesh-wide.</div>'));
   if (state.nat && state.nat.class && state.nat.class !== 'unknown') {
     const m = {
       open: ['directly reachable (no NAT)', 'on'],
@@ -5227,7 +5563,6 @@ function peerOverlayEdit(td, n, p, fam){
 // Monitor, alongside the rest of that group's live-diagnostic views (metrics,
 // latency, route-table, ...), rather than a mode flag on secPeers.
 function infoMeshPeers(c) {
-  c.appendChild($('<div class="hint" style="margin:0 0 10px">Live connection detail for peers on this node, grouped by network. Peer state is read-only here; tick a row and use \u25a0 to open a shell or \ud83d\udec8 to look one up, or see Mesh \u2192 peers to enable, disable, or ban one. <b>version</b> is the gravinet build each peer reports for itself, so you can spot which nodes are behind without logging into each one (a dash means that peer predates version reporting). <b>key</b> is the label (from this node\'s own Keys table) of the key currently authenticating that peer\'s session, handy for confirming everyone has moved onto a newly-distributed key before you retire the old one. <b>endpoint</b> is the peer\'s observed underlay address; for a peer behind NAT this is its public mapping as seen from here. <b>reach</b> is <i>direct</i> when there\'s a working direct path, or <i>relayed</i> when the peer could only be reached through another node (a strong sign of a restrictive NAT or firewall). <b>time</b> is how long the current session has been established, and it resets on every reconnect.</div>'));
   perNet(c, (card, n) => {
     const rows = peerRowsForNet(n);
 
@@ -5302,7 +5637,6 @@ function infoMeshPeers(c) {
 }
 
 function secBans(c) {
-  c.appendChild($('<div class="hint" style="margin:0 0 10px">Banned peers, grouped by network — the banned target, the node that issued the ban (origin), and notes. Bans propagate across the mesh from the node that created them; select a peer and click Unban to remove the mesh-wide ban.</div>'));
   perNet(c, (card, n) => {
     const bans = (n.bans||[]).slice().sort((a,b) =>
       (a.Target||a.target||'').localeCompare(b.Target||b.target||''));
@@ -5357,9 +5691,6 @@ function secBans(c) {
 
 function secRoutes(c) {
   if (!state.cfg.length) return emptyCard(c, 'No networks.');
-  secHint(c, 'CIDRs advertised into the mesh from this node. Double-click a cidr or metric to edit it (lower metric wins); double-click the state tag to toggle the route.');
-  secHint(c, 'This node\u2019s current BGP-learned routes (FRR\u2019s RIB), gossiped to this network\u2019s peers alongside the Advertise table above \u2014 the reverse of the "Redistribute mesh routes" toggle on the BGP page. Carries the metric set here (lower wins). Needs FRR/bgpd running; a route already advertised above is never redistributed back.');
-  secHint(c, 'CIDRs rejected when advertised by other nodes. A reject matches only that exact CIDR; tick inclusive to also reject every more-specific network inside it. Double-click a cidr to edit it, the inclusive cell to toggle it, or the state tag to toggle the entry.');
   // The "Redistribute from BGP" subcard's picker needs this node's current
   // BGP-learned routes — node-global, not per-network, but the subcard
   // below is built once per network in the loop that follows. Fetched once
@@ -5818,7 +6149,6 @@ function portLabel(min, max){ if(!min && !max) return 'any'; if(min===max) retur
 // used now.
 function secSeeds(c, nets){
   const cfgs = state.cfg;
-  c.appendChild($('<div class="hint" style="margin:0 0 10px">Seed addresses (host, host:port, or host:port,port,... for more than one) this node dials to find each network; persist whether or not a peer is connected. <b>udp</b> bootstraps over UDP, dialing TCP/TLS alongside it if UDP turns out to be blocked; <b>tcp</b> goes straight over TCP/TLS, for cold-starting when UDP\u2019s blocked entirely. Double-click <b>address</b>, <b>transport</b>, or <b>notes</b> to edit, or <b>state</b> to park a seed without deleting it \u2014 a disabled seed keeps its address and notes but isn\u2019t dialed and isn\u2019t embedded in a join token. State applies immediately and is mirrored on the peer behind that address \u2014 disable a seed and its peer is disabled too, enable it and the peer comes back, and the same in reverse from <b>Peers</b>. A seed that has never completed a handshake has no known peer, so nothing moves with it; you\u2019ll be told when that happens. + to add, tick rows and \u2212 to remove, or tick one and \ud83d\udec8 for DNS/WHOIS.</div>'));
   if (!cfgs.length){ emptyCard(c, 'no networks — create one under Networks first'); return; }
   for (const cf of cfgs){
     const card = $('<div class="card"></div>');
@@ -6059,8 +6389,6 @@ function seedAddRow(table, net){
 function secHosts(c, nets){
   const cfgs = state.cfg;
   if (!cfgs.length){ emptyCard(c, 'no networks — create one under Networks first'); return; }
-  secHint(c, 'Custom name \u2192 IP records this node advertises to the whole mesh; every peer adds them to its hosts file, on top of the automatic peer-hostname entries. The IP can be anything: an overlay address, or a LAN service reachable over an advertised route. Double-click a name or ip to edit it, or the state tag to toggle the record.');
-  secHint(c, 'Hostnames rejected from the mesh: a record peers advertise for one of these names is never written into this node\'s hosts file. This is a local filter (it doesn\'t affect other nodes), the host analog of rejecting a route. Double-click the state tag to toggle; use + to add, tick rows and \u2212 to remove.');
   for (const cf of cfgs){
     const card = $('<div class="card"></div>');
     card.appendChild($('<h3><span class="net-name">'+esc(cf.name)+'</span> <span class="net-id">'+esc(cf.id)+'</span></h3>'));
@@ -6182,9 +6510,6 @@ function hostRejectAddRow(table, net){
 function secDNS(c, nets){
   const cfgs = state.cfg;
   if (!cfgs.length){ emptyCard(c, 'no networks — create one under Networks first'); return; }
-  secHint(c, 'Domains this node forwards to specific DNS servers, advertised mesh-wide. Peers register them with their OS resolver (systemd-resolved on Linux, /etc/resolver on macOS, NRPT on Windows); only queries under the domain are affected \u2014 default DNS and Hosts-based names are untouched. Double-click a domain, servers, or state to edit.');
-  secHint(c, 'Domains never registered with this node\'s resolver, even if a peer advertises a forward for them: a local-only filter, the DNS analog of rejecting a hosts record. Double-click state to toggle; + to add, tick rows and \u2212 to remove.');
-  secHint(c, 'Each domain above also acts as a search suffix: an unqualified query like "grafana" is retried as "grafana.corp.internal". Linux and Windows only. Windows uses just the first domain (one suffix per adapter); macOS/FreeBSD have no per-interface equivalent.');
   for (const cf of cfgs){
     const card = $('<div class="card"></div>');
     card.appendChild($('<h3><span class="net-name">'+esc(cf.name)+'</span> <span class="net-id">'+esc(cf.id)+'</span></h3>'));
@@ -6430,7 +6755,6 @@ async function fwAutoPopulateCatalog(){
 
 function secFirewall(c) {
   state.firewallTab = state.firewallTab || 'rules';
-  secHint(c, 'Stateful firewall inspection per network.');
   c.appendChild(buildTabBar([['rules','Rules'],['objects','Objects'],['services','Services'],['allowlist','Allow List']], state.firewallTab,
     (tab) => { state.firewallTab = tab; renderSection(); }));
 
@@ -6451,7 +6775,6 @@ function secFirewall(c) {
   if (state.firewallTab === 'services') { secFwServices(c); return; }
 
   if (!state.cfg.length) return emptyCard(c, 'No networks.');
-  secHint(c, 'Enabled = Apply firewall filtering; Disabled = all traffic passes.<br><br>Rules are evaluated top-to-bottom, first match wins. Unmatched traffic is allowed unless specifically blocked.');
 
   for (const cf of state.cfg) {
     const fw = cf.firewall||{}; const en = !!fw.enabled;
@@ -6915,7 +7238,6 @@ function startFwEdit(tr, net){
 // per network either). Whole-list save, applied live via /api/firewall
 // op:objects (no restart).
 function secFwObjects(c){
-  secHint(c, 'Reusable address objects a rule can name in its <b>src</b>/<b>dst</b>; shared by every network, edited once. <b>kind</b>: host (literal IPs), subnet (CIDRs), range (a\u2011b), fqdn (domain names, re\u2011resolved live; supports a <b>*.domain.tld</b> wildcard, learned passively from DNS traffic), or group (a bundle of other objects, by name). Double\u2011click a cell to edit; + adds a row, tick rows and \u2212 removes. Every well\u2011known domain gravinet knows about is already a row here.');
   const objs = (state.fwObjects || []).map(cloneObj);
   const card = $('<div class="card"></div>');
   const t = $('<div></div>');
@@ -7232,7 +7554,6 @@ var FW_COMMON_SERVICES = [
 // every network on this node, not one per network, so this is one table,
 // not one per network either).
 function secFwServices(c){
-  secHint(c, 'Reusable protocol/port bundles a rule can name in its <b>services</b> field; shared by every network, edited once. e.g. a "DNS" service carrying udp/53 and tcp/53. Write ports as <i>proto/port</i> or <i>proto/lo\u2011hi</i>, comma\u2011separated; a proto alone (like <i>icmp</i>) matches any port. Double\u2011click a cell to edit; + adds a row, tick rows and \u2212 removes. Every well\u2011known service gravinet knows about is already a row here.');
   const svcs = (state.fwServices || []).map(cloneSvc);
   const card = $('<div class="card"></div>');
   const t=$('<div></div>');
@@ -7286,7 +7607,6 @@ function svcAddRow(table){
 
 function secNAT(c) {
   if (!state.cfg.length) return emptyCard(c, 'No networks.');
-  secHint(c, 'Network address translation rewrites addresses as traffic crosses the tunnel. IPv4 and IPv6 are both supported \u2014 write one rule per family. Use \u00d8 next to <b>source</b> or <b>dest</b> to match everything EXCEPT that prefix.');
   for (const cf of state.cfg) {
     const nat = cf.nat||{}; const en = !!nat.enabled;
     const card = $('<div class="card"></div>');
@@ -7513,7 +7833,9 @@ function qosClassOpts(classes, sel){
 }
 
 function secInterfaces(c){
-  secHint(c, 'Every network interface on this host, with its addresses and the default gateway in use. Double-click to edit \u2014 changes are applied to the running system straight away with no confirmation, so changing the address you are connected over will drop your session. Each family has its own source: IPv4 is <b>static</b> or <b>dhcp</b>, IPv6 is <b>static</b>, <b>dhcp6</b> or <b>slaac</b>, and a static IPv4 address alongside slaac IPv6 is an ordinary pairing. Under anything but static the address and default route come from the network, so there is nothing to type. Changes are recorded in gravinet\u2019s own configuration \u2014 so they are included in backups and come back on restore \u2014 and written to this host\u2019s network configuration so they survive a reboot.');
+  // The page's explanatory text lives in HELP.interfaces and is revealed by
+  // the toggle secHelp put in the heading; the one-line description of what
+  // this section is stays in NAV_GROUPS, where the rail and search read it.
   const wrap = $('<div></div>'); c.appendChild(wrap);
 
   (async () => {
@@ -7752,7 +8074,6 @@ function secInterfaces(c){
 }
 
 function secRadvd(c){
-  secHint(c, 'This node announces itself on a LAN so hosts autoconfigure an address (SLAAC) and learn a default route, and can hand out DNS servers and search domains in the advertisement itself \u2014 which is how a SLAAC network gets DNS without DHCPv6. Advertise on the LAN interface, never the mesh device. Leave <b>prefixes</b> blank to advertise whichever global /64s the interface already has.');
   const wrap = $('<div></div>'); c.appendChild(wrap);
 
   async function load(){
@@ -7905,7 +8226,6 @@ function secRadvd(c){
 
 function secQoS(c) {
   if (!state.cfg.length) return emptyCard(c, 'No networks.');
-  secHint(c, 'Quality of Service modifies traffic priority. There are 5 priority classes - 0 = highest to 4 = lowest/bulk. Unmatched traffic uses class 3 (normal). Strict priority is maintained \u2014 higher classes drain first under contention. <b>Match</b> takes a comma-separated mix of named services and raw <code>proto</code>/<code>proto/port</code> entries (e.g. <code>https, tcp/8443, udp/53</code>); leave it blank to match anything. Use + to add a rule, double-click a rule to edit it, double-click the state tag to toggle it, tick rows and use \u2212 to remove.');
   for (const cf of state.cfg) {
     const q = cf.qos||{}; const en = !!q.enabled; const classes = q.classes||5;
     const dflt = (q.default_class!=null)?q.default_class:3;
@@ -8028,7 +8348,6 @@ function startQoSEdit(tr, net, classes){
 
 function secBandwidth(c) {
   if (!state.cfg.length) return emptyCard(c, 'No networks.');
-  secHint(c, 'Limit traffic per network. Double-click a rate to set it \u2014 enter a number and pick the unit; clear the number for unlimited. Double-click the tag above to turn the cap on or off.');
   for (const cf of state.cfg) {
     const t = cf.throttle||{}; const en = !!t.enabled; const card = $('<div class="card"></div>');
     card.appendChild(netCardHead(cf, en, '/api/bandwidth'));
@@ -8051,7 +8370,6 @@ function secBandwidth(c) {
 // follows the current target: local by default, or proxied to the selected
 // peer, so the confirm names exactly which node it's about to take down.
 function secPower(c){
-  secHint(c, 'Restart or shut down this host \u2014 the whole machine [gravinet] runs on, not just the service. This acts on the node you\u2019re currently managing.');
 
   // Whose power is this? Local session, or the proxied peer if one is selected.
   const nodeLabel = () => {
@@ -8074,7 +8392,7 @@ function secPower(c){
   // else) without waiting to trip across another setting first.
   const svcCard = $('<div class="card"></div>');
   svcCard.appendChild($('<div style="'+legend+'">gravinet service</div>'));
-  svcCard.appendChild($('<div class="hint" style="margin:0 0 10px">Restarts just the gravinet service on this node. The host itself, and everything else running on it, is untouched.</div>'));
+  svcCard.appendChild($('<div class="hint help-desc" style="margin:0 0 10px">Restarts just the gravinet service on this node. The host itself, and everything else running on it, is untouched.</div>'));
   const svcBtn = $('<button class="sm">Restart</button>');
   svcCard.appendChild(svcBtn);
   c.appendChild(svcCard);
@@ -8178,7 +8496,6 @@ function secPower(c){
 // gravinet itself restarts. Said plainly in the hostname card rather than
 // implied by silence.
 function secResolver(c){
-  secHint(c, 'This host\u2019s hostname and default DNS servers \u2014 separate from Mesh > DNS (which forwards specific mesh domains to mesh-provided resolvers) and Naming > Hosts (which maps peer names to their tunnel addresses); neither is affected by anything on this page. Acts on the node you\u2019re currently managing.');
 
   const body = $('<div></div>');
   body.innerHTML = '<div class="hint">loading\u2026</div>';
@@ -8202,7 +8519,7 @@ function secResolver(c){
       const row = $('<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
         + '<input id="res-host-in" value="'+esc(r.hostname||'')+'" placeholder="node7.example" style="flex:1;min-width:240px"></div>');
       hostCard.appendChild(row);
-      hostCard.appendChild($('<div class="hint" style="margin:8px 0 0">Changes the OS hostname immediately and restarts [gravinet] so peers see the new name. Expect a brief reconnect blip.</div>'));
+      hostCard.appendChild($('<div class="hint help-desc" style="margin:8px 0 0">Changes the OS hostname immediately and restarts [gravinet] so peers see the new name. Expect a brief reconnect blip.</div>'));
       const hostIn = row.querySelector('#res-host-in');
       let hostLast = r.hostname || '';
       const saveHost = async () => {
@@ -8233,7 +8550,7 @@ function secResolver(c){
         + '<input id="res-search-in" value="'+esc(r.search_domain||'')+'" placeholder="corp.internal" style="width:100%"></div>'
         + '</div>');
       dnsCard.appendChild(row);
-      dnsCard.appendChild($('<div class="hint" style="margin:8px 0 0">Filling in DNS servers overrides whatever this host would otherwise use (typically DHCP-provided); clearing it reverts to that.'
+      dnsCard.appendChild($('<div class="hint help-desc" style="margin:8px 0 0">Filling in DNS servers overrides whatever this host would otherwise use (typically DHCP-provided); clearing it reverts to that.'
         + (r.manager ? ' Applied via ' + esc(r.manager) + '.' : '')
         + '</div>'));
       const dnsIn = row.querySelector('#res-dns-in');
@@ -8285,7 +8602,6 @@ function secResolver(c){
 let timeTimer = null;
 function secTime(c){
   if (timeTimer){ clearInterval(timeTimer); timeTimer = null; }
-  secHint(c, 'This host\u2019s clock, timezone, and time synchronization. [gravinet] refuses handshakes whose timestamp is too far from local time, so a node whose clock has drifted stops forming sessions rather than degrading \u2014 this is where to check that and fix it. Acts on the node you\u2019re currently managing.');
 
   const body = $('<div></div>');
   body.innerHTML = '<div class="hint">loading\u2026</div>';
@@ -8470,14 +8786,14 @@ function secTime(c){
       // Refused rather than merely warned about: a running sync daemon would
       // steer the clock back within seconds, so offering the control would be
       // offering something that doesn't work.
-      setCard.appendChild($('<div class="hint" style="margin:0">Not available while time sync is on \u2014 the sync daemon would put the clock back within seconds. Clear the time servers above first.</div>'));
+      setCard.appendChild($('<div class="hint help-desc" style="margin:0">Not available while time sync is on \u2014 the sync daemon would put the clock back within seconds. Clear the time servers above first.</div>'));
     } else {
       const row = $('<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
         + '<input type="datetime-local" id="clk-in" step="1" style="min-width:240px"></div>');
       const save = $('<button class="sm">Set</button>');
       row.appendChild(save);
       setCard.appendChild(row);
-      setCard.appendChild($('<div class="hint" style="margin:8px 0 0">One-shot, in this host\u2019s own timezone as shown above. Nothing is stored \u2014 the clock is set once and left alone. Needs an explicit click to apply.</div>'));
+      setCard.appendChild($('<div class="hint help-desc" style="margin:8px 0 0">One-shot, in this host\u2019s own timezone as shown above. Nothing is stored \u2014 the clock is set once and left alone. Needs an explicit click to apply.</div>'));
       save.onclick = async () => {
         const v = row.querySelector('#clk-in').value;
         if (!v){ alert('Pick a date and time.'); return; }
@@ -8516,7 +8832,6 @@ function secTime(c){
 // separate questions once there's more than one community to reason
 // about.
 function secSNMP(c){
-  secHint(c, 'A read-only SNMPv2c monitoring agent (net-snmp\u2019s snmpd) on this host. Acts on the node you\u2019re currently managing. Double-click the state tag to toggle a community, or any other cell to edit it.');
 
   const body = $('<div></div>');
   body.innerHTML = '<div class="hint">loading\u2026</div>';
@@ -8632,7 +8947,7 @@ function secSNMP(c){
     row.appendChild($('<div><div class="hint" style="margin:0 0 4px">sysContact</div>'
       + '<input id="snmp-contact" value="'+esc(snmp.contact||'')+'" placeholder="noc@example.com" style="width:100%"></div>'));
     card.appendChild(row);
-    card.appendChild($('<div class="hint" style="margin:8px 0 0">Double-click the pill next to the page title to turn the agent on or off. Saves automatically when you click or tab away.</div>'));
+    card.appendChild($('<div class="hint help-desc" style="margin:8px 0 0">Double-click the pill next to the page title to turn the agent on or off. Saves automatically when you click or tab away.</div>'));
     body.appendChild(card);
     body.appendChild(commCard);
 
@@ -8722,7 +9037,6 @@ function secSNMP(c){
 // each one's save carries the other's current value unchanged — see
 // saveLLDP below.
 function secLLDP(c){
-  secHint(c, 'Link-layer discovery: LLDP plus CDP, advertised and listened for on whichever interfaces you pick below. Acts on the node you\u2019re currently managing.');
 
   const body = $('<div></div>');
   body.innerHTML = '<div class="hint">loading\u2026</div>';
@@ -8825,7 +9139,6 @@ function secLLDP(c){
 // untouched" means per platform). Acts on the node you're currently
 // managing, like Resolver/Time/SNMP/LLDP.
 function secSyslog(c){
-  secHint(c, 'Forward this host\u2019s syslog to one or more remote collectors. Local logging keeps working as before \u2014 this only adds copies going out, never a replacement. Acts on the node you\u2019re currently managing. Double-click the state tag to toggle a target, or any other cell to edit it.');
   const body = $('<div></div>');
   body.innerHTML = '<div class="hint">loading\u2026</div>';
   c.appendChild(body);
@@ -8970,7 +9283,6 @@ async function syslogRemoveChecked(table){
 // than Time's card-per-setting form, since this is fundamentally a list of
 // entries, not a handful of independent settings.
 function secUsers(c){
-  secHint(c, 'Manage local OS accounts allowed to sign in to this console. Acts on the node you\u2019re currently managing.');
 
   const nodeLabel = () => {
     if (!state.target) return 'this node';
@@ -9165,8 +9477,90 @@ function usersAddRow(table){
 // Every action here goes to the same daemon entry point the CLI uses, so a
 // rollout started from this form is the same rollout, with the same canary and
 // the same abort rule, as one started from a terminal.
+// GH_REPO is the upstream repository the version check reads tags from, and
+// the one the download link points into.
+const GH_REPO = 'micush/gravinet';
+
+// latestGravinetTag returns the newest release tag on GitHub, or null.
+//
+// The lookup runs from the browser rather than through this node, because the
+// link it produces is clicked in the browser: a node with no route to GitHub
+// can still show an operator a link their own machine can fetch, and a browser
+// that cannot reach GitHub could not have downloaded the tarball either. It
+// also keeps a node that is deliberately offline from making an outbound
+// connection nobody asked it to make.
+//
+// Releases are asked for first and tags second: a repository that publishes
+// releases marks exactly one as latest, while the tags endpoint is ordered by
+// the API's own rules rather than by version. The tags fallback therefore
+// picks by number rather than by position — v1000 sorts above v999 that way,
+// and below it as a string.
+//
+// Cached on state for the life of the page. GitHub allows 60 unauthenticated
+// requests an hour per address, and this section re-renders on every visit.
+async function latestGravinetTag(){
+  if (state.latestTag !== undefined) return state.latestTag;
+  state.latestTag = null;
+  const tagNum = (t) => { const m = /^v?(\d+)$/.exec(t||''); return m ? parseInt(m[1],10) : null; };
+  try {
+    const rel = await fetch('https://api.github.com/repos/'+GH_REPO+'/releases/latest', { headers:{ 'Accept':'application/vnd.github+json' } });
+    if (rel.ok){
+      const j = await rel.json();
+      if (j && j.tag_name) state.latestTag = j.tag_name;
+    }
+    if (!state.latestTag){
+      const tg = await fetch('https://api.github.com/repos/'+GH_REPO+'/tags?per_page=100', { headers:{ 'Accept':'application/vnd.github+json' } });
+      if (tg.ok){
+        const list = await tg.json();
+        let best = null, bestN = -1;
+        for (const t of (Array.isArray(list) ? list : [])){
+          const n = tagNum(t && t.name);
+          if (n !== null && n > bestN){ bestN = n; best = t.name; }
+        }
+        state.latestTag = best;
+      }
+    }
+  } catch (_) { /* offline, blocked, or rate-limited — reported by the caller */ }
+  return state.latestTag;
+}
+
+// renderUpgradeVersions fills the line under the source picker. Written so the
+// running version still shows when the GitHub lookup fails: knowing what this
+// node is on is useful on its own, and an offline node is exactly where the
+// lookup will not work.
+async function renderUpgradeVersions(el){
+  let cur = '';
+  try {
+    // Explicitly local. /api/about is not in LOCAL_API, so it follows the
+    // peer selected in the header — but every /api/upgrade/* endpoint is
+    // local-only, so this page acts on the node you are logged into no matter
+    // what is selected. Left to default, this line would report a remote
+    // node's version beside a control that upgrades the local one.
+    const r = await api('/api/about', {}, null);
+    if (r.ok && r.body) cur = r.body.gravinet_version || '';
+  } catch (_) {}
+  if (state.section !== 'upgrade') return;
+  const vs = (v) => 'v' + String(v).replace(/^v/, '');
+  if (!cur){ el.textContent = ''; return; }
+
+  const latest = await latestGravinetTag();
+  if (state.section !== 'upgrade') return;
+  if (!latest){
+    el.innerHTML = 'The current version of [gravinet] is <b>'+esc(vs(cur))+'</b>. '
+      + '<span class="muted">The latest version could not be checked \u2014 GitHub was unreachable, or its rate limit was hit.</span>';
+    return;
+  }
+  // The tag goes into the URL exactly as GitHub reported it. A tag is a path
+  // segment upstream, so normalising it here would build a 404 for any
+  // repository that ever tags without the v.
+  const url = 'https://github.com/'+GH_REPO+'/archive/refs/tags/'+encodeURIComponent(latest)+'.tar.gz';
+  el.innerHTML = 'The current version of [gravinet] is <b>'+esc(vs(cur))+'</b>. '
+    + 'The latest version is <a href="'+esc(url)+'" rel="noopener noreferrer" '
+    + 'title="download the '+esc(latest)+' source tarball from GitHub">'+esc(vs(latest))+'</a>.'
+    + (vs(cur) === vs(latest) ? ' <span class="on">up to date</span>' : '');
+}
+
 function secUpgrade(c){
-  secHint(c, 'Deploy a new [gravinet] build to the mesh: upload it, and this node applies it and restarts.');
   const host = $('<div></div>');
   c.appendChild(host);
   drawUpgrade(host);
@@ -9212,7 +9606,7 @@ async function drawUpgrade(host){
       + esc(peerName) + '\u2019, which is selected above. Disabled here so it can\u2019t look like it\u2019s upgrading that peer when it isn\u2019t. Select \u201cThis node\u201d to use this on the node you\u2019re actually on, or log into '
       + esc(peerName) + '\u2019s own web admin to upgrade it there.</div>'));
   }
-  stCard.appendChild($('<div class="hint" style="margin:0 0 10px">Select a [gravinet] source archive to deploy.</div>'));
+  stCard.appendChild($('<div class="hint help-desc" style="margin:0 0 10px">Select a [gravinet] source archive to deploy.</div>'));
 
   const up = $('<div class="tbar"></div>');
   // No format choice on this side: .tgz/.tar.gz and .zip are both accepted,
@@ -9225,6 +9619,16 @@ async function drawUpgrade(host){
   up.appendChild(fileIn);
   up.appendChild(upgradeBtn);
   stCard.appendChild(up);
+
+  // What this node runs, and the newest tag on GitHub with a direct link to
+  // its source tarball — the archive this page's own picker above expects, so
+  // the link feeds straight back into the control it sits under.
+  //
+  // Deliberately a plain .hint rather than .help-desc: this is live status,
+  // not an explanation of the page, so it stays visible with help off.
+  const verLine = $('<div class="hint" style="margin:10px 0 0">\u2026</div>');
+  stCard.appendChild(verLine);
+  renderUpgradeVersions(verLine);
 
   // Peer picker, moved in from what used to be a separate "Push to managed
   // peers" card. The single Upgrade button decides its target from the picker:
@@ -9609,7 +10013,7 @@ async function drawUpgrade(host){
 async function drawOSUpdates(host){
   const card = $('<div class="card" style="margin-top:16px"></div>');
   card.appendChild($('<h3>OS updates</h3>'));
-  card.appendChild($('<div class="hint" style="margin:0 0 10px">Scheduled updates to this host\u2019s own OS packages \u2014 separate from the gravinet upgrade above, which only replaces the gravinet binary itself. Never reboots on its own, even if an update would benefit from one; use System &gt; Power for that separately.</div>'));
+  card.appendChild($('<div class="hint help-desc" style="margin:0 0 10px">Scheduled updates to this host\u2019s own OS packages \u2014 separate from the gravinet upgrade above, which only replaces the gravinet binary itself. Never reboots on its own, even if an update would benefit from one; use System &gt; Power for that separately.</div>'));
   host.appendChild(card);
 
   const body = $('<div></div>');
@@ -10148,7 +10552,6 @@ function rateFmt(v){
 // filter, since the target only needs to accept the client's request, not
 // originate one.
 function infoSpeedtest(c){
-  secHint(c, 'Measure overlay throughput between two managed peers. The first peer runs the test against the second; download and upload are each measured for ~4s and graphed separately, with a third chart below them showing both directions\' packets/sec together, where available. Only peers in Manager mode can run a test as the first peer.');
   const card = $('<div class="card"></div>');
 
   const bar = $('<div class="tbar"></div>');
@@ -10495,7 +10898,6 @@ let captureTimer = null, captureCursor = 0, captureRunning = false;
 let captureLines = [];
 function infoCapture(c){
   if (captureTimer){ clearInterval(captureTimer); captureTimer = null; }
-  secHint(c, 'Live tcpdump-style capture on an interface of this node. Read-only; needs raw-socket privileges. The buffer keeps the most recent ~5000 packets; Download saves a .pcap of what\'s buffered.');
   const card = $('<div class="card"></div>');
 
   const bar = $('<div class="tbar"></div>');
@@ -10717,7 +11119,6 @@ function infoCaptureMesh(c){
 
 // infoRoutes shows the host kernel routing table, read live (not from config).
 function infoRoutes(c){
-  secHint(c, 'The host kernel routing table on this node, read live and independent of config. Entries pointing at a gravinet interface are the ones installed for the mesh.');
   const card = $('<div class="card"></div>');
   const body = $('<div></div>'); body.innerHTML = '<div class="hint">loading\u2026</div>'; card.appendChild(body); c.appendChild(card);
   (async () => {
@@ -10742,7 +11143,6 @@ function infoRoutes(c){
 // The whole section is only reachable when state.bgpSupported is true (vtysh
 // present); see sectionVisible().
 function secBgp(c){
-  secHint(c, 'BGP configuration for dynamic routing. For neighbors and advertised networks: use + to add a row, double-click a field to edit it (double-click BFD to toggle it), tick rows and \u2212 to remove. Click the \ud83d\udc41\ufe0f next to a neighbor\u2019s MD5 password to reveal or mask it. Click a neighbor\u2019s \u201cfilters\u201d pill to restrict which prefixes BGP itself accepts from, or advertises to, that one neighbor \u2014 blank means unfiltered (the default). This is separate from the Redistribute pickers below, which control what feeds into BGP, not what BGP exchanges with a neighbor.');
   const editWrap = $('<div></div>'); c.appendChild(editWrap);
 
   const fail = (msg) => {
@@ -10829,7 +11229,6 @@ function secBgp(c){
 // Monitor holds live read-only state). Gated on vtysh presence, same as the
 // editor.
 function secBgpPeers(c){
-  secHint(c, 'Live BGP and BFD session status as reported by FRR on this host. Read-only \u2014 configure BGP under Traffic \u203a BGP.');
   const card = $('<div class="card"></div>');
   card.appendChild($('<h3>BGP Neighbors</h3>'));
   const meta = $('<div class="hint" style="margin:-4px 0 10px" id="bgp-live-meta"></div>'); card.appendChild(meta);
@@ -10970,11 +11369,10 @@ async function bgpTableLiveStatus(body){
 // editor (which interfaces run LLDP/CDP) so "configure" and "observe" stay
 // cleanly split, matching the rest of the app. Gated on lldpd's presence,
 // same as the editor — see sectionVisible. No card title — the section's
-// own <h2> (from sectionHeading) plus secHint's description already say
+// own <h2> (from sectionHeading) plus its HELP topic already say
 // what this is; a "L2 Neighbors" <h3> above a card holding nothing else
 // was redundant with both.
 function secL2Peers(c){
-  secHint(c, 'Live LLDP/CDP neighbor table as reported by lldpd on this host. Read-only \u2014 pick which interfaces run LLDP/CDP under System \u203a LLDP.');
   const card = $('<div class="card"></div>');
   const body = $('<div></div>'); card.appendChild(body);
   c.appendChild(card);
@@ -11542,7 +11940,6 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
 
 // infoHosts shows the local hosts file contents, read live from disk.
 function infoHosts(c){
-  secHint(c, 'This host\'s hosts file, including the gravinet-managed block (peer hostnames and advertised records). Read live from disk.');
   const card = $('<div class="card"></div>');
   const body = $('<div></div>'); body.innerHTML = '<div class="hint">loading\u2026</div>'; card.appendChild(body); c.appendChild(card);
   (async () => {
@@ -11565,7 +11962,6 @@ function infoHosts(c){
 // reflects reality even if a sync silently failed. This is the direct way to
 // answer "is conditional forwarding actually working" without a shell.
 function infoDNS(c){
-  secHint(c, 'What\'s actually registered with this host\'s OS resolver right now, per network. Read live from the OS, not from gravinet\'s own records. If an expected entry is missing, the last sync may have failed \u2014 check the DNS section\'s advertise/reject lists and this node\'s logs.');
   const card = $('<div class="card"></div>');
   const body = $('<div></div>'); body.innerHTML = '<div class="hint">loading\u2026</div>'; card.appendChild(body); c.appendChild(card);
   (async () => {
@@ -11923,7 +12319,6 @@ function seedLatencySinceFromSlots(e, slots, isV6){
 
 function infoLatency(c){
   if (latencyTimer){ clearInterval(latencyTimer); latencyTimer = null; }
-  secHint(c, 'Round-trip time from this host to every other peer on each up network, pinged over the overlay (so it reflects the mesh path, not just the underlay). A couple of probes per peer, run concurrently; this can take a few seconds. Refreshes automatically every '+(LATENCY_POLL_MS/1000)+'s; <b>trend</b> covers the last '+(LATENCY_WINDOW_MS/1000)+'s; blue bars scale to that peer\u2019s own range, red is a miss; hover a bar for the exact reading, or the chart for how long it\u2019s held its current state. Click a trend for a bigger chart over a longer window \u2014 that one comes from the mesh\u2019s own passive keepalive RTT, sampled continuously in the background, rather than this page\u2019s live ping.');
   const card = $('<div class="card"></div>');
   const body = $('<div></div>'); body.innerHTML = '<div class="hint">pinging\u2026</div>'; card.appendChild(body); c.appendChild(card);
 
@@ -12187,7 +12582,6 @@ function linkifyLog(msg, toks){
 let CH_SEL = new Set(); // ticked snapshot ids, this render only
 
 function secConfigHistory(c){
-  secHint(c, 'Automatic and manual snapshots of past configurations. A snapshot is taken every time a change is committed (no action needed), or on demand with the button below. Tick one to download or restore it, or two to compare them.');
   const card = $('<div class="card"></div>');
   const t = $('<div></div>');
   t.innerHTML = '<table><tr><th class="selcol"></th><th>saved</th><th>by</th><th>changes</th></tr></table>';
@@ -12556,7 +12950,6 @@ function openTshootModal(){
 }
 
 function secLogs(c){
-  secHint(c, 'Everything the daemon logs, newest first. Filter narrows by text across all columns (try a network id, <b>ERROR</b>, or <b>mesh</b>). Refresh reloads the tail of the log file.');
   const card = $('<div class="card"></div>');
   const t = $('<div></div>');
   t.innerHTML = '<table><tr><th>time</th><th>level</th><th>message</th></tr></table>';
