@@ -2,6 +2,22 @@
 
 ---
 
+## v910 — 2026-08-23
+
+**The version line ends at the two numbers.**
+
+v909 appended "up to date" when the running version matched the newest tag. The two numbers sit one clause apart in the same sentence; a badge restating their relationship is a third thing to render, keep correct, and read past. It is gone, and the comparison that produced it with it.
+
+### Verification
+
+`go build ./...` clean; `gofmt` clean on all three files touched. `internal/webadmin`, `cmd/gravinet`, `internal/config` and `internal/service` pass in full.
+
+`TestUpgradeVersionLineHasNoVerdict` fails on the marker text and on either shape of the comparison that would feed it. The comparison is worth pinning rather than just the string: re-deriving it is the first step toward any restatement, whether the next one says "up to date", colours the number, or adds an icon. Confirmed to fail with the v909 line restored, and to pass on removal.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
 ## v909 — 2026-08-23
 
 **System > Upgrade names the running version and links the newest one.**

@@ -9550,14 +9550,17 @@ async function renderUpgradeVersions(el){
       + '<span class="muted">The latest version could not be checked \u2014 GitHub was unreachable, or its rate limit was hit.</span>';
     return;
   }
+  // No verdict after the sentence. The two numbers are side by side and the
+  // reader can compare them; a badge restating the comparison is a third
+  // thing to render, keep correct, and read past.
+  //
   // The tag goes into the URL exactly as GitHub reported it. A tag is a path
   // segment upstream, so normalising it here would build a 404 for any
   // repository that ever tags without the v.
   const url = 'https://github.com/'+GH_REPO+'/archive/refs/tags/'+encodeURIComponent(latest)+'.tar.gz';
   el.innerHTML = 'The current version of [gravinet] is <b>'+esc(vs(cur))+'</b>. '
     + 'The latest version is <a href="'+esc(url)+'" rel="noopener noreferrer" '
-    + 'title="download the '+esc(latest)+' source tarball from GitHub">'+esc(vs(latest))+'</a>.'
-    + (vs(cur) === vs(latest) ? ' <span class="on">up to date</span>' : '');
+    + 'title="download the '+esc(latest)+' source tarball from GitHub">'+esc(vs(latest))+'</a>.';
 }
 
 function secUpgrade(c){

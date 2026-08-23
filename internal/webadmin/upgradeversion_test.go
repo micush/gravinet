@@ -107,3 +107,17 @@ func TestUpgradeVersionLineIsNotHelpText(t *testing.T) {
 		}
 	}
 }
+
+// The line ends at the two version numbers. No verdict, badge or "up to date"
+// marker after them — the reader can compare two numbers that are side by
+// side, and a restatement is a third thing to render, keep correct and read
+// past. Removing it in v910 is also why nothing here may reintroduce a
+// comparison between cur and latest for display purposes.
+func TestUpgradeVersionLineHasNoVerdict(t *testing.T) {
+	src := uiFuncSrc(t, "renderUpgradeVersions")
+	for _, bad := range []string{"up to date", "vs(cur) === vs(latest)", "cur === latest"} {
+		if strings.Contains(src, bad) {
+			t.Errorf("the version line restates the comparison (%q); the two numbers already show it", bad)
+		}
+	}
+}
