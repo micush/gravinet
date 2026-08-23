@@ -9882,7 +9882,21 @@ async function drawUpgrade(host){
         upgradeBtn.textContent = 'Building' + '.'.repeat(buildDots);
       }, 450);
       try {
-        const resp = await fetch('/api/upgrade/source', { method:'POST', body: fileIn.files[0] });
+        const src = fileIn.files[0];
+        if (!src){ alert('The selected file is no longer available. Pick the source archive again.'); return; }
+        let resp;
+        try {
+          resp = await fetch('/api/upgrade/source', { method:'POST', body: src });
+        } catch (e) {
+          // Same failure mode as pushBatch's: a File is a handle to a path,
+          // read when the body is streamed rather than when it was picked, so
+          // a build replaced under the same name throws here instead of
+          // returning an error response. Without this the request vanished
+          // and the button simply re-enabled.
+          alert('The upload could not be sent: ' + (e && e.message ? e.message : e)
+            + '\n\nNothing was applied. If the archive was rebuilt or downloaded again since you picked it, pick it again and retry.');
+          return;
+        }
         const body = await resp.json().catch(()=>({}));
         if (!resp.ok){ alert(body.error || 'build failed'); return; }
         if (body.skipped){
@@ -9891,6 +9905,14 @@ async function drawUpgrade(host){
           alert('Applied. This node is restarting into ' + (body.applied || 'the new build') + '.\n\nIf it cannot get its peers back within the confirm window, it will revert itself.');
         }
         drawUpgrade(host);
+      } catch (e) {
+        // Same reasoning as the rollout's backstop below. The inner catch
+        // above covers the fetch; this covers everything after it — parsing
+        // the response, and the redraw — which would otherwise unwind through
+        // the finally, stop the dots, and leave the button reading "Building"
+        // with nothing said.
+        alert('The upgrade stopped unexpectedly: ' + (e && e.message ? e.message : e) + '\n\nThis is a bug.');
+        throw e;
       } finally {
         clearInterval(buildDotsTimer);
       }
@@ -9970,15 +9992,45 @@ async function drawUpgrade(host){
       // deliberately distinct from a per-peer failure: null tells the caller
       // to abort the whole rollout immediately rather than treat it as
       // "these particular nodes failed".
+      // pushFailed renders a request-level failure and returns null, which is
+      // pushBatch's "abort the whole rollout" signal. Split out so a thrown
+      // fetch reports the same way a rejected one does.
+      const pushFailed = (msg) => {
+        resBox.appendChild($('<div class="hint" style="color:var(--danger,#b33);white-space:pre-wrap"></div>')).textContent = msg;
+        return null;
+      };
+
+      // srcFile re-reads the picked file for each batch and fails loudly if it
+      // has gone. A File is a handle to a path, not a copy of its contents: it
+      // is read when the request body is streamed, not when the file was
+      // picked, so a build downloaded again under the same name between
+      // picking and pushing leaves this pointing at bytes that no longer
+      // match — which surfaces as the fetch below throwing, not as an error
+      // response.
+      const srcFile = () => {
+        const f = fileIn.files[0];
+        if (!f) throw new Error('The selected file is no longer available. Pick the source archive again.');
+        return f;
+      };
+
       const pushBatch = async (batchNodes) => {
-        const fd = new FormData();
-        fd.append('nodes', JSON.stringify(batchNodes));
-        fd.append('source', fileIn.files[0]);
-        const resp = await fetch('/api/upgrade/push', { method:'POST', body: fd });
+        let resp;
+        try {
+          const fd = new FormData();
+          fd.append('nodes', JSON.stringify(batchNodes));
+          fd.append('source', srcFile());
+          resp = await fetch('/api/upgrade/push', { method:'POST', body: fd });
+        } catch (e) {
+          // Never reached the server, or the archive could not be read off
+          // disk. Nothing was pushed, so nothing is half-done — say so, and
+          // name re-picking the file, which is the fix when the build was
+          // replaced under the same name.
+          return pushFailed('The push could not be sent: ' + (e && e.message ? e.message : e)
+            + '\nNothing was pushed. If the archive was rebuilt or downloaded again since you picked it, pick it again and retry.');
+        }
         if (!resp.ok || !resp.body){
           const body = await resp.json().catch(()=>({}));
-          resBox.appendChild($('<div class="hint" style="color:var(--danger,#b33)">'+esc(body.error || 'push failed')+'</div>'));
-          return null;
+          return pushFailed(body.error || 'push failed');
         }
         const applied = [];
         const reader = resp.body.getReader();
@@ -9992,15 +10044,24 @@ async function drawUpgrade(host){
           if (obj.ok) applied.push(obj.node);
           addResult(obj);
         };
-        while (true){
-          const { done: readDone, value } = await reader.read();
-          if (readDone) break;
-          buf += decoder.decode(value, { stream: true });
-          let nl;
-          while ((nl = buf.indexOf('\n')) !== -1){
-            handleLine(buf.slice(0, nl));
-            buf = buf.slice(nl + 1);
+        try {
+          while (true){
+            const { done: readDone, value } = await reader.read();
+            if (readDone) break;
+            buf += decoder.decode(value, { stream: true });
+            let nl;
+            while ((nl = buf.indexOf('\n')) !== -1){
+              handleLine(buf.slice(0, nl));
+              buf = buf.slice(nl + 1);
+            }
           }
+        } catch (e) {
+          // The connection dropped part-way through. Unlike the case above,
+          // peers may well have been upgraded — the ones already reported are
+          // still on screen, and the rest are simply unknown from here, which
+          // is worth saying plainly rather than implying nothing happened.
+          return pushFailed('The connection dropped while the rollout was running: ' + (e && e.message ? e.message : e)
+            + '\nPeers listed above reported before it dropped; any others may or may not have been upgraded. Check the fleet before retrying.');
         }
         if (buf) handleLine(buf);
         return applied;
@@ -10095,6 +10156,22 @@ async function drawUpgrade(host){
         // so they can be retried without re-adding them.
         peerPicker.set(peerPicker.get().filter(n => !done.has(n)));
       }
+    } catch (e) {
+      // Backstop. Everything above that can reasonably throw now reports for
+      // itself, but this handler had only a finally: any throw unwound
+      // through it, which re-enabled the button and restored its label, and
+      // then vanished as an unhandled rejection. What that looked like was a
+      // rollout that had never started — progress frozen at "0 of N", button
+      // back to Upgrade, nothing said anywhere — which is indistinguishable
+      // from the button not having worked at all.
+      //
+      // Anything reaching here is a bug rather than an operating condition,
+      // so it says so instead of offering a remedy that may not apply.
+      const msg = 'The rollout stopped unexpectedly: ' + (e && e.message ? e.message : e)
+        + '\nThis is a bug. Peers listed above reported before it stopped; any others were not attempted.';
+      if (resBox) resBox.appendChild($('<div class="hint" style="color:var(--danger,#b33);white-space:pre-wrap"></div>')).textContent = msg;
+      else alert(msg);
+      throw e; // still reaches the console, so it can be reported
     } finally {
       if (pushDotsTimer) clearInterval(pushDotsTimer);
       stashResults();

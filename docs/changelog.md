@@ -2,6 +2,42 @@
 
 ---
 
+## v913 — 2026-08-23
+
+**Fix: a fleet rollout could fail silently and look like the button had not worked.**
+
+Reported as "it doesn't always kick off correctly", with a screenshot showing *Building on 17 peer(s)… 0 of 17 finished so far*, no error, and the Upgrade button back to its enabled idle state.
+
+**Root cause: `try`/`finally` with no `catch`.** The click handler had two, and `pushBatch` was inside one of them. Any throw unwound through the `finally`, which cleared the dots timer, stashed results and set `upgradeBtn.disabled = false; upgradeBtn.textContent = 'Upgrade'` — then disappeared as an unhandled rejection. The button returning to idle *is* the finally running. Nothing distinguished that from a click that never did anything, which is exactly how it read.
+
+Nothing on the streaming path throws under normal operation, which is why it was intermittent. Three things do:
+
+- **`fetch` rejecting.** `fd.append('source', fileIn.files[0])` puts a `File` in the body — a handle to a path, read when the request is streamed, not when the file was picked. Re-download or rebuild that archive under the same name between picking and clicking and the read fails with `NotReadableError`; the fetch rejects rather than returning an error response. Iterating on builds that all land as `gravinet-NNN.tar.gz` makes this easy to hit and hard to attribute.
+- **`reader.read()` failing** part-way through a rollout that legitimately runs for minutes across 17 peers.
+- **An absent file**: `fd.append('source', undefined)` sends the literal string `undefined`, which the server rejects — but only after the upload, and the rejection was handled while the throw was not.
+
+### The fix
+
+`pushBatch` now catches around the fetch and around the read loop separately, because the two mean different things. A send failure pushed nothing, so it says so and names re-picking the file. A dropped connection may have upgraded some peers, so it says the ones listed reported before it dropped and the rest are unknown — the difference decides whether to check the fleet before retrying. Both return `null`, which was already the "abort the rollout" signal, so the surrounding logic is unchanged.
+
+`applyLocal` gets the same treatment for the local path, and both `try` blocks gained a backstop `catch` that reports and rethrows, so an unanticipated failure is visible on the page *and* still reaches the console.
+
+`srcFile()` re-reads the picked file per batch and throws a named error when it is gone, rather than appending `undefined`.
+
+### Verification
+
+`go build ./...` clean; `gofmt` clean across `internal/webadmin` and `cmd/gravinet`. All four suites pass.
+
+`upgraderollout_test.go`'s main test is structural rather than a list of the sites fixed: it brace-matches every `try` in the click handler and fails any whose closing brace is followed by `finally` instead of `catch`. **It found a fourth one during this change** — `applyLocal`'s outer `try`, which the targeted fix had left catchless because the inner fetch catch looked like enough. Reintroducing the original bug fails it with the offending line number.
+
+The rest pin that each failure path writes something where the operator is already looking, that a send failure states nothing was pushed while a dropped connection warns that some peers' state is unknown, that the file is re-read through `srcFile` and never appended raw, and that the backstop rethrows rather than swallowing. Each was confirmed to fail with its guard broken — the catch removed, the stream catch alone removed, the raw `File` restored, the rethrow deleted — and to pass on restore.
+
+**Not reproduced live.** The failure needs a real fleet and a real network; the diagnosis is from the code path and matches the screenshot exactly — frozen progress, idle button, no message — but was not observed. If it recurs after this, the difference is that it will now say what happened, and the backstop's "This is a bug" wording is the marker that the specific cause was not one of the three anticipated ones.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
 ## v912 — 2026-08-23
 
 **Version bump only.** No code change; `cmd/gravinet/main.go` moves from 911 to 912 so the update-check work from v911 can be exercised against a build that is not the one it was written on.
