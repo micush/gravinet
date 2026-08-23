@@ -2,6 +2,64 @@
 
 ---
 
+## v912 — 2026-08-23
+
+**Version bump only.** No code change; `cmd/gravinet/main.go` moves from 911 to 912 so the update-check work from v911 can be exercised against a build that is not the one it was written on.
+
+`go build ./...` clean, `gofmt` clean, `internal/webadmin` and `cmd/gravinet` pass in full.
+
+### What this build will and will not show
+
+Probed upstream directly, since the API was rate-limited from here: `v903`, `v909` and `v910` resolve; `v906`, `v907`, `v908`, `v911`, `v912`, `v913`, `v915` and `v920` return 404. The newest tag is therefore **v910**.
+
+At version 912 the node is *ahead* of upstream, so `updateAvailable()` returns null and **the header notice will not appear** — that is the feature behaving correctly, not a failure. What is exercisable at 912: System › Upgrade's version line, which will read current **v912**, latest **v910** with the link resolving to `v910.tar.gz`; the Settings › General toggle and its persistence; and every help toggle from v904–v908.
+
+To see the header notice, set `version` below 910 — 909 is the natural choice, being a real tag — and reload. Reload rather than re-login is enough: the check runs from `dashboard()` and the result is cached on `state` for the life of the page, so a full page load is what re-runs it.
+
+**One thing this container demonstrated by accident.** The GitHub API rate-limited these probes from its shared address, returning JSON with a 4xx rather than tag data. That is exactly the path `latestGravinetTag()` treats as "no answer", and it means the "could not be checked" branch on the Upgrade page and the silent no-notice in the header are not rare edge cases — any NATed office or shared egress can hit 60 requests an hour across all its users. The per-page caching added in v909 is doing more work than it appeared to at the time.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
+## v911 — 2026-08-23
+
+**The header says so when this node is behind, and Settings can turn that off.**
+
+After login, one check: if GitHub has a higher tag than this node runs, "An update is available" appears beside `[gravinet]` in red and goes to System › Upgrade on click. Otherwise the header shows nothing — no "up to date", no placeholder while the lookup runs. A header that reports a negative on every login is a header that gets tuned out, and the version line on the Upgrade page is where the full picture already lives.
+
+**Failure is silence.** An offline node, a rate-limited response and a repository with no tags all land in the same place as being current, because none of them is something the person logging in can act on.
+
+**Once, from `dashboard()`, not on a timer.** The answer cannot change without someone upgrading a node, and an admin UI that polls a third party in the background is doing something its operator did not ask for. Reloading the page checks again.
+
+The comparison is shared. `updateAvailable()` is the single place that decides what "behind" means, so the header and the Upgrade page cannot disagree; `localGravinetVersion()` and `tagNumber()` were extracted from v909's code for the same reason, and the duplicate tag parser is gone. Only a strictly higher number counts, and a tag that will not parse is not newer — a repository that starts tagging release candidates should not light up every node in the fleet.
+
+### The setting
+
+Settings › General gains an **Updates** card with "Check for updates at login", between Dark mode and the Logging card. That position is the point: everything from Logging down is node configuration that gets proxied to the selected peer, while this — like Dark mode — is a browser preference. The request it governs comes from this browser, not from any node, so proxying it to a peer would mean nothing and a Manager changing a peer's copy would change nothing.
+
+It defaults on, and an unreadable `localStorage` also reads as on. That is the opposite of `helpModeOn`, deliberately: the check is advisory and costs one request, so failing towards showing it is harmless, while failing towards on for help mode would put prose back on every page. Toggling takes effect at the next login, since the header is built once by `dashboard()` — re-running the check on toggle would pop a notice beside a switch that says it happens at login.
+
+### A test helper was returning the wrong function's body
+
+`uiFuncSrc` ended a function at the next `\nfunction ` but not at the next `\nasync function `, so any function whose successor was async silently returned both bodies. It was caught by a new test failing on a `setInterval` that belonged to the function *after* the one it named.
+
+Fixing it broke two tests from v909, which is the interesting part: `secUpgrade` is a 102-character wrapper around `async function drawUpgrade`, so both tests named `secUpgrade`, read `drawUpgrade`, and passed. They assert the same things against the right name now. The change is in `tableview_test.go` and tightens every test in the package that uses the helper; nothing else in the suite depended on the bleed.
+
+### Verification
+
+`go build ./...` clean; `gofmt` clean across `internal/webadmin` and `cmd/gravinet`. `internal/webadmin`, `cmd/gravinet`, `internal/config` and `internal/service` pass in full.
+
+`updatenotice_test.go` pins: that the check runs exactly once from `dashboard()` and uses no timer, enforced by counting references so a second caller fails; that nothing renders when there is no newer tag and that a thrown lookup is swallowed; that the comparison is numeric, strict, and rejects unparseable tags; that clicking navigates with the same three calls the rail uses and suppresses the href; that the preference defaults on including when storage throws, never writes on read, and is honoured by the notice; and that the toggle sits between Dark mode and Logging with its description as a `settings-desc` so v908 hides it with the rest of the prose.
+
+All six were confirmed to fail with the guarded thing broken — the early return removed, the preference ignored, the default flipped, `b <= a` weakened to `b < a`, a timer added, the card moved below Logging — and to pass on restore.
+
+**Not rendered, and not exercised against GitHub.** The container cannot reach `api.github.com`. What was verified against the live service in v909 still holds: the archive URL 302s to `codeload.github.com`, which answers with `access-control-allow-origin: https://render.githubusercontent.com` — a real origin, not a wildcard. That is why the tarball still cannot be fetched by the browser and handed to the file picker, and it is worth recording here because it is the constraint behind the previous answer.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
 ## v910 — 2026-08-23
 
 **The version line ends at the two numbers.**

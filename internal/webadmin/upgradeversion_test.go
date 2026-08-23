@@ -14,7 +14,11 @@ import (
 // where it was asked for and also where it is useful: it names the version the
 // picker is about to replace.
 func TestUpgradeVersionLineSitsBetweenPickerAndPeers(t *testing.T) {
-	src := uiFuncSrc(t, "secUpgrade")
+	// drawUpgrade, not secUpgrade: the latter is a thin wrapper that calls it.
+	// Until v911 uiFuncSrc bled past a function whose successor was declared
+	// async, so naming secUpgrade here happened to return drawUpgrade's body
+	// and this test passed while inspecting a function it did not name.
+	src := uiFuncSrc(t, "drawUpgrade")
 	picker := strings.Index(src, "stCard.appendChild(up);")
 	line := strings.Index(src, "renderUpgradeVersions(verLine)")
 	peers := strings.Index(src, "Pick specific peers to upgrade")
@@ -30,8 +34,13 @@ func TestUpgradeVersionLineSitsBetweenPickerAndPeers(t *testing.T) {
 // not in LOCAL_API so it follows the peer selected in the header, while every
 // /api/upgrade/* endpoint is local-only — left to default, the line would
 // report a remote node's version beside a control that upgrades the local one.
+// Since v911 the lookup is shared with the header's update notice, so this
+// checks the one helper both go through.
 func TestUpgradeVersionReadsTheLocalNode(t *testing.T) {
-	src := uiFuncSrc(t, "renderUpgradeVersions")
+	if !strings.Contains(uiFuncSrc(t, "renderUpgradeVersions"), "await localGravinetVersion()") {
+		t.Error("the upgrade page no longer reads the version through localGravinetVersion")
+	}
+	src := uiFuncSrc(t, "localGravinetVersion")
 	if !strings.Contains(src, "api('/api/about', {}, null)") {
 		t.Error("the version lookup does not force the local node, so it reports the selected peer's version instead")
 	}
@@ -39,7 +48,7 @@ func TestUpgradeVersionReadsTheLocalNode(t *testing.T) {
 	// explicit target would be redundant and this test misleading.
 	local := between(t, indexHTML, "const LOCAL_API = [", "];")
 	if strings.Contains(local, "'/api/about'") {
-		t.Error("/api/about is now in LOCAL_API; the explicit null target in renderUpgradeVersions is no longer what makes this correct")
+		t.Error("/api/about is now in LOCAL_API; the explicit null target in localGravinetVersion is no longer what makes this correct")
 	}
 }
 
@@ -78,14 +87,18 @@ func TestUpgradeVersionSurvivesAFailedLookup(t *testing.T) {
 
 // Tags are picked by number, not by position or string order: the tags
 // endpoint orders by GitHub's own rules, and as strings v1000 sorts below
-// v999.
+// v999. Since v911 the parser is shared with the header's update notice, so
+// both agree on what counts as a version.
 func TestLatestTagIsChosenNumerically(t *testing.T) {
 	src := uiFuncSrc(t, "latestGravinetTag")
-	if !strings.Contains(src, "parseInt(") || !strings.Contains(src, "n > bestN") {
+	if !strings.Contains(src, "tagNumber(") || !strings.Contains(src, "n > bestN") {
 		t.Error("the tags fallback does not choose the highest tag numerically")
 	}
 	if !strings.Contains(src, "releases/latest") {
 		t.Error("releases are not consulted first, so a repository that marks a latest release is ignored")
+	}
+	if !strings.Contains(indexHTML, "function tagNumber(t){") {
+		t.Error("tagNumber is gone; the tag picker and the update notice would each need their own idea of a version")
 	}
 	// Cached for the page's life — this section re-renders on every visit and
 	// GitHub allows 60 unauthenticated requests an hour per address.
@@ -96,7 +109,7 @@ func TestLatestTagIsChosenNumerically(t *testing.T) {
 
 // The line reports live state, so it must not be hidden with the help text.
 func TestUpgradeVersionLineIsNotHelpText(t *testing.T) {
-	src := uiFuncSrc(t, "secUpgrade")
+	src := uiFuncSrc(t, "drawUpgrade")
 	m := regexp.MustCompile(`verLine = \$\('<div class="([^"]*)"`).FindStringSubmatch(src)
 	if m == nil {
 		t.Fatal("the version line's markup changed shape")

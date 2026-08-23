@@ -204,6 +204,15 @@ func TestPeersStateColumnIsContentSized(t *testing.T) {
 // start of the next top-level function so an assertion cannot be satisfied by
 // something written elsewhere on the page — the same trick as enhanceTableSrc,
 // generalised because the resize work is spread over several functions.
+// uiFuncSrc returns the source of a top-level function in indexHTML.
+//
+// The body ends at the next top-level declaration, which may be either
+// "function" or "async function". Stopping only at the former — as this did
+// until v911 — silently returns the following function's body as well
+// whenever the next declaration is async, so an assertion about one function
+// can be satisfied by code in its neighbour. That produced a test that failed
+// on dashboard()'s setInterval while claiming to inspect the function above
+// it.
 func uiFuncSrc(t *testing.T, name string) string {
 	t.Helper()
 	i := strings.Index(indexHTML, "function "+name+"(")
@@ -211,10 +220,13 @@ func uiFuncSrc(t *testing.T, name string) string {
 		t.Fatalf("%s not found in indexHTML", name)
 	}
 	body := indexHTML[i+1:]
-	if j := strings.Index(body, "\nfunction "); j >= 0 {
-		body = body[:j]
+	end := len(body)
+	for _, sep := range []string{"\nfunction ", "\nasync function "} {
+		if j := strings.Index(body, sep); j >= 0 && j < end {
+			end = j
+		}
 	}
-	return body
+	return body[:end]
 }
 
 // TestColumnResizeSurvivesRerender is the column-width half of

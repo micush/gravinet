@@ -22,6 +22,13 @@ const indexHTML = `<!doctype html>
   a { color:inherit; }
   .top { display:flex; justify-content:space-between; align-items:center; padding:12px 18px; border-bottom:1px solid var(--line); flex:0 0 auto; }
   .brand { font-size:16px; font-weight:600; letter-spacing:.5px; }
+  /* The update notice, beside the brand. Lighter weight and smaller than the
+     brand it follows so it reads as an aside rather than as part of the name,
+     and underlined on hover so it is discoverably a link — colour alone does
+     not say "clickable", and red here already means "attention". */
+  .update-avail { color:var(--danger); font-size:12px; font-weight:400;
+    letter-spacing:0; margin-left:10px; text-decoration:none; cursor:pointer; }
+  .update-avail:hover { text-decoration:underline; }
   .toggle { background:transparent; border:1px solid var(--line); color:var(--fg); border-radius:6px; padding:6px 11px; cursor:pointer; font:inherit; }
   .cluster { display:flex; gap:8px; align-items:center; margin-left:auto; margin-right:10px; }
   .peer-sel { display:flex; align-items:center; gap:8px; background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:6px 9px; font:inherit; cursor:pointer; }
@@ -710,6 +717,23 @@ function setTheme(t){ document.documentElement.setAttribute('data-theme', t); tr
   try { t = localStorage.getItem('gravinet-theme') || (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light':'dark'); } catch(e){}
   setTheme(t);
 })();
+
+// Update check at login. A browser preference like the theme above, not node
+// configuration: it governs whether this browser reaches out to GitHub, so it
+// belongs to whoever is sitting here rather than to the node, and a Manager
+// changing a peer's copy of it would mean nothing.
+//
+// Defaults on, and an unreadable localStorage reads as on — the check is
+// advisory and costs one request, so failing towards showing it is the safer
+// direction. Contrast helpModeOn, which defaults off because failing towards
+// on would put prose back on every page.
+const UPDATE_CHECK_KEY = 'gravinet_update_check_v1';
+function updateCheckOn(){
+  try { return localStorage.getItem(UPDATE_CHECK_KEY) !== '0'; } catch (_) { return true; }
+}
+function setUpdateCheck(on){
+  try { localStorage.setItem(UPDATE_CHECK_KEY, on ? '1' : '0'); } catch (_) {}
+}
 
 // LOCAL_API paths always hit this node, even while a remote peer is selected.
 // Most of these are about the local session/browsing state itself (cluster
@@ -2012,11 +2036,45 @@ function buildPeerPicker(){
   return picker;
 }
 
+// maybeShowUpdateNotice appends "An update is available" beside the brand when
+// this node is behind the newest tag on GitHub, and appends nothing otherwise
+// — no "up to date", no placeholder while the lookup runs. A header that
+// reports a negative on every login is a header that gets tuned out, and the
+// version line on System > Upgrade is where the full picture lives.
+//
+// Called once, from dashboard(), which runs once per login. Not on a timer:
+// the answer cannot change without someone upgrading a node, and an admin UI
+// that polls a third party in the background is doing something its operator
+// did not ask for. Reloading the page checks again.
+//
+// Failure is silence. An offline node, a rate-limited response and a
+// repository with no tags all land in the same place as being up to date,
+// because none of them is something the person logging in can act on.
+async function maybeShowUpdateNotice(brand){
+  if (!updateCheckOn() || !brand) return;
+  let latest = null;
+  try { latest = await updateAvailable(); } catch (_) { return; }
+  if (!latest) return;
+
+  const a = $('<a href="#" class="update-avail">An update is available</a>');
+  a.title = 'v' + String(latest).replace(/^v/, '') + ' is available \u2014 go to System \u203a Upgrade';
+  a.onclick = (e) => {
+    e.preventDefault();
+    // Same two calls the rail makes, so arriving here by clicking the notice
+    // leaves the app in the state a manual click would have.
+    state.section = 'upgrade';
+    setActiveRailTab('upgrade');
+    renderSection();
+  };
+  brand.appendChild(a);
+}
+
 async function dashboard() {
   if (!(await load())) return;
   app.innerHTML = '';
   // top bar: brand + peer selector (managed-mode toggle and dark mode moved to Settings)
   const top = $('<div class="top"><div class="brand">[gravinet]</div></div>');
+  maybeShowUpdateNotice(top.querySelector('.brand'));
 
   // Cluster peer-selector: pick a remote node to configure. Stays in the top bar
   // so switching nodes is always one click away regardless of active section.
@@ -3816,6 +3874,30 @@ function secSettingsGeneral(c) {
   dmCb.onchange = () => { setTheme(dmCb.checked ? 'dark' : 'light'); };
   dm.appendChild(dmLabel); dm.appendChild(dmSw);
   card.appendChild(dm);
+
+  c.appendChild(card); card = $('<div class="card"></div>');
+
+  // Updates card. A browser preference, like Dark mode above and unlike
+  // everything in the Logging card below it — nothing here is proxied to a
+  // peer, because the request it governs comes from this browser rather than
+  // from any node. That is also why it sits in General: it changes what this
+  // interface does, not what the mesh does.
+  card.appendChild($('<h3>Updates</h3>'));
+
+  const uc = $('<div class="settings-row" id="update-check-row"></div>');
+  const ucLabel = $('<div><div class="settings-label">Check for updates at login</div>'
+    + '<div class="settings-desc">Ask GitHub once per login whether a newer [gravinet] release is tagged, and show a notice in the header if so. '
+    + 'The request is made by this browser, not by the node, so a node with no route to the internet is unaffected either way. '
+    + 'Turn this off to stop the browser contacting GitHub on login; System \u203a Upgrade still checks when you open it.</div></div>');
+  const ucSw = $('<label class="sw"><input type="checkbox" id="update-check-cb"><span class="sw-slider"></span></label>');
+  const ucCb = ucSw.querySelector('input');
+  ucCb.checked = updateCheckOn();
+  // Takes effect at the next login: the header is built once by dashboard(),
+  // and re-running the check on toggle would mean a notice appearing beside a
+  // switch that says it happens at login.
+  ucCb.onchange = () => { setUpdateCheck(ucCb.checked); };
+  uc.appendChild(ucLabel); uc.appendChild(ucSw);
+  card.appendChild(uc);
 
   c.appendChild(card); card = $('<div class="card"></div>');
 
@@ -9477,6 +9559,44 @@ function usersAddRow(table){
 // Every action here goes to the same daemon entry point the CLI uses, so a
 // rollout started from this form is the same rollout, with the same canary and
 // the same abort rule, as one started from a terminal.
+// tagNumber parses a vNNN tag into its number, or null if it is not that
+// shape. Used for both picking the newest tag and deciding whether the newest
+// one is actually ahead of what is running.
+function tagNumber(t){ const m = /^v?(\d+)$/.exec(String(t||'')); return m ? parseInt(m[1],10) : null; }
+
+// localGravinetVersion returns the version of the node this browser is logged
+// into, cached for the life of the page.
+//
+// Explicitly local. /api/about is not in LOCAL_API, so it follows the peer
+// selected in the header — but every /api/upgrade/* endpoint is local-only, so
+// the Upgrade page acts on the node you are logged into no matter what is
+// selected. Left to default, both the header notice and the Upgrade page's
+// version line would report a remote node's version.
+async function localGravinetVersion(){
+  if (state.localVersion !== undefined) return state.localVersion;
+  state.localVersion = null;
+  try {
+    const r = await api('/api/about', {}, null);
+    if (r.ok && r.body && r.body.gravinet_version) state.localVersion = r.body.gravinet_version;
+  } catch (_) {}
+  return state.localVersion;
+}
+
+// updateAvailable resolves to the newer tag, or null. One place decides what
+// "newer" means, so the header notice and the Upgrade page cannot disagree
+// about whether this node is behind.
+async function updateAvailable(){
+  const cur = await localGravinetVersion();
+  const latest = await latestGravinetTag();
+  if (!cur || !latest) return null;
+  const a = tagNumber(cur), b = tagNumber(latest);
+  // Only a strictly higher number counts. A tag that will not parse is not
+  // treated as newer: a repository that starts tagging release candidates
+  // should not light up every node in the fleet.
+  if (a === null || b === null || b <= a) return null;
+  return latest;
+}
+
 // GH_REPO is the upstream repository the version check reads tags from, and
 // the one the download link points into.
 const GH_REPO = 'micush/gravinet';
@@ -9501,7 +9621,6 @@ const GH_REPO = 'micush/gravinet';
 async function latestGravinetTag(){
   if (state.latestTag !== undefined) return state.latestTag;
   state.latestTag = null;
-  const tagNum = (t) => { const m = /^v?(\d+)$/.exec(t||''); return m ? parseInt(m[1],10) : null; };
   try {
     const rel = await fetch('https://api.github.com/repos/'+GH_REPO+'/releases/latest', { headers:{ 'Accept':'application/vnd.github+json' } });
     if (rel.ok){
@@ -9514,7 +9633,7 @@ async function latestGravinetTag(){
         const list = await tg.json();
         let best = null, bestN = -1;
         for (const t of (Array.isArray(list) ? list : [])){
-          const n = tagNum(t && t.name);
+          const n = tagNumber(t && t.name);
           if (n !== null && n > bestN){ bestN = n; best = t.name; }
         }
         state.latestTag = best;
@@ -9529,16 +9648,7 @@ async function latestGravinetTag(){
 // node is on is useful on its own, and an offline node is exactly where the
 // lookup will not work.
 async function renderUpgradeVersions(el){
-  let cur = '';
-  try {
-    // Explicitly local. /api/about is not in LOCAL_API, so it follows the
-    // peer selected in the header — but every /api/upgrade/* endpoint is
-    // local-only, so this page acts on the node you are logged into no matter
-    // what is selected. Left to default, this line would report a remote
-    // node's version beside a control that upgrades the local one.
-    const r = await api('/api/about', {}, null);
-    if (r.ok && r.body) cur = r.body.gravinet_version || '';
-  } catch (_) {}
+  const cur = await localGravinetVersion();
   if (state.section !== 'upgrade') return;
   const vs = (v) => 'v' + String(v).replace(/^v/, '');
   if (!cur){ el.textContent = ''; return; }
