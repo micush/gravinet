@@ -245,14 +245,14 @@ func TestInterfaceEditsAreSilentOnSuccess(t *testing.T) {
 			t.Errorf("a successful edit still reports %q back to the operator", gone)
 		}
 	}
-	// Every editor — addresses, gateway, MTU — still alerts on a change that
+	// Every editor — addresses, gateway, MTU — still reports a change that
 	// did not happen...
 	const editors = 3
 	if n := strings.Count(sec, "|| 'could not apply'"); n != editors {
-		t.Errorf("expected all %d editors to alert on failure, found %d", editors, n)
+		t.Errorf("expected all %d editors to report a failure, found %d", editors, n)
 	}
 	// ...and on one that applied but will not persist.
-	if n := strings.Count(sec, "alert(r.body.warning)"); n != editors {
+	if n := strings.Count(sec, "noticeModal(r.body.warning)"); n != editors {
 		t.Errorf("expected all %d editors to surface a persistence warning, found %d", editors, n)
 	}
 }

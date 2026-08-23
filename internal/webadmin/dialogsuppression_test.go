@@ -58,7 +58,7 @@ func TestUpgradePathUsesNoNativeDialogs(t *testing.T) {
 // it rather than the browser.
 func TestConfirmModalResolvesOnDismissal(t *testing.T) {
 	src := uiFuncSrc(t, "confirmModal")
-	if !strings.Contains(src, "showModal(title, body, () => finish(false))") {
+	if !strings.Contains(src, "() => finish(false))") {
 		t.Error("confirmModal does not resolve when the modal is dismissed, so a dismissed prompt hangs the click forever")
 	}
 	if !strings.Contains(src, "let done = false;") || !strings.Contains(src, "if (done) return;") {
@@ -69,6 +69,11 @@ func TestConfirmModalResolvesOnDismissal(t *testing.T) {
 	}
 	if !strings.Contains(uiFuncSrc(t, "noticeModal"), "confirmModal(") {
 		t.Error("noticeModal is not built on confirmModal, so alerts and confirms can drift apart")
+	}
+	// A notice has no Cancel: its only outcome is acknowledgement, and a
+	// Cancel button would imply the action could still be called off.
+	if !strings.Contains(src, "if (!o.noticeOnly){") {
+		t.Error("confirmModal always renders Cancel, so notices offer a choice that does not exist")
 	}
 }
 
@@ -85,13 +90,79 @@ func TestUpgradeClearsStaleResultsBeforeReturningEarly(t *testing.T) {
 	// survives that path.
 	for _, guard := range []string{
 		"if (!fileIn.files[0])",
-		"confirmModal(allThenLocal",
-		"confirmModal('Upgrade this node'",
+		"confirmModal(msg, { title: allThenLocal",
+		"confirmModal('Build the selected archive",
 	} {
 		if at := strings.Index(h, guard); at < 0 {
 			t.Errorf("guard %q not found", guard)
 		} else if at < clear {
 			t.Errorf("guard %q can return before the stale results are cleared", guard)
 		}
+	}
+}
+
+// v916 converted the whole UI, not just the upgrade path. Every native dialog
+// is gone: 14 confirms and 187 alerts.
+func TestNoNativeDialogsAnywhereInTheUI(t *testing.T) {
+	// Excludes property access (foo.alert) and the modal helpers themselves.
+	call := regexp.MustCompile(`(?:^|[^.\w])(confirm|alert)\(`)
+	var bad []string
+	for i, line := range strings.Split(indexHTML, "\n") {
+		s := strings.TrimSpace(line)
+		if strings.HasPrefix(s, "//") || strings.HasPrefix(s, "*") {
+			continue // prose about the dialogs is fine; calls are not
+		}
+		if m := call.FindStringSubmatch(line); m != nil && !strings.Contains(line, m[1]+"Modal(") {
+			bad = append(bad, strings.TrimSpace(line))
+			_ = i
+		}
+	}
+	if len(bad) > 0 {
+		t.Errorf("%d native dialog call(s) are back; each is one browser suppression away from silently doing nothing:\n  %s",
+			len(bad), strings.Join(bad, "\n  "))
+	}
+}
+
+// Every confirm has to be awaited. An un-awaited confirmModal returns a
+// Promise, which is always truthy — so `if (!confirmModal(...)) return;` would
+// never stop anything, turning a guard into a rubber stamp on destructive
+// actions. That is a worse failure than the bug this replaced.
+func TestEveryConfirmModalIsAwaited(t *testing.T) {
+	var bad []string
+	for _, line := range strings.Split(indexHTML, "\n") {
+		s := strings.TrimSpace(line)
+		if strings.HasPrefix(s, "//") || strings.HasPrefix(s, "*") {
+			continue
+		}
+		if !strings.Contains(line, "confirmModal(") {
+			continue
+		}
+		if strings.Contains(line, "function confirmModal") || strings.Contains(line, "return confirmModal(") {
+			continue // the definition, and noticeModal delegating to it
+		}
+		if !strings.Contains(line, "await confirmModal(") {
+			bad = append(bad, s)
+		}
+	}
+	if len(bad) > 0 {
+		t.Errorf("%d confirmModal call(s) are not awaited; a Promise is always truthy, so the guard would pass every time:\n  %s",
+			len(bad), strings.Join(bad, "\n  "))
+	}
+}
+
+// A notice offers no Cancel, and its default title names the section it came
+// from so no call site has to pass one.
+func TestNoticeModalShape(t *testing.T) {
+	if !strings.Contains(uiFuncSrc(t, "noticeModal"), "noticeOnly: true") {
+		t.Error("noticeModal does not suppress Cancel; a notice would offer a choice that does not exist")
+	}
+	if !strings.Contains(uiFuncSrc(t, "confirmModal"), "o.title || helpModalTitle()") {
+		t.Error("no default title, so ~200 converted call sites would render an empty modal heading")
+	}
+	if !strings.Contains(uiFuncSrc(t, "helpModalTitle"), "sectionHeading(state.section)") {
+		t.Error("the default title is not the current section's heading")
+	}
+	if !strings.Contains(uiFuncSrc(t, "helpModalTitle"), "catch (_)") {
+		t.Error("helpModalTitle can throw during early render, which would break every modal that relies on the default")
 	}
 }

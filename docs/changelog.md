@@ -2,6 +2,47 @@
 
 ---
 
+## v916 — 2026-08-23
+
+**Every native browser dialog in the UI is gone.** 14 `confirm()` and 187 `alert()` calls, converted to `confirmModal` and `noticeModal`.
+
+v914 fixed the upgrade page after a suppressed `confirm()` made the fleet rollout silently do nothing. That fix covered two call sites out of 201. The remaining 14 confirms guarded, among other things: deleting networks, resetting networks, restarting and shutting down the node, changing the overlay MTU, turning time synchronisation off, reverting the TLS certificate, stopping the listener you are connected through, running an OS update pass, and clearing the log file. Each was one *"prevent this page from creating additional dialogs"* tick away from becoming a button that does nothing, with no dialog, no error and nothing to distinguish it from a bug.
+
+The 187 alerts are the milder half — a suppressed alert simply drops an outcome the operator needed to read — but they are also what *provokes* the browser's offer in the first place. Removing them makes the suppression far less likely to be armed at all.
+
+### How the conversion was done
+
+By parsing, not by find-and-replace. The UI script was parsed with acorn, each `confirm`/`alert` call resolved to its enclosing function, and the edits applied back-to-front against exact AST offsets, then spliced into `ui.go` after asserting the extracted slice was byte-identical.
+
+That analysis changed the plan twice, both times away from something that would have broken:
+
+- **`fwCollectRule`, `fwValidateNegate` and `qosCollectRule` return values their callers consume** in `const r = …` and `if (!…)`. Making them `async` to await a modal would have returned a Promise — always truthy — quietly turning `if (!fwValidateNegate(rule))` into a validator that never rejects anything. So `alert` became fire-and-forget `noticeModal` wherever the enclosing scope is not already async: 59 sites, no signature changed, no cascade.
+- **All 14 `confirm` sites were already inside async functions**, so every one could be awaited with no signature change at all. The distinction is what matters: a confirm is a decision the code branches on and *must* be awaited; a notice is a report and need not be.
+
+The other 128 alerts sit in already-async scopes and are awaited, preserving `alert()`'s blocking order.
+
+### API
+
+`confirmModal(message, opts)` and `noticeModal(message, opts)` are message-first, because ~200 call sites want nothing but the message. The default title is the current section's own heading, so a modal always says where it came from without any call site naming it. A notice renders no Cancel — acknowledging is its only outcome, and a Cancel button would imply the action could still be called off. v914's ten sites were migrated to the new signature.
+
+### Verification
+
+`go build ./...` clean; `gofmt` clean. All four suites pass.
+
+**Executed, not just parsed.** The converted UI was loaded into jsdom with `window.confirm` stubbed to return false and `window.alert` to a no-op — the suppressed state — and driven two ways. The 17-peer fleet rollout showed its in-app modal and pushed correctly (canary, then fourteen, then two seeds singly). A network-delete confirm rendered despite suppression, titled itself *Networks* from the section heading, offered Cancel and Continue, and resolved true; a notice rendered with OK and no Cancel.
+
+Two whole-file risks were checked with the parser rather than by reading. **No converted call sits in a value position** — an `alert()` used as an expression returned `undefined`, while `noticeModal()` returns a truthy Promise, which would have silently inverted any condition containing one. And of the 44 non-async functions holding a fire-and-forget notice, **the 11 with more than one are all validators** whose guards are mutually exclusive and each followed immediately by `return`, so no two can stack where `alert()` would previously have queued.
+
+Three existing tests asserted on the literal `alert(` and were repaired rather than relaxed: the peer-overlay and interface-editor tests still require exactly the same failures to reach the operator and successes to stay silent, now via `noticeModal`, and both gained a check that a native `alert` has not come back.
+
+New tests fail if any native dialog reappears anywhere in the UI, naming the offending lines; if any `confirmModal` is left un-awaited, which would make every guard pass; if a notice grows a Cancel button; or if the default title is removed. Each was confirmed to fail with its guard broken and to pass on restore.
+
+**Not rendered.** ~200 messages that were browser-chrome dialogs are now in-app modals in the app's own styling. Nothing was looked at. Long messages are the ones worth checking — the power and MTU confirmations carry two paragraphs — since `showModal`'s panel caps at 86vh and these are wider than a native dialog.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
 ## v915 — 2026-08-23
 
 **Version bump only.** No code change; 914 to 915 so the v914 upgrade fix can be exercised against a build that differs from the running one.

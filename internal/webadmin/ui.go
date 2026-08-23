@@ -2335,15 +2335,15 @@ async function edit(path, payload, autoRestart){
   const r = await api(path, { method:'POST', body: JSON.stringify(payload) });
   if (!r.ok){
     // friendlyErr/targetName still translate the raw transport error into
-    // plain language; only the presentation reverts to a plain alert() here.
+    // plain language; only the presentation differs from the inline paths.
     // The control restores its own value regardless of how the failure is shown.
-    alert('Couldn\u2019t save that change on '+targetName()+' \u2014 '+friendlyErr(r.body && r.body.error)+'.');
+    await noticeModal('Couldn\u2019t save that change on '+targetName()+' \u2014 '+friendlyErr(r.body && r.body.error)+'.');
     return false;
   }
   // An advisory the server wants shown even though the edit succeeded (today:
   // setting an MTU larger than any path can carry whole). Shown before any
   // restart below, since a quiet restart would otherwise swallow it.
-  if (r.body && r.body.note) alert(r.body.note);
+  if (r.body && r.body.note) await noticeModal(r.body.note);
   if (r.body && r.body.restart) {
     if (typeof autoRestart === 'function') { autoRestart(); return true; }
     if (autoRestart) { quietRestart(); return true; }
@@ -2406,18 +2406,18 @@ function startInlineEdit(td){
     if (v === cur){ renderSection(); return; } // unchanged
     let payload;
     if (field === 'name'){
-      if (!v){ alert('name cannot be empty'); renderSection(); return; }
+      if (!v){ await noticeModal('name cannot be empty'); renderSection(); return; }
       payload = { op:'rename', net, newName:v };
     } else if (field === 'notes'){
       payload = { op:'notes', net, notes:v };
     } else if (field === 'mtu'){
       const n = parseInt(v, 10);
-      if (!Number.isFinite(n)){ alert('mtu must be a number of bytes, e.g. 8915'); renderSection(); return; }
+      if (!Number.isFinite(n)){ await noticeModal('mtu must be a number of bytes, e.g. 8915'); renderSection(); return; }
       // Same class of footgun as subnet: the MTU is per-network but must match
       // on every node. A node left on a larger MTU keeps fragmenting every
       // full-size packet it sends, which costs throughput silently — no error,
       // no drop counter, nothing in the logs pointing at the mismatch.
-      if (!confirm('Set the overlay MTU for "'+nameOf(net)+'" to '+n+'?\n\nThis node will restart immediately to apply it. Make the same change on every other node in this network — a node left on a different MTU still works, but silently fragments every full-size packet it sends.')){ renderSection(); return; }
+      if (!await confirmModal('Set the overlay MTU for "'+nameOf(net)+'" to '+n+'?\n\nThis node will restart immediately to apply it. Make the same change on every other node in this network — a node left on a different MTU still works, but silently fragments every full-size packet it sends.')){ renderSection(); return; }
       payload = { op:'mtu', net, mtu:n };
     } else if (field === 'address4' || field === 'address6'){
       // No confirm. The dialog that used to be here said only one thing —
@@ -2445,7 +2445,7 @@ function startInlineEdit(td){
       // pointing at the mismatch, it just looks like that peer dropped off.
       // Spelling that out here is cheap insurance against the "changed it
       // on one box, spent an hour debugging a 'dead' peer" case.
-      if (!confirm('Change '+field+' for "'+nameOf(net)+'"?\n\nThis node will restart immediately to apply it. The same change must be made on every other node in this network — gravinet does not detect a mismatch, so a peer still on the old range will simply stop being reachable from this node, with nothing in the logs to explain why.')){ renderSection(); return; }
+      if (!await confirmModal('Change '+field+' for "'+nameOf(net)+'"?\n\nThis node will restart immediately to apply it. The same change must be made on every other node in this network — gravinet does not detect a mismatch, so a peer still on the old range will simply stop being reachable from this node, with nothing in the logs to explain why.')){ renderSection(); return; }
       payload = { op:'subnet', net }; payload[field] = v;
     }
     const ok = await edit('/api/network', payload, true); // restarts automatically once saved; refreshes on success, alerts on error
@@ -2537,14 +2537,14 @@ function editExpiry(td, netName){
     // is how the field itself reports "incomplete", so check that first and
     // let the user finish it instead of discarding what they typed.
     if (inp.value === '' && inp.validity && inp.validity.badInput){
-      alert('that date/time isn\'t complete — set both the date and the time');
+      noticeModal('that date/time isn\'t complete — set both the date and the time');
       inp.focus();
       done = false;
       return;
     }
     const v = inp.value.trim();
     if (!v){ if (!iso){ renderSection(); return; } edit('/api/key', { op:'expiry', net:netName, slot:slot, expires:'' }); return; }
-    const d = new Date(v); if (isNaN(d)){ alert('invalid date/time'); renderSection(); return; }
+    const d = new Date(v); if (isNaN(d)){ noticeModal('invalid date/time'); renderSection(); return; }
     edit('/api/key', { op:'expiry', net:netName, slot:slot, expires:d.toISOString() });
   };
   inp.onkeydown = e => {
@@ -2560,7 +2560,7 @@ async function doRestart(){
   var before = null;
   try { var p = await fetch('/api/ping', { cache:'no-store' }); if (p.ok){ before = (await p.json()).boot; } } catch(e){}
   const r = await api('/api/restart', { method:'POST' });
-  if (!r.ok){ alert((r.body && r.body.error) || 'restart failed'); return; }
+  if (!r.ok){ await noticeModal((r.body && r.body.error) || 'restart failed'); return; }
   const c = document.getElementById('content');
   if (c) { c.innerHTML=''; c.appendChild($('<div class="card"><div class="empty">Restarting service… reconnecting.</div></div>')); }
   pollBack(before, 0, false);
@@ -2588,7 +2588,7 @@ async function quietRestart(){
   var before = null;
   try { var p = await fetch('/api/ping', { cache:'no-store' }); if (p.ok){ before = (await p.json()).boot; } } catch(e){}
   const r = await api('/api/restart', { method:'POST' });
-  if (!r.ok){ alert((r.body && r.body.error) || 'restart failed'); return; }
+  if (!r.ok){ await noticeModal((r.body && r.body.error) || 'restart failed'); return; }
   quietPollBack(before, 0, false);
 }
 async function quietPollBack(before, n, wentDown){
@@ -2700,7 +2700,7 @@ function startBwEdit(span, netName, dir, curBps){
     const raw = num.value.trim();
     let bps;
     if (raw===''){ bps = 0; } // unlimited
-    else { const n = parseFloat(raw); if (isNaN(n) || n<0){ alert('Enter a number (e.g. 50), or clear it for unlimited.'); num.focus(); return; } bps = toBps(n, unit.value); }
+    else { const n = parseFloat(raw); if (isNaN(n) || n<0){ await noticeModal('Enter a number (e.g. 50), or clear it for unlimited.'); num.focus(); return; } bps = toBps(n, unit.value); }
     done=true;
     await edit('/api/bandwidth', { net:netName, dir, bps });
   };
@@ -3446,22 +3446,33 @@ function emptyCard(c, msg){ c.appendChild($('<div class="card"><div class="empty
 // caller fills in (directly, or later via bodyEl.innerHTML once results come
 // back). Closes on the × button, clicking the backdrop, or Escape. Returns
 // {close} so a caller can dismiss it programmatically too.
-// confirmModal is showModal as a promise-returning confirm(), and exists
-// because window.confirm cannot be trusted here.
+// confirmModal is showModal as a promise-returning confirm(), and noticeModal
+// is the same for alert(). They exist because neither native dialog can be
+// trusted here.
 //
 // Both Chrome and Firefox offer "prevent this page from creating additional
 // dialogs" after a page has shown a few, and this page shows a great many:
-// almost every action reports its outcome through alert(). Once an operator
-// ticks that box — or the browser applies it on its own — window.confirm stops
-// rendering anything and *returns false*. Every guarded action then becomes a
+// almost every action reports its outcome this way. Once an operator ticks
+// that box — or the browser applies it on its own — window.confirm stops
+// rendering anything and *returns false*, and window.alert becomes a no-op.
+//
+// A suppressed confirm is the dangerous half: every guarded action becomes a
 // click that does nothing at all, with no dialog, no error and no way to tell
 // it apart from a broken button. That is how the fleet rollout came to "never
-// get to pushing": its first statement was a confirm() guard that returned
-// before the button label changed or anything was sent.
+// get to pushing" in v914 — its first statement was a confirm() guard that
+// returned before the button label changed or anything was sent. Delete a
+// network, restart the node, clear the log: each was one tick away from the
+// same silence.
+//
+// Message first, options second, because these are called from ~200 sites and
+// almost none of them want anything but the message. The default title is the
+// current section's own heading, so a modal always says where it came from
+// without any call site having to name it.
 //
 // Resolves false on Escape, backdrop click and the close button, so dismissing
 // still means no — the difference is that the operator is the one dismissing.
-function confirmModal(title, message, okLabel){
+function confirmModal(message, opts){
+  const o = opts || {};
   return new Promise((resolve) => {
     let done = false;
     const finish = (v) => { if (done) return; done = true; resolve(v); };
@@ -3470,22 +3481,32 @@ function confirmModal(title, message, okLabel){
     p.textContent = message;
     body.appendChild(p);
     const row = $('<div style="display:flex;gap:8px;justify-content:flex-end"></div>');
-    const cancel = $('<button class="sm">Cancel</button>');
     const ok = $('<button class="sm primary"></button>');
-    ok.textContent = okLabel || 'Continue';
-    row.appendChild(cancel); row.appendChild(ok);
+    ok.textContent = o.okLabel || 'Continue';
+    if (!o.noticeOnly){
+      const cancel = $('<button class="sm">Cancel</button>');
+      cancel.onclick = () => { finish(false); m.close(); };
+      row.appendChild(cancel);
+    }
+    row.appendChild(ok);
     body.appendChild(row);
-    const m = showModal(title, body, () => finish(false));
-    cancel.onclick = () => { finish(false); m.close(); };
+    const m = showModal(o.title || helpModalTitle(), body, () => finish(false));
     ok.onclick = () => { finish(true); m.close(); };
     ok.focus();
   });
 }
 
-// noticeModal is the alert() half of the same problem: a suppressed alert is a
-// silent no-op, so an outcome an operator needs to read simply never appears.
-function noticeModal(title, message){
-  return confirmModal(title, message, 'OK');
+// noticeModal reports an outcome. Callers in an async scope await it, which
+// preserves alert()'s blocking order; the rest call it and carry on, which
+// keeps this from making 59 more functions async and changing their contracts.
+function noticeModal(message, opts){
+  const o = opts || {};
+  return confirmModal(message, { title: o.title, okLabel: o.okLabel || 'OK', noticeOnly: true });
+}
+
+// helpModalTitle names the section a modal came from, so no call site has to.
+function helpModalTitle(){
+  try { return sectionHeading(state.section) || '[gravinet]'; } catch (_) { return '[gravinet]'; }
 }
 
 function showModal(title, bodyEl, onClose){
@@ -3867,7 +3888,7 @@ function buildPortListRow(id, label, desc, initialPorts, apiPath, onSaved, initi
     if (normalized === last) { input.value = normalized; return; } // unchanged
     const r = await api(apiPath, { method:'POST', body: JSON.stringify(body) });
     if (r.ok) { last = normalized; input.value = normalized; if (onSaved) onSaved(body.ports || [], !!body.disabled); }
-    else { alert((r.body && r.body.error) || 'could not update ports'); input.value = last; }
+    else { await noticeModal((r.body && r.body.error) || 'could not update ports'); input.value = last; }
   };
   input.onblur = save;
   input.onkeydown = (e) => { if (e.key === 'Enter') { input.blur(); } };
@@ -3989,7 +4010,7 @@ function secSettingsGeneral(c) {
       lzLast = r.body.size;
       lzInput.value = r.body.size; // canonical form from the server
     } else {
-      alert((r.body && r.body.error) || 'could not set log size');
+      await noticeModal((r.body && r.body.error) || 'could not set log size');
       lzInput.value = lzLast; // revert
     }
   };
@@ -4008,7 +4029,7 @@ function secSettingsGeneral(c) {
   chInp.value = state.configHistoryLimit;
   chInp.onchange = async () => {
     const v = parseInt(chInp.value, 10);
-    if (isNaN(v) || v < 0) { alert('Enter 0 or a positive whole number.'); chInp.value = state.configHistoryLimit; return; }
+    if (isNaN(v) || v < 0) { await noticeModal('Enter 0 or a positive whole number.'); chInp.value = state.configHistoryLimit; return; }
     if (v === state.configHistoryLimit) return;
     const ok = await edit('/api/history/limit', { limit: v });
     if (ok) { state.configHistoryLimit = v; }
@@ -4048,7 +4069,7 @@ function secSettingsSecurity(c) {
   lbaInp.value = state.loginBanMaxFailures;
   lbaInp.onchange = async () => {
     const v = parseInt(lbaInp.value, 10);
-    if (isNaN(v) || v < 0) { alert('Enter 0 or a positive whole number.'); lbaInp.value = state.loginBanMaxFailures; return; }
+    if (isNaN(v) || v < 0) { await noticeModal('Enter 0 or a positive whole number.'); lbaInp.value = state.loginBanMaxFailures; return; }
     if (v === state.loginBanMaxFailures) return;
     const ok = await edit('/api/loginban', { maxFailures: v, banSeconds: state.loginBanSeconds }, scheduleLoginBanRestart);
     if (ok) { state.loginBanMaxFailures = v; }
@@ -4063,7 +4084,7 @@ function secSettingsSecurity(c) {
   lbdInp.value = Math.round(state.loginBanSeconds / 60);
   lbdInp.onchange = async () => {
     const mins = parseInt(lbdInp.value, 10);
-    if (isNaN(mins) || mins < 0) { alert('Enter 0 or a positive whole number of minutes.'); lbdInp.value = Math.round(state.loginBanSeconds / 60); return; }
+    if (isNaN(mins) || mins < 0) { await noticeModal('Enter 0 or a positive whole number of minutes.'); lbdInp.value = Math.round(state.loginBanSeconds / 60); return; }
     const secs = mins * 60;
     if (secs === state.loginBanSeconds) return;
     const ok = await edit('/api/loginban', { maxFailures: state.loginBanMaxFailures, banSeconds: secs }, scheduleLoginBanRestart);
@@ -4117,7 +4138,7 @@ function secSettingsSecurity(c) {
       // every other removal is recoverable from the browser you are already
       // using, and this one is not.
       if (lo.current && selected.indexOf(lo.current) >= 0 && addrs.indexOf(lo.current) < 0) {
-        if (!confirm('Stop listening on ' + lo.current + '?\n\nThat is the address you are connected through, so this session will end when the node restarts. Make sure you can reach it on one of the addresses you have kept.')) {
+        if (!await confirmModal('Stop listening on ' + lo.current + '?\n\nThat is the address you are connected through, so this session will end when the node restarts. Make sure you can reach it on one of the addresses you have kept.')) {
           renderSection();
           return;
         }
@@ -4160,7 +4181,7 @@ function secSettingsSecurity(c) {
   card.appendChild(tc);
 
   tcBtn.onclick = async () => {
-    if (!tcCertFile.files[0] || !tcKeyFile.files[0]) { alert('Pick both a certificate file and a key file first.'); return; }
+    if (!tcCertFile.files[0] || !tcKeyFile.files[0]) { await noticeModal('Pick both a certificate file and a key file first.'); return; }
     tcBtn.disabled = true;
     tcBtn.textContent = 'Uploading\u2026';
     try {
@@ -4189,7 +4210,7 @@ function secSettingsSecurity(c) {
     const tcrLabel = $('<div><div class="settings-label">Revert to self-signed</div><div class="settings-desc">'+esc(tcrDesc)+'</div></div>');
     const tcrBtn = $('<button class="sm danger">Revert</button>');
     tcrBtn.onclick = async () => {
-      if (!confirm('Revert to the auto-generated self-signed certificate?')) return;
+      if (!await confirmModal('Revert to the auto-generated self-signed certificate?')) return;
       await edit('/api/tls-cert/reset', {});
     };
     tcr.appendChild(tcrLabel);
@@ -4361,7 +4382,7 @@ function secSettingsNetwork(c) {
     if (String(v) === raLast) { raInput.value = v; return; }                // unchanged
     const r = await api('/api/routeadv', { method:'POST', body: JSON.stringify({ interval: v }) });
     if (r.ok) { raLast = String(v); raInput.value = v; }
-    else { alert((r.body && r.body.error) || 'could not save interval'); raInput.value = raLast; }
+    else { await noticeModal((r.body && r.body.error) || 'could not save interval'); raInput.value = raLast; }
   };
   raInput.onblur = saveRA;
   raInput.onkeydown = (e) => { if (e.key === 'Enter') { raInput.blur(); } };
@@ -4384,7 +4405,7 @@ function secSettingsNetwork(c) {
     if (String(v) === kaLast) { kaInput.value = v; return; }                // unchanged
     const r = await api('/api/keepalive', { method:'POST', body: JSON.stringify({ interval: v }) });
     if (r.ok) { kaLast = String(v); kaInput.value = v; }
-    else { alert((r.body && r.body.error) || 'could not save interval'); kaInput.value = kaLast; }
+    else { await noticeModal((r.body && r.body.error) || 'could not save interval'); kaInput.value = kaLast; }
   };
   kaInput.onblur = saveKA;
   kaInput.onkeydown = (e) => { if (e.key === 'Enter') { kaInput.blur(); } };
@@ -4404,7 +4425,7 @@ function secSettingsNetwork(c) {
     if (String(v) === ptLast) { ptInput.value = v; return; }                // unchanged
     const r = await api('/api/peertimeout', { method:'POST', body: JSON.stringify({ interval: v }) });
     if (r.ok) { ptLast = String(v); ptInput.value = v; }
-    else { alert((r.body && r.body.error) || 'could not save interval'); ptInput.value = ptLast; }
+    else { await noticeModal((r.body && r.body.error) || 'could not save interval'); ptInput.value = ptLast; }
   };
   ptInput.onblur = savePT;
   ptInput.onkeydown = (e) => { if (e.key === 'Enter') { ptInput.blur(); } };
@@ -4488,7 +4509,7 @@ function secSettingsNetwork(c) {
     if (String(v) === ntLast) { ntInput.value = (v||''); return; }           // unchanged
     const r = await api('/api/natstate', { method:'POST', body: JSON.stringify({ timeout: v }) });
     if (r.ok) { ntLast = String(v); state.natStateTimeout = v; ntInput.value = (v||''); }
-    else { alert((r.body && r.body.error) || 'could not set NAT state timeout'); ntInput.value = ntLast; }
+    else { await noticeModal((r.body && r.body.error) || 'could not set NAT state timeout'); ntInput.value = ntLast; }
   };
   ntInput.onblur = saveNatState;
   ntInput.onkeydown = (e) => { if (e.key === 'Enter') { ntInput.blur(); } };
@@ -4563,7 +4584,7 @@ function secSettingsPerformance(c) {
   wtInp.value = state.workerThreads;
   wtInp.onchange = async () => {
     const v = parseInt(wtInp.value, 10);
-    if (isNaN(v) || v < 0) { alert('Enter 0 or a positive whole number.'); wtInp.value = state.workerThreads; return; }
+    if (isNaN(v) || v < 0) { await noticeModal('Enter 0 or a positive whole number.'); wtInp.value = state.workerThreads; return; }
     if (v === state.workerThreads) return;
     const ok = await edit('/api/worker-threads', { value: v }, schedulePerfRestart);
     if (ok) { state.workerThreads = v; }
@@ -4585,7 +4606,7 @@ function secSettingsPerformance(c) {
   tqInp.value = state.tunQueues;
   tqInp.onchange = async () => {
     const v = parseInt(tqInp.value, 10);
-    if (isNaN(v) || v < 0) { alert('Enter 0 or a positive whole number.'); tqInp.value = state.tunQueues; return; }
+    if (isNaN(v) || v < 0) { await noticeModal('Enter 0 or a positive whole number.'); tqInp.value = state.tunQueues; return; }
     if (v === state.tunQueues) return;
     const ok = await edit('/api/tun-queues', { value: v }, schedulePerfRestart);
     if (ok) { state.tunQueues = v; }
@@ -4606,7 +4627,7 @@ function secSettingsPerformance(c) {
   sbInp.value = state.socketBufferMB;
   sbInp.onchange = async () => {
     const v = parseInt(sbInp.value, 10);
-    if (isNaN(v) || v < 0 || v > state.socketBufferMaxMB) { alert('Enter a whole number of megabytes between 0 and '+state.socketBufferMaxMB+'.'); sbInp.value = state.socketBufferMB; return; }
+    if (isNaN(v) || v < 0 || v > state.socketBufferMaxMB) { await noticeModal('Enter a whole number of megabytes between 0 and '+state.socketBufferMaxMB+'.'); sbInp.value = state.socketBufferMB; return; }
     if (v === state.socketBufferMB) return;
     const ok = await edit('/api/socket-buffer', { value: v }, schedulePerfRestart);
     if (ok) { state.socketBufferMB = v; }
@@ -4692,9 +4713,9 @@ function secAlwaysAllowed(c){
   const resetBtn = $('<button class="ghost sm">reset to defaults</button>');
   resetBar.appendChild(resetBtn); card.appendChild(resetBar);
   resetBtn.onclick = async () => {
-    if(!confirm('Reset the always-allowed list to the built-in defaults (management, BGP, OSPF, RIP)?')) return;
+    if(!await confirmModal('Reset the always-allowed list to the built-in defaults (management, BGP, OSPF, RIP)?')) return;
     const r = await api('/api/exempt', { method:'POST', body: JSON.stringify({ reset:true }) });
-    if(!r.ok){ alert((r.body&&r.body.error)||'reset failed'); return; }
+    if(!r.ok){ await noticeModal((r.body&&r.body.error)||'reset failed'); return; }
     renderSection();
   };
   c.appendChild(card);
@@ -4734,7 +4755,7 @@ async function exemptReload(table){
     const nameTd = tr.querySelector('.ex-name'), svcTd = tr.querySelector('.ex-service');
     nameTd.title = svcTd.title = 'double-click to edit';
     nameTd.ondblclick = () => inlineCellEdit(nameTd, e.name||'', 'name', v => {
-      v = v.trim(); if(!v){ alert('name cannot be empty'); renderSection(); return; }
+      v = v.trim(); if(!v){ noticeModal('name cannot be empty'); renderSection(); return; }
       list[i].name = v; exemptSave(list); });
     // Editing this field always takes manual control of the port — same rule
     // the old separate port cell followed (any save there cleared .mgmt,
@@ -4743,7 +4764,7 @@ async function exemptReload(table){
     // proto without also re-stating the port, so any save here clears mgmt).
     svcTd.ondblclick = () => inlineCellEdit(svcTd, exSvcLabel(e, mgmtPort), 'proto or proto/port (blank = any)', v => {
       const parsed = exParseSvc(v);
-      if (parsed.error){ alert(parsed.error); renderSection(); return; }
+      if (parsed.error){ noticeModal(parsed.error); renderSection(); return; }
       list[i].proto = parsed.proto; list[i].port = parsed.port; list[i].mgmt = false;
       exemptSave(list); });
   });
@@ -4758,7 +4779,7 @@ function exemptPayload(list){
 
 async function exemptSave(list){
   const r = await api('/api/exempt', { method:'POST', body: JSON.stringify({ exempt: exemptPayload(list) }) });
-  if(!r.ok){ alert((r.body && r.body.error) || 'save failed'); }
+  if(!r.ok){ await noticeModal((r.body && r.body.error) || 'save failed'); }
   renderSection();
 }
 
@@ -4771,9 +4792,9 @@ function exemptAddRow(table){
   if(!insertNewRow(table, tr)) return;
   tr.querySelector('.exa-cancel').onclick = () => renderSection();
   tr.querySelector('.exa-save').onclick = () => {
-    const name = tr.querySelector('.exa-name').value.trim(); if(!name){ alert('name required'); return; }
+    const name = tr.querySelector('.exa-name').value.trim(); if(!name){ noticeModal('name required'); return; }
     const parsed = exParseSvc(tr.querySelector('.exa-service').value);
-    if (parsed.error){ alert(parsed.error); return; }
+    if (parsed.error){ noticeModal(parsed.error); return; }
     const list = (table._exempt || []).slice();
     list.push({ name:name, proto:parsed.proto, port:parsed.port, mgmt:false });
     exemptSave(list);
@@ -4782,7 +4803,7 @@ function exemptAddRow(table){
 
 async function exemptRemoveChecked(table){
   const sel = selCheckedRows(table);
-  if(!sel.length){ alert('tick one or more rows to remove'); return; }
+  if(!sel.length){ await noticeModal('tick one or more rows to remove'); return; }
   const drop = new Set(sel.map(tr => Number(tr.dataset.idx)));
   const list = (table._exempt || []).filter((e,i) => !drop.has(i));
   exemptSave(list);
@@ -4818,7 +4839,7 @@ function secKeys(c) {
     t.querySelectorAll('td.klabel').forEach(td => td.ondblclick = () =>
       inlineCellEdit(td, td.textContent, 'label', async (v, prev) => {
         if (v === prev){ renderSection(); return; }
-        if (!v){ alert('label cannot be empty'); renderSection(); return; }
+        if (!v){ await noticeModal('label cannot be empty'); renderSection(); return; }
         edit('/api/key', { op:'label', net:cf.name, slot:Number(td.dataset.slot), label:v });
       }));
     t.querySelectorAll('td.knotes').forEach(td => td.ondblclick = () =>
@@ -4872,19 +4893,19 @@ function secKeys(c) {
     const slots = () => selectedIn('keys', cf.id).map(Number);
     const setSlots = () => slots().filter(s => bySlot[s] && bySlot[s].set);
     const emptySlots = () => slots().filter(s => bySlot[s] && !bySlot[s].set);
-    const needSet = () => { const s = setSlots(); if (!s.length){ alert('select one or more filled keys first'); return null; } return s; };
+    const needSet = () => { const s = setSlots(); if (!s.length){ noticeModal('select one or more filled keys first'); return null; } return s; };
     const revealOne = async (slot) => {
       const r = await api('/api/key', { method:'POST', body: JSON.stringify({ op:'reveal', net:cf.name, slot:Number(slot) }) });
-      if (!r.ok){ alert((r.body && r.body.error) || 'failed'); return null; }
+      if (!r.ok){ await noticeModal((r.body && r.body.error) || 'failed'); return null; }
       return r.body.key;
     };
 
     const genFn = async () => {
       const empties = emptySlots();
-      if (!empties.length){ alert('tick one or more empty slots to generate into'); return; }
+      if (!empties.length){ await noticeModal('tick one or more empty slots to generate into'); return; }
       for (const slot of empties){
         const r = await api('/api/key',{method:'POST',body:JSON.stringify({op:'generate',net:cf.name,slot})});
-        if (!r.ok){ alert((r.body&&r.body.error)||'failed'); break; }
+        if (!r.ok){ await noticeModal((r.body&&r.body.error)||'failed'); break; }
         if (r.body.restart) state.restartPending = true;
       }
       selection.keys.clear();
@@ -4892,9 +4913,9 @@ function secKeys(c) {
     };
     const importFn = () => {
       const empties = emptySlots();
-      if (empties.length !== 1){ alert('tick exactly one empty slot to import into'); return; }
+      if (empties.length !== 1){ noticeModal('tick exactly one empty slot to import into'); return; }
       const key = window.prompt('Paste the key to import into slot '+empties[0]+' on "'+cf.name+'":'); if (key===null) return;
-      if (!key.trim()){ alert('no key provided'); return; }
+      if (!key.trim()){ noticeModal('no key provided'); return; }
       selection.keys.clear();
       edit('/api/key', { op:'set', net:cf.name, slot:empties[0], key:key.trim() });
     };
@@ -4908,7 +4929,7 @@ function secKeys(c) {
       const anyDist = s.some(slot => bySlot[slot] && bySlot[slot].distributed);
       const msg = 'Delete '+s.length+' key'+(s.length>1?'s':'')+' on "'+cf.name+'"?'
         + (anyDist ? ' This includes a distributed key; it will be retracted from every peer holding a copy, not just removed here.' : '');
-      if (!confirm(msg)) return;
+      if (!await confirmModal(msg)) return;
       for (const slot of s) await api('/api/key',{method:'POST',body:JSON.stringify({op:'delete',net:cf.name,slot})});
       selection.keys.clear(); refresh(); };
     const revealFn = async () => { const s=needSet(); if(!s) return;
@@ -5001,7 +5022,7 @@ function secNetworks(c) {
       const msg = want === 'partial'
         ? 'Switch "'+name+'" to partial mesh?\n\nOnly seed\u2013seed and seed\u2013peer links will be allowed; existing peer\u2013peer sessions on this node will be refused once it reconnects. This node restarts immediately to apply it \u2014 make the same change on every other node in this network.'
         : 'Switch "'+name+'" back to full mesh?\n\nEvery node will resume connecting to every other node it learns about. This node restarts immediately to apply it \u2014 make the same change on every other node in this network.';
-      if (!confirm(msg)) return;
+      if (!await confirmModal(msg)) return;
 
       // The restart this triggers genuinely takes real seconds (the daemon
       // tears down and rebuilds the network, quietRestart then polls /api/
@@ -5050,10 +5071,10 @@ function secNetworks(c) {
   ];
   table._rowRemove = async () => {
     const sel = selCheckedRows(table);
-    if (!sel.length){ alert('tick one or more networks to remove'); return; }
+    if (!sel.length){ await noticeModal('tick one or more networks to remove'); return; }
     const names = sel.map(tr => tr.dataset.netname).join(', ');
-    if (!confirm('Delete '+sel.length+' network'+(sel.length>1?'s':'')+' ('+names+')? This permanently removes them and their keys.')) return;
-    for (const tr of sel){ const r = await api('/api/network',{method:'POST',body:JSON.stringify({op:'delete',net:tr.dataset.netid})}); if(!r.ok){ alert((r.body&&r.body.error)||'delete failed'); break; } }
+    if (!await confirmModal('Delete '+sel.length+' network'+(sel.length>1?'s':'')+' ('+names+')? This permanently removes them and their keys.')) return;
+    for (const tr of sel){ const r = await api('/api/network',{method:'POST',body:JSON.stringify({op:'delete',net:tr.dataset.netid})}); if(!r.ok){ await noticeModal((r.body&&r.body.error)||'delete failed'); break; } }
     refresh();
   };
   c.appendChild(card);
@@ -5072,7 +5093,7 @@ function netAddRow(table){
   tr.querySelector('.ne-cancel').onclick = () => refresh();
   tr.querySelector('.ne-save').onclick = () => {
     const name = tr.querySelector('.ne-name').value.trim();
-    if (!name){ alert('name required'); return; }
+    if (!name){ noticeModal('name required'); return; }
     edit('/api/network', { op:'add', net:name, subnet4:tr.querySelector('.ne-s4').value.trim(), subnet6:tr.querySelector('.ne-s6').value.trim() });
   };
 }
@@ -5097,8 +5118,8 @@ function netJoinRow(table){
     const token = tr.querySelector('.je-token').value.trim();
     if (token){ edit('/api/network', { op:'join-token', token:token }); return; }
     const id = tr.querySelector('.je-id').value.trim(), key = tr.querySelector('.je-key').value.trim(), peer = tr.querySelector('.je-peer').value.trim();
-    if (!id || !key){ alert('paste a join token, or enter a network id and key'); return; }
-    if (!peer){ alert('a seed peer is required to learn the network'); return; }
+    if (!id || !key){ noticeModal('paste a join token, or enter a network id and key'); return; }
+    if (!peer){ noticeModal('a seed peer is required to learn the network'); return; }
     edit('/api/network', { op:'join', id:id, key:key, peer:peer });
   };
 }
@@ -5109,7 +5130,7 @@ function netJoinRow(table){
 // seed/cached peer the host knows.
 async function netTokenRow(table){
   const sel = selCheckedRows(table);
-  if (sel.length !== 1){ alert('tick exactly one network to generate a join token for'); return; }
+  if (sel.length !== 1){ await noticeModal('tick exactly one network to generate a join token for'); return; }
   const net = sel[0].dataset.netname || sel[0].dataset.netid;
   const tr = document.createElement('tr');
   const cols = table.rows[0].cells.length;
@@ -5137,12 +5158,12 @@ async function netTokenRow(table){
 // timeout. Live and in-place — no config change, no restart.
 async function netResetRow(table){
   const sel = selCheckedRows(table);
-  if (!sel.length){ alert('tick one or more networks to reset'); return; }
+  if (!sel.length){ await noticeModal('tick one or more networks to reset'); return; }
   const names = sel.map(tr => tr.dataset.netname).join(', ');
-  if (!confirm('Reset '+sel.length+' network'+(sel.length>1?'s':'')+' ('+names+')? This drops all current peer connections and immediately reconnects to peers and seeds.')) return;
+  if (!await confirmModal('Reset '+sel.length+' network'+(sel.length>1?'s':'')+' ('+names+')? This drops all current peer connections and immediately reconnects to peers and seeds.')) return;
   for (const tr of sel){
     const r = await api('/api/network/reset', { method:'POST', body: JSON.stringify({ net:tr.dataset.netid }) });
-    if (!r.ok){ alert((r.body && r.body.error) || 'reset failed'); break; }
+    if (!r.ok){ await noticeModal((r.body && r.body.error) || 'reset failed'); break; }
   }
   refresh();
 }
@@ -5384,9 +5405,9 @@ function rttCellHTML(p) {
 // between render and click is caught here instead of acting on a stale row.
 function openPeerShellFromSel(n, sec) {
   const ids = selectedIn(sec, n.id);
-  if (ids.length !== 1){ alert('tick exactly one peer (or this node) to open a shell on'); return; }
+  if (ids.length !== 1){ noticeModal('tick exactly one peer (or this node) to open a shell on'); return; }
   const p = peerRowsForNet(n).find(x => x.id === ids[0]);
-  if (!p){ alert('that row is no longer available'); return; }
+  if (!p){ noticeModal('that row is no longer available'); return; }
   // A shell on self runs locally and only needs Remote shell enabled
   // (checked server-side), but that's only true when self means *this*
   // browser session's own node. When a remote node is selected up top
@@ -5395,8 +5416,8 @@ function openPeerShellFromSel(n, sec) {
   // that node: it still needs Manager mode and a live connection.
   const trulyLocalSelf = p.self && !state.target;
   if (!trulyLocalSelf) {
-    if (!state.manager){ alert('enable Manager mode (Settings \u2192 Security \u2192 Cluster) to open a shell on a peer'); return; }
-    if (p.disabled || p.pending){ alert('that peer is not currently connected'); return; }
+    if (!state.manager){ noticeModal('enable Manager mode (Settings \u2192 Security \u2192 Cluster) to open a shell on a peer'); return; }
+    if (p.disabled || p.pending){ noticeModal('that peer is not currently connected'); return; }
   }
   openShellModal(p.id, p.host || p.id);
 }
@@ -5488,7 +5509,7 @@ function secPeers(c) {
       td.ondblclick = () => inlineCellEdit(td, td.textContent, 'notes', async (v, prev) => {
         if (v === prev){ renderSection(); return; }
         const r = await api('/api/peer',{method:'POST',body:JSON.stringify({net:n.id,node:td.dataset.peerNotes,op:'notes',notes:v})});
-        if (!r.ok){ alert((r.body&&r.body.error)||'failed'); renderSection(); return; }
+        if (!r.ok){ await noticeModal((r.body&&r.body.error)||'failed'); renderSection(); return; }
         await refresh();
       });
     });
@@ -5524,9 +5545,9 @@ function secPeers(c) {
     ptable._rowButtons = [
       { label:'Ban', cls:'danger', title:'ban selected peers (mesh-wide)', onclick: async () => {
       const ids = selectedIn('peers', n.id);
-      if (!ids.length){ alert('select one or more peers first'); return; }
+      if (!ids.length){ await noticeModal('select one or more peers first'); return; }
       const self = rows.find(x => x.self);
-      if (self && ids.includes(self.id)){ alert('can\'t ban this node itself; untick "this node" first'); return; }
+      if (self && ids.includes(self.id)){ await noticeModal('can\'t ban this node itself; untick "this node" first'); return; }
       for (const id of ids) await api('/api/ban',{method:'POST',body:JSON.stringify({net:n.id,node:id,notes:'banned via admin'})});
       selection.peers.clear(); refresh();
     }},
@@ -5636,7 +5657,7 @@ function peerOverlayEdit(td, n, p, fam){
       // would be a trap waiting for the first time it did.
       const looksV6 = typed.includes(':');
       if (looksV6 !== v6) {
-        alert('That looks like an IPv'+(looksV6?'6':'4')+' address, but you are editing the IPv'+(v6?'6':'4')+' slot.\n\nDouble-click the other line to edit that family.');
+        await noticeModal('That looks like an IPv'+(looksV6?'6':'4')+' address, but you are editing the IPv'+(v6?'6':'4')+' slot.\n\nDouble-click the other line to edit that family.');
         refresh(); return;
       }
     }
@@ -5663,7 +5684,7 @@ function peerOverlayEdit(td, n, p, fam){
     wrap.appendChild(inp);
     wrap.appendChild($('<span class="cell-saving-note">saving\u2026</span>'));
     const r = await api('/api/network', { method:'POST', body: JSON.stringify(body) }, p.id);
-    if (!r.ok){ alert((r.body && r.body.error) || 'save failed'); refresh(); return; }
+    if (!r.ok){ await noticeModal((r.body && r.body.error) || 'save failed'); refresh(); return; }
     // No success popup either. This editor now raises no dialog at all on the
     // way through: the cell's tooltip says what the edit means before it is
     // made, and the refreshed row showing the new value is how every other
@@ -5806,7 +5827,7 @@ function secBans(c) {
     const btable = el.querySelector('table');
     btable._rowButtons = [{ label:'Unban', cls:'ok', title:'unban selected peers', onclick: async () => {
       const ids = selectedIn('bans', n.id);
-      if (!ids.length){ alert('select one or more bans first'); return; }
+      if (!ids.length){ await noticeModal('select one or more bans first'); return; }
       for (const id of ids) await api('/api/unban',{method:'POST',body:JSON.stringify({net:n.id,node:id})});
       selection.bans.clear(); refresh();
     }}];
@@ -5873,7 +5894,7 @@ function secRoutes(c) {
         let done = false;
         const commit = async () => { if(done) return; done=true; const m=Math.max(0,parseInt(inp.value,10)||0);
           const ar = await api('/api/route',{method:'POST',body:JSON.stringify({op:'add',net:cf.name,cidr:tr.dataset.cidr,metric:m})});
-          if (!ar.ok){ alert((ar.body&&ar.body.error)||'edit failed'); refresh(); return; }
+          if (!ar.ok){ await noticeModal((ar.body&&ar.body.error)||'edit failed'); refresh(); return; }
           if (wasDisabled){ await api('/api/route',{method:'POST',body:JSON.stringify({op:'disable',net:cf.name,cidr:tr.dataset.cidr})}); }
           refresh(); };
         inp.onkeydown = (e) => { if(e.key==='Enter'){ commit(); } else if(e.key==='Escape'){ done=true; refresh(); } };
@@ -5897,7 +5918,7 @@ function secRoutes(c) {
     // other's current value along with it.
     const rbPostUpdate = async (routes, metric) => {
       const ar = await api('/api/network', {method:'POST', body:JSON.stringify({op:'redistribute-bgp', net:cf.name, routes:routes, metric:metric})});
-      if (!ar.ok){ alert((ar.body&&ar.body.error)||'edit failed'); refresh(); }
+      if (!ar.ok){ await noticeModal((ar.body&&ar.body.error)||'edit failed'); refresh(); }
     };
     const rbRow = $('<div class="settings-row"></div>');
     rbRow.appendChild($('<div><div class="settings-label">BGP-learned routes</div><div class="settings-desc">Pick which of this node\u2019s current BGP-learned routes to gossip into this network\u2019s mesh. Needs FRR/bgpd running. A route already advertised above is never redistributed back.</div></div>'));
@@ -6195,7 +6216,7 @@ function wirePreferDrag(list, save){
     if (now === list._lastOrder) return; // dropped where it started
     list._lastOrder = now;
     const r = await save();
-    if (r && !r.ok){ alert((r.body&&r.body.error)||'could not save the order'); }
+    if (r && !r.ok){ await noticeModal((r.body&&r.body.error)||'could not save the order'); }
     refresh();
   });
   list._lastOrder = [...list.querySelectorAll('.pref-item')].map(li => li.dataset.via).join(',');
@@ -6227,7 +6248,7 @@ function routeCidrEdit(cell, cf, kind){
         addOp = { op:'reject', net:cf.name, cidr:nv, inclusive: tr.dataset.inc==='1' };
       }
       const ar = await api('/api/route', { method:'POST', body: JSON.stringify(addOp) });
-      if (!ar.ok){ alert((ar.body&&ar.body.error)||'invalid cidr'); refresh(); return; }
+      if (!ar.ok){ await noticeModal((ar.body&&ar.body.error)||'invalid cidr'); refresh(); return; }
       await api('/api/route', { method:'POST', body: JSON.stringify({ op:'delete', net:cf.name, cidr:old }) });
       if (wasDisabled){
         await api('/api/route', { method:'POST', body: JSON.stringify({ op:(kind==='advertise'?'disable':'reject-disable'), net:cf.name, cidr:nv }) });
@@ -6255,7 +6276,7 @@ function routeAddCidr(table, net, op, cols){
   else tr.innerHTML = '<td class="selcol"></td><td colspan="3"><input class="re-cidr" placeholder="cidr e.g. 192.168.0.0/24" style="width:210px"> <label style="font-size:12px;white-space:nowrap"><input type="checkbox" class="re-inc"> inclusive</label>'+btns+'</td>';
   if (!insertNewRow(table, tr)) return;
   tr.querySelector('.re-cancel').onclick = () => refresh();
-  tr.querySelector('.re-save').onclick = () => { const v=tr.querySelector('.re-cidr').value.trim(); if(!v){ alert('cidr required'); return; }
+  tr.querySelector('.re-save').onclick = () => { const v=tr.querySelector('.re-cidr').value.trim(); if(!v){ noticeModal('cidr required'); return; }
     const mEl=tr.querySelector('.re-metric'); const m=mEl?Math.max(0,parseInt(mEl.value,10)||0):0;
     const incEl=tr.querySelector('.re-inc'); const inc=incEl?incEl.checked:false;
     edit('/api/route', { op:op, net:net, cidr:v, metric:m, inclusive:inc }, false); };
@@ -6369,7 +6390,7 @@ function seedEdit(cell, net, oldAddr){
     if (!bare || v === oldAddr) { cancel(); return; }
     done = true;
     const a = await api('/api/seed', { method:'POST', body:JSON.stringify({ op:'update-addr', net:net, addr:oldAddr, newAddr:v }) });
-    if (!a.ok) { alert('could not update ' + oldAddr + ': ' + (a.body||a.status)); }
+    if (!a.ok) { await noticeModal('could not update ' + oldAddr + ': ' + (a.body||a.status)); }
     refresh();
   };
   inp.onkeydown = (e) => {
@@ -6389,7 +6410,7 @@ async function seedSetProto(net, oldAddr){
   const v = seedWithScheme(stripScheme(oldAddr), next);
   if (v === oldAddr) return;
   const a = await api('/api/seed', { method:'POST', body:JSON.stringify({ op:'update-addr', net:net, addr:oldAddr, newAddr:v }) });
-  if (!a.ok) { alert('could not switch transport: ' + (a.body||a.status)); }
+  if (!a.ok) { await noticeModal('could not switch transport: ' + (a.body||a.status)); }
   refresh();
 }
 
@@ -6399,7 +6420,7 @@ async function seedSetProto(net, oldAddr){
 // particular can take a few seconds) lookup returns.
 async function seedInfoRow(table, net){
   const sel = selCheckedRows(table);
-  if (sel.length !== 1){ alert('tick exactly one seed to look up'); return; }
+  if (sel.length !== 1){ await noticeModal('tick exactly one seed to look up'); return; }
   const addr = sel[0].dataset.addr;
   const shown = stripScheme(addr);
   const body = $('<div class="hint">looking up '+esc(shown)+'\u2026</div>');
@@ -6485,9 +6506,9 @@ function geoIPSectionHTML(d){
 // selection actually persists across its periodic re-renders.
 async function peerInfoRow(n, sec){
   const ids = selectedIn(sec || 'peers', n.id);
-  if (ids.length !== 1){ alert('tick exactly one peer to look up'); return; }
+  if (ids.length !== 1){ await noticeModal('tick exactly one peer to look up'); return; }
   const p = peerRowsForNet(n).find(x => x.id === ids[0]);
-  if (!p || p.disabled || p.pending || !p.endpoint){ alert('no underlay endpoint to look up yet for this peer'); return; }
+  if (!p || p.disabled || p.pending || !p.endpoint){ await noticeModal('no underlay endpoint to look up yet for this peer'); return; }
   const shown = p.host || p.id.slice(0,8);
   const body = $('<div class="hint">looking up '+esc(dispAddr(p.endpoint))+'\u2026</div>');
   showModal('Peer info: ' + shown, body);
@@ -6505,7 +6526,7 @@ function seedAddRow(table, net){
   if(!insertNewRow(table, tr)) return;
   tr.querySelector('.se-cancel').onclick = () => refresh();
   tr.querySelector('.se-save').onclick = () => {
-    const bare=tr.querySelector('.se-addr').value.trim(); if(!bare){ alert('address required'); return; }
+    const bare=tr.querySelector('.se-addr').value.trim(); if(!bare){ noticeModal('address required'); return; }
     const v=seedWithScheme(bare, tr.querySelector('.se-tr').value);
     edit('/api/seed', { op:'add', net:net, addr:v }, false); };
 }
@@ -6553,18 +6574,18 @@ function secHosts(c, nets){
       if (ipTd) ipTd.title = 'double-click to edit';
       if (nameTd) nameTd.ondblclick = () => inlineCellEdit(nameTd, tr.dataset.name, 'web.local', async (v) => {
         v = v.trim();
-        if (!v){ alert('name cannot be empty'); renderSection(); return; }
+        if (!v){ await noticeModal('name cannot be empty'); renderSection(); return; }
         if (v === tr.dataset.name){ renderSection(); return; }
         const r = await api('/api/host',{method:'POST',body:JSON.stringify({op:'update',net:cf.name,name:tr.dataset.name,newname:v,ip:tr.dataset.ip})});
-        if (!r.ok){ alert((r.body&&r.body.error)||'rename failed'); }
+        if (!r.ok){ await noticeModal((r.body&&r.body.error)||'rename failed'); }
         refresh();
       });
       if (ipTd) ipTd.ondblclick = () => inlineCellEdit(ipTd, tr.dataset.ip, '192.168.5.5', async (v) => {
         v = v.trim();
-        if (!v){ alert('ip cannot be empty'); renderSection(); return; }
+        if (!v){ await noticeModal('ip cannot be empty'); renderSection(); return; }
         if (v === tr.dataset.ip){ renderSection(); return; }
         const r = await api('/api/host',{method:'POST',body:JSON.stringify({op:'update',net:cf.name,name:tr.dataset.name,newname:tr.dataset.name,ip:v})});
-        if (!r.ok){ alert((r.body&&r.body.error)||'update failed'); }
+        if (!r.ok){ await noticeModal((r.body&&r.body.error)||'update failed'); }
         refresh();
       });
     });
@@ -6612,7 +6633,7 @@ function hostAddRow(table, net){
   tr.querySelector('.ho-save').onclick = () => {
     const name = tr.querySelector('.ho-name').value.trim();
     const ip = tr.querySelector('.ho-ip').value.trim();
-    if(!name || !ip){ alert('name and ip required'); return; }
+    if(!name || !ip){ noticeModal('name and ip required'); return; }
     edit('/api/host', { op:'add', net:net, name:name, ip:ip }, false);
   };
 }
@@ -6626,7 +6647,7 @@ function hostRejectAddRow(table, net){
   tr.querySelector('.hr-cancel').onclick = () => refresh();
   tr.querySelector('.hr-save').onclick = () => {
     const name = tr.querySelector('.hr-name').value.trim();
-    if(!name){ alert('name required'); return; }
+    if(!name){ noticeModal('name required'); return; }
     edit('/api/host', { op:'reject', net:net, name:name }, false);
   };
 }
@@ -6673,18 +6694,18 @@ function secDNS(c, nets){
       if (srvTd) srvTd.title = 'double-click to edit';
       if (domTd) domTd.ondblclick = () => inlineCellEdit(domTd, tr.dataset.domain, 'corp.internal', async (v) => {
         v = v.trim();
-        if (!v){ alert('domain cannot be empty'); renderSection(); return; }
+        if (!v){ await noticeModal('domain cannot be empty'); renderSection(); return; }
         if (v === tr.dataset.domain){ renderSection(); return; }
         const r = await api('/api/dns',{method:'POST',body:JSON.stringify({op:'update',net:cf.name,domain:tr.dataset.domain,newdomain:v,servers:tr.dataset.servers})});
-        if (!r.ok){ alert((r.body&&r.body.error)||'rename failed'); }
+        if (!r.ok){ await noticeModal((r.body&&r.body.error)||'rename failed'); }
         refresh();
       });
       if (srvTd) srvTd.ondblclick = () => inlineCellEdit(srvTd, tr.dataset.servers, '1.1.1.1, 2.2.2.2', async (v) => {
         v = v.trim();
-        if (!v){ alert('at least one server is required'); renderSection(); return; }
+        if (!v){ await noticeModal('at least one server is required'); renderSection(); return; }
         if (v === tr.dataset.servers){ renderSection(); return; }
         const r = await api('/api/dns',{method:'POST',body:JSON.stringify({op:'update',net:cf.name,domain:tr.dataset.domain,newdomain:tr.dataset.domain,servers:v})});
-        if (!r.ok){ alert((r.body&&r.body.error)||'update failed'); }
+        if (!r.ok){ await noticeModal((r.body&&r.body.error)||'update failed'); }
         refresh();
       });
     });
@@ -6733,7 +6754,7 @@ function dnsAddRow(table, net){
   tr.querySelector('.dn-save').onclick = () => {
     const domain = tr.querySelector('.dn-domain').value.trim();
     const servers = tr.querySelector('.dn-servers').value.trim();
-    if(!domain || !servers){ alert('domain and servers required'); return; }
+    if(!domain || !servers){ noticeModal('domain and servers required'); return; }
     edit('/api/dns', { op:'add', net:net, domain:domain, servers:servers }, false);
   };
 }
@@ -6747,7 +6768,7 @@ function dnsRejectAddRow(table, net){
   tr.querySelector('.dr-cancel').onclick = () => refresh();
   tr.querySelector('.dr-save').onclick = () => {
     const domain = tr.querySelector('.dr-domain').value.trim();
-    if(!domain){ alert('domain required'); return; }
+    if(!domain){ noticeModal('domain required'); return; }
     edit('/api/dns', { op:'reject', net:net, domain:domain }, false);
   };
 }
@@ -6761,8 +6782,8 @@ function selAllWire(t){ const a=t.querySelector('.selall'); if(a) a.onclick=()=>
 function selCheckedRows(table){ return [...table.querySelectorAll('.selbox')].filter(x=>x.checked).map(x=>x.closest('tr')); }
 async function removeCheckedRows(table, delFn, autoRestart){
   const sel=selCheckedRows(table);
-  if(!sel.length){ alert('tick one or more rows to remove'); return; }
-  for(const tr of sel){ const r=await delFn(tr); if(r&&!r.ok){ alert((r.body&&r.body.error)||'remove failed'); break; } }
+  if(!sel.length){ await noticeModal('tick one or more rows to remove'); return; }
+  for(const tr of sel){ const r=await delFn(tr); if(r&&!r.ok){ await noticeModal((r.body&&r.body.error)||'remove failed'); break; } }
   if(autoRestart) doRestart(); else refresh();
 }
 function insertNewRow(table, tr){
@@ -6941,7 +6962,7 @@ function secFirewall(c) {
         const toIdx = Number(tr.dataset.idx);
         if (!draggedId || Number.isNaN(toIdx) || draggedId===Number(tr.dataset.fwid)) return;
         const r = await api('/api/firewall',{method:'POST',body:JSON.stringify({net:cf.id,op:'move',ids:[draggedId],to:toIdx})});
-        if (!r.ok) { alert((r.body&&r.body.error)||'reorder failed'); return; }
+        if (!r.ok) { await noticeModal((r.body&&r.body.error)||'reorder failed'); return; }
         await refresh();
       });
     });
@@ -6959,8 +6980,8 @@ function secFirewall(c) {
     table._rowAdd = () => fwAddRow(table, cf.id);
     table._rowRemove = async () => {
       const sel=selCheckedRows(table);
-      if(!sel.length){ alert('tick one or more rows to remove'); return; }
-      for(const tr of sel){ const r=await api('/api/firewall',{method:'POST',body:JSON.stringify({net:cf.id,op:'del',ids:[Number(tr.dataset.fwid)]})}); if(r&&!r.ok){ alert((r.body&&r.body.error)||'remove failed'); return; } }
+      if(!sel.length){ await noticeModal('tick one or more rows to remove'); return; }
+      for(const tr of sel){ const r=await api('/api/firewall',{method:'POST',body:JSON.stringify({net:cf.id,op:'del',ids:[Number(tr.dataset.fwid)]})}); if(r&&!r.ok){ await noticeModal((r.body&&r.body.error)||'remove failed'); return; } }
       await refresh();
     };
     // Reset-counters control: zeroes every rule's hit tally on this network.
@@ -6969,7 +6990,7 @@ function secFirewall(c) {
       const rc = $('<button class="ghost sm">reset counters</button>');
       rc.onclick = async () => {
         const r = await api('/api/firewall',{method:'POST',body:JSON.stringify({net:cf.id,op:'reset-counters',ids:[]})});
-        if(!r.ok){ alert((r.body&&r.body.error)||'reset failed'); return; }
+        if(!r.ok){ await noticeModal((r.body&&r.body.error)||'reset failed'); return; }
         await refresh();
       };
       bar.appendChild(rc); card.appendChild(bar);
@@ -7274,7 +7295,7 @@ function fwAddRow(table, net){
     const rule = fwCollectRule(tr); if (!rule) return;
     if (!fwValidateNegate(rule)) return;
     const r = await api('/api/firewall',{method:'POST',body:JSON.stringify({net:net,op:'add',at:-1,rule})});
-    if (!r.ok){ alert((r.body && r.body.error) || 'failed'); return; }
+    if (!r.ok){ await noticeModal((r.body && r.body.error) || 'failed'); return; }
     await refresh();
   };
 }
@@ -7289,7 +7310,7 @@ function fwAddRow(table, net){
 function fwCollectRule(scope){
   const q = s => scope.querySelector(s);
   const parsed = fwParseSvc(q('.fwe-services').value);
-  if (parsed.error){ alert(parsed.error); return null; }
+  if (parsed.error){ noticeModal(parsed.error); return null; }
   return {
     action: q('.fwe-action').value,
     proto: parsed.proto,
@@ -7314,10 +7335,10 @@ function fwCollectRule(scope){
 // anyone meant on purpose, so it's caught here before it's saved rather
 // than silently producing a rule that can never match.
 function fwValidateNegate(rule){
-  if (rule.src_negate && !rule.src){ alert('src \u00d8 is on but src is empty (any): that would match nothing; set src or turn its \u00d8 off'); return false; }
-  if (rule.dst_negate && !rule.dst){ alert('dst \u00d8 is on but dst is empty (any): that would match nothing; set dst or turn its \u00d8 off'); return false; }
+  if (rule.src_negate && !rule.src){ noticeModal('src \u00d8 is on but src is empty (any): that would match nothing; set src or turn its \u00d8 off'); return false; }
+  if (rule.dst_negate && !rule.dst){ noticeModal('dst \u00d8 is on but dst is empty (any): that would match nothing; set dst or turn its \u00d8 off'); return false; }
   const noLeg = !rule.proto && !rule.dport_min && !rule.services.length;
-  if (rule.services_negate && noLeg){ alert('services \u00d8 is on but no proto/port/service is set (any): that would match nothing; set one or turn its \u00d8 off'); return false; }
+  if (rule.services_negate && noLeg){ noticeModal('services \u00d8 is on but no proto/port/service is set (any): that would match nothing; set one or turn its \u00d8 off'); return false; }
   return true;
 }
 
@@ -7348,9 +7369,9 @@ function startFwEdit(tr, net){
     const rule = fwCollectRule(tr); if (!rule) return;
     if (!fwValidateNegate(rule)) return;
     const dr = await api('/api/firewall',{method:'POST',body:JSON.stringify({net:net,op:'del',ids:[oldId]})});
-    if (!dr.ok){ alert((dr.body&&dr.body.error)||'edit failed'); refresh(); return; }
+    if (!dr.ok){ await noticeModal((dr.body&&dr.body.error)||'edit failed'); refresh(); return; }
     const ar = await api('/api/firewall',{method:'POST',body:JSON.stringify({net:net,op:'add',at:oldIdx,rule:rule})});
-    if (!ar.ok) { alert((ar.body&&ar.body.error)||'edit failed'); refresh(); return; }
+    if (!ar.ok) { await noticeModal((ar.body&&ar.body.error)||'edit failed'); refresh(); return; }
     await refresh();
   };
 }
@@ -7380,14 +7401,14 @@ function secFwObjects(c){
     const i = Number(tr.dataset.idx);
     const nameTd=tr.querySelector('.ob-name'), kindTd=tr.querySelector('.ob-kind'), valTd=tr.querySelector('.ob-val'), notesTd=tr.querySelector('.ob-notes');
     nameTd.title=kindTd.title=valTd.title=notesTd.title='double-click to edit';
-    nameTd.ondblclick=()=>inlineCellEdit(nameTd,objs[i].name||'','name',v=>{ v=v.trim(); if(!v){alert('name required');renderSection();return;} objs[i].name=v; objSave(objs); });
-    kindTd.ondblclick=()=>inlineCellEdit(kindTd,objs[i].kind||'','host|subnet|range|fqdn|group',v=>{ v=v.trim().toLowerCase(); if(['host','subnet','range','fqdn','group'].indexOf(v)<0){alert('kind must be host, subnet, range, fqdn, or group');renderSection();return;} objs[i].kind=v; objSave(objs); });
+    nameTd.ondblclick=()=>inlineCellEdit(nameTd,objs[i].name||'','name',v=>{ v=v.trim(); if(!v){noticeModal('name required');renderSection();return;} objs[i].name=v; objSave(objs); });
+    kindTd.ondblclick=()=>inlineCellEdit(kindTd,objs[i].kind||'','host|subnet|range|fqdn|group',v=>{ v=v.trim().toLowerCase(); if(['host','subnet','range','fqdn','group'].indexOf(v)<0){noticeModal('kind must be host, subnet, range, fqdn, or group');renderSection();return;} objs[i].kind=v; objSave(objs); });
     valTd.ondblclick=()=>inlineCellEdit(valTd,objValStr(objs[i]), objs[i].kind==='group'?'member object names, comma-separated':'addresses / CIDRs / ranges / domains, comma-separated', v=>{ setObjVal(objs[i], v); objSave(objs); });
     notesTd.ondblclick=()=>inlineCellEdit(notesTd,objs[i].notes||'','notes',v=>{ objs[i].notes=v.trim(); objSave(objs); });
   });
   selAllWire(t);
   table._rowAdd = ()=>objAddRow(table);
-  table._rowRemove = ()=>{ const sel=selCheckedRows(table); if(!sel.length){alert('tick one or more rows to remove');return;} const keep=objs.filter((_,i)=>!sel.some(tr=>Number(tr.dataset.idx)===i)); objSave(keep); };
+  table._rowRemove = ()=>{ const sel=selCheckedRows(table); if(!sel.length){noticeModal('tick one or more rows to remove');return;} const keep=objs.filter((_,i)=>!sel.some(tr=>Number(tr.dataset.idx)===i)); objSave(keep); };
   c.appendChild(card);
 }
 function cloneObj(o){ return { name:o.name||'', kind:o.kind||'host', addresses:(o.addresses||[]).slice(), members:(o.members||[]).slice(), notes:o.notes||'' }; }
@@ -7396,7 +7417,7 @@ function setObjVal(o, v){ const parts=v.split(',').map(x=>x.trim()).filter(Boole
 function objPayload(objs){ return objs.map(o=>({ name:o.name, kind:o.kind, addresses:(o.kind==='group'?[]:(o.addresses||[])), members:(o.kind==='group'?(o.members||[]):[]), notes:o.notes||'' })); }
 async function objSave(objs){
   const r = await api('/api/firewall',{method:'POST',body:JSON.stringify({op:'objects', objects:objPayload(objs)})});
-  if(!r.ok){ alert((r.body&&r.body.error)||'save failed'); }
+  if(!r.ok){ await noticeModal((r.body&&r.body.error)||'save failed'); }
   await refresh();
 }
 function objAddRow(table){
@@ -7411,7 +7432,7 @@ function objAddRow(table){
   kindSel.onchange=()=>{ valInp.placeholder = kindSel.value==='group' ? 'member object names, comma-separated' : 'addresses, comma-separated'; };
   tr.querySelector('.oba-cancel').onclick=()=>renderSection();
   tr.querySelector('.oba-save').onclick=()=>{
-    const name=tr.querySelector('.oba-name').value.trim(); if(!name){alert('name required');return;}
+    const name=tr.querySelector('.oba-name').value.trim(); if(!name){noticeModal('name required');return;}
     const o={name:name, kind:kindSel.value, addresses:[], members:[], notes:tr.querySelector('.oba-notes').value.trim()};
     setObjVal(o, valInp.value);
     const list=(table._objs||[]).slice(); list.push(o);
@@ -7695,13 +7716,13 @@ function secFwServices(c){
     const i=Number(tr.dataset.idx);
     const nameTd=tr.querySelector('.sv-name'), portsTd=tr.querySelector('.sv-ports'), notesTd=tr.querySelector('.sv-notes');
     nameTd.title=portsTd.title=notesTd.title='double-click to edit';
-    nameTd.ondblclick=()=>inlineCellEdit(nameTd,svcs[i].name||'','name',v=>{v=v.trim(); if(!v){alert('name required');renderSection();return;} svcs[i].name=v; svcSave(svcs);});
-    portsTd.ondblclick=()=>inlineCellEdit(portsTd,svcPortsFmt(svcs[i].ports),'e.g. udp/53, tcp/53',v=>{ const p=svcPortsParse(v); if(p===null){alert('bad ports: use proto/port or proto/lo-hi, comma-separated');renderSection();return;} svcs[i].ports=p; svcSave(svcs);});
+    nameTd.ondblclick=()=>inlineCellEdit(nameTd,svcs[i].name||'','name',v=>{v=v.trim(); if(!v){noticeModal('name required');renderSection();return;} svcs[i].name=v; svcSave(svcs);});
+    portsTd.ondblclick=()=>inlineCellEdit(portsTd,svcPortsFmt(svcs[i].ports),'e.g. udp/53, tcp/53',v=>{ const p=svcPortsParse(v); if(p===null){noticeModal('bad ports: use proto/port or proto/lo-hi, comma-separated');renderSection();return;} svcs[i].ports=p; svcSave(svcs);});
     notesTd.ondblclick=()=>inlineCellEdit(notesTd,svcs[i].notes||'','notes',v=>{svcs[i].notes=v.trim(); svcSave(svcs);});
   });
   selAllWire(t);
   table._rowAdd=()=>svcAddRow(table);
-  table._rowRemove=()=>{ const sel=selCheckedRows(table); if(!sel.length){alert('tick one or more rows to remove');return;} const keep=svcs.filter((_,i)=>!sel.some(tr=>Number(tr.dataset.idx)===i)); svcSave(keep); };
+  table._rowRemove=()=>{ const sel=selCheckedRows(table); if(!sel.length){noticeModal('tick one or more rows to remove');return;} const keep=svcs.filter((_,i)=>!sel.some(tr=>Number(tr.dataset.idx)===i)); svcSave(keep); };
   c.appendChild(card);
 }
 function cloneSvc(s){ return {name:s.name||'', ports:(s.ports||[]).map(p=>({proto:p.proto||'', port_min:p.port_min||0, port_max:p.port_max||0})), notes:s.notes||''}; }
@@ -7710,7 +7731,7 @@ function svcPortsParse(str){ const out=[]; for(let tok of str.split(',')){ tok=t
 function svcPayload(svcs){ return svcs.map(s=>({ name:s.name, ports:(s.ports||[]).map(p=>({proto:p.proto, port_min:p.port_min||0, port_max:p.port_max||0})), notes:s.notes||'' })); }
 async function svcSave(svcs){
   const r=await api('/api/firewall',{method:'POST',body:JSON.stringify({op:'services', services:svcPayload(svcs)})});
-  if(!r.ok){ alert((r.body&&r.body.error)||'save failed'); }
+  if(!r.ok){ await noticeModal((r.body&&r.body.error)||'save failed'); }
   await refresh();
 }
 function svcAddRow(table){
@@ -7722,8 +7743,8 @@ function svcAddRow(table){
   if(!insertNewRow(table, tr)) return;
   tr.querySelector('.sva-cancel').onclick=()=>renderSection();
   tr.querySelector('.sva-save').onclick=()=>{
-    const name=tr.querySelector('.sva-name').value.trim(); if(!name){alert('name required');return;}
-    const ports=svcPortsParse(tr.querySelector('.sva-ports').value); if(ports===null){alert('bad ports: use proto/port or proto/lo-hi, comma-separated');return;}
+    const name=tr.querySelector('.sva-name').value.trim(); if(!name){noticeModal('name required');return;}
+    const ports=svcPortsParse(tr.querySelector('.sva-ports').value); if(ports===null){noticeModal('bad ports: use proto/port or proto/lo-hi, comma-separated');return;}
     const list=(table._svcs||[]).slice(); list.push({name:name, ports:ports, notes:tr.querySelector('.sva-notes').value.trim()});
     svcSave(list);
   };
@@ -7873,13 +7894,13 @@ function natAddRow(table, net){
   tr.querySelector('.nate-cancel').onclick = () => refresh();
   tr.querySelector('.nate-save').onclick = () => {
     const t = natReadTranslateCell(trCell);
-    if (!t){ alert('address is required for static address / port-forward'); return; }
+    if (!t){ noticeModal('address is required for static address / port-forward'); return; }
     const srcV = tr.querySelector('.nate-src').value.trim();
     const dstV = tr.querySelector('.nate-dst').value.trim();
     const sNeg = tr.querySelector('.nate-src-negate').classList.contains('active');
     const dNeg = tr.querySelector('.nate-dst-negate').classList.contains('active');
-    if (sNeg && !srcV){ alert('source \u00d8 is on but source is empty (any): that would match nothing; set source or turn its \u00d8 off'); return; }
-    if (dNeg && !dstV){ alert('dest \u00d8 is on but dest is empty (any): that would match nothing; set dest or turn its \u00d8 off'); return; }
+    if (sNeg && !srcV){ noticeModal('source \u00d8 is on but source is empty (any): that would match nothing; set source or turn its \u00d8 off'); return; }
+    if (dNeg && !dstV){ noticeModal('dest \u00d8 is on but dest is empty (any): that would match nothing; set dest or turn its \u00d8 off'); return; }
     edit('/api/nat', {
       op:'add', net:net,
       source: srcV, dest: dstV,
@@ -7924,13 +7945,13 @@ function startNATEdit(tr, net){
   tr.querySelector('.nate-cancel').onclick = () => refresh();
   tr.querySelector('.nate-save').onclick = async () => {
     const t = natReadTranslateCell(trCell);
-    if (!t){ alert('address is required for static address / port-forward'); return; }
+    if (!t){ await noticeModal('address is required for static address / port-forward'); return; }
     const srcV = srcCell.querySelector('.nate-src').value.trim();
     const dstV = dstCell.querySelector('.nate-dst').value.trim();
     const sNeg = srcCell.querySelector('.nate-src-negate').classList.contains('active');
     const dNeg = dstCell.querySelector('.nate-dst-negate').classList.contains('active');
-    if (sNeg && !srcV){ alert('source \u00d8 is on but source is empty (any): that would match nothing; set source or turn its \u00d8 off'); return; }
-    if (dNeg && !dstV){ alert('dest \u00d8 is on but dest is empty (any): that would match nothing; set dest or turn its \u00d8 off'); return; }
+    if (sNeg && !srcV){ await noticeModal('source \u00d8 is on but source is empty (any): that would match nothing; set source or turn its \u00d8 off'); return; }
+    if (dNeg && !dstV){ await noticeModal('dest \u00d8 is on but dest is empty (any): that would match nothing; set dest or turn its \u00d8 off'); return; }
     const r = await api('/api/nat', { method:'POST', body: JSON.stringify({
       op:'update', net:net, index:idx,
       source: srcV, dest: dstV,
@@ -7940,7 +7961,7 @@ function startNATEdit(tr, net){
       translate: t.translate,
       iface: t.iface
     })});
-    if (!r.ok){ alert((r.body&&r.body.error)||'update failed'); }
+    if (!r.ok){ await noticeModal((r.body&&r.body.error)||'update failed'); }
     refresh();
   };
 }
@@ -8135,8 +8156,8 @@ function secInterfaces(c){
         if (m4 !== (tr.dataset.mode4||'static') || m6 !== (tr.dataset.mode6||'static')){
           const rm = await api('/api/system/interface-edit', { method:'POST', body: JSON.stringify({
             op:'mode', iface: tr.dataset.iface, mode4: m4, mode6: m6 }) });
-          if (!rm.ok){ alert((rm.body && rm.body.error) || 'could not change the addressing mode'); return; }
-          if (rm.body && rm.body.warning) alert(rm.body.warning);
+          if (!rm.ok){ await noticeModal((rm.body && rm.body.error) || 'could not change the addressing mode'); return; }
+          if (rm.body && rm.body.warning) await noticeModal(rm.body.warning);
           // Nothing static left to set, so the second request would be an
           // empty set that prunes nothing. Stop here rather than send it.
           if (m4 !== 'static' && m6 !== 'static'){ renderSection(); return; }
@@ -8144,13 +8165,13 @@ function secInterfaces(c){
       }
       const r = await api('/api/system/interface-edit', { method:'POST', body: JSON.stringify({
         op:'addrs', iface: tr.dataset.iface, addrs: list }) });
-      if (!r.ok){ alert((r.body && r.body.error) || 'could not apply'); return; }
+      if (!r.ok){ await noticeModal((r.body && r.body.error) || 'could not apply'); return; }
       // Success needs no announcement: the table redraws with the new
       // addressing, which is the confirmation. Where it was saved is
       // gravinet's business, not the operator's. A warning means the change
       // is live but will not survive a reboot or a restore, which is not
       // visible anywhere and has to be said.
-      if (r.body && r.body.warning) alert(r.body.warning);
+      if (r.body && r.body.warning) await noticeModal(r.body.warning);
       renderSection();
     };
   }
@@ -8164,11 +8185,11 @@ function secInterfaces(c){
     cell.querySelector('.ife-cancel').onclick = () => renderSection();
     cell.querySelector('.ife-save').onclick = async () => {
       const v = parseInt(cell.querySelector('.ife-mtu').value, 10);
-      if (!v){ alert('enter an MTU'); return; }
+      if (!v){ await noticeModal('enter an MTU'); return; }
       const r = await api('/api/system/interface-edit', { method:'POST', body: JSON.stringify({
         op:'mtu', iface: tr.dataset.iface, mtu: v }) });
-      if (!r.ok){ alert((r.body && r.body.error) || 'could not apply'); return; }
-      if (r.body && r.body.warning) alert(r.body.warning);
+      if (!r.ok){ await noticeModal((r.body && r.body.error) || 'could not apply'); return; }
+      if (r.body && r.body.warning) await noticeModal(r.body.warning);
       renderSection();
     };
   }
@@ -8185,13 +8206,13 @@ function secInterfaces(c){
         op:'gateway', iface: tr.dataset.iface,
         gw4: cell.querySelector('.ife-gw4').value.trim(),
         gw6: cell.querySelector('.ife-gw6').value.trim() }) });
-      if (!r.ok){ alert((r.body && r.body.error) || 'could not apply'); return; }
+      if (!r.ok){ await noticeModal((r.body && r.body.error) || 'could not apply'); return; }
       // Success needs no announcement: the table redraws with the new
       // addressing, which is the confirmation. Where it was saved is
       // gravinet's business, not the operator's. A warning means the change
       // is live but will not survive a reboot or a restore, which is not
       // visible anywhere and has to be said.
-      if (r.body && r.body.warning) alert(r.body.warning);
+      if (r.body && r.body.warning) await noticeModal(r.body.warning);
       renderSection();
     };
   }
@@ -8321,10 +8342,10 @@ function secRadvd(c){
     tr.querySelector('.rae-cancel').onclick = () => load();
     tr.querySelector('.rae-save').onclick = async () => {
       const body = Object.assign({op:'add'}, readFields(tr));
-      if (!body.iface){ alert('choose an interface to advertise on'); return; }
+      if (!body.iface){ await noticeModal('choose an interface to advertise on'); return; }
       const r = await api('/api/radvd', {method:'POST', body:JSON.stringify(body)});
-      if (!r.ok){ alert((r.body&&r.body.error)||'add failed'); return; }
-      if (r.body && r.body.note) alert(r.body.note);
+      if (!r.ok){ await noticeModal((r.body&&r.body.error)||'add failed'); return; }
+      if (r.body && r.body.note) await noticeModal(r.body.note);
       load();
     };
   }
@@ -8339,8 +8360,8 @@ function secRadvd(c){
     tr.querySelector('.rae-save').onclick = async () => {
       const body = Object.assign({op:'update', index:idx}, readFields(tr));
       const r = await api('/api/radvd', {method:'POST', body:JSON.stringify(body)});
-      if (!r.ok){ alert((r.body&&r.body.error)||'update failed'); return; }
-      if (r.body && r.body.note) alert(r.body.note);
+      if (!r.ok){ await noticeModal((r.body&&r.body.error)||'update failed'); return; }
+      if (r.body && r.body.note) await noticeModal(r.body.note);
       load();
     };
   }
@@ -8436,7 +8457,7 @@ function qosAddRow(table, net, classes){
 // (after alerting) if the field couldn't be parsed.
 function qosCollectRule(scope){
   const parsed = fwParseSvc(scope.querySelector('.qe-services').value);
-  if (parsed.error){ alert(parsed.error); return null; }
+  if (parsed.error){ noticeModal(parsed.error); return null; }
   return { proto: parsed.proto, port: parsed.port, services: parsed.services, class: Number(scope.querySelector('.qe-class').value) };
 }
 
@@ -8456,15 +8477,15 @@ function startQoSEdit(tr, net, classes){
   cc.querySelector('.qe-save').onclick = async () => {
     const rule = qosCollectRule(tr); if (!rule) return;
     const dr = await api('/api/qos',{method:'POST',body:JSON.stringify({op:'delete',net:net,proto:oldProto,port:oldPort,services:oldServices})});
-    if (!dr.ok){ alert((dr.body&&dr.body.error)||'edit failed'); refresh(); return; }
+    if (!dr.ok){ await noticeModal((dr.body&&dr.body.error)||'edit failed'); refresh(); return; }
     const ar = await api('/api/qos',{method:'POST',body:JSON.stringify({op:'add',net:net,proto:rule.proto,port:rule.port,services:rule.services,class:rule.class})});
-    if (!ar.ok){ alert((ar.body&&ar.body.error)||'edit failed'); refresh(); return; }
+    if (!ar.ok){ await noticeModal((ar.body&&ar.body.error)||'edit failed'); refresh(); return; }
     // An edit re-keys the rule via delete+add, which would reset it to enabled;
     // carry the prior disabled state across so editing doesn't silently
     // re-enable a paused rule.
     if (wasDisabled){
       const xr = await api('/api/qos',{method:'POST',body:JSON.stringify({op:'rule-disable',net:net,proto:rule.proto,port:rule.port,services:rule.services})});
-      if (!xr.ok) alert((xr.body&&xr.body.error)||'edit failed');
+      if (!xr.ok) await noticeModal((xr.body&&xr.body.error)||'edit failed');
     }
     refresh();
   };
@@ -8522,7 +8543,7 @@ function secPower(c){
   c.appendChild(svcCard);
 
   svcBtn.onclick = async () => {
-    if (!confirm('Restart gravinet on ' + nodeLabel() + '?\n\nThis briefly drops the mesh session and this admin connection while it comes back.')) return;
+    if (!await confirmModal('Restart gravinet on ' + nodeLabel() + '?\n\nThis briefly drops the mesh session and this admin connection while it comes back.')) return;
     svcBtn.disabled = true;
     try { await doRestart(); } finally { svcBtn.disabled = false; }
   };
@@ -8560,11 +8581,11 @@ function secPower(c){
     const payload = { action, when };
     if (when === 'in') {
       const m = parseInt(card.querySelector('#pwr-mins').value, 10);
-      if (!(m >= 1)) { alert('Enter a positive number of minutes.'); return; }
+      if (!(m >= 1)) { await noticeModal('Enter a positive number of minutes.'); return; }
       payload.minutes = m;
     } else if (when === 'at') {
       const t = card.querySelector('#pwr-time').value;
-      if (!/^\d{2}:\d{2}$/.test(t)) { alert('Choose a time.'); return; }
+      if (!/^\d{2}:\d{2}$/.test(t)) { await noticeModal('Choose a time.'); return; }
       payload.time = t;
     }
     const verb = isRestart ? 'restart' : 'shut down';
@@ -8572,12 +8593,12 @@ function secPower(c){
     const warn = isRestart
       ? 'This reboots the entire host machine, not just gravinet.'
       : 'This powers off the entire host machine; it stays down, blocking all traffic, until powered on out of band.';
-    if (!confirm(verb.charAt(0).toUpperCase()+verb.slice(1) + ' ' + nodeLabel() + ' ' + whenText + '?\n\n' + warn + '\n\nYou will lose access to this console' + (state.target ? ' for that node' : '') + '.')) return;
+    if (!await confirmModal(verb.charAt(0).toUpperCase()+verb.slice(1) + ' ' + nodeLabel() + ' ' + whenText + '?\n\n' + warn + '\n\nYou will lose access to this console' + (state.target ? ' for that node' : '') + '.')) return;
     execBtn.disabled = true; cancelBtn.disabled = true;
     const r = await api('/api/system/power', { method:'POST', body: JSON.stringify(payload) });
-    if (!r.ok) { alert((r.body && r.body.error) || 'power action failed'); execBtn.disabled = false; cancelBtn.disabled = false; return; }
+    if (!r.ok) { await noticeModal((r.body && r.body.error) || 'power action failed'); execBtn.disabled = false; cancelBtn.disabled = false; return; }
     // One popup (the confirm above) is enough for an action this disruptive;
-    // stack a second alert() on top of it and the operator has to dismiss a
+    // stack a second notice on top of it and the operator has to dismiss a
     // dialog for a connection that may already be on its way down. Status
     // goes inline instead.
     const w = (r.body && r.body.when) || 'now';
@@ -8591,8 +8612,8 @@ function secPower(c){
 
   cancelBtn.onclick = async () => {
     const r = await api('/api/system/power', { method:'POST', body: JSON.stringify({ action:'cancel' }) });
-    if (!r.ok) { alert((r.body && r.body.error) || 'No pending power action to cancel.'); return; }
-    alert('Pending power action cancelled.');
+    if (!r.ok) { await noticeModal((r.body && r.body.error) || 'No pending power action to cancel.'); return; }
+    await noticeModal('Pending power action cancelled.');
   };
 }
 
@@ -8650,8 +8671,8 @@ function secResolver(c){
         const v = hostIn.value.trim();
         if (!v || v === hostLast){ hostIn.value = hostLast; return; }
         const res = await api('/api/system/resolver', { method:'POST', body: JSON.stringify({ op:'hostname', hostname: v }) });
-        if (!res.ok){ alert((res.body && res.body.error) || 'could not set the hostname'); hostIn.value = hostLast; return; }
-        if (res.body && res.body.note) alert(res.body.note);
+        if (!res.ok){ await noticeModal((res.body && res.body.error) || 'could not set the hostname'); hostIn.value = hostLast; return; }
+        if (res.body && res.body.note) await noticeModal(res.body.note);
         load();
       };
       hostIn.onblur = saveHost;
@@ -8691,8 +8712,8 @@ function secResolver(c){
         const search = searchIn.value.trim();
         if (joined === dnsLast && search === searchLast){ dnsIn.value = dnsLast; searchIn.value = searchLast; return; }
         const res = await api('/api/system/resolver', { method:'POST', body: JSON.stringify({ op:'dns', servers: rawServers, search_domain: search }) });
-        if (!res.ok){ alert((res.body && res.body.error) || 'could not change the default DNS configuration'); dnsIn.value = dnsLast; searchIn.value = searchLast; return; }
-        if (res.body && res.body.note) alert(res.body.note);
+        if (!res.ok){ await noticeModal((res.body && res.body.error) || 'could not change the default DNS configuration'); dnsIn.value = dnsLast; searchIn.value = searchLast; return; }
+        if (res.body && res.body.note) await noticeModal(res.body.note);
         load();
       };
       dnsIn.onblur = saveDNS;
@@ -8854,7 +8875,7 @@ function secTime(c){
         const tz = tzIn.value.trim();
         if (!tz || tz === tzLast){ tzIn.value = tzLast; return; }
         const r = await api('/api/system/time', { method:'POST', body: JSON.stringify({ op:'timezone', timezone: tz }) });
-        if (!r.ok){ alert((r.body && r.body.error) || 'could not set the timezone'); tzIn.value = tzLast; return; }
+        if (!r.ok){ await noticeModal((r.body && r.body.error) || 'could not set the timezone'); tzIn.value = tzLast; return; }
         load();
       };
       tzIn.onblur = saveTz;
@@ -8877,7 +8898,7 @@ function secTime(c){
       ntpCard.appendChild(row);
       ntpCard.appendChild($('<div class="hint" style="margin:8px 0 0">Filling this in turns synchronization <b>on</b>; clearing it turns it <b>off</b>. Separate multiple servers with commas or spaces \u2014 either works, e.g. <code>0.pool.ntp.org, 1.pool.ntp.org</code> or <code>0.pool.ntp.org 1.pool.ntp.org</code>. Saves automatically when you click or tab away, and restarts the sync daemon so the change takes effect immediately.</div>'));
       // Auto-saves on blur like every other settings field here. The
-      // confirm() only fires when the edit actually turns sync off (an empty
+      // the confirmation only fires when the edit actually turns sync off (an empty
       // field where there were servers before) \u2014 not on every blur \u2014 so
       // tabbing through an unchanged or still-filled-in field never prompts.
       const ntpIn = row.querySelector('#ntp-in');
@@ -8888,12 +8909,12 @@ function secTime(c){
         const joined = servers.join(', ');
         if (joined === ntpLast){ ntpIn.value = ntpLast; return; }
         const enabled = servers.length > 0;
-        if (!enabled && ntpLast && !confirm('Turn time synchronization off on ' + (state.target ? 'the selected node' : 'this node') + '?\n\nIts clock will drift freely from here on. Once it drifts past the handshake tolerance, this node stops forming new mesh sessions.')) {
+        if (!enabled && ntpLast && !await confirmModal('Turn time synchronization off on ' + (state.target ? 'the selected node' : 'this node') + '?\n\nIts clock will drift freely from here on. Once it drifts past the handshake tolerance, this node stops forming new mesh sessions.')) {
           ntpIn.value = ntpLast; return;
         }
         const r = await api('/api/system/time', { method:'POST', body: JSON.stringify({ op:'ntp', enabled: enabled, servers: servers }) });
-        if (!r.ok){ alert((r.body && r.body.error) || 'could not change time synchronization'); ntpIn.value = ntpLast; return; }
-        if (r.body && r.body.note) alert(r.body.note);
+        if (!r.ok){ await noticeModal((r.body && r.body.error) || 'could not change time synchronization'); ntpIn.value = ntpLast; return; }
+        if (r.body && r.body.note) await noticeModal(r.body.note);
         load();
       };
       ntpIn.onblur = saveNtp;
@@ -8920,9 +8941,9 @@ function secTime(c){
       setCard.appendChild($('<div class="hint help-desc" style="margin:8px 0 0">One-shot, in this host\u2019s own timezone as shown above. Nothing is stored \u2014 the clock is set once and left alone. Needs an explicit click to apply.</div>'));
       save.onclick = async () => {
         const v = row.querySelector('#clk-in').value;
-        if (!v){ alert('Pick a date and time.'); return; }
+        if (!v){ await noticeModal('Pick a date and time.'); return; }
         const r = await api('/api/system/time', { method:'POST', body: JSON.stringify({ op:'clock', datetime: v }) });
-        if (!r.ok){ alert((r.body && r.body.error) || 'could not set the clock'); return; }
+        if (!r.ok){ await noticeModal((r.body && r.body.error) || 'could not set the clock'); return; }
         load();
       };
     }
@@ -8999,8 +9020,8 @@ function secSNMP(c){
     // every other table here.
     const saveAndRerender = async (next) => {
       const res = await postSNMP(next);
-      if (!res.ok){ alert((res.body && res.body.error) || 'could not save SNMP settings'); }
-      else if (res.body && res.body.note) alert(res.body.note);
+      if (!res.ok){ await noticeModal((res.body && res.body.error) || 'could not save SNMP settings'); }
+      else if (res.body && res.body.note) await noticeModal(res.body.note);
       renderSection();
     };
 
@@ -9034,7 +9055,7 @@ function secSNMP(c){
       };
       const cellTd = tr.querySelector('.sn-community');
       cellTd.ondblclick = () => inlineCellEdit(cellTd, cm.community||'', 'community string', v => {
-        if (!v){ alert('community is required'); renderSection(); return; }
+        if (!v){ noticeModal('community is required'); renderSection(); return; }
         const next = Object.assign({}, cur, { communities: list.map((t,j) => j===i ? Object.assign({},t,{community:v}) : t) });
         saveAndRerender(next);
       });
@@ -9048,13 +9069,13 @@ function secSNMP(c){
       tr.querySelector('.sna-cancel').onclick = () => renderSection();
       tr.querySelector('.sna-save').onclick = () => {
         const v = tr.querySelector('.sna-community').value.trim();
-        if (!v){ alert('community is required'); return; }
+        if (!v){ noticeModal('community is required'); return; }
         saveAndRerender(Object.assign({}, cur, { communities: list.concat([{community:v, disabled:false}]) }));
       };
     };
     commTable._rowRemove = () => {
       const sel = selCheckedRows(commTable);
-      if (!sel.length){ alert('tick one or more rows to remove'); return; }
+      if (!sel.length){ noticeModal('tick one or more rows to remove'); return; }
       const drop = new Set(sel.map(tr => Number(tr.dataset.idx)));
       saveAndRerender(Object.assign({}, cur, { communities: list.filter((_,i) => !drop.has(i)) }));
     };
@@ -9099,10 +9120,10 @@ function secSNMP(c){
       if (fields.listen===lastFields.listen && fields.location===lastFields.location && fields.contact===lastFields.contact) return;
       const next = Object.assign({}, cur, fields);
       const res = await postSNMP(next);
-      if (!res.ok){ alert((res.body && res.body.error) || 'could not save SNMP settings'); return; }
+      if (!res.ok){ await noticeModal((res.body && res.body.error) || 'could not save SNMP settings'); return; }
       cur.listen = fields.listen; cur.location = fields.location; cur.contact = fields.contact;
       lastFields = fields;
-      if (res.body && res.body.note) alert(res.body.note);
+      if (res.body && res.body.note) await noticeModal(res.body.note);
     };
     [listenIn, locationIn, contactIn].forEach(inp => {
       inp.onblur = saveFields;
@@ -9120,7 +9141,7 @@ function secSNMP(c){
         if (!res.ok) { console.warn('/api/system/snmp toggle failed:', (res.body&&res.body.error)||'failed'); return; }
         cur.enabled = on;
         if (res.body) setPill(!!res.body.enabled);
-        if (res.body && res.body.note) alert(res.body.note);
+        if (res.body && res.body.note) noticeModal(res.body.note);
       });
     };
   };
@@ -9224,7 +9245,7 @@ function secLLDP(c){
       api('/api/system/lldp', { method:'POST', body: JSON.stringify({ interfaces, enabled: en }) })
         .then(res => {
           if (!res.ok) { console.warn('/api/system/lldp save failed:', (res.body&&res.body.error)||'failed'); return; }
-          if (res.body && res.body.note) alert(res.body.note);
+          if (res.body && res.body.note) noticeModal(res.body.note);
         });
     };
 
@@ -9322,13 +9343,13 @@ async function syslogReload(body){
     };
     const remoteTd = tr.querySelector('.sy-remote');
     remoteTd.ondblclick = () => inlineCellEdit(remoteTd, tgt.remote||'', 'host or IP', v => {
-      if (!v){ alert('remote is required'); renderSection(); return; }
+      if (!v){ noticeModal('remote is required'); renderSection(); return; }
       syslogSave(list.map((t,j) => j===i ? Object.assign({},t,{remote:v}) : t));
     });
     const portTd = tr.querySelector('.sy-port');
     portTd.ondblclick = () => inlineCellEdit(portTd, String(tgt.port||''), '1-65535', v => {
       const n = Number(v);
-      if (!Number.isInteger(n) || n < 1 || n > 65535){ alert('port must be 1-65535'); renderSection(); return; }
+      if (!Number.isInteger(n) || n < 1 || n > 65535){ noticeModal('port must be 1-65535'); renderSection(); return; }
       syslogSave(list.map((t,j) => j===i ? Object.assign({},t,{port:n}) : t));
     });
     // Protocol only ever has two legal values, so double-click just flips
@@ -9352,7 +9373,7 @@ function syslogPayload(list){
 // exemptSave already uses for the Allow List table.
 async function syslogSave(list){
   const r = await api('/api/system/syslog', { method:'POST', body: JSON.stringify({ targets: syslogPayload(list) }) });
-  if (!r.ok){ alert((r.body && r.body.error) || 'save failed'); }
+  if (!r.ok){ await noticeModal((r.body && r.body.error) || 'save failed'); }
   renderSection();
 }
 
@@ -9367,9 +9388,9 @@ function syslogAddRow(table){
   tr.querySelector('.sya-cancel').onclick = () => renderSection();
   tr.querySelector('.sya-save').onclick = () => {
     const remote = tr.querySelector('.sya-remote').value.trim();
-    if (!remote){ alert('remote is required'); return; }
+    if (!remote){ noticeModal('remote is required'); return; }
     const port = Number(tr.querySelector('.sya-port').value);
-    if (!Number.isInteger(port) || port < 1 || port > 65535){ alert('port must be 1-65535'); return; }
+    if (!Number.isInteger(port) || port < 1 || port > 65535){ noticeModal('port must be 1-65535'); return; }
     const protocol = tr.querySelector('.sya-proto').value;
     const list = (table._syslogTargets || []).slice();
     list.push({ remote, port, protocol, disabled:false });
@@ -9379,7 +9400,7 @@ function syslogAddRow(table){
 
 async function syslogRemoveChecked(table){
   const sel = selCheckedRows(table);
-  if (!sel.length){ alert('tick one or more rows to remove'); return; }
+  if (!sel.length){ await noticeModal('tick one or more rows to remove'); return; }
   const drop = new Set(sel.map(tr => Number(tr.dataset.idx)));
   const list = (table._syslogTargets || []).filter((t,i) => !drop.has(i));
   syslogSave(list);
@@ -9514,11 +9535,11 @@ function usersExpiryEdit(td, name, currentUnix, onDone){
   const finish = async (expiresUnix) => {
     if (done) return; done = true;
     const r = await api('/api/system/users', { method:'POST', body: JSON.stringify({ op:'expiry', username: name, expires_unix: expiresUnix }) });
-    if (!r.ok){ alert((r.body && r.body.error) || 'could not set expiry'); }
+    if (!r.ok){ await noticeModal((r.body && r.body.error) || 'could not set expiry'); }
     onDone();
   };
   save.onclick = () => {
-    if (!inp.value){ alert('pick a date, or use \u201cnever\u201d to clear it'); return; }
+    if (!inp.value){ noticeModal('pick a date, or use \u201cnever\u201d to clear it'); return; }
     const secs = Math.floor(new Date(inp.value+'T00:00:00Z').getTime()/1000);
     finish(secs);
   };
@@ -9546,10 +9567,10 @@ function usersPasswordEdit(td, name, onDone){
   let done = false;
   save.onclick = async () => {
     if (done) return;
-    if (!inp.value){ alert('enter a password'); return; }
+    if (!inp.value){ await noticeModal('enter a password'); return; }
     done = true;
     const r = await api('/api/system/users', { method:'POST', body: JSON.stringify({ op:'add', username: name, password: inp.value }) });
-    if (!r.ok){ alert((r.body && r.body.error) || 'could not set password'); }
+    if (!r.ok){ await noticeModal((r.body && r.body.error) || 'could not set password'); }
     else if (r.body && r.body.note) { /* e.g. "account created but expiry could not be applied" */ console.info(r.body.note); }
     onDone();
   };
@@ -9580,8 +9601,8 @@ function usersAddRow(table){
   tr.querySelector('.us-new-save').onclick = () => {
     const name = nameInp.value.trim();
     const pw = pwInp.value;
-    if (!name){ alert('username required'); return; }
-    if (!pw){ alert('password required'); return; }
+    if (!name){ noticeModal('username required'); return; }
+    if (!pw){ noticeModal('password required'); return; }
     const expEl = tr.querySelector('.us-new-exp');
     const expStr = expEl ? expEl.value : '';
     const expiresUnix = expStr ? Math.floor(new Date(expStr+'T00:00:00Z').getTime()/1000) : 0;
@@ -9887,7 +9908,7 @@ async function drawUpgrade(host){
     // place: the page looked mid-rollout while nothing was running.
     if (resBox) resBox.innerHTML = '';
     host._upgradeResults = '';
-    if (!fileIn.files[0]){ await noticeModal('Upgrade', 'Pick a source .tgz/.tar.gz or .zip first.'); return; }
+    if (!fileIn.files[0]){ await noticeModal('Pick a source .tgz/.tar.gz or .zip first.'); return; }
     const sel = peerPicker ? peerPicker.get() : [];
     const allThenLocal = sel.indexOf(ALL_PEERS) !== -1;
     const nodes = allThenLocal ? targets.map(p => p.node_id) : sel;
@@ -9913,9 +9934,9 @@ async function drawUpgrade(host){
       const msg = allThenLocal
         ? 'Upgrade all ' + nodes.length + ' peer' + (nodes.length === 1 ? '' : 's') + ', then this node?\n\nIf the first one fails, the rollout stops there and nothing else is touched. Otherwise every peer is attempted regardless of failures elsewhere, and this node is upgraded last, only if every one of them applied.' + seedNote
         : (nodes.length === 1 ? 'Upgrade this peer?' : 'Upgrade these ' + nodes.length + ' peers? If the first one fails, the rollout stops there \u2014 otherwise every one of them is attempted regardless of failures elsewhere.') + seedNote;
-      if (!await confirmModal(allThenLocal ? 'Upgrade the fleet' : 'Upgrade peers', msg, 'Upgrade')) return;
+      if (!await confirmModal(msg, { title: allThenLocal ? 'Upgrade the fleet' : 'Upgrade peers', okLabel: 'Upgrade' })) return;
     } else {
-      if (!await confirmModal('Upgrade this node', 'Build the selected archive on this node and restart into it?', 'Upgrade')) return;
+      if (!await confirmModal('Build the selected archive on this node and restart into it?', { title: 'Upgrade this node', okLabel: 'Upgrade' })) return;
     }
 
     // applyLocal builds+applies on THIS node (/api/upgrade/source) and restarts
@@ -9935,7 +9956,7 @@ async function drawUpgrade(host){
       }, 450);
       try {
         const src = fileIn.files[0];
-        if (!src){ await noticeModal('Upgrade', 'The selected file is no longer available. Pick the source archive again.'); return; }
+        if (!src){ await noticeModal('The selected file is no longer available. Pick the source archive again.'); return; }
         let resp;
         try {
           resp = await fetch('/api/upgrade/source', { method:'POST', body: src });
@@ -9945,16 +9966,16 @@ async function drawUpgrade(host){
           // a build replaced under the same name throws here instead of
           // returning an error response. Without this the request vanished
           // and the button simply re-enabled.
-          await noticeModal('Upgrade failed', 'The upload could not be sent: ' + (e && e.message ? e.message : e)
+          await noticeModal('The upload could not be sent: ' + (e && e.message ? e.message : e)
             + '\n\nNothing was applied. If the archive was rebuilt or downloaded again since you picked it, pick it again and retry.');
           return;
         }
         const body = await resp.json().catch(()=>({}));
-        if (!resp.ok){ await noticeModal('Upgrade failed', body.error || 'build failed'); return; }
+        if (!resp.ok){ await noticeModal(body.error || 'build failed'); return; }
         if (body.skipped){
-          await noticeModal('Nothing to do', 'Already on ' + (body.already_on || 'this version') + ' \u2014 nothing to build or apply.');
+          await noticeModal('Already on ' + (body.already_on || 'this version') + ' \u2014 nothing to build or apply.');
         } else {
-          await noticeModal('Applied', 'This node is restarting into ' + (body.applied || 'the new build') + '.\n\nIf it cannot get its peers back within the confirm window, it will revert itself.');
+          await noticeModal('This node is restarting into ' + (body.applied || 'the new build') + '.\n\nIf it cannot get its peers back within the confirm window, it will revert itself.');
         }
         drawUpgrade(host);
       } catch (e) {
@@ -9963,7 +9984,7 @@ async function drawUpgrade(host){
         // the response, and the redraw — which would otherwise unwind through
         // the finally, stop the dots, and leave the button reading "Building"
         // with nothing said.
-        await noticeModal('Upgrade failed', 'The upgrade stopped unexpectedly: ' + (e && e.message ? e.message : e) + '\n\nThis is a bug.');
+        await noticeModal('The upgrade stopped unexpectedly: ' + (e && e.message ? e.message : e) + '\n\nThis is a bug.');
         throw e;
       } finally {
         clearInterval(buildDotsTimer);
@@ -10222,7 +10243,7 @@ async function drawUpgrade(host){
       const msg = 'The rollout stopped unexpectedly: ' + (e && e.message ? e.message : e)
         + '\nThis is a bug. Peers listed above reported before it stopped; any others were not attempted.';
       if (resBox) resBox.appendChild($('<div class="hint" style="color:var(--danger,#b33);white-space:pre-wrap"></div>')).textContent = msg;
-      else await noticeModal('Rollout failed', msg);
+      else await noticeModal(msg);
       throw e; // still reaches the console, so it can be reported
     } finally {
       if (pushDotsTimer) clearInterval(pushDotsTimer);
@@ -10343,16 +10364,16 @@ async function drawOSUpdates(host){
         weekday: parseInt(weekdaySel.value,10)||0, day_of_month: parseInt(daySel.value,10)||1,
         hour: hh||0, minute: mm||0,
       }) });
-      if (!res.ok){ alert((res.body && res.body.error) || 'could not save the OS update schedule'); return; }
+      if (!res.ok){ await noticeModal((res.body && res.body.error) || 'could not save the OS update schedule'); return; }
       draw(res.body);
     };
     [enabledCb, weekdaySel, daySel, timeIn].forEach(el => { el.onchange = saveSchedule; });
 
     runBtn.onclick = async () => {
-      if (!confirm('Run an OS update pass on ' + (window.location.hostname||'this host') + ' now?\n\nThis applies whatever updates the host\u2019s package manager has pending. It will not reboot on its own.')) return;
+      if (!await confirmModal('Run an OS update pass on ' + (window.location.hostname||'this host') + ' now?\n\nThis applies whatever updates the host\u2019s package manager has pending. It will not reboot on its own.')) return;
       runBtn.disabled = true;
       const res = await api('/api/upgrade/os-updates', { method:'POST', body: JSON.stringify({ op:'run_now' }) });
-      if (!res.ok){ alert((res.body && res.body.error) || 'could not start the update'); runBtn.disabled = false; return; }
+      if (!res.ok){ await noticeModal((res.body && res.body.error) || 'could not start the update'); runBtn.disabled = false; return; }
       draw(res.body);
       // Poll until it's done, since a real update can take minutes and
       // there's no push channel for this — the same "come back and check"
@@ -10449,7 +10470,7 @@ function csvCell(s){
 // consistent unit throughout is exactly the case rateFmt's adaptive scaling
 // would silently get wrong.
 function downloadMetricsCsv(data, minutes, label){
-  if (!data || !data.available){ alert('No metrics loaded yet for this range.'); return; }
+  if (!data || !data.available){ noticeModal('No metrics loaded yet for this range.'); return; }
   const cols = [];
   if (data.cpu && data.cpu.length) cols.push({label:'cpu_pct', points:data.cpu});
   if (data.mem && data.mem.length) cols.push({label:'mem_pct', points:data.mem});
@@ -10466,7 +10487,7 @@ function downloadMetricsCsv(data, minutes, label){
     if (ifc.rx && ifc.rx.length) cols.push({label:tag+' rx_mbps', points:ifc.rx, conv:bytesToMbps});
     if (ifc.tx && ifc.tx.length) cols.push({label:tag+' tx_mbps', points:ifc.tx, conv:bytesToMbps});
   }
-  if (!cols.length){ alert('No history loaded yet for this range.'); return; }
+  if (!cols.length){ noticeModal('No history loaded yet for this range.'); return; }
   const allT = new Set();
   const maps = cols.map(c => {
     const m = new Map();
@@ -10895,12 +10916,12 @@ function infoSpeedtest(c){
 
   runBtn.onclick = async () => {
     const aVal = pickA.getValue(), bVal = pickB.getValue();
-    if (!aVal){ alert('no peer here is in Manager mode — turn on Manager mode for this node or a reachable peer to run a test'); return; }
-    if (aVal === bVal){ alert('pick two different nodes'); return; }
+    if (!aVal){ await noticeModal('no peer here is in Manager mode — turn on Manager mode for this node or a reachable peer to run a test'); return; }
+    if (aVal === bVal){ await noticeModal('pick two different nodes'); return; }
     const aDesc = descFor(aVal), bDesc = descFor(bVal);
     const aRemote = aVal !== '__self__';
-    if (!bDesc.ip || !bDesc.port){ alert('the target node has no reachable overlay web-admin'); return; }
-    if (aRemote && !aDesc.node_id){ alert('the client node is unavailable — try again in a moment'); return; }
+    if (!bDesc.ip || !bDesc.port){ await noticeModal('the target node has no reachable overlay web-admin'); return; }
+    if (aRemote && !aDesc.node_id){ await noticeModal('the client node is unavailable — try again in a moment'); return; }
     runBtn.disabled = true; const prev = runBtn.textContent; runBtn.textContent = 'Running…';
     status.style.display = ''; status.textContent = 'Running download and upload (~8s)…'; out.innerHTML = '';
     try {
@@ -11189,9 +11210,9 @@ function infoCapture(c){
   startBtn.onclick = async () => {
     if (captureRunning){ await api('/api/capture/stop', {method:'POST'}); setRunning(false); stopPoll(); return; }
     const iface = sel.value;
-    if (!iface){ alert('select an interface first'); return; }
+    if (!iface){ await noticeModal('select an interface first'); return; }
     const r = await api('/api/capture/start', {method:'POST', body: JSON.stringify({iface})});
-    if (!r.ok || (r.body&&r.body.error)){ alert((r.body&&r.body.error)||'could not start capture'); return; }
+    if (!r.ok || (r.body&&r.body.error)){ await noticeModal((r.body&&r.body.error)||'could not start capture'); return; }
     captureLines = []; captureCursor = 0; render();
     setRunning(true);
     stopPoll(); captureTimer = setInterval(poll, 1000); poll();
@@ -11333,7 +11354,7 @@ function infoCaptureMesh(c){
 
   goBtn.onclick = async () => {
     const r = await api('/api/capture/mesh/start', {method:'POST', body: JSON.stringify({duration_seconds: Number(durSel.value)})});
-    if (!r.ok || (r.body&&r.body.error)){ alert((r.body&&r.body.error)||'could not start capture'); return; }
+    if (!r.ok || (r.body&&r.body.error)){ await noticeModal((r.body&&r.body.error)||'could not start capture'); return; }
     table.innerHTML = '';
     statusLine.textContent = 'Starting\u2026';
     goBtn.disabled = true; goBtn.textContent = 'Capturing\u2026';
@@ -11960,7 +11981,7 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
     table._rowAdd = () => nbrAddRow(table);
     table._rowRemove = () => {
       const rows = selCheckedRows(table);
-      if (!rows.length){ alert('tick one or more rows to remove'); return; }
+      if (!rows.length){ noticeModal('tick one or more rows to remove'); return; }
       const idxs = rows.map(tr => parseInt(tr.dataset.idx, 10)).sort((a,b) => b-a);
       for (const idx of idxs) neighbors.splice(idx, 1);
       renderNbrs(); scheduleSave(true);
@@ -11990,7 +12011,7 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
     tr.querySelector('.nbre-save').onclick = () => {
       const peer = tr.querySelector('.nbre-peer').value.trim();
       const remote_as = parseInt(tr.querySelector('.nbre-as').value, 10) || 0;
-      if (!peer || remote_as <= 0){ alert('peer address and remote AS are required'); return; }
+      if (!peer || remote_as <= 0){ noticeModal('peer address and remote AS are required'); return; }
       const entry = {
         peer, remote_as,
         description: tr.querySelector('.nbre-desc').value.trim(),
@@ -12060,7 +12081,7 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
     table._rowAdd = () => netAddRow(table);
     table._rowRemove = () => {
       const rows = selCheckedRows(table);
-      if (!rows.length){ alert('tick one or more rows to remove'); return; }
+      if (!rows.length){ noticeModal('tick one or more rows to remove'); return; }
       const idxs = rows.map(tr => parseInt(tr.dataset.idx, 10)).sort((a,b) => b-a);
       for (const idx of idxs) networks.splice(idx, 1);
       renderNets(); scheduleSave(true);
@@ -12074,7 +12095,7 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
     tr.querySelector('.nete-cancel').onclick = () => renderNets();
     tr.querySelector('.nete-save').onclick = () => {
       const v = tr.querySelector('.nete-val').value.trim();
-      if (!v){ alert('enter a network prefix'); return; }
+      if (!v){ noticeModal('enter a network prefix'); return; }
       networks.push(v);
       renderNets(); scheduleSave(true);
     };
@@ -12369,7 +12390,7 @@ const DOWNLOAD_ICON_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill=
 // fresh fetch — so what downloads always matches what's on screen even if
 // the range selection has since changed underneath.
 function downloadLatencyCsv(points, label, minutes){
-  if (!points || !points.length){ alert('No history loaded yet for this range.'); return; }
+  if (!points || !points.length){ noticeModal('No history loaded yet for this range.'); return; }
   const rows = ['timestamp_utc,rtt_ms'];
   for (const p of points) rows.push(new Date(p.t*1000).toISOString()+','+p.v);
   const blob = new Blob([rows.join('\n')+'\n'], { type:'text/csv' });
@@ -12910,11 +12931,11 @@ function chUploadConfig(){
     if (!f) return;
     let parsed;
     try { parsed = JSON.parse(await f.text()); }
-    catch (e) { alert('That file is not valid JSON.'); return; }
+    catch (e) { await noticeModal('That file is not valid JSON.'); return; }
     // The note records where the entry came from, since an uploaded snapshot
     // is otherwise indistinguishable in the list from one this node took.
     const r = await api('/api/history/import', { method:'POST', body: JSON.stringify({ config: parsed, note: f.name }) });
-    if (!r.ok) { alert((r.body && r.body.error) || 'could not file that configuration'); return; }
+    if (!r.ok) { await noticeModal((r.body && r.body.error) || 'could not file that configuration'); return; }
     renderSection();
   };
   inp.click();
@@ -12922,7 +12943,7 @@ function chUploadConfig(){
 
 async function chSnapshotNow(){
   const r = await api('/api/history/snapshot', { method:'POST' });
-  if (!r.ok) { alert((r.body && r.body.error) || 'could not save snapshot'); return; }
+  if (!r.ok) { await noticeModal((r.body && r.body.error) || 'could not save snapshot'); return; }
   renderSection();
 }
 
@@ -12934,13 +12955,13 @@ async function chDiffSelected(){
   const [a, b] = Array.from(CH_SEL);
   const [older, newer] = (Number(a) <= Number(b)) ? [a, b] : [b, a];
   const r = await api('/api/history/diff?a='+encodeURIComponent(older)+'&b='+encodeURIComponent(newer));
-  if (!r.ok || !r.body) { alert((r.body && r.body.error) || 'could not diff snapshots'); return; }
+  if (!r.ok || !r.body) { await noticeModal((r.body && r.body.error) || 'could not diff snapshots'); return; }
   chShowDiffModal(r.body);
 }
 
 async function chViewSnapshot(id){
   const r = await api('/api/history/get?id='+encodeURIComponent(id));
-  if (!r.ok || !r.body) { alert((r.body && r.body.error) || 'could not load snapshot'); return; }
+  if (!r.ok || !r.body) { await noticeModal((r.body && r.body.error) || 'could not load snapshot'); return; }
   const pretty = JSON.stringify(r.body.config, null, 2);
   const body = $('<div></div>');
   body.innerHTML = '<pre class="ch-json" style="max-height:60vh;overflow:auto;font-size:12px">'+esc(pretty)+'</pre>'
@@ -12991,12 +13012,12 @@ function chSaveConfigFile(config, stamp){
     const a = document.createElement('a'); a.href = url; a.download = name;
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-  } catch (e) { alert('Could not prepare the download.'); }
+  } catch (e) { noticeModal('Could not prepare the download.'); }
 }
 
 async function chDownloadSnapshot(id){
   const r = await api('/api/history/get?id='+encodeURIComponent(id));
-  if (!r.ok || !r.body) { alert((r.body && r.body.error) || 'could not download snapshot'); return; }
+  if (!r.ok || !r.body) { await noticeModal((r.body && r.body.error) || 'could not download snapshot'); return; }
   chSaveConfigFile(r.body.config, r.body.stamp || id);
 }
 
@@ -13103,7 +13124,7 @@ async function chConfirmRestore(id){
 // api()'s fetch-then-json() wrapper can't carry it (see LOCAL_API's comment
 // for the general proxy rule this endpoint already follows on the server
 // side). Kept as fetch+blob rather than a simpler window.location
-// navigation specifically so a failed build can still show an alert()
+// navigation specifically so a failed build can still report the failure
 // instead of just navigating to an error page. Shared by both buttons in
 // openTshootModal below so there is one download implementation, not two
 // that could quietly drift apart. Returns whether it succeeded, so a caller
@@ -13113,7 +13134,7 @@ async function downloadTshoot(url, filenamePrefix){
   if (!r.ok) {
     let msg = 'HTTP '+r.status;
     try { const j = await r.json(); if (j && j.error) msg = j.error; } catch(e){}
-    alert('could not build the bundle ('+msg+')');
+    await noticeModal('could not build the bundle ('+msg+')');
     return false;
   }
   // blob(), not text(): the response is gzipped binary, and text() would
@@ -13200,7 +13221,7 @@ function secLogs(c){
     { label:'Refresh', cls:'ghost', title:'reload the log', onclick: () => renderSection() },
     { label:'Download', cls:'ghost', title:'download the log file', onclick: async () => {
         const r = await api('/api/logs?download=1');
-        if (!r.ok || !r.body) { alert((r.body && r.body.error) || 'could not fetch log'); return; }
+        if (!r.ok || !r.body) { await noticeModal((r.body && r.body.error) || 'could not fetch log'); return; }
         const text = (r.body.text != null) ? r.body.text : (r.body.lines||[]).join('\n');
         const blob = new Blob([text], { type:'text/plain' });
         const url = URL.createObjectURL(blob);
@@ -13209,9 +13230,9 @@ function secLogs(c){
       } },
     { label:'tshoot', cls:'ghost', title:'download a troubleshooting bundle: every peer on every network with reach, relay, session age, path MTU, fragment and drop counters; routes; bans; disabled peers; firewall rules and exemptions; NAT status; interfaces; the config with secrets redacted; and the tail of the log. Asks whether to collect just the current node or every reachable mesh peer at once \u2014 collecting from both ends of any peer problem is often the diagnosis.', onclick: () => openTshootModal() },
     { label:'Clear', cls:'ghost', title:'clear the log file', onclick: async () => {
-        if (!confirm('Clear the log file? This cannot be undone.')) return;
+        if (!await confirmModal('Clear the log file? This cannot be undone.')) return;
         const r = await api('/api/logs/clear', { method:'POST' });
-        if (!r.ok) { alert((r.body && r.body.error) || 'could not clear log'); return; }
+        if (!r.ok) { await noticeModal((r.body && r.body.error) || 'could not clear log'); return; }
         renderSection();
       } }
   ];

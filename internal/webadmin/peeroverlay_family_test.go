@@ -207,23 +207,28 @@ func TestPeerOverlayEditRaisesNoDialogOnSuccess(t *testing.T) {
 	if n := strings.Count(body, "confirm("); n != 0 {
 		t.Errorf("peerOverlayEdit raises %d confirm dialogs, want none: the edit is deliberate, reversible, and explained by the cell's tooltip before it is made", n)
 	}
-	if strings.Contains(body, "alert('Saved") {
-		t.Error("a success alert is back")
+	if strings.Contains(body, "noticeModal('Saved") {
+		t.Error("a success notice is back")
 	}
 	if strings.Contains(body, "takes effect on its next restart") {
 		t.Error("the pre-v857 restart claim is back somewhere in this editor; the reload rebuilds the network and applies the address immediately")
 	}
-	// The remaining alerts must all be failure paths.
+	// The remaining notices must all be failure paths. v916 replaced native
+	// alert() with noticeModal throughout; what is asserted is unchanged —
+	// both failures still have to reach the operator, and nothing else may.
 	for _, ok := range []string{
-		"alert((r.body && r.body.error) || 'save failed')",
-		"alert('That looks like an IPv'",
+		"noticeModal((r.body && r.body.error) || 'save failed')",
+		"noticeModal('That looks like an IPv'",
 	} {
 		if !strings.Contains(body, ok) {
-			t.Errorf("expected failure alert is missing: %s", ok)
+			t.Errorf("expected failure notice is missing: %s", ok)
 		}
 	}
-	if n := strings.Count(body, "alert("); n != 2 {
-		t.Errorf("peerOverlayEdit raises %d alerts, want 2 (both failures)", n)
+	if n := strings.Count(body, "noticeModal("); n != 2 {
+		t.Errorf("peerOverlayEdit raises %d notices, want 2 (both failures)", n)
+	}
+	if strings.Contains(body, "alert(") {
+		t.Error("a native alert is back; a suppressed dialog would drop this failure silently")
 	}
 
 	// Removing the dialog must not delete what it said. The tooltip is the only
