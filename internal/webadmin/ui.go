@@ -597,7 +597,7 @@ const indexHTML = `<!doctype html>
 <script>
 const $ = (h) => { const d=document.createElement('div'); d.innerHTML=h.trim(); return d.firstChild; };
 const app = document.getElementById('app');
-const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, geoipLookup:false, enableUpnp:false, allowRemoteShell:false, loginBanMaxFailures:3, loginBanSeconds:900, tlsSource:'self-signed', tlsCommonName:'', tlsNotAfter:'', configHistoryLimit:250, configHistoryCount:0, shellSupported:true, bgpSupported:false, snmpSupported:false, ipv6raSupported:false, lldpSupported:false, syslogSupported:false, selfId:null, selfHostname:'', targetSeq:0, pendingBgpHighlight:null, workerThreads:0, tunQueues:0, tunQueuesSupported:true, udpGSO:false, udpGSOSupported:true, socketBufferMB:16, socketBufferMaxMB:256, perfRestartPending:false, loginBanRestartPending:false, tableView:{} };
+const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, geoipLookup:false, enableUpnp:false, allowRemoteShell:false, loginBanMaxFailures:3, loginBanSeconds:900, tlsSource:'self-signed', tlsCommonName:'', tlsNotAfter:'', configHistoryLimit:250, configHistoryCount:0, shellSupported:true, bgpSupported:false, snmpSupported:false, ipv6raSupported:false, dhcpSupported:false, lldpSupported:false, syslogSupported:false, selfId:null, selfHostname:'', targetSeq:0, pendingBgpHighlight:null, workerThreads:0, tunQueues:0, tunQueuesSupported:true, udpGSO:false, udpGSOSupported:true, socketBufferMB:16, socketBufferMaxMB:256, perfRestartPending:false, loginBanRestartPending:false, tableView:{} };
 // setTarget is the only place state.target is ever assigned — bumping
 // targetSeq alongside it, once, exactly when the *selection itself* actually
 // changes. load()/startPolling()/refreshCluster() each capture targetSeq
@@ -1094,6 +1094,12 @@ const NAV_GROUPS = [
     ['interfaces', 'this host\u2019s network interfaces, addresses and default gateways (read-only)'],
     ['resolver', 'this host\u2019s hostname and default DNS servers'],
     ['time', 'this host\u2019s clock, timezone, and NTP synchronization'],
+    // parapet's System menu runs resolver, time, dhcp, snmp, users, power,
+    // and this is the dhcp that note above used to say gravinet skipped.
+    // Shown on Linux only (state.dhcpSupported, set from /api/config): the
+    // relay half is gravinet's own and the server half drives Kea, and
+    // neither has an implementation on the other platforms.
+    ['dhcp', 'serve DHCP leases through Kea, or relay to an upstream server \u2014 one or the other, never both'],
     // SNMP/LLDP/Syslog each need a real agent on the host (snmpd/
     // lldpd/a syslog daemon) to be anything but an empty page — same
     // "present in the model, but only shown when the host can actually
@@ -1159,6 +1165,7 @@ function sectionHeading(s){
 function sectionVisible(sec){
   if (sec === 'bgp' || sec === 'bgp-peers') return !!state.bgpSupported;
   if (sec === 'ipv6ra') return !!state.ipv6raSupported;
+  if (sec === 'dhcp') return !!state.dhcpSupported;
   if (sec === 'snmp') return !!state.snmpSupported;
   if (sec === 'lldp' || sec === 'l2-peers') return !!state.lldpSupported;
   if (sec === 'syslog') return !!state.syslogSupported;
@@ -1350,6 +1357,7 @@ async function load() {
   // whose RA daemon gravinet can actually render config for, and that daemon
   // is installed on the *targeted* node. See the server's ipv6RASupported().
   state.ipv6raSupported = !!(c.body && c.body.ipv6ra_supported);
+  state.dhcpSupported = !!(c.body && c.body.dhcp_supported);
   // Same idea for System > SNMP, System > LLDP, and System > Syslog:
   // gates on whether snmpd / lldpd / a syslog daemon gravinet knows how to
   // drive are actually usable on the *targeted* node (see the server's
@@ -3434,7 +3442,7 @@ function renderSection() {
        upgrade:secUpgrade,
        metrics:infoMetrics, 'mesh-peers':infoMeshPeers, capture:infoCapture, speedtest:infoSpeedtest, latency:infoLatency,
        'route-table':infoRoutes, 'bgp-peers':secBgpPeers, 'l2-peers':secL2Peers, 'hosts-file':infoHosts, 'dns-state':infoDNS,
-       resolver:secResolver, time:secTime, snmp:secSNMP, lldp:secLLDP, syslog:secSyslog, users:secUsers, power:secPower,
+       resolver:secResolver, time:secTime, dhcp:secDHCP, snmp:secSNMP, lldp:secLLDP, syslog:secSyslog, users:secUsers, power:secPower,
        logs:secLogs, interfaces:secInterfaces, 'config-history':secConfigHistory, readme:secReadme, 'getting-started':secGettingStarted, api:secAPIDoc, license:secLicense, about:infoAbout }[state.section])(c, nets);
   }
   c.querySelectorAll('table').forEach(enhanceTable);
@@ -8507,6 +8515,202 @@ function secRadvd(c){
       say((r.body && r.body.note) || '');
       load();
     };
+  }
+
+  load();
+}
+
+function secDHCP(c){
+  // Outcomes render here, in the page, never in a modal — the same treatment
+  // Traffic > IPv6 RA got in v941 and for the same reasons. Outside the wrap
+  // element that load() rewrites wholesale, so a note about something that
+  // happened during a save outlives the reload that save triggers.
+  const bar = $('<div style="display:none"></div>'); c.appendChild(bar);
+  function say(text, bad){
+    if (!text){ bar.style.display = 'none'; bar.textContent = ''; return; }
+    bar.textContent = text;
+    bar.className = bad ? 'err' : 'hint';
+    bar.style.display = '';
+  }
+  const wrap = $('<div></div>'); c.appendChild(wrap);
+  let ifaceNames = [];
+
+  async function load(){
+    wrap.innerHTML = '<div class="card"><div class="hint">loading\u2026</div></div>';
+    const r = await api('/api/dhcp');
+    if (state.section !== 'dhcp') return;
+    const allIfaces = await systemInterfaces();
+    if (state.section !== 'dhcp') return;
+    // Mesh devices are dropped from the picker: serving DHCP into the overlay
+    // would hand mesh peers a lease, and relaying out of it would forward
+    // their requests to a LAN server that knows nothing about them.
+    const meshIfaces = (r.body && r.body.mesh_ifaces) || [];
+    ifaceNames = allIfaces.filter(n => meshIfaces.indexOf(n) < 0);
+    if (!r || !r.ok || !r.body){ wrap.innerHTML = '<div class="card"><div class="hint">could not load: '+esc((r&&r.body&&r.body.error)||'no response')+'</div></div>'; return; }
+    render(r.body);
+  }
+
+  async function post(body){
+    const r = await api('/api/dhcp', {method:'POST', body:JSON.stringify(body)});
+    if (!r.ok){ say((r.body&&r.body.error)||'save failed', true); return false; }
+    say((r.body && r.body.note) || '');
+    load();
+    return true;
+  }
+
+  function render(b){
+    const d = b.dhcp || {};
+    const mode = d.mode || '';
+    const probs = b.problems || {};
+    wrap.innerHTML = '';
+
+    // The mode switch is the whole page's premise, so it renders first and
+    // alone. Server and relay are mutually exclusive in the model (one field,
+    // not two flags), and showing both editors stacked would suggest they can
+    // both be on.
+    const head = $('<div class="card"></div>');
+    let hh = '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
+      + '<label>role</label><select class="dh-mode">';
+    for (const m of [['','off'],['server','server \u2014 hand out leases (Kea)'],['relay','relay \u2014 forward to an upstream server']])
+      hh += '<option value="'+m[0]+'"'+(m[0]===mode?' selected':'')+'>'+esc(m[1])+'</option>';
+    hh += '</select></div>';
+    if (mode === 'server' && !b.installed)
+      hh += '<div class="err" style="margin-top:8px;font-size:12px">the Kea DHCPv4 server is not installed on this host \u2014 saving a subnet will install it</div>';
+    head.innerHTML = hh;
+    head.querySelector('.dh-mode').onchange = (e) => post({op:'mode', mode:e.target.value});
+    wrap.appendChild(head);
+
+    if (mode === 'server') renderServer(d, probs);
+    else if (mode === 'relay') renderRelay(d, probs);
+  }
+
+  function renderServer(d, probs){
+    const list = d.subnets || [];
+    const card = $('<div class="card"></div>');
+    let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>interface</th><th>subnet</th><th>pool</th><th>router</th><th>dns</th><th>lease</th></tr>';
+    if (!list.length) h += '<tr><td colspan="8" class="empty">no subnets \u2014 click + to serve one</td></tr>';
+    else list.forEach((e,i) => {
+      const on = !e.disabled;
+      h += '<tr class="dhrow'+(on?'':' fw-disabled')+'" data-idx="'+i+'"'
+        + ' data-iface="'+esc(e.iface||'')+'" data-subnet="'+esc(e.subnet||'')+'"'
+        + ' data-pool_start="'+esc(e.pool_start||'')+'" data-pool_end="'+esc(e.pool_end||'')+'"'
+        + ' data-router="'+esc(e.router||'')+'" data-dns="'+esc((e.dns||[]).join(', '))+'"'
+        + ' data-search="'+esc((e.search||[]).join(', '))+'" data-lease="'+esc(e.lease_seconds||0)+'">'
+        + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
+        + '<td class="dh-state"><span class="tag-toggle '+(on?'on':'off')+'" data-dhstate="1" title="double-click to '+(on?'disable':'enable')+'">'+(on?'enabled':'disabled')+'</span></td>'
+        + '<td class="dh-field">'+esc(e.iface||'')+'</td>'
+        + '<td class="dh-field">'+esc(e.subnet||'')+'</td>'
+        + '<td class="dh-field">'+esc((e.pool_start||'')+' \u2013 '+(e.pool_end||''))+'</td>'
+        + '<td class="dh-field">'+esc(e.router||'\u2014')+'</td>'
+        + '<td class="dh-field">'+esc((e.dns||[]).join(', ')||'\u2014')+'</td>'
+        + '<td class="dh-field">'+esc(e.lease_seconds ? e.lease_seconds+'s' : 'default')+'</td></tr>';
+      // Carries a colspan, which puts it outside enhanceTable's isData \u2014 so
+      // it is never sorted away from the row it explains or hidden by a
+      // filter its prose does not match.
+      const why = on ? probs[e.iface] : '';
+      if (why) h += '<tr class="dh-problem"><td colspan="8" class="err" style="font-size:12px">'+esc(why)+'</td></tr>';
+    });
+    const t = $('<div></div>'); t.innerHTML = h+'</table>'; card.appendChild(t);
+    const table = t.querySelector('table');
+    t.querySelectorAll('[data-dhstate]').forEach(tag => {
+      tag.ondblclick = (e) => { e.stopPropagation();
+        const tr = tag.closest('tr');
+        toggleTagState(tag, '/api/dhcp', on => ({op:(on?'enable':'disable'), index:parseInt(tr.dataset.idx,10)}));
+      };
+    });
+    t.querySelectorAll('tr.dhrow .dh-field').forEach(td => {
+      td.title = 'double-click to edit';
+      td.ondblclick = () => dhEdit(td.closest('tr'));
+    });
+    selAllWire(t);
+    table._rowAdd = () => dhAddRow(table);
+    table._rowRemove = () => removeCheckedRows(table, tr => api('/api/dhcp',{method:'POST',body:JSON.stringify({op:'delete',index:parseInt(tr.dataset.idx,10)})}));
+    wrap.appendChild(card);
+    enhanceTable(table);
+  }
+
+  function dhFields(e){
+    e = e || {};
+    return '<td class="selcol"></td><td class="dh-state"><span class="on">enabled</span></td>'
+      + '<td><select class="dhe-iface" style="width:100px">'+dhIfaceOpts(e.iface||'')+'</select></td>'
+      + '<td><input class="dhe-subnet" placeholder="10.1.1.0/24" style="width:120px" value="'+esc(e.subnet||'')+'"></td>'
+      + '<td><input class="dhe-start" placeholder="10.1.1.100" style="width:95px" value="'+esc(e.pool_start||'')+'">'
+      + ' <input class="dhe-end" placeholder="10.1.1.200" style="width:95px" value="'+esc(e.pool_end||'')+'"></td>'
+      + '<td><input class="dhe-router" placeholder="10.1.1.1" style="width:95px" value="'+esc(e.router||'')+'"></td>'
+      + '<td><input class="dhe-dns" placeholder="10.1.1.1, 9.9.9.9" style="width:130px" value="'+esc(e.dns||'')+'"></td>'
+      + '<td><input class="dhe-lease" placeholder="3600" style="width:60px" value="'+esc(e.lease||'')+'">'
+      + ' <button class="sm dhe-save">save</button> <button class="sm dhe-cancel">cancel</button></td>';
+  }
+
+  function dhIfaceOpts(sel){
+    const names = ifaceNames.slice();
+    if (sel && names.indexOf(sel) < 0) names.unshift(sel);
+    let o = names.length ? '' : '<option value="">(no interfaces found)</option>';
+    if (!sel) o += '<option value="" selected>choose\u2026</option>';
+    for (const n of names) o += '<option value="'+esc(n)+'"'+(n===sel?' selected':'')+'>'+esc(n)+'</option>';
+    return o;
+  }
+
+  function dhRead(tr){
+    const csv = (sel) => (tr.querySelector(sel).value||'').split(',').map(x=>x.trim()).filter(Boolean);
+    const lease = parseInt(tr.querySelector('.dhe-lease').value, 10);
+    return {
+      iface: tr.querySelector('.dhe-iface').value.trim(),
+      subnet: tr.querySelector('.dhe-subnet').value.trim(),
+      pool_start: tr.querySelector('.dhe-start').value.trim(),
+      pool_end: tr.querySelector('.dhe-end').value.trim(),
+      router: tr.querySelector('.dhe-router').value.trim(),
+      dns: csv('.dhe-dns'),
+      lease_seconds: isNaN(lease) ? 0 : lease
+    };
+  }
+
+  function dhAddRow(table){
+    const tr = document.createElement('tr');
+    tr.innerHTML = dhFields({});
+    if (!insertNewRow(table, tr)) return;
+    tr.querySelector('.dhe-cancel').onclick = () => { say(''); load(); };
+    tr.querySelector('.dhe-save').onclick = async () => {
+      const body = Object.assign({op:'add'}, dhRead(tr));
+      // The editor stays open on a rejection, so the operator fixes the row
+      // in front of them rather than losing it and starting again.
+      if (!body.iface){ say('choose an interface to serve on', true); return; }
+      post(body);
+    };
+  }
+
+  function dhEdit(tr){
+    if (tr.querySelector('.dhe-iface')) return;
+    const idx = parseInt(tr.dataset.idx,10);
+    const cur = {iface:tr.dataset.iface, subnet:tr.dataset.subnet, pool_start:tr.dataset.pool_start,
+      pool_end:tr.dataset.pool_end, router:tr.dataset.router, dns:tr.dataset.dns, lease:tr.dataset.lease};
+    tr.innerHTML = dhFields(cur);
+    tr.querySelector('.dhe-cancel').onclick = () => { say(''); load(); };
+    tr.querySelector('.dhe-save').onclick = () => post(Object.assign({op:'update', index:idx}, dhRead(tr)));
+  }
+
+  function renderRelay(d, probs){
+    const r = d.relay || {};
+    const card = $('<div class="card"></div>');
+    const ifs = (r.interfaces||[]);
+    let h = '<div class="hint" style="margin-top:0">Requests arriving on the client-facing interfaces are forwarded to every upstream server; the client takes whichever reply arrives first.</div>'
+      + '<div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-start">'
+      + '<div><label>client-facing interfaces</label><br><select class="dh-relayifs" multiple size="5" style="min-width:150px">';
+    for (const n of ifaceNames) h += '<option value="'+esc(n)+'"'+(ifs.indexOf(n)>=0?' selected':'')+'>'+esc(n)+'</option>';
+    h += '</select></div>'
+      + '<div><label>upstream servers</label><br><input class="dh-relaysrv" placeholder="10.0.0.5, 10.0.0.6" style="width:200px" value="'+esc((r.servers||[]).join(', '))+'"></div>'
+      + '<div><label>max hops</label><br><input class="dh-relayhops" placeholder="4" style="width:60px" value="'+esc(r.max_hops||'')+'"></div>'
+      + '</div><div style="margin-top:10px"><button class="sm dh-relaysave">save</button></div>';
+    for (const n of ifs) if (probs[n]) h += '<div class="err" style="margin-top:8px;font-size:12px">'+esc(probs[n])+'</div>';
+    card.innerHTML = h;
+    card.querySelector('.dh-relaysave').onclick = () => {
+      const sel = [...card.querySelectorAll('.dh-relayifs option')].filter(o=>o.selected).map(o=>o.value);
+      const hops = parseInt(card.querySelector('.dh-relayhops').value, 10);
+      post({op:'relay', interfaces:sel,
+        servers:(card.querySelector('.dh-relaysrv').value||'').split(',').map(x=>x.trim()).filter(Boolean),
+        max_hops: isNaN(hops) ? 0 : hops});
+    };
+    wrap.appendChild(card);
   }
 
   load();

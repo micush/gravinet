@@ -50,7 +50,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "943"
+	version = "944"
 	commit  = "none"
 )
 
@@ -947,6 +947,15 @@ func cmdRun(args []string) {
 			}
 		}
 
+		// Bring the DHCP relay back up if this node is configured to relay.
+		// It runs inside this process rather than as a unit of its own, so
+		// unlike Kea it does not come back on its own after a restart. A
+		// failure is a warning rather than fatal: a node that cannot relay
+		// should still carry its mesh.
+		if err := webadmin.StartDHCPRelay(cfg.DHCP); err != nil {
+			logx.Warnf("dhcp relay: %v", err)
+		}
+
 		// Turn off host acceptance (and, where the platform exposes it,
 		// sending) of ICMP IPv4/IPv6 redirects — an unauthenticated redirect
 		// can rewrite this host's route table, which matters more here than
@@ -1807,6 +1816,10 @@ func cmdRun(args []string) {
 			if t := getTLS(); t != nil {
 				t.Close()
 			}
+			// Unconditional, and deliberately outside the forwarding gate
+			// below: the relay holds port 67, and whether it needs releasing
+			// has nothing to do with whether this node was asked to forward.
+			webadmin.StopDHCPRelay()
 			if cfg.ForwardingEnabled() {
 				ipfwd.Restore(fwdState)
 			}

@@ -279,6 +279,7 @@ var systemGroup = []groupLeaf{
 	{"interfaces", "this host's network interfaces, addresses and default gateways (read-only)", cmdSystemInterfaces},
 	{"resolver", "this host's hostname and default DNS servers", cmdSystemResolver},
 	{"time", "this host's clock, timezone, and NTP synchronization", cmdSystemTime},
+	{"dhcp", "DHCP role: serve leases through Kea, or relay to an upstream server", cmdSystemDHCP},
 	{"snmp", "read-only SNMPv2c monitoring agent", cmdSystemSNMP},
 	{"lldp", "link-layer discovery (LLDP/CDP) configuration", cmdSystemLLDP},
 	{"syslog", "forward this host's syslog to a remote collector", cmdSystemSyslog},

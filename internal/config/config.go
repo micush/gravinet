@@ -418,6 +418,11 @@ type Config struct {
 	// then, so installing gravinet on a host already running radvd by hand
 	// changes nothing until an operator opts in.
 	RouterAdvert RAConfig `json:"router_advert,omitempty"`
+	// DHCP is this node's DHCP role — serving leases through Kea, relaying
+	// to somebody else's server, or neither. Node-global like BGP above, and
+	// one role at a time: see DHCPMode for why that is a single field rather
+	// than two enable flags.
+	DHCP DHCPConfig `json:"dhcp,omitempty"`
 	// HostInterfaces is host addressing gravinet has been told to own, so it
 	// travels with the configuration: back it up, restore it, and the node's
 	// own IP addresses come back with everything else. Without this, a
@@ -2807,6 +2812,9 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("log_max_size: %v", err)
 		}
 	}
+	if err := c.DHCP.Validate(); err != nil {
+		return fmt.Errorf("dhcp: %v", err)
+	}
 	// SNMP grew from a single community string to a list in v736. Migrate
 	// any legacy value into the new field (only if the new field is still
 	// unset, so a config already using Communities is never second-guessed)
@@ -3480,6 +3488,235 @@ func (h HostSettings) Validate() error {
 				return fmt.Errorf("dns server %q: %v", d, err)
 			}
 		}
+	}
+	return nil
+}
+
+// --- DHCP ------------------------------------------------------------------
+
+// DHCPMode is what this node does about DHCP on its LANs.
+//
+// The three values are exclusive by construction rather than by validation,
+// and that is the point. A node is either handing out leases or forwarding
+// somebody else's, never both: a relay that answers locally would shadow the
+// central server for the subnets it relays, and hosts would get addresses
+// from whichever raced first. Modelling it as one mode makes that
+// unrepresentable, where two independent enable flags would make it a rule
+// somebody has to remember to check — and, eventually, forget.
+type DHCPMode string
+
+const (
+	// DHCPOff is the default: gravinet writes no Kea config, runs no relay,
+	// and touches no service. A host already running its own DHCP server is
+	// untouched until an operator opts in.
+	DHCPOff DHCPMode = ""
+	// DHCPServer hands out leases from pools defined here, rendered into
+	// Kea's config and applied by driving kea-dhcp4.
+	DHCPServer DHCPMode = "server"
+	// DHCPRelay forwards client traffic to upstream servers. Implemented in
+	// gravinet itself (internal/dhcrelay) rather than by a daemon: a relay is
+	// a few hundred lines of well-specified forwarding, and every packaged
+	// one is either end-of-life or a second copy of a daemon this node is
+	// already running for something else.
+	DHCPRelay DHCPMode = "relay"
+)
+
+// DHCPConfig is this node's DHCP configuration. Node-global, like BGP and the
+// router advertisements: one DHCP role per host.
+type DHCPConfig struct {
+	// Mode selects server, relay, or neither. See DHCPMode.
+	Mode DHCPMode `json:"mode,omitempty"`
+	// Subnets are the pools served in server mode. Ignored in relay mode —
+	// kept rather than cleared, so an operator can switch to relay for an
+	// afternoon and switch back without retyping their pools.
+	Subnets []DHCPSubnet `json:"subnets,omitempty"`
+	// Relay is the forwarding configuration used in relay mode. Kept in the
+	// same way when the mode is something else.
+	Relay DHCPRelayConfig `json:"relay,omitempty"`
+}
+
+// DHCPSubnet is one served pool.
+type DHCPSubnet struct {
+	// Iface is the interface this subnet is reachable on. Kea works out
+	// which subnet a request belongs to from the interface address, but
+	// naming it here is what lets gravinet check the pairing before Kea has
+	// to, and what the interface picker writes.
+	Iface string `json:"iface"`
+	// Subnet is the CIDR being served, e.g. 10.1.1.0/24.
+	Subnet string `json:"subnet"`
+	// PoolStart and PoolEnd bound the range of addresses handed out. Both
+	// required: a pool that defaults to "the whole subnet" would hand out
+	// the router's own address, and the first symptom is an operator losing
+	// the box they are configuring it from.
+	PoolStart string `json:"pool_start"`
+	PoolEnd   string `json:"pool_end"`
+	// Router is the default gateway offered to clients (option 3). Empty
+	// means offer none, which is a thing an operator can mean on a segment
+	// that routes through something else.
+	Router string `json:"router,omitempty"`
+	// DNS are the name servers offered (option 6), Search the domain search
+	// list (option 119).
+	DNS    []string `json:"dns,omitempty"`
+	Search []string `json:"search,omitempty"`
+	// LeaseSeconds is the lease time. 0 means Kea's own default.
+	LeaseSeconds int `json:"lease_seconds,omitempty"`
+	// Disabled parks a subnet without deleting it, the same convention every
+	// other table here uses.
+	Disabled bool `json:"disabled,omitempty"`
+}
+
+// DHCPRelayConfig is the relay half.
+type DHCPRelayConfig struct {
+	// Interfaces are the client-facing links to listen on. A relay has to be
+	// told which links are downstream: listening everywhere would relay the
+	// upstream server's own replies back at it.
+	Interfaces []string `json:"interfaces,omitempty"`
+	// Servers are the upstream DHCP servers to forward to. More than one is
+	// allowed and each gets a copy, which is how a relay does redundancy —
+	// there is no failover to sequence, the client takes whichever answer
+	// arrives and the rest are ignored.
+	Servers []string `json:"servers,omitempty"`
+	// MaxHops bounds the relay hop count before a packet is dropped, per RFC
+	// 1542 §4.1.1. 0 means the default of 4.
+	MaxHops int `json:"max_hops,omitempty"`
+}
+
+// EnabledSubnets returns the served subnets actually in service. Empty unless
+// the mode is server, so every caller gets the mutual exclusion for free
+// rather than each having to remember to check the mode first.
+func (c DHCPConfig) EnabledSubnets() []DHCPSubnet {
+	if c.Mode != DHCPServer {
+		return nil
+	}
+	var out []DHCPSubnet
+	for _, s := range c.Subnets {
+		if !s.Disabled && strings.TrimSpace(s.Iface) != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// RelayActive reports whether the relay should be running. Same shape as
+// EnabledSubnets and for the same reason.
+func (c DHCPConfig) RelayActive() bool {
+	return c.Mode == DHCPRelay && len(c.Relay.Interfaces) > 0 && len(c.Relay.Servers) > 0
+}
+
+// ValidDHCPMode checks a mode string.
+func ValidDHCPMode(m DHCPMode) error {
+	switch m {
+	case DHCPOff, DHCPServer, DHCPRelay:
+		return nil
+	}
+	return fmt.Errorf("unknown DHCP mode %q: want server, relay, or empty for off", string(m))
+}
+
+// Validate checks the whole DHCP configuration, including the parts not
+// currently in service.
+//
+// Both halves are checked whichever mode is selected. The alternative —
+// validating only the active half — means a subnet that has been broken since
+// an edit made in relay mode saves cleanly and fails at the moment somebody
+// switches back to server, which is the moment they least want to be
+// debugging a pool boundary.
+func (c DHCPConfig) Validate() error {
+	if err := ValidDHCPMode(c.Mode); err != nil {
+		return err
+	}
+	seen := map[string]bool{}
+	for _, s := range c.Subnets {
+		if err := s.Validate(); err != nil {
+			return err
+		}
+		// Two pools on one interface is not a second scope, it is two
+		// answers to the same question. Kea would take one.
+		k := strings.ToLower(strings.TrimSpace(s.Iface))
+		if seen[k] {
+			return fmt.Errorf("interface %s has more than one subnet configured", s.Iface)
+		}
+		seen[k] = true
+	}
+	return c.Relay.Validate()
+}
+
+// Validate checks one served subnet.
+func (s DHCPSubnet) Validate() error {
+	if strings.TrimSpace(s.Iface) == "" {
+		return fmt.Errorf("interface name is required")
+	}
+	net, err := netip.ParsePrefix(strings.TrimSpace(s.Subnet))
+	if err != nil {
+		return fmt.Errorf("subnet %q: %v", s.Subnet, err)
+	}
+	// DHCPv4 only in this release. DHCPv6 addressing is reached through the
+	// router advertisement's M flag and is a different scope shape in Kea; a
+	// v6 subnet accepted here would render into a v4 server that ignores it.
+	if !net.Addr().Is4() {
+		return fmt.Errorf("subnet %q: DHCP is IPv4 here — IPv6 addressing comes from Traffic > IPv6 RA", s.Subnet)
+	}
+	if net.Addr() != net.Masked().Addr() {
+		return fmt.Errorf("subnet %q: has host bits set, did you mean %s?", s.Subnet, net.Masked())
+	}
+	lo, err := netip.ParseAddr(strings.TrimSpace(s.PoolStart))
+	if err != nil || !lo.Is4() {
+		return fmt.Errorf("pool start %q: must be an IPv4 address", s.PoolStart)
+	}
+	hi, err := netip.ParseAddr(strings.TrimSpace(s.PoolEnd))
+	if err != nil || !hi.Is4() {
+		return fmt.Errorf("pool end %q: must be an IPv4 address", s.PoolEnd)
+	}
+	if hi.Less(lo) {
+		return fmt.Errorf("pool %s-%s: ends before it starts", lo, hi)
+	}
+	// A pool outside its own subnet is the error that produces a server which
+	// starts, runs, and hands out addresses nothing on the link can use.
+	for _, a := range []netip.Addr{lo, hi} {
+		if !net.Contains(a) {
+			return fmt.Errorf("pool address %s is outside subnet %s", a, net)
+		}
+	}
+	if s.Router != "" {
+		r, err := netip.ParseAddr(strings.TrimSpace(s.Router))
+		if err != nil || !r.Is4() {
+			return fmt.Errorf("router %q: must be an IPv4 address", s.Router)
+		}
+		if !net.Contains(r) {
+			return fmt.Errorf("router %s is outside subnet %s, so no client could reach it", r, net)
+		}
+		// A gateway inside the pool gets handed to a client as its own
+		// address, and then two hosts answer for it.
+		if !r.Less(lo) && !hi.Less(r) {
+			return fmt.Errorf("router %s is inside the pool %s-%s, so it could be leased to a client", r, lo, hi)
+		}
+	}
+	for _, d := range s.DNS {
+		if a, err := netip.ParseAddr(strings.TrimSpace(d)); err != nil || !a.Is4() {
+			return fmt.Errorf("dns %q: must be an IPv4 address", d)
+		}
+	}
+	if s.LeaseSeconds < 0 || s.LeaseSeconds > 315360000 {
+		return fmt.Errorf("lease seconds %d: must be between 0 and 315360000 (ten years), or 0 for the default", s.LeaseSeconds)
+	}
+	return nil
+}
+
+// Validate checks the relay half.
+func (r DHCPRelayConfig) Validate() error {
+	for _, s := range r.Servers {
+		a, err := netip.ParseAddr(strings.TrimSpace(s))
+		if err != nil || !a.Is4() {
+			return fmt.Errorf("relay server %q: must be an IPv4 address", s)
+		}
+		// A relay forwards to a unicast address. Broadcast would be relayed
+		// straight back onto a link, and the loop is only bounded by the hop
+		// count.
+		if a.IsMulticast() || a.IsUnspecified() || a == netip.AddrFrom4([4]byte{255, 255, 255, 255}) {
+			return fmt.Errorf("relay server %q: must be a unicast address", s)
+		}
+	}
+	if r.MaxHops < 0 || r.MaxHops > 16 {
+		return fmt.Errorf("max hops %d: must be between 0 and 16, or 0 for the default of 4", r.MaxHops)
 	}
 	return nil
 }

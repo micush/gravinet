@@ -2,6 +2,74 @@
 
 ---
 
+## v944 — 2026-08-24
+
+**New: System > DHCP. Serve leases through Kea, or relay to an upstream server — one role or the other, never both.**
+
+### One field, not two switches
+
+`config.DHCPMode` is a single value: off, server, or relay. The alternative — an enable flag per half — would have made "serving and relaying at once" a rule somebody has to remember to check, and then forget. A relay that answered locally would shadow the central server for the subnets it relays, and clients would take whichever raced first.
+
+`EnabledSubnets()` returns nothing outside server mode and `RelayActive()` is false outside relay mode, so every caller inherits the exclusion instead of each re-deriving it. The renderer, the preflight and the CLI all go through those two.
+
+The model only makes it unrepresentable in the *config*, though. On the host it still has to be torn down, so every apply stops the role that is not selected **before** starting the one that is — including when neither is. A relay still forwarding while Kea starts answering would give one link two servers for the length of an apply, which is long enough.
+
+Both halves are kept when the other is active. Switching to relay for an afternoon does not discard the pools, and both are validated whichever is running: validating only the live half means a subnet broken during an edit made in relay mode saves cleanly and fails when somebody switches back, which is the moment they least want to be debugging a pool boundary.
+
+### Relay: in-tree
+
+New `internal/dhcrelay`, DHCPv4. `prepareRequest` and `replyTarget` are the whole protocol surface — stamp `giaddr`, bump hops, forward; match the reply's `giaddr` and send it back broadcast or unicast.
+
+In-tree rather than driven as a daemon, which is the opposite of how radvd, FRR and now Kea are handled. RFC 2131 §4.3.5 and RFC 1542 §4.1 are four pages between them and there is no state to keep, while every packaged relay is either end-of-life (ISC dhcrelay) or a second copy of a daemon this node already runs for something else. Neither is worth this project's first module dependency.
+
+Three things the protocol requires that are easy to get wrong, and are each pinned by a test:
+
+- **`giaddr` is set only when it is zero.** A non-zero one means another relay is already in the path and owns the reply; overwriting it sends the server's answer here instead of to the relay the client can hear.
+- **Two independent loop bounds.** The hop limit is RFC 1542's; the `giaddr == self` check catches a packet this relay already stamped arriving back on a link it listens on, which is the loop a hop count bounds rather than prevents.
+- **A reply to an addressless client is broadcast to 255.255.255.255**, not the subnet broadcast — the client has no netmask yet to derive one from.
+
+**The socket binding is the part that does not survive the obvious approach.** Binding the interface's own address gives a socket that never sees a request, because a client with no address broadcasts and a unicast-bound socket is not delivered broadcast. Binding the wildcard receives them but loses the one fact the relay exists to record: which link they came from. `SO_BINDTODEVICE` resolves it — bind wildcard, confine to one interface — with `SO_REUSEADDR`/`SO_REUSEPORT` because a node relaying for several LANs opens one of these per LAN on port 67, and `SO_BROADCAST` to answer an addressless client.
+
+That makes the relay Linux-only, and it is refused rather than approximated elsewhere: the BSDs spell it `IP_RECVIF` plus a source lookup and Windows differently again, and a relay that guessed the arrival link would not fail — it would hand clients addresses from another LAN's subnet.
+
+The relay runs inside the daemon, so it has no unit to bring it back. `webadmin.StartDHCPRelay` runs it at startup and `StopDHCPRelay` releases port 67 on clean exit — the latter deliberately outside the `ForwardingEnabled` gate it was first written inside, since whether a socket needs releasing has nothing to do with whether this node was asked to forward.
+
+### Server: Kea
+
+`internal/webadmin/kea.go` renders `/etc/kea/kea-dhcp4.conf` and drives the unit, the same shape as the radvd and FRR integrations: own the file, regenerate it whole, never edit in place, set aside anything gravinet did not write rather than clobbering it.
+
+One difference earns its own note. **Kea's config is JSON, so this renders through `encoding/json`.** Every text renderer in this tree carries a hand-written escape guard — `radvd.go` runs `safeToken` over operator strings because a stray brace in a search domain would break out of the line it was written on. Here the marshaller escapes and there is nothing to escape wrong; a test feeds a search domain crafted to inject a sibling key and checks it comes back out of the parser as the same string.
+
+The ownership marker moves inside the document for the same reason — a comment line is not something `json.Marshal` will emit, and a file whose first line had to be written outside the marshaller is one this code could no longer round-trip.
+
+Kea is named only the interfaces it serves, never its `"*"` wildcard, which is what keeps a DHCP server off every other link on the host — most importantly off the mesh devices, where answering would hand overlay peers a lease. `refuseMeshIface` backs that up on save, since a picker is a convenience and not a control.
+
+### Preflight, per v942
+
+The same class of failure, one field over. Kea matches a request to a scope by the receiving interface's address, so an interface addressed outside the subnet it is configured to serve gets a server that starts, runs, logs nothing unusual and never answers. The relay's version is that an interface with no IPv4 address has no `giaddr` to stamp.
+
+Both are reported in the apply note and again on every page load, under the row they belong to, in an `.err` line carrying a `colspan` so `enhanceTable`'s `isData` leaves it attached to its row.
+
+### Installer and gating
+
+`INSTALL_KEA`/`--no-kea`/`ensure_kea`, mirroring `ensure_radvd`, with two differences called out where the operator makes the choice. The package is `kea-dhcp4-server` on Debian/Ubuntu and `kea` on Fedora/RHEL/Arch, so both are tried rather than going through one `pkg_install`; and unlike `--no-radvd`, declining does not hide the page — the relay half needs no daemon, so the section is gated on `GOOS` alone and the server half reports its own missing daemon and offers to install it on apply.
+
+`system dhcp <list|mode>` is the CLI leaf, read-and-switch only, the same split `cmdIPv6RA` draws: reproducing a subnet editor as flags would be a second, weaker copy of a form that already validates.
+
+### Verification
+
+`go build ./...` clean, `go vet` and `gofmt -l` clean and identical to baseline (the same six files, none of them mine), `bash -n` clean on the installer. `internal/dhcrelay`, `internal/config`, `internal/webadmin`, `cmd/gravinet` and `internal/hostnet` all pass — the webadmin suite included, which parses the page JavaScript, and `cmd/gravinet`'s nav-parity suite, which is what requires the CLI leaf. `internal/dhcrelay` cross-builds for freebsd, openbsd, darwin and windows, where `listen` refuses.
+
+The exclusion was checked by mutation, not just by passing: removing the relay teardown from the apply fails `TestApplyDHCPStopsTheRoleThatIsNotSelected`, and making `EnabledSubnets` ignore the mode fails `TestDHCPModeIsExclusive`.
+
+**Not verified, and the list is long.** No packet has been relayed. No Kea has parsed a file this renders, and no lease has been issued — the JSON is checked against the schema in Kea's documentation, not against a running daemon. `ensure_kea` has never executed on any distro, and the two unit names in `keaService` are from packaging knowledge rather than from a unit observed starting. The page has not been rendered in a browser, and the mode switch has never been clicked. Both socket options and the `SO_BINDTODEVICE` bind are reasoned from the man pages; nothing here has held port 67.
+
+**DHCPv6 is not in this release**, in either half. A v6 relay is a different message shape — Relay-Forward and Relay-Reply wrap the client's message rather than amending it in place, multicast to `ff02::1:2` — and v6 addressing through Kea is a different scope shape reached via the RA's M flag. A v6 subnet is refused on save rather than accepted into a v4 server that would ignore it. Which leaves a real coupling unbuilt: turning on a DHCPv6 server would have to set `RAInterface.Managed` for that link, or hosts do SLAAC and DHCPv6 both. That is the first thing to design when v6 lands.
+
+The two pre-existing failures from v887 are untouched.
+
+---
+
 ## v943 — 2026-08-24
 
 **Assigning a global IPv6 address to a host interface now also gives it a link-local if it has none, and turns on that interface's IPv6 forwarding knob. v942 made the missing link-local visible; this stops it happening.**
