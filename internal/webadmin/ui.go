@@ -5157,59 +5157,79 @@ function netJoinRow(table){
 // The API has always accepted an "addr" for exactly this (see
 // handleNetworkToken, and "network token NAME addr HOST:PORT" on the CLI, which
 // warns when the count comes back zero). No backticks in this comment: it lives
-// inside indexHTML, which is a Go raw string, and a backtick here ends it. This row never sent one and never read
-// the returned count, so the web path could mint an inert token in silence
-// while the CLI path warned about the identical token. Hence the address field,
-// prefilled with a guess the operator can correct, and the seed count reported
-// under the token either way.
+// inside indexHTML, which is a Go raw string, and a backtick here ends it.
+//
+// This row never sent one, so the web path could mint an inert token without
+// ever offering anywhere to put the address that would fix it. Hence the field,
+// prefilled with a guess the operator can correct.
+//
+// It does not report the seed count. That was tried and removed by request, so
+// the field is the whole of the remedy on this path: fill it and the token has
+// something to dial; leave it empty on a network with no seeds and the token is
+// inert with nothing here saying so. The CLI still warns in that case.
+//
+// The field only appears when the network has no enabled seed of its own. With
+// seeds configured, NetworkToken already embeds every one of them and the token
+// bootstraps without help, so the field would be asking for an address nothing
+// needs. On a network with none, it is the only thing standing between the
+// operator and an inert token, which is why it shows there and nowhere else.
+//
+// "Enabled" is the operative word: a disabled seed keeps its address in the
+// list but is deliberately not embedded (see SeedList.EnabledAddrs), so a
+// network whose only seed is disabled needs the field exactly as much as one
+// with no seeds at all. Counting cf.seeds.length would hide it there and mint
+// an inert token in silence.
 async function netTokenRow(table){
   const sel = selCheckedRows(table);
   if (sel.length !== 1){ await noticeModal('tick exactly one network to generate a join token for'); return; }
   const net = sel[0].dataset.netname || sel[0].dataset.netid;
+  const seeded = (cfgOf(sel[0].dataset.netid).seeds||[]).some(s => (s.address||s.Address||'') && !(s.disabled||s.Disabled));
   const tr = document.createElement('tr');
   const cols = table.rows[0].cells.length;
   tr.innerHTML = '<td class="selcol"></td><td colspan="'+(cols-1)+'">'
     + '<div class="row" style="gap:8px;align-items:center;margin-bottom:4px"><span style="color:var(--mut)">join token for <b>'+esc(net)+'</b> (expires in 1 hour):</span><button class="sm tk-copy" disabled>Copy</button></div>'
-    + '<div class="row" style="gap:6px;align-items:center;margin-bottom:4px"><span style="color:var(--mut)">this node\'s reachable address for joiners:</span>'
-    + '<input class="tk-addr" placeholder="host:port" style="width:200px">'
-    + '<button class="ghost sm tk-regen">regenerate</button></div>'
+    + (seeded ? '' :
+        '<div class="row" style="gap:6px;align-items:center;margin-bottom:4px"><span style="color:var(--mut)">this node\'s reachable address for joiners:</span>'
+      + '<input class="tk-addr" placeholder="host:port" style="width:200px" title="edit and press Enter (or click away) to re-mint the token with this address"></div>')
     + '<textarea class="tk-tok" readonly rows="3" style="width:100%;font-family:monospace;font-size:11px;resize:vertical;box-sizing:border-box">generating\u2026</textarea>'
-    + '<div class="tk-seeds" style="margin-top:4px;color:var(--mut)"></div>'
     + '</td>';
   if (!insertNewRow(table, tr)) return;
   const tok = tr.querySelector('.tk-tok'), copyBtn = tr.querySelector('.tk-copy');
-  const addr = tr.querySelector('.tk-addr'), note = tr.querySelector('.tk-seeds');
-  addr.value = tokenSeedGuess();
+  const addr = tr.querySelector('.tk-addr'); // absent when the network has its own seeds
+  if (addr) addr.value = tokenSeedGuess();
   copyBtn.onclick = async () => {
     try { await navigator.clipboard.writeText(tok.value); }
     catch(err){ tok.focus(); tok.select(); window.prompt('Copy the join token:', tok.value); }
     refresh(); // copying closes the box
   };
-  const generate = async () => {
+  // takeFocus only on the first mint. On a re-mint the operator is mid-tab out
+  // of the address field, and this call lands asynchronously after that: moving
+  // focus here would snatch it from whatever they just tabbed to, which is the
+  // Copy button as often as not.
+  const generate = async (takeFocus) => {
     tok.value = 'generating\u2026';
     copyBtn.disabled = true;
-    note.textContent = '';
-    note.style.color = 'var(--mut)';
-    const r = await api('/api/network/token', { method:'POST', body: JSON.stringify({ net:net, addr:addr.value.trim(), expires:'1h' }) });
+    const r = await api('/api/network/token', { method:'POST', body: JSON.stringify({ net:net, addr:(addr ? addr.value.trim() : ''), expires:'1h' }) });
     if (!r.ok || !r.body || r.body.error){ tok.value = (r.body && r.body.error) || 'could not generate token'; return; }
     tok.value = r.body.token;
     copyBtn.disabled = false;
-    const n = r.body.seeds | 0;
-    if (n > 0){
-      note.textContent = 'carries ' + n + ' bootstrap address' + (n === 1 ? '' : 'es') + ' for the joiner to dial.';
-    } else {
-      // Deliberately not a modal: the token is still worth copying, since a
-      // joiner can be given a seed by hand afterwards. So this warns without
-      // blocking, and says the same thing the CLI says.
-      note.style.color = 'var(--danger)';
-      note.textContent = 'No bootstrap address in this token \u2014 the joiner will hold the right keys but have nothing to dial, so nothing will form. '
-        + 'Put this node\'s reachable underlay endpoint in the field above and regenerate, or add a seed to the network first.';
+    // No seed-count reporting here at all, by request: neither the ordinary
+    // case nor the zero-seed one. The handler still returns r.body.seeds and
+    // the CLI still warns on zero, so a token with nothing to dial in it is
+    // now silent on this path and loud on that one -- deliberately, not by
+    // oversight. The address field above is what keeps the count off zero.
+    if (takeFocus){
+      tok.focus();
+      tok.select();
     }
-    tok.focus();
-    tok.select();
   };
-  tr.querySelector('.tk-regen').onclick = generate;
-  await generate();
+  // Editing the address re-mints, rather than a button asking to. change
+  // fires on Enter and on blur, which is exactly when the new value is ready,
+  // and a token costs nothing to mint: NetworkToken only encodes keys,
+  // subnets and seeds into a string -- nothing is registered server-side and
+  // there is nothing to revoke, so a discarded token is free.
+  if (addr) addr.onchange = () => generate(false);
+  await generate(true);
 }
 
 // tokenSeedGuess proposes an underlay endpoint for this node to advertise in a

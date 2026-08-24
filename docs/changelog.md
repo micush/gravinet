@@ -2,6 +2,150 @@
 
 ---
 
+## v936 — 2026-08-24
+
+**The join token's address field now appears only when the network has no enabled seed of its own. With seeds configured the token already bootstraps, so the field was asking for an address nothing needed.**
+
+### What changed
+
+`internal/webadmin/ui.go`, `netTokenRow`. The row resolves the ticked network through the existing `cfgOf` helper and builds the address line only when that network has no enabled seed:
+
+    const seeded = (cfgOf(sel[0].dataset.netid).seeds||[])
+      .some(s => (s.address||s.Address||'') && !(s.disabled||s.Disabled));
+
+When the field is absent nothing is sent for it, and `NetworkToken` embeds the network's own seeds exactly as it always has. `addr`, `addr.onchange` and the prefill are all guarded on the element existing rather than assumed.
+
+### Enabled, not present
+
+The test is on **enabled** seeds, not on `cf.seeds.length`, and the difference is not academic. A disabled seed keeps its address in the list and is deliberately not embedded in a token — that is `SeedList.EnabledAddrs`, and the seed table's own tooltip says so. A network whose only seed is disabled therefore needs the address field exactly as much as a network with none.
+
+Counting the raw list would hide the field on precisely that network and mint an inert token in silence, which is the bug this whole run started from, reintroduced through a different door. An entry with an empty address is skipped for the same reason: it contributes nothing to the token.
+
+### Verification
+
+**Partial**, as the five releases before it: node available here, no Go toolchain.
+
+`node --check` passes on the script extracted from `indexHTML`.
+
+`netTokenRow` and `tokenSeedGuess` were extracted and run against stand-in DOM objects across five seed-list shapes. Field shown and address sent: no seeds — shown, sent; one enabled seed — hidden, nothing sent; only a disabled seed — shown, sent; one enabled plus one disabled — hidden, nothing sent; a seed entry with an empty address — shown, sent.
+
+That harness covers the branch and what reaches the API. It does not prove the row renders in a browser, and it stubs `cfgOf` against a hand-built `state.cfg` rather than a real config payload — so the field names it reads (`seeds`, `address`, `disabled`) are checked against `config.Seed`'s JSON tags by eye, not by round-tripping one.
+
+Not run: `go build ./...`, `go vet`, `gofmt`, and the Go test suites. Eight releases.
+
+The two pre-existing failures from v887 are untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
+## v935 — 2026-08-24
+
+**Removes the zero-seed warning under the join token, by request. The address field stays; the reporting around it is now gone entirely.**
+
+### What changed
+
+`internal/webadmin/ui.go`, `netTokenRow`. The `tk-seeds` element, the `--danger` warning text, and the per-mint reset of both are gone, along with the now-dead `note` handle. `netTokenRow`'s doc comment no longer claims a seed count is reported, since it isn't.
+
+Together with v934 this reverses the reporting half of v932 completely: the web token row now says nothing about how many bootstrap addresses a token carries, in either direction.
+
+### What this costs, recorded once
+
+The address field remains, and it is the whole of the remedy on this path. Filled, the token carries something to dial. Left empty on a network with no configured seeds, the token is inert exactly as it was before v932 — the joiner gets the right keys for a network it cannot find — and nothing on this screen says so.
+
+The handler still returns the count and `TokenSeedCount` still computes it; only the UI stopped looking. The CLI still prints its warning on zero. So the asymmetry v932 was written to close is back: same API, same inert token, one path warns and the other does not. Deliberately now rather than by oversight, which is the only part of it this entry can fix.
+
+Nothing about what a token *carries* changed in v932, v933, v934 or here. Configured seeds and cached peers have been embedded since long before this run, and still are.
+
+### Verification
+
+**Partial**, as the four releases before it: node available here, no Go toolchain.
+
+`node --check` passes on the script extracted from `indexHTML`. No `tk-seeds`, `note`, `carries` or `danger` reference survives in `netTokenRow`; the single remaining mention of `r.body.seeds` is in a comment explaining why nothing reads it.
+
+The flow was re-run against stand-in DOM objects: a zero-seed mint now produces a token and emits no warning, and a re-mint via `onchange` still leaves focus where the operator put it.
+
+Not run: `go build ./...`, `go vet`, `gofmt`, and the Go test suites. Seven releases.
+
+The two pre-existing failures from v887 are untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
+## v934 — 2026-08-24
+
+**Drops the "carries N bootstrap addresses" line under the join token. The zero-seed warning stays. No change to what a token carries — configured seeds were already in there.**
+
+### The success line is gone
+
+The note under the token now stays empty unless something is wrong. A token that carries seeds is the ordinary case and does not need narrating; the whole reason the line exists is the inert token, and a line that appears on every mint is a line an operator learns to stop reading — including on the one mint where it says something.
+
+The zero-seed warning is unchanged and still red: no bootstrap address, joiner holds the right keys with nothing to dial, put an endpoint in the field or add a seed. If that was meant to go too, say so — but it is the whole of what v932 fixed, so it is kept absent an explicit "remove it".
+
+### On the second request: already the case
+
+Configured seeds are already embedded, and have been. `NetworkToken` walks three sources into the token:
+
+    for _, s := range extraSeeds { addSeed(s) }          // the address field
+    for _, s := range n.Seeds { if !s.Disabled { addSeed(s.Address) } }
+    for _, s := range n.PeerCache { addCached(s) }
+
+The address typed in the UI and every enabled seed on the network land in the token's `Seeds` group, deduplicated, and the joiner adopts them as its own explicit seeds. This node's recently-seen peers travel in a separate `PeerCache` group so the joiner gets the same number of bootstrap candidates without someone else's transient peer list being written into its permanent seed config.
+
+Two deliberate exclusions, both pre-existing and both left alone:
+
+- **Disabled seeds are skipped.** A token is a claim that these addresses are worth dialling, and handing a joiner an address this node has itself taken out of service spends its cold start on a known-dead endpoint.
+- **Nothing is inferred about this node's own address.** That is what the address field supplies, and why v932 added it.
+
+So the screenshot's "carries 1" was correct: one address from the field, zero configured seeds on that network (the seeds column reads 0), nothing in the peer cache on a first node. With seeds defined it would already have counted them. Nothing was changed here, because nothing was wrong here.
+
+### Verification
+
+**Partial**, as v932 and v933: node available, no Go toolchain.
+
+`node --check` passes on the script extracted from `indexHTML`. The only remaining occurrence of "carries" in `netTokenRow` is in a comment.
+
+The seed-embedding claim above is from reading `NetworkToken` and `TokenSeedCount`, not from running them — `internal/config`'s tests have not been executed here.
+
+Not run: `go build ./...`, `go vet`, `gofmt`, and the Go test suites. Six releases now.
+
+The two pre-existing failures from v887 are untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
+## v933 — 2026-08-24
+
+**Removes the regenerate button v932 added one release ago. It had exactly one job — re-mint the token after the address is edited — and the input's own change event does that job without asking the operator to.**
+
+### Why it was there and why it shouldn't be
+
+v932 made the address field editable, which made the displayed token stale the moment it was edited, which needs a re-mint. A button was reached for because the change was being thought about as a state machine with a transition needing a trigger, rather than as an operator who has just typed an address and wants the token for it. `change` fires on Enter and on blur, which is precisely when the new value is ready.
+
+Nothing argues for the extra click. Minting is free: `NetworkToken` encodes the network's keys, subnets and seed list into a string and returns it. No server-side record, no counter, no revocation list, nothing to clean up. A token generated and discarded costs exactly the CPU to base64 it, so there is no reason to make the operator ask.
+
+### What changed
+
+`internal/webadmin/ui.go`, `netTokenRow` only.
+
+The button is gone; `addr.onchange` re-mints. The field carries a title explaining that editing re-mints, since the affordance is now implicit and something has to say so.
+
+`generate` takes a `takeFocus` argument, true only on the first mint. It ended with `tok.focus(); tok.select()`, which was right as a one-shot and wrong on a re-mint: that call lands asynchronously *after* the operator has tabbed out of the address field, so it would snatch focus from whatever they tabbed to — the Copy button, as often as not. This is a bug the button was hiding, since a click doesn't move focus the way tabbing does. Removing the button is what surfaced it.
+
+The zero-seed warning no longer says "and regenerate", which would have been advice to press a button that isn't there.
+
+### Verification
+
+**Partial**, same shape as v932: node here, no Go toolchain.
+
+`node --check` passes on the script extracted from `indexHTML`, and no reference to `tk-regen` or the word "regenerate" survives anywhere in the file.
+
+The mint/re-mint flow was extracted and run against stand-in DOM objects: the first mint focuses the token and reports one bootstrap address; a re-mint triggered by `onchange` while focus sits on the Copy button leaves it there and still updates the token; a re-mint returning zero seeds sets `--danger` and the full warning text.
+
+That harness proves the control flow and the focus decision. It does not prove the row renders, that `change` fires as expected in a real browser, or that the layout still holds without the button — none of that is exercised without a browser.
+
+Not run: `go build ./...`, `go vet`, `gofmt`, and the Go test suites, which now include v931's `TestNetAddRowMatchesHeaderColumns` and v928's four extraction tests. That gap is now five releases old.
+
+The two pre-existing failures from v887 are untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
 ## v932 — 2026-08-24
 
 **Web admin › Networks › join token: the token carried no bootstrap address, so a joiner got the right keys for a network it had no way to find and nothing formed. The API always accepted an address for this and the CLI always warned when it was missing; the web path sent neither and reported neither.**
