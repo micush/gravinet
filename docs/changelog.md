@@ -2,6 +2,105 @@
 
 ---
 
+## v932 — 2026-08-24
+
+**Web admin › Networks › join token: the token carried no bootstrap address, so a joiner got the right keys for a network it had no way to find and nothing formed. The API always accepted an address for this and the CLI always warned when it was missing; the web path sent neither and reported neither.**
+
+### The report
+
+"When i create a token and copy it to another peer, it doesn't contain the seed ip address of the peer token. So, if there's no seeds defined, nothing forms because it doesn't know about any seeds."
+
+Confirmed, and the silence is the worse half. `NetworkToken` embeds three things as bootstrap candidates: the caller's `extraSeeds`, the network's own enabled seeds, and this node's `PeerCache`. On a first node all three are empty — no seeds configured yet, no peers ever seen — so the token is syntactically valid, carries the network id, keys and subnets, and is completely inert. The joiner applies it, has nothing to dial, and forms nothing. No error, at either end.
+
+The address was never meant to be inferred. `NetworkToken`'s `extraSeeds` exists precisely so the minting node can advertise its own reachable endpoint, `handleNetworkToken` has always read an `Addr` from the request, and the CLI exposes it as `network token NAME addr HOST:PORT` and prints a warning when `TokenSeedCount` comes back zero.
+
+`netTokenRow` — the ● button — sent `{net, expires:'1h'}` and nothing else, and discarded the `seeds` count the handler returns alongside the token. So the web path could mint an inert token in silence while the CLI printed a warning about the identical token. Same API, same network, same zero seeds, one path telling the operator and the other not.
+
+### What changed
+
+`internal/webadmin/ui.go`, `netTokenRow` only. No API change; the handler already supported all of this.
+
+The row now has an editable address field, prefilled by a new `tokenSeedGuess()`, and a **regenerate** button. Under the token it reports how many bootstrap addresses the token actually carries, and when that is zero it says so in `--danger`: the joiner will hold the right keys and have nothing to dial. That is the CLI's warning, in the place the web operator was going to look.
+
+The warning is not a modal. A seedless token is still worth copying — a joiner can be handed a seed by hand afterwards — so it informs rather than blocks.
+
+### On guessing the address
+
+`tokenSeedGuess()` prefills a visible field. It does not put anything in the token that the operator has not seen, and that restraint is the point rather than timidity:
+
+- The observed public endpoint (`state.nat.public`) is the honest answer when it exists — peers have reported back the address they actually reach this node at. It needs at least one connected peer, so it is empty on exactly the first node of a network, which is the case that produced the report.
+- The fallback is the address the operator is currently reaching the web admin on, paired with the first mesh UDP port (or TCP, when UDP is off). Often right, and wrong in ways this code cannot see: an admin reached over the overlay, or through the managed-cluster proxy, yields an address no joiner can dial from outside.
+
+A wrong address embedded silently is worse than none, because it looks like it worked and fails later at the joiner. In a field, the operator can see it is their LAN address and decide whether that is what they meant.
+
+### Not changed
+
+`NetworkToken` still does not consult the engine for this node's own candidates, and `Backend` gains no method. The daemon does know more than the UI does here — `localEndpoints()` gathers host candidates (interface addresses plus port) and would cover the first-node case that `state.nat.public` cannot. Wiring it through means an exported accessor on the engine and a new `Backend` method, which is a larger change than this bug needs, and it inherits the same "which of these addresses is actually reachable" problem the fallback above has. Worth doing deliberately, not as part of a UI fix.
+
+### Verification
+
+**Partial, and better than the last three releases.** This environment has node but no Go toolchain.
+
+`TestUIScriptParses`'s check was run directly: the script blocks were extracted from `indexHTML` and `node --check` passes. That check earned its keep immediately — the first draft of this change put backticks around `addr` and `network token NAME addr HOST:PORT` in a comment, and that comment lives *inside* `indexHTML`, which is a Go raw string. The backticks terminated the literal 500KB early. Extraction returned a 1-byte script and a truncated raw string, which is how it was caught; a Go build would have failed outright on the wreckage after it. `ui.go` warns about exactly this in two other comments, and it still happened. The comment now says so a third time, at the third site.
+
+`tokenSeedGuess` was exercised in node across six cases: public endpoint preferred, fallback to admin host with the UDP port, fallback to the TCP port when UDP is off, IPv6 literals bracketed, and empty when no port or no host is known.
+
+v931's `netAddRow` column alignment was re-checked against this tree and still holds at 13 of 13.
+
+Not run: `go build ./...`, `go vet`, `gofmt`, and the Go test suites, including v931's new `TestNetAddRowMatchesHeaderColumns`. The generate/regenerate flow and the warning were not exercised in a browser — `node --check` proves the script parses, not that the row behaves.
+
+The two pre-existing failures from v887 are untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
+## v931 — 2026-08-24
+
+**Networks › create row: the subnet4 and subnet6 inputs sat one column left of their own headers, and four columns had no cell at all. Reported from the UI, reproduced in the markup, fixed with the trailing span now derived from the header instead of written as a number.**
+
+### The report
+
+"When i create a new mesh network, the fields don't line up." Correct, and worth being precise about what was wrong, because the row was doing two independent things wrong at once.
+
+The Networks header is 13 columns: selcol, name, id, state, mesh, subnet4, overlay4, subnet6, overlay6, mtu, peers, seeds, notes. `netAddRow` built seven cells:
+
+    selcol | name | id | state | ne-s4 | ne-s6 | buttons colspan=3
+
+There is no cell for **mesh**, so every field after state landed one column left of where it belonged: the subnet4 input under the `mesh` header, the subnet6 input under `subnet4`. Both inputs still worked and still submitted the right value. They were simply labelled by the wrong header, which is worse than a field that visibly breaks — nothing looks broken, so the reasonable reading is that subnet4 goes in the box under `subnet4`, and that box was subnet6's.
+
+Separately, the row covered 9 of 13 columns. `colspan="3"` was correct when the header had 9; the header grew and the literal did not, so `mtu`, `peers`, `seeds` and `notes` had no cell, and the row stopped short of the table's right edge.
+
+### The fix
+
+`internal/webadmin/ui.go`, `netAddRow`: one cell per header column through subnet4 — including the missing `mesh` cell and an `overlay4` cell — and the button cell spanning `Math.max(1, cols-8)`, with `cols` read from `table.rows[0].cells.length`.
+
+Deriving the span is the part that matters beyond this bug. `netJoinRow`, ten lines below, already did exactly that. Had `netAddRow` done the same, the second defect could not have happened: the next column added would have landed inside the span instead of off the end of the row. A literal colspan is correct only until someone edits the header, and the person editing the header is not looking at this function.
+
+The em dashes in the new `mesh` and `overlay4` cells are the table's existing "not set yet" marker, the same one `id` and `state` already used here. All four are in the same category: not chosen at create time, filled in by the server afterwards (`mesh` defaults to full).
+
+### Test
+
+`ui_addrow_columns_test.go` — `TestNetAddRowMatchesHeaderColumns`. It reads the real column order out of the header, walks the create row's cells, and asserts each named input lands under the header it is named for and that the row covers the full width. It also fails on any literal `colspan=` in the row, which is the drift mechanism rather than the drift itself.
+
+The point is that neither defect is visible from reading `netAddRow` alone — both need the header in front of you, in another function 120 lines away. The test is what puts them side by side.
+
+Confirmed to fail on the previous markup, reporting all three: `ne-s4` under `mesh`, `ne-s6` under `subnet4`, and coverage short of the header. Follows the static-scan approach of `TestNoStandaloneTrOrTdViaInnerHTML` — this package has no JS runtime in its test suite, so the served page is checked as text.
+
+### Not audited
+
+There are roughly fourteen other inline create-row builders in `ui.go` — `seedAddRow`, `hostAddRow`, `fwAddRow`, `usersAddRow` and the rest — and a scan shows literal colspans in most of them. Whether any is *misaligned* needs each row matched against its own table's header, which was not done here. The new test covers `netAddRow` only. If another table shows the same symptom, that is the first place to look, and generalising the test to the other rows is the fix worth making rather than another one-off.
+
+### Verification
+
+**Not run.** No Go toolchain in the environment this was prepared in, so `go build ./...`, `go vet`, `gofmt` and `go test ./internal/webadmin/` have not been executed. The test's logic was verified by reimplementing it against the real `ui.go` text, which is not the same as compiling it.
+
+One collision was caught by inspection rather than by a compiler: the new file first defined a `between` helper that `natui_test.go` already declares in this package, which would have failed to build. It now reuses the existing one. That is the kind of thing a build catches in a second and review catches only sometimes, so treat the build as required here rather than a formality.
+
+The gap named in v930 is still open: `go vet ./...`, `gofmt -l .`, and the package test suites remain unrun across v928–v931.
+
+The two pre-existing failures from v887 are untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
 ## v930 — 2026-08-23
 
 **No code changes. v928 and v929 both shipped with their Verification sections reading "Not run"; this release amends them to what has since been confirmed, and records the amendment rather than making it silently.**

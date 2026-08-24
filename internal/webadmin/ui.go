@@ -5082,12 +5082,32 @@ function secNetworks(c) {
 
 function netAddRow(table){
   const tr = document.createElement('tr');
+  // One cell per header column, in header order — selcol, name, id, state,
+  // mesh, subnet4, overlay4, subnet6 — and then the buttons spanning every
+  // column that remains. A cell short anywhere before the last input shifts
+  // every field after it one column left of its own header, which is exactly
+  // what a missing mesh cell used to do to subnet4 and subnet6 here.
+  //
+  // The trailing span is computed from the live header rather than written
+  // as a number, the same way netJoinRow does it, because a literal is only
+  // correct until someone adds a column: this row said colspan="3" while the
+  // header had grown to 13 columns, leaving mtu, peers, seeds and notes with
+  // no cell at all. Deriving it means the next column added lands in the
+  // span instead of off the end of the row.
+  //
+  // The em dashes are the same "not set yet" marker the rendered rows use.
+  // mesh, id and state all belong in that category: none is chosen here, the
+  // server fills them in on create (mesh defaults to full).
+  const cols = table.rows[0].cells.length;
   tr.innerHTML = '<td class="selcol"></td>'
     + '<td><input class="ne-name" placeholder="name" style="width:110px"></td>'
-    + '<td><span class="net-id">—</span></td><td>—</td>'
+    + '<td><span class="net-id">—</span></td>'
+    + '<td>—</td>'
+    + '<td>—</td>'
     + '<td><input class="ne-s4" placeholder="subnet4 (optional)" style="width:160px"></td>'
+    + '<td>—</td>'
     + '<td><input class="ne-s6" placeholder="subnet6 (optional)" style="width:140px"></td>'
-    + '<td colspan="3"><button class="sm ne-save">create</button> <button class="ghost sm ne-cancel">cancel</button></td>';
+    + '<td colspan="'+Math.max(1, cols-8)+'"><button class="sm ne-save">create</button> <button class="ghost sm ne-cancel">cancel</button></td>';
   if (!insertNewRow(table, tr)) return;
   tr.querySelector('.ne-name').focus();
   tr.querySelector('.ne-cancel').onclick = () => refresh();
@@ -5125,9 +5145,23 @@ function netJoinRow(table){
 }
 
 // netTokenRow generates a 1-hour join token for the single ticked network and
-// shows it with a Copy button that copies the token and closes the box. No
-// inputs, no prompts. The token bundles the network's keys, subnets, and every
-// seed/cached peer the host knows.
+// shows it with a Copy button that copies the token and closes the box.
+//
+// The token bundles the network's keys, subnets, and every seed/cached peer
+// this host knows -- and on a first node there are none of the latter, which is
+// the case this row exists to make visible. A token with no bootstrap address
+// in it is syntactically fine and completely inert: the joiner ends up holding
+// the right keys for a network it has no way to find, so nothing forms and
+// nothing says why.
+//
+// The API has always accepted an "addr" for exactly this (see
+// handleNetworkToken, and "network token NAME addr HOST:PORT" on the CLI, which
+// warns when the count comes back zero). No backticks in this comment: it lives
+// inside indexHTML, which is a Go raw string, and a backtick here ends it. This row never sent one and never read
+// the returned count, so the web path could mint an inert token in silence
+// while the CLI path warned about the identical token. Hence the address field,
+// prefilled with a guess the operator can correct, and the seed count reported
+// under the token either way.
 async function netTokenRow(table){
   const sel = selCheckedRows(table);
   if (sel.length !== 1){ await noticeModal('tick exactly one network to generate a join token for'); return; }
@@ -5136,20 +5170,71 @@ async function netTokenRow(table){
   const cols = table.rows[0].cells.length;
   tr.innerHTML = '<td class="selcol"></td><td colspan="'+(cols-1)+'">'
     + '<div class="row" style="gap:8px;align-items:center;margin-bottom:4px"><span style="color:var(--mut)">join token for <b>'+esc(net)+'</b> (expires in 1 hour):</span><button class="sm tk-copy" disabled>Copy</button></div>'
+    + '<div class="row" style="gap:6px;align-items:center;margin-bottom:4px"><span style="color:var(--mut)">this node\'s reachable address for joiners:</span>'
+    + '<input class="tk-addr" placeholder="host:port" style="width:200px">'
+    + '<button class="ghost sm tk-regen">regenerate</button></div>'
     + '<textarea class="tk-tok" readonly rows="3" style="width:100%;font-family:monospace;font-size:11px;resize:vertical;box-sizing:border-box">generating\u2026</textarea>'
+    + '<div class="tk-seeds" style="margin-top:4px;color:var(--mut)"></div>'
     + '</td>';
   if (!insertNewRow(table, tr)) return;
   const tok = tr.querySelector('.tk-tok'), copyBtn = tr.querySelector('.tk-copy');
+  const addr = tr.querySelector('.tk-addr'), note = tr.querySelector('.tk-seeds');
+  addr.value = tokenSeedGuess();
   copyBtn.onclick = async () => {
     try { await navigator.clipboard.writeText(tok.value); }
     catch(err){ tok.focus(); tok.select(); window.prompt('Copy the join token:', tok.value); }
     refresh(); // copying closes the box
   };
-  const r = await api('/api/network/token', { method:'POST', body: JSON.stringify({ net:net, expires:'1h' }) });
-  if (!r.ok || !r.body || r.body.error){ tok.value = (r.body && r.body.error) || 'could not generate token'; return; }
-  tok.value = r.body.token;
-  copyBtn.disabled = false;
-  tok.focus(); tok.select();
+  const generate = async () => {
+    tok.value = 'generating\u2026';
+    copyBtn.disabled = true;
+    note.textContent = '';
+    note.style.color = 'var(--mut)';
+    const r = await api('/api/network/token', { method:'POST', body: JSON.stringify({ net:net, addr:addr.value.trim(), expires:'1h' }) });
+    if (!r.ok || !r.body || r.body.error){ tok.value = (r.body && r.body.error) || 'could not generate token'; return; }
+    tok.value = r.body.token;
+    copyBtn.disabled = false;
+    const n = r.body.seeds | 0;
+    if (n > 0){
+      note.textContent = 'carries ' + n + ' bootstrap address' + (n === 1 ? '' : 'es') + ' for the joiner to dial.';
+    } else {
+      // Deliberately not a modal: the token is still worth copying, since a
+      // joiner can be given a seed by hand afterwards. So this warns without
+      // blocking, and says the same thing the CLI says.
+      note.style.color = 'var(--danger)';
+      note.textContent = 'No bootstrap address in this token \u2014 the joiner will hold the right keys but have nothing to dial, so nothing will form. '
+        + 'Put this node\'s reachable underlay endpoint in the field above and regenerate, or add a seed to the network first.';
+    }
+    tok.focus();
+    tok.select();
+  };
+  tr.querySelector('.tk-regen').onclick = generate;
+  await generate();
+}
+
+// tokenSeedGuess proposes an underlay endpoint for this node to advertise in a
+// join token. It is a starting value for an editable field, never something
+// embedded behind the operator's back, because every source here can be wrong
+// in a way only the operator can see.
+//
+// The observed public endpoint is the honest answer when it exists: peers have
+// reported back the address they actually reach this node at. It needs at least
+// one connected peer, so it is empty on precisely the first node of a network
+// -- the case that produced "nothing forms".
+//
+// The fallback is the address the operator is currently reaching this web admin
+// on, paired with the first mesh port. That is a guess and can be wrong in ways
+// that are obvious to a human and invisible here: an admin reached over the
+// overlay, or through the managed-cluster proxy, yields an address no joiner
+// can dial. Which is exactly why it lands in a visible field instead of in the
+// token.
+function tokenSeedGuess(){
+  if (state.nat && state.nat.public) return state.nat.public;
+  const port = (state.udpPorts && state.udpPorts[0]) || (state.tcpPorts && state.tcpPorts[0]) || 0;
+  let host = location.hostname || '';
+  if (!host || !port) return '';
+  if (host.indexOf(':') >= 0 && host.charAt(0) !== '[') host = '[' + host + ']'; // IPv6 literal
+  return host + ':' + port;
 }
 
 // netResetRow drops every current peer session on each ticked network and
