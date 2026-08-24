@@ -8327,6 +8327,25 @@ function secInterfaces(c){
 }
 
 function secRadvd(c){
+  // Outcomes on this page are reported here, in the page, and never in a
+  // modal. Saving an RA row is an ordinary edit on a table that redraws from
+  // the server the moment it succeeds — the redraw is the confirmation, and a
+  // dialog on top of it is a second thing to dismiss for no information. What
+  // a modal was genuinely carrying is a failure, or a side effect the table
+  // does not show (radvd being installed, a hand-written radvd.conf being
+  // displaced), so those come out here instead of being dropped.
+  //
+  // Deliberately outside wrap, which load() rewrites wholesale: a note about
+  // something that happened during a save has to outlive the reload that save
+  // triggers, or it would be written and erased in the same tick.
+  const bar = $('<div style="display:none"></div>'); c.appendChild(bar);
+  function say(text, bad){
+    if (!text){ bar.style.display = 'none'; bar.textContent = ''; return; }
+    bar.textContent = text;
+    bar.className = bad ? 'err' : 'hint';
+    bar.style.display = '';
+  }
+
   const wrap = $('<div></div>'); c.appendChild(wrap);
 
   async function load(){
@@ -8346,6 +8365,14 @@ function secRadvd(c){
   function render(b){
     const ra = b.ra || {};
     const list = ra.interfaces || [];
+    // Why an interface cannot advertise, keyed by interface name. A row whose
+    // state says "enabled" is describing the configuration, and on this page
+    // that is not the same claim as "advertising" — radvd will start happily
+    // on an interface with no link-local and then never send anything. The
+    // reason goes under the row it belongs to rather than in the message line
+    // at the top, which is for what happened during a save; this is a standing
+    // condition and has to still be there on the next visit.
+    const probs = b.problems || {};
     wrap.innerHTML = '';
     const card = $('<div class="card"></div>');
     // No banners here. The page is only reachable when the daemon is
@@ -8369,6 +8396,12 @@ function secRadvd(c){
         + '<td class="ra-field">'+esc(e.preference||'medium')+'</td>'
         + '<td class="ra-field">'+esc((e.dns||[]).join(', ')||'\u2014')+'</td>'
         + '<td class="ra-field">'+esc((e.search||[]).join(', ')||'\u2014')+'</td></tr>';
+      // Carries a colspan, which is what keeps it out of enhanceTable's
+      // isData — so it is never sorted away from the row it explains, and
+      // never hidden by a filter that its prose does not happen to match.
+      // The same guard the help-annotation row relies on.
+      const why = on ? probs[e.iface] : '';
+      if (why) h += '<tr class="ra-problem"><td colspan="7" class="err" style="font-size:12px">'+esc(why)+'</td></tr>';
     });
     const t = $('<div></div>'); t.innerHTML = h+'</table>'; card.appendChild(t);
     const table = t.querySelector('table');
@@ -8447,13 +8480,15 @@ function secRadvd(c){
     const tr = document.createElement('tr');
     tr.innerHTML = fields(tr, {});
     if (!insertNewRow(table, tr)) return;
-    tr.querySelector('.rae-cancel').onclick = () => load();
+    tr.querySelector('.rae-cancel').onclick = () => { say(''); load(); };
     tr.querySelector('.rae-save').onclick = async () => {
       const body = Object.assign({op:'add'}, readFields(tr));
-      if (!body.iface){ await noticeModal('choose an interface to advertise on'); return; }
+      // The editor stays open on a rejection, so the operator fixes the row
+      // they are looking at rather than losing it and starting again.
+      if (!body.iface){ say('choose an interface to advertise on', true); return; }
       const r = await api('/api/radvd', {method:'POST', body:JSON.stringify(body)});
-      if (!r.ok){ await noticeModal((r.body&&r.body.error)||'add failed'); return; }
-      if (r.body && r.body.note) await noticeModal(r.body.note);
+      if (!r.ok){ say((r.body&&r.body.error)||'add failed', true); return; }
+      say((r.body && r.body.note) || '');
       load();
     };
   }
@@ -8464,12 +8499,12 @@ function secRadvd(c){
     const cur = {iface:tr.dataset.iface, prefixes:tr.dataset.prefixes, dns:tr.dataset.dns, search:tr.dataset.search,
       preference:tr.dataset.preference};
     tr.innerHTML = fields(tr, cur);
-    tr.querySelector('.rae-cancel').onclick = () => load();
+    tr.querySelector('.rae-cancel').onclick = () => { say(''); load(); };
     tr.querySelector('.rae-save').onclick = async () => {
       const body = Object.assign({op:'update', index:idx}, readFields(tr));
       const r = await api('/api/radvd', {method:'POST', body:JSON.stringify(body)});
-      if (!r.ok){ await noticeModal((r.body&&r.body.error)||'update failed'); return; }
-      if (r.body && r.body.note) await noticeModal(r.body.note);
+      if (!r.ok){ say((r.body&&r.body.error)||'update failed', true); return; }
+      say((r.body && r.body.note) || '');
       load();
     };
   }

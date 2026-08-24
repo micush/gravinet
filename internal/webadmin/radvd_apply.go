@@ -76,7 +76,7 @@ func applyRouterAdvert(c config.RAConfig) (note string, err error) {
 			return "", fmt.Errorf("write %s: %w", radvdConfPath, err)
 		}
 		raService("stop")
-		return installed + backedUp + "router advertisements stopped (no interfaces enabled)", nil
+		return noteworthy(installed, backedUp), nil
 	}
 
 	conf := renderRadvd(c)
@@ -92,7 +92,44 @@ func applyRouterAdvert(c config.RAConfig) (note string, err error) {
 		return "", fmt.Errorf("wrote %s but the radvd service would not start — check `journalctl -u radvd` (or the rtadvd log on FreeBSD)", radvdConfPath)
 	}
 	raService("enable")
-	return fmt.Sprintf("%s%sadvertising on %d interface(s)", installed, backedUp, len(ifaces)), nil
+	// Last, and after the restart rather than before it: a running daemon is
+	// not evidence that anything is being advertised. See radvd_preflight.go
+	// — an interface with no link-local leaves radvd started, quiet and
+	// silent about being quiet, which is the one failure this whole path
+	// could not otherwise report. Reported rather than refused: the config is
+	// correct and worth keeping, and the condition is on the host, fixable
+	// without coming back here.
+	return noteworthy(installed, backedUp, radvdProblemNote(c)), nil
+}
+
+// noteworthy assembles the note from the things an operator could not have
+// seen for themselves, and returns "" when there are none.
+//
+// The note is a modal. Every other handler in this package raises one for a
+// caveat — a partial success, a side effect, something that did not go the way
+// the request implied — and stays silent when a request simply worked; the
+// resolver handler's contract says so in as many words. This one used to
+// return "advertising on N interface(s)" on the way out of an ordinary save,
+// which is not a caveat but a restatement of the row the operator is looking
+// at, and it put a dialog in front of them on every single save.
+//
+// Installing radvd and displacing a hand-written radvd.conf stay in: both are
+// changes to the host that nothing on the page shows and that the operator did
+// not directly ask for. Stopping the daemon when the last interface is
+// disabled comes out — that one is visible in the table, which is the request
+// itself.
+func noteworthy(parts ...string) string {
+	return strings.TrimSuffix(strings.Join(nonEmpty(parts), ""), "; ")
+}
+
+func nonEmpty(in []string) []string {
+	out := in[:0:0]
+	for _, s := range in {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // handleRouterAdvert serves the RA editor: GET returns the stored config plus
@@ -117,11 +154,19 @@ func (s *Server) handleRouterAdvert(w http.ResponseWriter, r *http.Request) {
 				meshIfaces = append(meshIfaces, i.Iface)
 			}
 		}
+		// problems is computed per request rather than remembered from the
+		// last apply. The conditions it reports are properties of the host,
+		// not of the save: an interface goes down, or comes back without a
+		// link-local, long after the row that named it was written. An
+		// operator who opens this page to find out why a LAN is not
+		// autoconfiguring should be told on arrival, not only if they save
+		// something.
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ra":          cfg.RouterAdvert,
 			"installed":   radvdInstalled(),
 			"owned":       radvdOwned(radvdConfPath),
 			"mesh_ifaces": meshIfaces,
+			"problems":    radvdProblems(cfg.RouterAdvert),
 		})
 		return
 	}

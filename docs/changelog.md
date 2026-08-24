@@ -2,6 +2,181 @@
 
 ---
 
+## v943 — 2026-08-24
+
+**Assigning a global IPv6 address to a host interface now also gives it a link-local if it has none, and turns on that interface's IPv6 forwarding knob. v942 made the missing link-local visible; this stops it happening.**
+
+### Link-local
+
+`internal/hostnet/ipv6.go`. When a spec assigns a static global IPv6 address and the interface carries no `fe80::`, one is derived and added over rtnetlink, the same path every other address on that interface takes.
+
+Derived, not invented. `linkLocalFor` implements the modified EUI-64 rule (RFC 4291 appendix A, RFC 2464 §4) over the interface's hardware address, which is the address the kernel itself would have generated under the default `addr_gen_mode`. That is what makes it safe to do without asking: it is stable across reboots, identical on both sides of a restore, and unique on the link for the same reason a MAC is. If someone later clears `addr_gen_mode` and bounces the link, the kernel generates *this* address, and the interface ends up holding the one it already had rather than a second one.
+
+Refused rather than approximated when there is nothing to derive from: no hardware address, a length the rule does not describe, an all-zero address, or a group-bit address. Two nodes handed the same link-local on one link is a worse outcome than an interface left as it was found.
+
+Best-effort — a link-local that could not be derived does not fail an address edit that worked. It does not go unreported either: v942's RA preflight names an interface with no link-local on the page where the consequence shows up.
+
+### Forwarding
+
+`ensureForwarding6` writes the interface's own `forwarding` knob, through the existing hardened `writeIfaceSysctl6` (single-path-component check, missing knob treated as "no IPv6 here").
+
+**This is not the global switch, which already existed and is already symmetric with IPv4.** `ipfwd.Enable(true, true)` has always written `net.ipv6.conf.all.forwarding` next to `net.ipv4.ip_forward`, and on Linux that write does propagate — `addrconf_fixup_forwarding` sets `devconf_dflt` and then walks every device, so interfaces created afterwards inherit it too. There was no asymmetry there to fix.
+
+What the global write cannot cover is an interface whose *own* knob is set after gravinet's startup — a `sysctl.d` drop-in applied when the link comes up, or a network manager writing per-interface settings. The per-interface value wins, and a router interface with forwarding off is a black hole that advertises itself as a default route.
+
+Only ever on, never off. gravinet has no record of having turned one off and no way to tell a deliberate zero from a default, so it asserts what it needs and does not clear what it did not set.
+
+### Both are gated, and on different things
+
+Both only fire when the spec assigns a **static global** IPv6 address. Not on SLAAC or DHCPv6: there the address comes from the network, gravinet has not been asked to make that interface a router, and turning forwarding on under it would change how the kernel reads the very advertisements it depends on for its own address.
+
+Forwarding is gated a second time, on `ip_forwarding`. That setting is real and means what it says, and gravinet's forwarding story is otherwise entirely host-level — an operator who declined it and then edited an address would have found the per-interface knob turned on by a code path that never mentions forwarding. New `hostnet.SetForwarding6`, called unconditionally at startup from `cfg.ForwardingEnabled()` alongside the `ipfwd` block, so opting out opts out of both. Process-wide rather than a `Spec` field because that is the shape of the setting: one host decision both callers of `Apply` are subject to.
+
+The link-local is deliberately *not* gated on it. A link-local is what makes an interface work on its link at all — neighbour discovery, being a next hop — and is needed whether or not this node routes.
+
+### Placement
+
+After the address work in `Apply`, not before: an edit that adds the first global IPv6 address to an interface is exactly the case this is for, and inspecting beforehand would be inspecting the interface as it was. After both removal loops as well, though `GlobalAddrs` excludes link-locals so the prune could never have taken one anyway.
+
+The link-local counts toward `added`, because that is what it is. Idempotent on the next reconcile pass: the interface has one, so nothing is added and the count is zero.
+
+### Verification
+
+`go build ./...`, `go vet` and `gofmt -l` clean, the last identical to baseline (the same six files, none of them mine). `internal/hostnet`, `cmd/gravinet`, `internal/webadmin`, `internal/config` and `internal/tun` all pass. `internal/hostnet` also cross-builds for freebsd, openbsd, darwin and windows, where both functions are stubs.
+
+The derivation is pinned against the interface from the report that prompted v942 — MAC `0c:0e:41:8a:00:01`, whose kernel link-local would have been `fe80::e0e:41ff:fe8a:1`. The kernel propagation claim above was read out of `addrconf_fixup_forwarding` in `net/ipv6/addrconf.c`, not assumed.
+
+New tests were checked by mutation rather than only by passing: dropping the universal/local bit inversion fails the derivation test, gating on mode alone fails the `assignsV6` test, and moving `SetForwarding6` inside the `ForwardingEnabled` block fails the wiring test.
+
+**Not verified.** Nothing has run against a live interface. No address has actually been added over rtnetlink here, no `forwarding` knob written, and the round trip that matters — assign an address, watch a link-local appear, watch radvd start advertising — has not been observed. In particular a link-local added this way goes through duplicate address detection like any other, and a radvd already running will not notice it until something restarts it; that interaction is reasoned about, not seen.
+
+The two pre-existing failures from v887 are untouched.
+
+---
+
+## v942 — 2026-08-24
+
+**Reported from a live host: radvd configured, running, and advertising nothing. Traffic > IPv6 RA now checks the one precondition radvd needs and cannot report — an interface with no IPv6 link-local address.**
+
+### The report
+
+`/etc/radvd.conf` correct and gravinet-generated. `radvd` running. The page green, the row `enabled`. `tcpdump -i eth1 'ip6[40] == 134'` — nothing, ever.
+
+`ip addr show eth1` had `fd01::1/64 scope global` and no `fe80::` address at all.
+
+That is the whole fault. RFC 4861 §6.1.2 requires a router advertisement to be sourced from the sending interface's link-local address, and radvd implements it literally: `get_iface_addrs()` returns -1 when it finds no `fe80::` on the interface, `setup_iface()` gives up there, and `iface->state_info.ready` is never set. An interface that is never ready is never sent on. Not slowly — never.
+
+### Why nothing said so
+
+The complaint is gated on `IgnoreIfMissing`, which defaults to on (`defaults.h`: `DFLT_IgnoreIfMissing 1`), so it goes to `dlog` at debug level 4 and is suppressed at the default level. radvd parses the file, forks, drops privileges and runs.
+
+So `systemctl status radvd` is green, `journalctl -u radvd` is clean, the config file is right, and the page says enabled. Every surface an operator would think to check agrees the feature is working. gravinet's own failure text made that worse by pointing at `journalctl -u radvd`, which in this case has nothing in it.
+
+This is the failure shape v836 named when it replaced the free-text interface field — "validates, saves, renders into radvd.conf, and then advertises on nothing, with no error anywhere and a page that looks correctly configured". It has now happened for real, in the one precondition nothing checked.
+
+### What changed
+
+New `internal/webadmin/radvd_preflight.go`. `radvdIfaceProblem` reports why an enabled interface will not advertise — absent, down, or no link-local, in that order, since the first two explain a missing link-local rather than being explained by it. `radvdProblems` maps it over the enabled entries; `radvdProblemNote` renders it for the apply note.
+
+Two places consume it:
+
+- **`applyRouterAdvert`**, after the restart rather than before it. A running unit is not evidence that anything is advertised, which is the entire point of the check. Reported through the note, not raised as an error: the configuration is correct and worth keeping, and the condition is on the host.
+- **The `/api/radvd` GET**, as a `problems` map, computed per request rather than remembered from the last apply. These are properties of the host — an interface goes down, or comes back without a link-local, long after the row naming it was written. An operator opening this page to find out why a LAN will not autoconfigure is told on arrival, not only if they save something.
+
+In the table the reason renders under the row it belongs to, in `.err`. It carries a `colspan`, which puts it outside `enhanceTable`'s `isData` — the same guard the help-annotation row has relied on since v904 — so it is never sorted away from its row or hidden by a filter its prose does not match. It stays out of the message line at the top, which v941 established as the place for what happened *during a save*; this is a standing condition.
+
+### What this does not do
+
+It does not fix the interface. A link-local is the kernel's to create: `hostnet` treats it as such, and `HostIface.Validate` refuses to let one be configured as a static address. gravinet reports and points at `addr_gen_mode` and `disable_ipv6`, and that is the whole contribution — which is enough, because the condition is trivial to clear once someone knows it is the condition.
+
+It also does not check IPv6 forwarding. radvd only warns on that and still sends, so it is a different severity and belongs in its own change rather than smuggled in beside a hard failure.
+
+### On where the missing link-local came from
+
+Not from gravinet. The only per-interface IPv6 sysctls it writes are `accept_ra` and `autoconf` (`internal/hostnet/mode_linux.go`), and link-local generation in `addrconf_dev_config()` depends on `disable_ipv6` and `addr_gen_mode` only — `autoconf` is not consulted. Nothing in the tree touches either knob. The suppression is the host image's, and gravinet's job here is to say so rather than to own it.
+
+### Verification
+
+`go build ./...`, `go vet` and `gofmt -l` clean, the last identical to baseline (the same six files, none of them mine). The full `internal/webadmin` suite passes, `uisyntax_test.go` included, which parses the page JavaScript.
+
+The radvd behaviour above was read out of radvd's own source — `get_iface_addrs`, `setup_iface_addrs`, `setup_iface`, `DFLT_IgnoreIfMissing` — and the kernel behaviour out of `net/ipv6/addrconf.c`, rather than inferred.
+
+The new tests fake the interface lookup through the `lookupIfaceRAState` seam: there is no portable way to arrange a real NIC with a global address and no link-local, which is precisely the state worth covering. They were confirmed to fail against the pre-fix behaviour rather than only to pass against the new one.
+
+**Not verified.** No browser, and still no host observed advertising — the fix makes the silent failure visible, and whether the report is the one an operator needs in front of them has not been watched happening. The reported box has not been re-tested with a link-local restored.
+
+The two pre-existing failures from v887 are untouched.
+
+---
+
+## v941 — 2026-08-24
+
+**No modal on Traffic > IPv6 RA, at all. v940 only stopped the routine one; a save that failed, or that installed radvd, still raised a dialog.**
+
+### What changed
+
+`internal/webadmin/ui.go`, `secRadvd`. All five modal calls in the section are gone. Outcomes now render in a message line in the page, above the table: errors in `.err`, notes in `.hint`, nothing at all on an ordinary save.
+
+The line lives outside the `wrap` element that `load()` rewrites wholesale. A note describes something that happened *during* a save, and a save is immediately followed by a reload — put inside `wrap`, it would be written and erased in the same tick.
+
+A rejected save leaves the editor row open, so the operator corrects the row in front of them instead of losing it and retyping. Cancel clears the line.
+
+### On not just deleting them
+
+Four of the five modals were carrying something: three failure paths and the note about a side effect the table cannot show. Dropping those outright would leave a save button that does nothing visible when a save fails, which is the exact failure the dialog-suppression work in v892 was about — a click that does nothing is indistinguishable from a broken button. So they move rather than disappear.
+
+v940's server-side change stands and is what makes the line quiet in the ordinary case: `applyRouterAdvert` returns no note for a plain apply, so there is nothing for the page to show.
+
+### Scope
+
+`secRadvd` only. The shared row helpers this section borrows for the enable/disable toggle and the row delete — `toggleTagState`, `removeCheckedRows` — are used by a dozen other sections and are untouched.
+
+### Verification
+
+`go build ./...` and `go vet` clean, `gofmt -l` unchanged from baseline. The full `internal/webadmin` suite passes, `uisyntax_test.go` included, which parses the page JavaScript.
+
+**Not verified in a browser.** What is checked is that no modal call remains anywhere in `secRadvd`.
+
+The two pre-existing failures from v887 are untouched.
+
+---
+
+## v940 — 2026-08-24
+
+**Saving a Traffic > IPv6 RA row no longer raises a modal. It reported "advertising on N interface(s)" on every successful save — a restatement of the row the operator was already looking at, behind a dialog they had to dismiss.**
+
+### What changed
+
+`internal/webadmin/radvd_apply.go`. `applyRouterAdvert` now returns a note only for the things an operator could not have seen for themselves, and `""` otherwise. The UI is unchanged: it already only raises a modal when a note comes back.
+
+Kept, because both are changes to the host that nothing on the page shows and that the operator did not directly ask for:
+
+- **radvd was installed.** A package appearing on a host is never silent, which is the point v904 made when it added the auto-install.
+- **A hand-written `radvd.conf` was displaced.** The note carries where it went, and that path exists nowhere else.
+
+Dropped:
+
+- **"advertising on N interface(s)".** The table redraws from the server on save. The count is the thing the operator just typed.
+- **"router advertisements stopped (no interfaces enabled)".** Also visible in the table, and it is a description of the request rather than of anything unexpected.
+
+The partial-failure path (`"saved, but: …"`), the missing-daemon path, and every hard error are untouched.
+
+### Why this was the handler's bug and not the UI's
+
+`note` means a caveat everywhere else in this package — a partial success, a side effect, an outcome that did not match what the request implied — and handlers stay silent when a request simply worked. The resolver handler states that contract in its own comment. The RA handler was the one place returning a note unconditionally on success, so the fix belongs there rather than in a special case at the call site: a UI-side filter would have to know which note strings are boring, and the next note added would arrive un-filtered.
+
+That also means the fix covers the enable/disable tag toggle, the row delete and the feature switch, all of which route through the same apply and all of which were modal on success for the same reason.
+
+### Verification
+
+`go build ./...` and `go vet` clean, `gofmt -l` unchanged from baseline. The full `internal/webadmin` suite passes.
+
+**Not verified in a browser.** What is checked is that the handler returns no note for an ordinary apply; that no modal appears is inferred from the UI raising one only on a non-empty note, which is one line of unchanged JavaScript.
+
+The two pre-existing failures from v887 are untouched.
+
+---
+
 ## v939 — 2026-08-24
 
 **Renaming the host under System > Resolver now rewrites gravinet's own advertised hostname too. v938 made `config.Hostname` persistent, which silently broke the rename path that used to work by leaving it empty.**

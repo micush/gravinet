@@ -596,3 +596,163 @@ func TestAutoBGPIsIndependentOfEnabled(t *testing.T) {
 		t.Error("a disabled config with AutoBGP set must still count as managed")
 	}
 }
+
+// --- preflight -------------------------------------------------------------
+//
+// The failure these cover is the one the whole RA feature could not report:
+// radvd running, config correct, page green, nothing on the wire. See
+// radvd_preflight.go for why radvd is silent about it.
+
+// withIfaceStates fakes the host's interfaces for the duration of a test.
+// Anything not named is absent. There is no portable way to arrange a real
+// NIC with a global address and no link-local, which is exactly the state
+// worth testing, so it is faked rather than skipped.
+func withIfaceStates(t *testing.T, m map[string]ifaceRAState) {
+	t.Helper()
+	prev := lookupIfaceRAState
+	lookupIfaceRAState = func(name string) ifaceRAState { return m[name] }
+	t.Cleanup(func() { lookupIfaceRAState = prev })
+}
+
+var ifaceReady = ifaceRAState{present: true, up: true, linkLocal: true}
+
+// An interface carrying a global /64 but no fe80:: cannot source a router
+// advertisement, so radvd never marks it ready and never sends. Nothing else
+// on the apply path can tell: the prefix validates, the file renders, the
+// unit starts.
+func TestRadvdProblemNoLinkLocal(t *testing.T) {
+	withIfaceStates(t, map[string]ifaceRAState{
+		"eth1": {present: true, up: true}, // global address only
+	})
+	got := radvdIfaceProblem("eth1")
+	if got == "" {
+		t.Fatal("an interface with no link-local must be reported: radvd will advertise nothing on it")
+	}
+	if !strings.Contains(got, "link-local") {
+		t.Errorf("the reason has to name the missing thing, got %q", got)
+	}
+	// The operator has to be told where to look, or the report is only a
+	// better-worded dead end than the one they arrived with.
+	if !strings.Contains(got, "addr_gen_mode") {
+		t.Errorf("the reason should point at the host knob to check, got %q", got)
+	}
+}
+
+// A ready interface is not reported. A preflight that cries wolf on a working
+// LAN would be read as decoration and then ignored on the LAN that is broken.
+func TestRadvdProblemSilentWhenReady(t *testing.T) {
+	withIfaceStates(t, map[string]ifaceRAState{"eth1": ifaceReady})
+	if got := radvdIfaceProblem("eth1"); got != "" {
+		t.Errorf("a working interface must report nothing, got %q", got)
+	}
+}
+
+// Absent and down come before the link-local check: both explain a missing
+// link-local rather than being explained by one, and both are what the
+// operator would act on.
+func TestRadvdProblemAbsentAndDownComeFirst(t *testing.T) {
+	withIfaceStates(t, map[string]ifaceRAState{
+		"eth9": {present: true, up: false},
+	})
+	if got := radvdIfaceProblem("eth9"); !strings.Contains(got, "down") {
+		t.Errorf("a down interface should be reported as down, got %q", got)
+	}
+	if got := radvdIfaceProblem("nosuch0"); !strings.Contains(got, "no interface by that name") {
+		t.Errorf("an absent interface should be reported as absent, got %q", got)
+	}
+}
+
+// Only enabled entries are checked. A parked row is not meant to be
+// advertising, so reporting that it is not would hand the operator their own
+// request back as a fault.
+func TestRadvdProblemsSkipDisabled(t *testing.T) {
+	withIfaceStates(t, map[string]ifaceRAState{
+		"eth1": {present: true, up: true}, // broken, but parked
+		"eth2": ifaceReady,
+	})
+	probs := radvdProblems(raCfg(
+		config.RAInterface{Iface: "eth1", Disabled: true},
+		config.RAInterface{Iface: "eth2"},
+	))
+	if len(probs) != 0 {
+		t.Errorf("a disabled row must not be reported, got %v", probs)
+	}
+	// The feature switch counts too: nothing is advertising when it is off.
+	off := radvdProblems(config.RAConfig{Enabled: false, Interfaces: []config.RAInterface{{Iface: "eth1"}}})
+	if len(off) != 0 {
+		t.Errorf("nothing to report while the feature is off, got %v", off)
+	}
+}
+
+// The note is assembled from a map, so it has to be ordered — otherwise two
+// saves that changed nothing produce two different notes.
+func TestRadvdProblemNoteIsOrderedAndEmptyWhenClean(t *testing.T) {
+	withIfaceStates(t, map[string]ifaceRAState{
+		"eth1": {present: true, up: true},
+		"eth2": {present: true, up: false},
+	})
+	cfg := raCfg(config.RAInterface{Iface: "eth2"}, config.RAInterface{Iface: "eth1"})
+	first := radvdProblemNote(cfg)
+	if first == "" {
+		t.Fatal("two broken interfaces and no note")
+	}
+	for i := 0; i < 8; i++ {
+		if radvdProblemNote(cfg) != first {
+			t.Fatal("the note reorders itself between identical applies")
+		}
+	}
+	if strings.Index(first, "eth1") > strings.Index(first, "eth2") {
+		t.Errorf("interfaces should be named in sorted order, got %q", first)
+	}
+	// noteworthy joins its parts with nothing and trims one separator off the
+	// end, so each part has to carry its own.
+	if !strings.HasSuffix(first, "; ") {
+		t.Errorf("note part must end with the separator noteworthy expects, got %q", first)
+	}
+	if n := noteworthy(radvdProblemNote(cfg)); strings.HasSuffix(n, "; ") {
+		t.Errorf("noteworthy should have trimmed the trailing separator, got %q", n)
+	}
+
+	withIfaceStates(t, map[string]ifaceRAState{"eth1": ifaceReady, "eth2": ifaceReady})
+	if got := radvdProblemNote(cfg); got != "" {
+		t.Errorf("a healthy host must produce no note, got %q", got)
+	}
+}
+
+// The preflight has to run after the daemon is restarted, not before. A
+// running unit is not evidence that anything is advertised, and that is the
+// entire point of the check.
+func TestRadvdPreflightRunsAfterRestart(t *testing.T) {
+	i := strings.Index(radvdApplySource, `raService("restart")`)
+	j := strings.Index(radvdApplySource, "radvdProblemNote(c)")
+	if i < 0 || j < 0 {
+		t.Fatal("apply no longer restarts the service or no longer runs the preflight")
+	}
+	if j < i {
+		t.Error("the preflight runs before the restart, so it would report the state of the previous daemon")
+	}
+	// And the page has to be able to show it on arrival, not only after a save.
+	if !strings.Contains(radvdApplySource, `"problems":`) {
+		t.Error("the GET no longer reports per-interface problems, so the table cannot show them")
+	}
+}
+
+// The row's own warning, and the property that keeps it where it belongs:
+// enhanceTable's isData skips rows with a colspan, which is what stops the
+// warning being sorted away from the row it explains or filtered out.
+func TestRadvdUIShowsRowProblem(t *testing.T) {
+	if !strings.Contains(indexHTML, "b.problems") {
+		t.Error("the RA table never reads the problems the server sends")
+	}
+	if !strings.Contains(indexHTML, `class="ra-problem"`) {
+		t.Fatal("no per-row problem line in the RA table")
+	}
+	row := indexHTML[strings.Index(indexHTML, `class="ra-problem"`):]
+	row = row[:200]
+	if !strings.Contains(row, "colspan") {
+		t.Error("the problem row needs a colspan, or enhanceTable sorts and filters it as data")
+	}
+	if !strings.Contains(row, `class="err"`) {
+		t.Error("a row that is not advertising should not be styled as a hint")
+	}
+}

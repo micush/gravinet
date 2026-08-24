@@ -165,6 +165,33 @@ func Apply(s Spec) (added, removed int, err error) {
 			removed++
 		}
 	}
+	// An interface gravinet has just given a global IPv6 address to is meant
+	// to carry routed IPv6, and the address alone does not make it able to.
+	// See ipv6.go: a link-local is what an advertisement and a neighbour
+	// entry are sourced from, and per-interface forwarding is what stops a
+	// router interface being a black hole. Both assert only, never clear.
+	//
+	// After the address work rather than before it, so the interface is in
+	// its final state when it is inspected — an edit that adds the first
+	// global IPv6 address to an interface is exactly the case this is for,
+	// and asking beforehand would be asking about the interface as it was.
+	//
+	// Best-effort: neither failure invalidates an address change that
+	// succeeded. The link-local counts as an add because that is what it is,
+	// and a caller reporting "1 address added" for an edit that added two is
+	// the kind of small lie that costs an operator an hour later on.
+	if s.assignsV6() {
+		if addedLL, err := ensureLinkLocal6(s.Iface); err == nil && addedLL {
+			added++
+		}
+		// Gated separately from the link-local: a link-local is what makes
+		// the interface work at all on the link and is needed whether or not
+		// this node routes, but forwarding is the setting an operator can
+		// have turned off on purpose. See forward6.go.
+		if forward6.Load() {
+			_ = ensureForwarding6(s.Iface)
+		}
+	}
 	// MTU before addresses would be tidier, but an MTU change can bounce the
 	// link on some drivers, and doing that before the new address is on the
 	// interface would drop the very session carrying the request.

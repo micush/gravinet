@@ -33,6 +33,7 @@ import (
 	"gravinet/internal/config"
 	"gravinet/internal/control"
 	"gravinet/internal/crypto"
+	"gravinet/internal/hostnet"
 	"gravinet/internal/hosts"
 	"gravinet/internal/ipfwd"
 	"gravinet/internal/logx"
@@ -49,7 +50,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "939"
+	version = "943"
 	commit  = "none"
 )
 
@@ -917,6 +918,14 @@ func cmdRun(args []string) {
 		// its other interfaces — the on-ramp that makes redistributed routes and NAT
 		// actually carry traffic. Default on; opt out with "ip_forwarding": false.
 		// The prior values are restored on clean shutdown.
+		//
+		// hostnet is told the same thing, on the same terms. It asserts the
+		// per-interface IPv6 forwarding knob on interfaces it gives a global
+		// IPv6 address to — which the global write above covers on a quiet
+		// host, but not on one where something sets that interface's own knob
+		// afterwards. Set unconditionally, including to false, so opting out
+		// opts out of both.
+		hostnet.SetForwarding6(cfg.ForwardingEnabled())
 		var fwdState ipfwd.State
 		if cfg.ForwardingEnabled() {
 			fwdState = ipfwd.Enable(true, true)
