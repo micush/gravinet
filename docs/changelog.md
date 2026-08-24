@@ -2,6 +2,34 @@
 
 ---
 
+## v937 — 2026-08-24
+
+**Documents the join token's address field in the Networks help topic: what it is for, that the prefilled value is a guess, and how it is wrong when it is wrong.**
+
+### What changed
+
+`internal/webadmin/ui.go`, `HELP['networks'].topic` only. Three paragraphs appended to the existing prose, shown when the section's <b>help</b> pill is on. No behaviour change anywhere.
+
+They cover, in order: why the field exists at all (a new network has no seeds, so a token minted without it carries no address and the joiner ends up with the right keys and nowhere to dial); that it only appears when the network has no enabled seed, because configured seeds are embedded automatically; that the prefill is a guess and should be checked before copying; the specific ways it is wrong — a private address from across the internet, `127.0.0.1` from anywhere else, an address reached over the overlay or through the cluster proxy; that nothing validates it, so a wrong address yields a perfectly valid token that never connects; and how to correct it, including the port, since a bare host falls back to the *joining* node's default ports rather than this node's.
+
+### On the guess
+
+This is documentation of a limitation rather than a fix for one, and it is worth being plain about which. The prefill exists so a first network can be brought up without the operator having to know what to type. It is right on a LAN, which is the common case for standing up a second node, and wrong in every case where the admin page is reached by a route the joiner does not share.
+
+Nothing in the mint path can tell the difference, and the count that would have flagged an empty token never flagged a *wrong* one — v935's removal of that warning cost nothing here, because the prefill means the count is essentially never zero. Telling the operator to check the value is the whole of the remedy available on this path. Detecting a bad seed properly belongs on the joining side, where failure is observable.
+
+### Verification
+
+**Partial**, as the six releases before it: node available here, no Go toolchain.
+
+`node --check` passes on the script extracted from `indexHTML`. The `HELP` object was evaluated in node and `HELP['networks'].topic` renders as a single 2,088-character string with the five paragraphs intact and no broken escapes — the entry is a chain of concatenated single-quoted JS strings inside a Go raw string, with `\'` for apostrophes and `\u` escapes throughout, which is exactly the shape that fails silently when it fails.
+
+Not run: `go build ./...`, `go vet`, `gofmt`, and the Go test suites. Nine releases.
+
+The two pre-existing failures from v887 are untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
 ## v936 — 2026-08-24
 
 **The join token's address field now appears only when the network has no enabled seed of its own. With seeds configured the token already bootstraps, so the field was asking for an address nothing needed.**
