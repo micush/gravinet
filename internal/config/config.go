@@ -51,8 +51,16 @@ var AltUDPPorts = []int{443, 4500, 3478, 1194, 500, 53}
 // Config is the whole daemon configuration.
 type Config struct {
 	// Node identity & global behavior.
-	NodeID   string `json:"node_id"`  // stable random id; auto-generated if empty
-	Hostname string `json:"hostname"` // advertised to peers; OS hostname if empty
+	// NodeID identifies this node in every handshake. Generated and written
+	// back to the file at startup when empty (cmd/gravinet's
+	// ensureNodeIdentity): it has to be stable across restarts and distinct
+	// between nodes, and two nodes sharing the empty id cannot peer at all.
+	NodeID string `json:"node_id"`
+	// Hostname is advertised to peers. Taken from the OS hostname and written
+	// back at startup when empty, so after the first run it is a fixed value
+	// in the file rather than one that follows the OS: rename the host and
+	// this keeps the old name until it is edited, or cleared to re-detect.
+	Hostname string `json:"hostname"`
 	LogLevel string `json:"log_level"`
 
 	// Underlay listening. A node listens on a set of UDP ports and a set of

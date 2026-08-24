@@ -2,6 +2,70 @@
 
 ---
 
+## v938 — 2026-08-24
+
+**`node_id` and `hostname` are generated and written back to the config at startup when empty. Two nodes left with the default empty `node_id` could not peer with each other at all, and nothing in the logs said so.**
+
+### What changed
+
+New `ensureNodeIdentity` in `cmd/gravinet/main.go`, called from `runBody` immediately after the log file is opened and before `config.NewStore`. It fills either field if empty and persists the result through `config.WithLock(path, cfg.SaveTo)`.
+
+Placement is deliberate at both ends. After the log file opens, so the line recording a generated id lands somewhere durable rather than only on a console nobody is watching when a service starts at boot. Before `NewStore`, so the store and every later reader — engine, web admin, control socket — see one config that already has the identity in it, instead of each deciding for itself what an empty field means.
+
+Three smaller edits follow from it: the inline hostname fallback in `runBody` is gone, since `ensureNodeIdentity` is now the only place `os.Hostname()` is consulted on this path; the `NodeID` and `Hostname` field docs in `internal/config/config.go` now describe what actually happens; and `shortHostname`'s doc no longer claims a non-empty `config.Hostname` implies a human chose it.
+
+### Why the empty id was not cosmetic
+
+`Config.NodeID` has always been documented as "auto-generated if empty", and it was — but only by `writeDefaultConfig`, which runs when the config file is *missing*. A config written by hand, copied between hosts, or trimmed to the fields someone cared about loaded with `node_id` empty and stayed that way. `cfg.NodeID` went straight into `mesh.Options` untouched.
+
+An empty id is not merely a blank column in the peers table. `internal/mesh`'s `onHSInit` and `onHSResp` both drop any handshake whose payload node id equals the engine's own, on the reasoning that a packet claiming our identity is our own traffic hairpinning off a NAT. That reasoning is sound when ids are distinct. When two nodes both carry `""`, each one sees its own id arriving from the other and refuses the peering outright — `onHSResp` additionally calls `coolSeedAfterRefusal`, so the address is cooled down and retried more slowly. The failure is symmetric, total, and nearly silent: the only trace is a debug-level line attributing it to a NAT hairpin, which is precisely the wrong thing to go looking at.
+
+Generating the id in memory only would have been worse than leaving it. Peers key their tables on the id, so one that changes at every restart turns a single node into an unbounded series of new ones. That is why this writes back, and why `node_id` is persisted even though `hostname` is the more obviously "configured" of the two.
+
+### On persisting the hostname
+
+This one deserves flagging rather than burying, because it cuts against a principle this codebase states explicitly elsewhere. The comment on `ControlSocket` in `config.Default()` argues that a derivable default should be left empty and resolved at runtime — writing the current value into the file freezes it, "exactly how the stale `/run/gravinet.sock` outlived its fix."
+
+The OS hostname is derivable in exactly that sense, and persisting it does freeze it. After this change, `hostnamectl set-hostname` no longer reaches gravinet: the node keeps advertising the name captured on its first start until someone edits the config, or clears the field to re-detect. Previously the OS name was followed on every boot.
+
+It is being done because it is what was asked for, and there is a real argument for it — the hostname is gossiped mesh-wide and used for bare-name resolution, so a name that changes under peers without warning is its own kind of surprise, and pinning it makes the advertised value explicit and editable. But it is a behaviour change, not a bug fix, and it is the half of this release to reverse if the argument does not hold: delete the `cfg.Hostname == ""` block in `ensureNodeIdentity` and restore the four-line fallback in `runBody`.
+
+`node_id` carries none of this ambiguity. It is random, nothing can re-derive it, and empty is actively broken.
+
+### Edges
+
+An OS hostname that is unreadable, empty, or reduces to nothing under `shortHostname` (the degenerate leading-dot case, `.cush.local`) is left unset with a warning rather than replaced by an invented name — a name matching nothing an operator could look up is worse on a mesh than no name. `runBody` then advertises the empty string, which is what the old inline fallback produced from the same failed lookup.
+
+Persisting is best-effort. A node that cannot write its config — read-only filesystem, packaged install, wrong ownership — still comes up on the values generated in memory, with a warning that says what that costs (a node id regenerated each boot looks like a different node to peers each time). Refusing to start over an unwritable config would be a worse trade.
+
+No config-history snapshot is taken. `SnapshotNow` is for operator edits; a startup bootstrap filling in its own identity is not one, and filing it would push a real edit out of a bounded history.
+
+### Coverage that was not real
+
+A mutation run over `ensureNodeIdentity` found three of its branches pinned by nothing. Deleting the `shortHostname` call from the function entirely passed the whole suite: every host these tests run on already reports a short name, so the call was a no-op on the real lookup, and `TestShortHostname` exercises the function in isolation while pinning nothing about whether anything calls it. The read-failure and unusable-name branches were reachable only through `os.Hostname` and so were not reachable at all.
+
+`os.Hostname` is now reached through a package-level `osHostname` var. That is a test seam and nothing more — it exists because those three branches are otherwise untestable, and it is documented at the declaration as such so it is not mistaken for a general indirection.
+
+Two of the branches were also reaching the right *value* by accident rather than by the guard under test. `case h == ""` and `case err != nil` both end with the hostname unset, so no assertion about the resulting config can tell either from the default branch. They are now pinned on what actually differs between them: the unusable-name case must leave `filled` empty and therefore write nothing at all, asserted by deleting the config first and checking it is not recreated; and the two no-hostname warnings must name their distinct causes, since that log line is the only thing an operator has to tell a failed lookup from a useless answer.
+
+### Verification
+
+**Full.** A Go toolchain is available in this environment — go1.22.2 from the Ubuntu archive — so the standing caveat on the previous nine entries does not apply here.
+
+Built with `CGO_ENABLED=0`. `auth_pam.go` is gated on `(linux || darwin || freebsd) && cgo` and `auth_nopam.go` covers the build without it; nothing here touches that path, but it means this was not a cgo build.
+
+`go build ./...` clean. `go vet ./...` and `gofmt -l` are both clean and both byte-identical to the baseline taken before any edit. `go test` passes for every package except `internal/mesh`.
+
+Nine tests in `cmd/gravinet/nodeidentity_test.go`, four of them added this release: fields filled and surviving a reload; an existing id and hostname left alone; a configured FQDN not run through `shortHostname`; two configs generating distinct ids; an unwritable path still yielding a usable in-memory identity; and, new here, a detected FQDN shortened on the way in, an unreadable OS hostname, three shapes of unusable OS hostname, the no-op case writing nothing and logging nothing, and the two warnings being distinguishable.
+
+Seven mutations of `ensureNodeIdentity` were run against the suite — drop `shortHostname`, neutralise each of the two hostname-failure guards, overwrite an existing id, overwrite an existing hostname, skip the write-back, save when nothing was filled. All seven are caught. The first three were not, before this release.
+
+**Not verified:** that a real two-node mesh now completes a handshake where it previously did not. `internal/mesh`'s test binary does not build and no two-host underlay was available here. The account above of *why* an empty id blocked peering is read from `onHSInit` and `onHSResp` directly, not observed on a live mesh. What is tested is the claim the fix rests on — that two nodes booting from identical empty configs end up with distinct ids.
+
+The two pre-existing failures from v887 are untouched: `internal/mesh`'s duplicated test files (`waitFor` and others redeclared across `tcpdial_backoff_test.go` and `fallbackdial_backoff_test.go`, plus `fallback_extraports_test.go` referencing an `ensureFallback` method the `Engine` no longer has), and the same six files that are not `gofmt` clean — none of them mine.
+
+---
+
 ## v937 — 2026-08-24
 
 **Documents the join token's address field in the Networks help topic: what it is for, that the prefilled value is a guess, and how it is wrong when it is wrong.**

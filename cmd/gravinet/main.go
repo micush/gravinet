@@ -49,7 +49,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "937"
+	version = "938"
 	commit  = "none"
 )
 
@@ -412,6 +412,13 @@ func cmdRun(args []string) {
 				}
 			}
 		}
+		// Settle node_id and hostname before anything reads them. Deliberately
+		// after the log file is open, so the line recording a generated id
+		// lands somewhere durable, and before NewStore, so the store and every
+		// later reader (engine, web admin, control socket) see one config with
+		// the identity already in it rather than each filling it in themselves.
+		ensureNodeIdentity(cfg, *cfgPath)
+
 		store := config.NewStore(cfg)
 
 		workers := cfg.WorkerThreadsValue()
@@ -504,11 +511,12 @@ func cmdRun(args []string) {
 		}
 		logx.Infof("worker threads: %d (cores=%d)", workers, runtime.NumCPU())
 
+		// Filled in and persisted by ensureNodeIdentity above, which is now the
+		// only place the OS hostname is consulted. It is still empty in exactly
+		// one case — the OS hostname was unreadable or unusable there — and
+		// advertising nothing is what the inline fallback that used to live
+		// here produced from that same failed lookup anyway.
 		hostname := cfg.Hostname
-		if hostname == "" {
-			osName, _ := os.Hostname()
-			hostname = shortHostname(osName)
-		}
 
 		// Clear any gravinet-managed hosts entries left over from a previous run
 		// before we resolve seeds. Those map peer hostnames to overlay (tunnel) IPs;
@@ -2332,9 +2340,13 @@ func negPrefix(negate bool) string {
 // used for peer display and bare-hostname resolution, so a lone FQDN breaks
 // both: the peers table shows it inconsistently next to every other node's
 // short name, and "ping gn-openbsd" wouldn't resolve the way "ping
-// gn-cush1" does. Only called for the auto-detected case — an explicit
-// config.Hostname is taken verbatim, on the assumption that whoever set it
-// did so deliberately.
+// gn-cush1" does. A config.Hostname that is already set is taken verbatim.
+//
+// Called from ensureNodeIdentity only, at the moment a detected name is
+// written into the config. So the shortening happens once, at fill-in,
+// instead of on every boot — and a non-empty config.Hostname seen later is
+// no longer necessarily one a human chose, only one that was settled on an
+// earlier run. It is short either way, so nothing downstream need care.
 func shortHostname(s string) string {
 	if i := strings.IndexByte(s, '.'); i >= 0 {
 		return s[:i]
@@ -3713,6 +3725,78 @@ func writeDefaultConfig(path string) error {
 		return fmt.Errorf("mkdir: %w", err)
 	}
 	return c.SaveTo(path)
+}
+
+// ensureNodeIdentity fills in node_id and hostname when they are empty at
+// startup and writes them back, so both are settled facts on disk from the
+// first run rather than values re-derived — or re-invented — on every boot.
+//
+// node_id is the load-bearing half. It is this node's identity in every
+// handshake, and the engine drops any handshake whose payload carries the
+// engine's own node id as a NAT hairpin (see onHSInit and onHSResp in
+// internal/mesh). Two nodes that both come up with node_id "" therefore each
+// see their own id arriving from the other and refuse the peering outright —
+// the only trace being a debug line blaming a hairpin, which is exactly wrong
+// about the cause. Until now only a config *scaffolded* by writeDefaultConfig
+// ever got an id; one written by hand, copied between hosts, or cut down to
+// the fields someone cared about came up empty and silently never peered.
+//
+// Generating the id in memory alone would be worse than not generating it:
+// peers key their tables on the id, so a value that changes on every restart
+// makes one node look like an endless series of new ones. Hence the
+// write-back, and hence node_id being persisted even though hostname is the
+// more obviously "configured" of the two.
+//
+// Persisting is best-effort. A node that cannot write its config — read-only
+// filesystem, packaged install, wrong ownership — still comes up on the values
+// generated here. It regenerates them next boot, which is no worse than the
+// behaviour this replaces and much better than refusing to start.
+//
+// The OS lookup goes through osHostname rather than os.Hostname directly. That
+// is a test seam and not a general indirection: every host a test runs on
+// reports a name that is already short, so nothing in this function's three
+// branches — the read failure, the unusable name, the FQDN that has to be
+// shortened — can be reached from a test that calls the real os.Hostname. A
+// version of this that dropped shortHostname altogether passed the whole suite
+// before the seam went in.
+var osHostname = os.Hostname
+
+func ensureNodeIdentity(cfg *config.Config, path string) {
+	var filled []string
+
+	if cfg.NodeID == "" {
+		cfg.NodeID = randomNodeID()
+		filled = append(filled, "node_id "+cfg.NodeID)
+	}
+
+	if cfg.Hostname == "" {
+		osName, err := osHostname()
+		switch h := shortHostname(osName); {
+		case err != nil:
+			logx.Warnf("config: hostname is empty and the OS hostname could not be read (%v); advertising no hostname", err)
+		case h == "":
+			// os.Hostname() succeeded but carries no usable label — an empty
+			// name, or the degenerate leading-dot case shortHostname reduces
+			// to "". Inventing one would put a name on the mesh that matches
+			// nothing an operator could look up.
+			logx.Warnf("config: hostname is empty and the OS hostname %q yields no usable short name; advertising no hostname", osName)
+		default:
+			cfg.Hostname = h
+			filled = append(filled, "hostname "+h)
+		}
+	}
+
+	if len(filled) == 0 {
+		return
+	}
+	logx.Infof("config: generated %s", strings.Join(filled, ", "))
+
+	if err := config.WithLock(path, func() error { return cfg.SaveTo(path) }); err != nil {
+		logx.Warnf("config: could not write %s back to %s: %v — this run uses the values above, "+
+			"but they are generated afresh on every restart until the file is writable, and a node id "+
+			"that changes each boot appears to peers as a different node each time",
+			strings.Join(filled, " and "), path, err)
+	}
 }
 
 func randomNodeID() string { return randHex(8) }
