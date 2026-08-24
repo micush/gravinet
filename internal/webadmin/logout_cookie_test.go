@@ -154,3 +154,48 @@ func signedSessionAt(s *Server, user string, exp int64) string {
 	return base64.RawURLEncoding.EncodeToString([]byte(payload)) + "." +
 		base64.RawURLEncoding.EncodeToString(s.sign(payload))
 }
+
+// TestLogoutRejectsCrossSite closes what v926 left open. Requiring POST
+// stopped an <img> tag; a cross-site form post still reached the handler and
+// cleared the operator's session cookie, because SameSite governs when a
+// cookie is sent, not whether a Set-Cookie is honoured.
+func TestLogoutRejectsCrossSite(t *testing.T) {
+	for _, site := range []string{"cross-site", "same-site"} {
+		s := &Server{}
+		r := httptest.NewRequest(http.MethodPost, "/api/logout", nil)
+		r.Header.Set("Sec-Fetch-Site", site)
+		w := httptest.NewRecorder()
+		s.handleLogout(w, r)
+		if w.Code != http.StatusForbidden {
+			t.Errorf("Sec-Fetch-Site: %s returned %d; want 403", site, w.Code)
+		}
+		for _, c := range w.Result().Cookies() {
+			if c.Name == sessionCookie {
+				t.Errorf("Sec-Fetch-Site: %s still cleared the session cookie", site)
+			}
+		}
+	}
+}
+
+// TestLogoutAllowsTheUIAndNonBrowsers is the half that keeps logout working.
+// The UI's fetch is same-origin; a script or an older browser sends nothing,
+// and must not be locked out of logging out.
+func TestLogoutAllowsTheUIAndNonBrowsers(t *testing.T) {
+	for _, site := range []string{"same-origin", "none", ""} {
+		s := &Server{secret: []byte(strings.Repeat("k", 32))}
+		tok := s.newSession("alice")
+		r := httptest.NewRequest(http.MethodPost, "/api/logout", nil)
+		if site != "" {
+			r.Header.Set("Sec-Fetch-Site", site)
+		}
+		r.AddCookie(&http.Cookie{Name: sessionCookie, Value: tok})
+		w := httptest.NewRecorder()
+		s.handleLogout(w, r)
+		if w.Code != http.StatusOK {
+			t.Errorf("Sec-Fetch-Site: %q returned %d; want 200", site, w.Code)
+		}
+		if _, ok := s.revoked[tok]; !ok {
+			t.Errorf("Sec-Fetch-Site: %q did not revoke the token", site)
+		}
+	}
+}

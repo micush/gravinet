@@ -1006,11 +1006,31 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		// reachable from an <img> tag on any page the operator visited: the
 		// session cookie is SameSite=Strict so nothing got revoked, but the
 		// clearing cookie below is honoured on a cross-site response all the
-		// same, so an arbitrary web page could log an admin out. Requiring
-		// POST closes the <img>/<script> shape of that. It does not close a
-		// cross-site form post, which needs its own answer; see the note in
-		// the changelog.
+		// same, so an arbitrary web page could log an admin out.
 		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	// Requiring POST closed the <img>/<script> shape of that; a cross-site
+	// form post still reached it, and SameSite does not help, because it
+	// governs when a cookie is *sent*, not whether a Set-Cookie is honoured.
+	//
+	// Sec-Fetch-Site is the check rather than Origin, because it needs no
+	// comparison against r.Host: a reverse proxy that rewrites Host would
+	// make a correct Origin look wrong and 403 the logout button, and this
+	// header carries the browser's own verdict instead. Absent means a
+	// non-browser client (curl, a script, an older browser) and is allowed —
+	// those are not the ones being tricked, and the peer proxy forwards
+	// neither this header nor a cookie. "none" is a user-initiated
+	// navigation, which is the operator themselves.
+	//
+	// This is the last of the cross-site surface here, and it is smaller
+	// than v926 implied: every authed() endpoint already refuses a
+	// cross-site request, because it needs validSession, which needs the
+	// SameSite=Strict cookie the browser withholds. Logout is the exception
+	// only because it is deliberately unauthenticated.
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "cross-site", "same-site":
+		w.WriteHeader(http.StatusForbidden)
 		return
 	}
 	// Record the token as revoked for the rest of its lifetime so a replay

@@ -2,6 +2,44 @@
 
 ---
 
+## v927 — 2026-08-23
+
+**CodeQL `go/cookie-secure-not-set` #8 is the `Secure` sibling of #9, closed by v926 in the same edit. This release closes the cross-site logout v926 left open — and corrects how large v926 said that was.**
+
+### Assessment
+
+#8 and #9 are the same line, in the same commit, reported by two rules that each check one attribute of it. v926 set all four at once — `HttpOnly`, `Secure`, `SameSite=Strict`, `Path` — so `Secure: true` has been there since that release, and `TestLogoutCookieMirrorsLoginCookie` already asserts it by name. It passes unchanged.
+
+Nothing to do, but recorded rather than closed silently, for the same reason v925 recorded #10: a duplicate that gets waved through is indistinguishable from one that gets missed.
+
+### The correction
+
+v926 said closing cross-site logout "means a CSRF token or an `Origin` check across the mutating API surface, which is a wider change than this one". That overstated the scope, and re-reading `authed()` while checking this alert is what showed it.
+
+Every authenticated endpoint already refuses a cross-site request, and has all along. `authed()` requires `validSession`, `validSession` requires the session cookie, and the cookie is `SameSite=Strict` — so the browser never sends it cross-site and the request arrives unauthenticated. There is no CSRF surface across the mutating API to protect. There is exactly one endpoint, `/api/logout`, and only because it is deliberately unauthenticated so that logging out with a stale session works.
+
+So the "wider change" was one handler.
+
+### What changed
+
+`handleLogout` now refuses a request whose `Sec-Fetch-Site` is `cross-site` or `same-site`.
+
+`Sec-Fetch-Site` rather than `Origin` deliberately: an `Origin` check has to be compared against `r.Host`, and a reverse proxy that rewrites `Host` turns a correct `Origin` into a mismatch and 403s the logout button for a legitimate operator. This header carries the browser's own verdict and needs no comparison, so it cannot be broken by a rewritten `Host`.
+
+Absent is allowed. That covers curl, scripts, and older browsers — none of which is the party being tricked — and the peer proxy, which forwards neither this header nor a cookie (`handleProxy` sets only `Content-Type` on the outbound request). `none` is allowed too: that is a user-initiated navigation, i.e. the operator.
+
+The practical exposure this removes is small and was described that way in v926: an attacker page could log an admin out, having first got them to accept the node's certificate. No state changed, nothing leaked — the revocation path needs a valid session, which needs the cookie the browser withholds. It is closed because it is cheap to close, not because it was serious.
+
+### Verification
+
+`go build ./...` clean; cross-compiles clean for `linux/arm`, `linux/amd64`, `darwin/arm64`, `windows/amd64`, `openbsd/amd64` and `freebsd/amd64`. `go vet` and `gofmt` clean on the touched package. `internal/webadmin`, `internal/upgrade`, `internal/config`, `cmd/gravinet`, `internal/hostnet` and `internal/control` pass in full, including v926's five logout tests.
+
+Two tests added: that `cross-site` and `same-site` are refused without clearing the cookie, and — the half that matters more for a check that can lock someone out of their own logout button — that `same-origin`, `none` and an absent header all still log out *and* still revoke the token. The guard was neutralised and the refusal test confirmed to fail on both values.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
 ## v926 — 2026-08-23
 
 **CodeQL `go/cookie-httponly-not-set` on the logout cookie: cosmetic as reported, and the handler it points at accepted unauthenticated writes into the session revocation map.**
