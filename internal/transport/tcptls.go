@@ -101,6 +101,27 @@ func disableNagle(c net.Conn) {
 // TLS here is camouflage and stream integrity, not the trust boundary: the mesh
 // PSK and per-session handshake remain the real authentication, so dials use a
 // self-signed cert and skip verification.
+// unverifiedCamouflageTLS is the client config for dialling a peer's TLS
+// transport. Verification is off, and unlike most places that say that, there
+// is nothing here that verification could check: the far side is another
+// gravinet node presenting a self-signed cert, and ServerName is
+// "www.cloudflare.com" precisely so the handshake resembles ordinary web
+// traffic on the wire. Pointing a certificate check at that name would ask
+// whether a peer node can prove it is Cloudflare, which it cannot and should
+// not.
+//
+// The authentication is the mesh handshake carried inside this stream — the
+// PSK and per-session keys — exactly as the type comment below says. The
+// outer TLS supplies camouflage and stream integrity, not identity.
+//
+// MinVersion stays at TLS 1.2 for the same camouflage reason: a dial that
+// negotiated something unusual would stand out rather than blend in.
+var unverifiedCamouflageTLS = &tls.Config{
+	InsecureSkipVerify: true,
+	ServerName:         "www.cloudflare.com",
+	MinVersion:         tls.VersionTLS12,
+}
+
 type TLSTransport struct {
 	port    int
 	handler Handler
@@ -434,7 +455,7 @@ func (t *TLSTransport) Dial(to netip.AddrPort) error {
 	disableNagle(raw)
 	// ServerName is cosmetic (self-signed, unverified); set it so the handshake
 	// looks like a normal SNI request rather than an empty one.
-	c := tls.Client(raw, &tls.Config{InsecureSkipVerify: true, ServerName: "www.cloudflare.com", MinVersion: tls.VersionTLS12})
+	c := tls.Client(raw, unverifiedCamouflageTLS)
 	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
 	if err := c.Handshake(); err != nil {
 		c.Close()

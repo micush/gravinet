@@ -583,13 +583,53 @@ type clusterPeerTarget struct {
 	port int
 }
 
+// selfSignedPeerTLS is the client-side TLS configuration for every call this
+// package makes to another node's web admin over the overlay: the peer proxy,
+// the speedtest legs, and the relayed shell stream. Certificate verification
+// is off, and the name says so rather than leaving it to a trailing comment
+// on each of the four call sites that used to build this inline.
+//
+// What actually authenticates these calls is the mesh, not this handshake,
+// and the argument is worth stating once in full because it is the whole
+// justification for the field below:
+//
+//   - The address dialled is always an overlay address. resolveManagedTarget
+//     drops any candidate failing OverlayContains, so a peer that advertises
+//     a non-overlay address is refused rather than dialled.
+//   - Reaching that address means holding the peer's mesh session keys. A
+//     relayed path does not help an interposer: onRelay forwards opaque
+//     ciphertext and the relay never has the keys (see internal/mesh/relay.go).
+//   - A mesh member cannot pose as a different one. v185's anti-spoof rule
+//     refuses a packet sourced from an overlay address another peer owns.
+//
+// So an attacker who could benefit from a forged certificate here would
+// already have to be the peer. Peer web admins also carry per-node
+// self-signed certs with no shared CA and no fingerprint distribution
+// (webadmin.go's selfSignedCert), so there is nothing available to verify
+// against in the first place.
+//
+// The one thing this does not cover, stated so it is not mistaken for
+// covered: OverlayContains checks that the *address* is inside the overlay
+// range, not that the packet left through the tunnel. If the overlay route
+// is missing, or something local installs a competing route for that range,
+// the dial goes out in the clear and nothing here would notice. Closing that
+// needs pinning, which needs fingerprints on the control plane — a design
+// change, not a config field.
+//
+// Shared as one value rather than four copies: net/http clones
+// TLSClientConfig per connection and crypto/tls does not modify a Config, so
+// reuse across the three clients and the direct tls.Dial is safe. It does
+// mean a future per-site setting (a MinVersion, say) has to be split back
+// out rather than added here.
+var selfSignedPeerTLS = &tls.Config{InsecureSkipVerify: true}
+
 // proxyClient talks to peer web admins over the overlay. Their certs are
 // self-signed and the channel is already the encrypted mesh, so we skip cert
 // verification here; the overlay + mesh PSK is the trust boundary.
 var proxyClient = &http.Client{
 	Timeout: 15 * time.Second,
 	Transport: &http.Transport{
-		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true}, // overlay-internal, self-signed
+		TLSClientConfig:   selfSignedPeerTLS,
 		ForceAttemptHTTP2: false,
 	},
 }
@@ -610,7 +650,7 @@ var proxyClient = &http.Client{
 var proxySpeedtestClient = &http.Client{
 	Timeout: 2*(stConnectSlack+stDuration+5*time.Second) + 5*time.Second,
 	Transport: &http.Transport{
-		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true}, // overlay-internal, self-signed
+		TLSClientConfig:   selfSignedPeerTLS,
 		ForceAttemptHTTP2: false,
 	},
 }

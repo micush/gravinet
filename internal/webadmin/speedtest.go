@@ -2,7 +2,6 @@ package webadmin
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -394,11 +393,12 @@ func avgMbps(total int64, dur time.Duration) float64 {
 // silently reintroduce "context deadline exceeded" through the client's own
 // timeout even after fixing the per-request context budgets below. Same
 // trust boundary as proxyClient: overlay-internal, self-signed, protected by
-// the mesh PSK, so certificate verification is skipped the same way.
+// the mesh PSK, so certificate verification is skipped the same way — see
+// selfSignedPeerTLS in cluster.go for why that is sound and where it isn't.
 var speedtestClient = &http.Client{
 	Timeout: stConnectSlack + stDuration + 5*time.Second,
 	Transport: &http.Transport{
-		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
+		TLSClientConfig:   selfSignedPeerTLS,
 		ForceAttemptHTTP2: false,
 	},
 }

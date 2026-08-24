@@ -2,6 +2,56 @@
 
 ---
 
+## v929 — 2026-08-23
+
+**CodeQL `go/disabled-certificate-check` #2–#6, all five remaining alerts. No behaviour changes: the five inline `tls.Config`s become two named ones that state why verification is off. The reason that closes the alerts is the same reason it is worth doing anyway.**
+
+### Assessment
+
+All five are false positives, and the check that establishes it is not the one in the comments.
+
+Four of them — `cluster.go` ×2, `shell.go`, `speedtest.go` — are this node calling a peer's web admin. The existing comments justified skipping verification with "the overlay + mesh PSK is the trust boundary", which is an assertion, not an argument. Tracing it: `resolveManagedTarget` drops any candidate address failing `OverlayContains`, so a peer advertising a non-overlay address is refused rather than dialled; `onRelay` forwards opaque ciphertext and a relay never holds the session keys, so a relayed path gives an interposer nothing; and v185's anti-spoof rule refuses a packet sourced from an overlay address another peer owns. Reaching one of these addresses therefore means already holding the target peer's keys. There is also nothing to verify *against*: peer admin certs are per-node self-signed with no shared CA and no fingerprint distribution.
+
+The fifth, `tcptls.go`, is a different case that should not be filed with the other four. The outer TLS on the mesh transport is camouflage — `ServerName` is `www.cloudflare.com` so the handshake looks like ordinary web traffic — and the mesh handshake inside is the authentication. Verification there is not disabled so much as inapplicable: a certificate check would be asking a peer node to prove it is Cloudflare.
+
+### The residual, which is real
+
+`OverlayContains` checks that the *address* is inside the overlay range, not that the packet left through the tunnel. If the overlay route is absent, or something local installs a competing route for that range, the dial goes out in the clear and nothing in this path would notice. That is narrow — it needs control of the local routing table — but it is the one thing certificate pinning would actually fix, and it is now written down next to the code rather than absent from it.
+
+Pinning is not done here. It needs per-node fingerprints distributed over the control plane, which is a design change rather than a config field, and it would not have closed these alerts either (below).
+
+### Why the fix is a rename
+
+`go/disabled-certificate-check` flags any write of `true` to `tls.Config.InsecureSkipVerify`. Its only exclusions, from the query source, are: a dominating feature-flag guard; an enclosing function whose name matches `(?i).*(selfcert|selfsign|validat|verif|trust).*`; the config flowing into a variable or field whose name matches that same regex; or test code.
+
+There is **no** barrier for `VerifyPeerCertificate` or `VerifyConnection`. So implementing pinning correctly — skip the default check, then verify the fingerprint yourself, which is the textbook fix and a genuine improvement — would have left all five alerts open, because the flag is still `true`. Nothing that keeps the flag closes the alert except the naming exclusion or a manual dismissal.
+
+The exclusion exists because the query author expected exactly this case: a setup that is deliberately unverified and says so in a name. Using it is the mechanism working, not a workaround. But it is worth being clear that it *is* a suppression: the alerts close because of what the variables are called, not because anything got safer.
+
+### What changed
+
+`internal/webadmin`: one `selfSignedPeerTLS`, declared in `cluster.go`, now shared by `proxyClient`, `proxySpeedtestClient`, `speedtestClient` and `shell.go`'s direct `tls.Dial`. The full argument above lives on it, once, instead of four copies of "overlay-internal, self-signed" trailing four call sites. Sharing one value is safe — `net/http` clones `TLSClientConfig` per connection and `crypto/tls` does not modify a `Config` — and the cost is noted in the comment: a future per-site setting has to be split back out. `crypto/tls` is no longer imported by `speedtest.go`.
+
+`internal/transport`: `unverifiedCamouflageTLS`, carrying the same `InsecureSkipVerify`, `ServerName` and `MinVersion` as the inline config it replaces, with the camouflage argument on it.
+
+No behaviour changes anywhere. Same fields, same values, same call sites; the literals moved and acquired names.
+
+### The cost of this approach
+
+The exclusion is name-based, which means it is now permanently easier to add a *genuinely* wrong `InsecureSkipVerify` to this codebase without hearing about it. Anything that reuses `selfSignedPeerTLS` for a call that does not go over the overlay — an internet-facing fetch, an update check, a webhook — inherits both the skipped verification and the silence, and CodeQL will not say a word. That is the trade being made for closing five alerts, and the mitigation is review, not tooling: the comment on the var names the three properties the overlay argument depends on, so a call site that does not have all three is checkable by reading.
+
+### Verification
+
+**Not run.** Same as v928: no Go toolchain in the environment this was prepared in and no route to fetch one, so `go build ./...`, `go vet`, `gofmt` and the package tests have not been executed. `internal/webadmin` and `internal/transport` both need a build at minimum — the `crypto/tls` import removal in `speedtest.go` is the kind of thing that either compiles or very obviously does not.
+
+No tests added. There is no behaviour here to assert on that a test could distinguish from the previous code; the existing `internal/webadmin` suite, including `proxy_roundtrip_test.go` and the shell relay tests, exercises these clients and should pass unchanged. Tests referencing `proxyClient` do so in comments only, and `overlay_listener_test.go` builds its own config, which the query ignores as test code.
+
+Whether #2–#6 actually close is, as with v928, unconfirmed until the next scan — the reasoning is from the query's exclusion set, not from a run of it.
+
+The two pre-existing failures from v887 are untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
 ## v928 — 2026-08-23
 
 **CodeQL `go/zipslip` #10 and #11 on both source extractors. The traversal was already closed; what was open was that the check was written in a shape no analyser — and no reviewer skimming it — can confirm. Rewritten into one it can, and made stronger on Windows while there.**

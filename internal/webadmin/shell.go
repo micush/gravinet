@@ -202,7 +202,7 @@ func (s *Server) relayShellSession(ws *wsConn, who, node string, rows, cols int)
 		return
 	}
 	hostport := net.JoinHostPort(target.ip.String(), strconv.Itoa(target.port))
-	conn, err := tls.Dial("tcp", hostport, &tls.Config{InsecureSkipVerify: true}) // overlay-internal, self-signed — see proxyClient's doc comment
+	conn, err := tls.Dial("tcp", hostport, selfSignedPeerTLS) // overlay-internal, self-signed — see selfSignedPeerTLS
 	if err != nil {
 		ws.sendControl(shellControl{Type: "error", Message: fmt.Sprintf("reaching %s: %v", node, err)})
 		return
