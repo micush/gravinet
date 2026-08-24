@@ -80,7 +80,7 @@ func TestPushSourceToWithRetrySucceedsAfterTransientFailure(t *testing.T) {
 	ts := flakyThenOKPeer(t, 1, map[string]any{"ok": true, "applied": "715", "restarting": true})
 	srv := secServer(&stubBackend{})
 
-	status, skipped, err := srv.pushSourceToWithRetry("peer", testTarget(t, ts), src, "deadbeef")
+	status, skipped, err := srv.pushSourceToWithRetry("peer", testTarget(t, ts), src, "deadbeef", "")
 	if err != nil {
 		t.Fatalf("expected eventual success, got error: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestPushSourceToWithRetryExhaustsAndFails(t *testing.T) {
 	ts := flakyThenOKPeer(t, 999, nil) // never succeeds
 	srv := secServer(&stubBackend{})
 
-	_, _, err := srv.pushSourceToWithRetry("peer", testTarget(t, ts), src, "deadbeef")
+	_, _, err := srv.pushSourceToWithRetry("peer", testTarget(t, ts), src, "deadbeef", "")
 	if err == nil {
 		t.Fatal("expected an error after exhausting retries, got nil")
 	}
@@ -119,7 +119,7 @@ func TestPushSourceToWithRetryDoesNotRetryPeerError(t *testing.T) {
 	ts, hits := alwaysRejectsPeer(t)
 	srv := secServer(&stubBackend{})
 
-	status, _, err := srv.pushSourceToWithRetry("peer", testTarget(t, ts), src, "deadbeef")
+	status, _, err := srv.pushSourceToWithRetry("peer", testTarget(t, ts), src, "deadbeef", "")
 	if err == nil {
 		t.Fatal("expected the peer's rejection to surface as an error")
 	}

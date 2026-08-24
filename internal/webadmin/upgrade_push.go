@@ -10,8 +10,11 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
+
+	"gravinet/internal/upgrade"
 )
 
 // pushConcurrency bounds how many peers are built at once. Every target
@@ -117,6 +120,22 @@ func (s *Server) handleUpgradePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The version this archive builds to, read once from the archive itself.
+	// It is what lets a peer whose reply was lost be resolved rather than
+	// retried: applying an upgrade ends in a restart that kills the reply, so
+	// "no response" and "it worked" look identical from here — the peer's own
+	// reported version is the difference. Extraction is cheap (no compile),
+	// and an unreadable one comes back as "", which simply disables the check
+	// and restores the previous retry-only behaviour.
+	wantVersion := ""
+	if f, err := os.Open(spooled); err == nil {
+		wantVersion = upgrade.ExtractedVersion(f, s.upg.StateDir)
+		f.Close()
+	}
+	if wantVersion == "" {
+		s.log.Debugf("upgrade: could not read the pushed archive's version; a peer whose reply is lost will be retried rather than checked")
+	}
+
 	type result struct {
 		Node    string `json:"node"`
 		OK      bool   `json:"ok"`
@@ -149,7 +168,7 @@ func (s *Server) handleUpgradePush(w http.ResponseWriter, r *http.Request) {
 				resultsCh <- result{Node: node, OK: false, Error: msg}
 				return
 			}
-			status, skipped, perr := s.pushSourceToWithRetry(node, target, spooled, sum)
+			status, skipped, perr := s.pushSourceToWithRetry(node, target, spooled, sum, wantVersion)
 			if perr != nil {
 				resultsCh <- result{Node: node, OK: false, Status: status, Error: perr.Error()}
 				return
@@ -296,8 +315,55 @@ const pushTransientRetries = 2
 // second added to how long the whole rollout takes to report back. A var,
 // not a plain func, so tests can substitute a near-zero backoff rather than
 // actually sleeping through it.
+// pushApplyProbeWindow bounds how long a lost reply is investigated before
+// giving up and retrying. A peer that applied has to build nothing further —
+// it only has to restart and rejoin the overlay — so this is sized for a
+// service restart and a mesh reconnect, not for a build.
+var pushApplyProbeWindow = 90 * time.Second
+
+// pushApplyProbeInterval is how often the peer is asked during that window.
+// Vars rather than consts, like pushRetryBackoff above, so tests can shrink
+// them instead of sleeping through a real restart window.
+var pushApplyProbeInterval = 3 * time.Second
+
 var pushRetryBackoff = func(attempt int) time.Duration {
 	return time.Duration(attempt) * 3 * time.Second
+}
+
+// peerUpgradeState asks a peer what it is running and whether it has an
+// upgrade in flight. Uses /api/upgrade, which every version that can receive a
+// push already serves, so this works against peers older than this node — the
+// case that matters, since a fleet is upgraded from one node outward.
+func (s *Server) peerUpgradeState(target *clusterPeerTarget) (version, phase, to string, err error) {
+	hostport := net.JoinHostPort(target.ip.String(), strconv.Itoa(target.port))
+	resp, err := proxyClient.Get("https://" + hostport + "/api/upgrade")
+	if err != nil {
+		return "", "", "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", "", "", fmt.Errorf("peer returned %d", resp.StatusCode)
+	}
+	var body struct {
+		Version string `json:"version"`
+		Phase   string `json:"phase"`
+		To      string `json:"to"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&body); err != nil {
+		return "", "", "", err
+	}
+	return body.Version, body.Phase, body.To, nil
+}
+
+// peerLandedOn reports whether a peer has ended up on wantVersion, either
+// already running it or holding it pending confirmation.
+func peerLandedOn(version, phase, to, wantVersion string) bool {
+	if wantVersion == "" {
+		return false
+	}
+	trim := func(v string) string { return strings.TrimPrefix(strings.TrimSpace(v), "v") }
+	w := trim(wantVersion)
+	return trim(version) == w || (phase == string(upgrade.PhasePending) && trim(to) == w)
 }
 
 // pushSourceToWithRetry wraps pushSourceTo with a few retries, but only for a
@@ -306,16 +372,63 @@ var pushRetryBackoff = func(attempt int) time.Duration {
 // unsuccessfully (wrong version, hasn't opted in, a real compile error), is
 // never retried: retrying wouldn't help, and re-running a build that
 // genuinely failed serves no purpose beyond delaying the result.
-func (s *Server) pushSourceToWithRetry(node string, target *clusterPeerTarget, srcPath, sum string) (status int, skipped bool, err error) {
+//
+// A transport failure here does NOT mean nothing happened. Applying an upgrade
+// ends with the peer swapping its binary and restarting into it, which tears
+// down the very connection carrying the reply — the reply is lost precisely
+// *because* the apply succeeded. Retrying then pushes a second upgrade at a
+// node that is mid-trial from the first, which its own guard correctly
+// refuses; that refusal is a real response, so it ends the retry loop and gets
+// reported as the peer's failure. The first attempt's success is never
+// mentioned, and because this runs on the canary, one upgraded peer stops the
+// whole rollout with an error saying it failed.
+//
+// So before retrying, ask the peer where it landed. Peers restart and rejoin
+// on their own schedule, so this waits rather than asking once.
+func (s *Server) pushSourceToWithRetry(node string, target *clusterPeerTarget, srcPath, sum, wantVersion string) (status int, skipped bool, err error) {
 	for attempt := 1; ; attempt++ {
 		status, skipped, err = s.pushSourceTo(target, srcPath, sum)
-		if err == nil || status != 0 || attempt > pushTransientRetries {
+		if err == nil || status != 0 {
+			return status, skipped, err
+		}
+		if applied, aerr := s.peerAppliedAfterLostReply(node, target, wantVersion); applied {
+			return http.StatusOK, false, nil
+		} else if aerr != nil {
+			s.log.Debugf("upgrade: push to %s: could not determine whether it applied: %v", node, aerr)
+		}
+		if attempt > pushTransientRetries {
 			return status, skipped, err
 		}
 		s.log.Debugf("upgrade: push to %s: transport-level error (attempt %d/%d), retrying: %v",
 			node, attempt, pushTransientRetries+1, err)
 		time.Sleep(pushRetryBackoff(attempt))
 	}
+}
+
+// peerAppliedAfterLostReply waits out a peer's restart and reports whether it
+// came back on the version just pushed. Bounded: a peer that never returns is
+// a real failure, and the caller still has its retries.
+func (s *Server) peerAppliedAfterLostReply(node string, target *clusterPeerTarget, wantVersion string) (bool, error) {
+	if wantVersion == "" {
+		return false, nil
+	}
+	deadline := time.Now().Add(pushApplyProbeWindow)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		version, phase, to, err := s.peerUpgradeState(target)
+		if err == nil {
+			if peerLandedOn(version, phase, to, wantVersion) {
+				s.log.Infof("upgrade: %s lost its reply but came back on %s — counting the push as applied", node, wantVersion)
+				return true, nil
+			}
+			// Reachable and on something else: the push genuinely did not
+			// land, so let the caller retry.
+			return false, nil
+		}
+		lastErr = err
+		time.Sleep(pushApplyProbeInterval)
+	}
+	return false, lastErr
 }
 
 // pushSourceTo streams one spooled source archive (digest first, then bytes) to

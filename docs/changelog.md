@@ -2,6 +2,48 @@
 
 ---
 
+## v918 — 2026-08-23
+
+**Fix: a peer that upgraded successfully was reported as having failed, and stopped the rollout.**
+
+Reported as "then your fix failed", from a 17-peer rollout:
+
+    x hw-macmini-macos
+      an upgrade (916 -> 917) is already mid-trial on this node - started 1m0s ago
+      the first peer (hw-macmini-macos) failed - the rollout stopped there
+
+The same screen listed that peer as running **v917**. It had upgraded. The rollout said it failed.
+
+**Root cause: a retry that cannot succeed.** Applying an upgrade ends with the peer swapping its binary and restarting into it, which tears down the connection carrying the reply. The reply is lost precisely *because* the apply succeeded — so at the pushing end "no response" and "it worked" are the same thing. `pushSourceToWithRetry` read that as a transport failure and pushed again. The second push arrived at a node now mid-trial from the first, whose guard correctly refuses it; a refusal is a real HTTP response, so it ended the retry loop and was reported as the peer's error. The first attempt's success was never mentioned. And since this runs on the canary before anything else, one peer that had upgraded perfectly halted the whole fleet.
+
+The timings in the report line up exactly: `Arm` runs after the build and just before the swap, so "started 1m0s ago" dates the swap, not the build, and the retries (3s, 6s) land after the peer has restarted and come back.
+
+**The fix is entirely on the pushing side**, which matters: peers are by definition older during a rollout, so a fix needing peer-side changes could never be deployed by the rollout it fixes. On a lost reply the pusher now asks the peer where it landed, via `/api/upgrade` — an endpoint v915 and v916 already serve. A peer running the pushed version, or holding it pending confirmation, counts as applied. A peer that answers and is still on its old version did not apply, and is retried exactly as before.
+
+The target version is read once from the archive with `upgrade.ExtractedVersion` (no compile). If it cannot be read, the check disables itself and the previous retry-only behaviour returns.
+
+### On v917
+
+v917's flush was correct and is what got the rollout as far as this. Its second half was overstated: the entry claimed `ReadTimeout` was "the other half of the failure". Testing since — the same handler over both plain HTTP and TLS, with and without the deadline lifted — shows `ReadTimeout` does **not** kill a long handler once the request body has been read. All four combinations succeed. The lift is harmless and still right in principle, but it was not a cause, and that claim was reasoning presented as diagnosis.
+
+The same testing answers a question raised alongside it: only the node driving the web admin needs these fixes. The node-to-peer leg uses `proxyClient.Transport`, which sets no `ResponseHeaderTimeout`, so a peer that is silent for minutes was never at risk.
+
+### Verification
+
+`go build ./...` clean, `go vet` clean, `gofmt` clean. All four suites pass.
+
+`upgrade_lostreply_test.go` drives the real retry path against a peer that hijacks and closes the connection on apply — what a restart looks like — and then answers `/api/upgrade` as a peer that came back. It asserts that a peer returning on the pushed version counts as applied and **is not pushed a second time**; that the same holds mid-trial, the state the reported fleet was actually in; that a peer still on its old version is retried, so this cannot turn a real blip into a silent success; and that version comparison ignores the `v` prefix, since the archive says `917` while tags and the UI say `v917`.
+
+All three behavioural tests were confirmed to fail with the guard broken — the check removed (reproducing the report), mid-trial no longer counted, and the check over-corrected to accept every lost reply — and to pass on restore. The three existing retry tests pass `""` as the target version, which disables the probe and preserves exactly what they were written to test.
+
+**Not reproduced on real hardware.** The mechanism is demonstrated against a real HTTP server, but a live 17-peer rollout was not run.
+
+**hw-macmini-macos is on v917 and mid-trial.** That is a real trial awaiting confirmation, from before this change. It will confirm or revert on its own; `gravinet upgrade clear` forgets a trial whose window has passed without touching the running binary.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
 ## v917 — 2026-08-23
 
 **Fix: a fleet rollout died the moment a peer actually had to build.**
