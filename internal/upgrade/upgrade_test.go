@@ -288,6 +288,83 @@ func TestExtractRefusesPathTraversal(t *testing.T) {
 	}
 }
 
+// The same hazard through the zip path, which had no test of its own — and
+// which is the path an operator who got the source from GitHub's "Download
+// ZIP" button actually takes, so it is the more likely of the two to be
+// exercised in the field, not the less.
+func TestExtractRefusesPathTraversalInZip(t *testing.T) {
+	dest := t.TempDir()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for name, body := range goodTree() {
+		f, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.Write([]byte(body))
+	}
+	escape, err := zw.Create("../escaped.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	escape.Write([]byte("pwned"))
+	zw.Close()
+
+	if _, err := extractSourceArchive(bytes.NewReader(buf.Bytes()), dest); err == nil {
+		t.Fatal("a zip entry escaping the extraction directory was accepted")
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(dest), "escaped.txt")); err == nil {
+		t.Fatal("the escaping zip entry was actually written outside the destination")
+	}
+}
+
+// An entry naming an absolute path is refused rather than silently reinterpreted:
+// filepath.Join(destDir, "/etc/passwd") is destDir/etc/passwd, so a check that
+// only looked at the joined result would see nothing wrong and write a file the
+// uploader named with an absolute path into the tree anyway.
+func TestExtractRefusesAbsoluteEntryNames(t *testing.T) {
+	evil := map[string]string{
+		"gravinet/go.mod":               "module gravinet\n",
+		"gravinet/cmd/gravinet/main.go": "package main\n",
+		"/etc/gravinet-pwned":           "pwned",
+	}
+	if _, err := extractSourceArchive(bytes.NewReader(tgz(t, evil)), t.TempDir()); err == nil {
+		t.Fatal("an entry naming an absolute path was accepted")
+	}
+}
+
+// An archive that names its own root — "./", which is what GNU tar writes when
+// asked to archive a directory — is not an escape attempt. That entry resolves
+// to the destination directory, which already exists, so it is skipped. The
+// boundary check itself admits nothing at or outside destDir, destDir included,
+// which is why the root entry has to be handled before it rather than excused
+// inside it.
+func TestExtractAcceptsAnArchiveRootEntry(t *testing.T) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	if err := tw.WriteHeader(&tar.Header{Name: "./", Mode: 0o755, Typeflag: tar.TypeDir}); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range goodTree() {
+		hdr := &tar.Header{Name: "./" + name, Mode: 0o644, Size: int64(len(body)), Typeflag: tar.TypeReg}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatal(err)
+		}
+		tw.Write([]byte(body))
+	}
+	tw.Close()
+	gz.Close()
+
+	root, err := extractSourceArchive(bytes.NewReader(buf.Bytes()), t.TempDir())
+	if err != nil {
+		t.Fatalf("an archive with a \"./\" root entry was rejected: %v", err)
+	}
+	if filepath.Base(root) != "gravinet" {
+		t.Fatalf("module root resolved to %q, want the directory holding go.mod", root)
+	}
+}
+
 // A symlink is how a tar entry escapes a path check that only inspects the
 // entry's own name, so they are refused rather than resolved.
 func TestExtractRefusesSymlinks(t *testing.T) {

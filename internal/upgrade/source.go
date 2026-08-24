@@ -158,6 +158,12 @@ func extractSourceTarGz(r io.Reader, destDir string) (moduleRoot string, err err
 	}
 	defer gz.Close()
 
+	// Normalized once, so the boundary check below compares against exactly
+	// what filepath.Join will produce. An uncleaned destDir (a trailing
+	// separator, say) would make the prefix test fail closed on every entry
+	// rather than open, but "rejects every legitimate upload" is still a bug.
+	destDir = filepath.Clean(destDir)
+
 	tr := tar.NewReader(gz)
 	var total int64
 	var entries int
@@ -192,16 +198,37 @@ func extractSourceTarGz(r io.Reader, destDir string) (moduleRoot string, err err
 			return "", fmt.Errorf("upload contains more than %d files and directories", maxSourceEntries)
 		}
 
-		// Clean, reject absolute paths and any ".." component, then confirm
-		// the resolved path is still inside destDir. filepath.Clean alone is
-		// not enough — "../x" cleans to itself — so the prefix check after
-		// joining is the actual boundary, not the cleaning.
+		// The boundary, in two independent steps.
+		//
+		// filepath.IsLocal is the first, and does everything the hand-rolled
+		// IsAbs/".."-prefix test it replaces did: it rejects absolute paths,
+		// empty names, and anything that climbs out of the directory it is
+		// relative to. It also covers two Windows cases that test silently
+		// let through — volume-relative names like `C:x`, for which
+		// filepath.IsAbs reports false, and reserved device names like
+		// `NUL` — which matters because Windows is one of the platforms this
+		// project builds for.
+		//
+		// Joining and re-checking the prefix is the second, and is not a
+		// restatement of the first: it constrains the path actually about to
+		// be opened, after Join has had its say, so nothing added between
+		// here and the write can quietly move the boundary.
+		//
+		// filepath.Clean alone is not, and never was, the boundary — "../x"
+		// cleans to itself. It only normalizes the name the two checks are
+		// then applied to.
 		name := filepath.Clean(hdr.Name)
-		if filepath.IsAbs(name) || name == ".." || strings.HasPrefix(name, ".."+string(filepath.Separator)) {
+		if name == "." {
+			// The archive's own root ("./" or "."), which destDir already
+			// is: nothing to create, and nothing that could be created here
+			// without writing over the destination directory itself.
+			continue
+		}
+		if !filepath.IsLocal(name) {
 			return "", fmt.Errorf("refusing to extract %q: escapes the upload directory", hdr.Name)
 		}
 		target := filepath.Join(destDir, name)
-		if target != destDir && !strings.HasPrefix(target, destDir+string(filepath.Separator)) {
+		if !strings.HasPrefix(target, destDir+string(filepath.Separator)) {
 			return "", fmt.Errorf("refusing to extract %q: escapes the upload directory", hdr.Name)
 		}
 
@@ -285,6 +312,9 @@ func extractSourceZip(r io.ReaderAt, size int64, destDir string) (moduleRoot str
 		return "", fmt.Errorf("not a valid zip archive: %w", err)
 	}
 
+	// Normalized once, for the same reason extractSourceTarGz does it.
+	destDir = filepath.Clean(destDir)
+
 	var total int64
 	var entries int
 	var foundGoMod string
@@ -308,15 +338,20 @@ func extractSourceZip(r io.ReaderAt, size int64, destDir string) (moduleRoot str
 			return "", fmt.Errorf("upload contains more than %d files and directories", maxSourceEntries)
 		}
 
-		// Same boundary check as extractSourceTarGz, applied to a zip
-		// entry's name instead of a tar header's — see its comment for why
-		// filepath.Clean alone isn't the actual boundary.
+		// Same boundary as extractSourceTarGz — filepath.IsLocal on the
+		// cleaned entry name, then a prefix check on the joined path —
+		// applied to a zip entry's name instead of a tar header's. See its
+		// comment for what each of the two steps is for, and for why
+		// filepath.Clean is not itself the boundary.
 		name := filepath.Clean(zf.Name)
-		if filepath.IsAbs(name) || name == ".." || strings.HasPrefix(name, ".."+string(filepath.Separator)) {
+		if name == "." {
+			continue
+		}
+		if !filepath.IsLocal(name) {
 			return "", fmt.Errorf("refusing to extract %q: escapes the upload directory", zf.Name)
 		}
 		target := filepath.Join(destDir, name)
-		if target != destDir && !strings.HasPrefix(target, destDir+string(filepath.Separator)) {
+		if !strings.HasPrefix(target, destDir+string(filepath.Separator)) {
 			return "", fmt.Errorf("refusing to extract %q: escapes the upload directory", zf.Name)
 		}
 

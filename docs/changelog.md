@@ -2,6 +2,57 @@
 
 ---
 
+## v928 — 2026-08-23
+
+**CodeQL `go/zipslip` #10 and #11 on both source extractors. The traversal was already closed; what was open was that the check was written in a shape no analyser — and no reviewer skimming it — can confirm. Rewritten into one it can, and made stronger on Windows while there.**
+
+### Assessment
+
+The extraction path in b399403 was not exploitable. Both `extractSourceTarGz` and `extractSourceZip` cleaned the entry name, rejected absolute paths and `..`, joined against `destDir`, and re-checked the result was inside it. Symlinks and hard links were already refused outright, so there was no escape via a resolved link either. No traversal was found through any of it.
+
+The alerts were still right to fire, for a reason worth stating rather than dismissing. `go/zipslip` recognises four barriers, per `TaintedPathCustomizations.qll`: `strings.Contains(x, "..")` false, `strings.HasPrefix(p, ...)` true, `filepath.IsLocal(p)` true, and a regexp check. The boundary was written as
+
+    if target != destDir && !strings.HasPrefix(target, destDir+sep) { return ... }
+
+whose continuing branch proves only *either `target` is `destDir`, or the prefix holds*. `HasPrefix` is never known-true there. The disjunct existed to let a `"./"` root entry through, and in buying that one case it cost the guarantee on every other one — for the analyser, and for anyone reading the line quickly.
+
+That is the actual defect: a boundary that holds by argument rather than by inspection. It survives review only as long as the argument is re-derived each time, and the next edit near it is exactly when nobody will.
+
+### What changed
+
+`internal/upgrade/source.go`, both extractors, kept deliberately identical to each other as they already were:
+
+`filepath.IsLocal(name)` replaces the hand-rolled `IsAbs || ".." || "../"` test. It is a recognised barrier and strictly stronger than what it replaces: it also rejects volume-relative names like `C:x`, for which `filepath.IsAbs` reports **false**, and Windows reserved device names. Windows is a build target here, so that was a real gap and not a concession to the analyser. `go.mod` is already `go 1.22`; `IsLocal` landed in 1.20.
+
+The `target != destDir` disjunct is gone, leaving a single unconditional prefix check on the joined path. The `"."` entry it existed for — what GNU tar writes for the archive root — is now skipped explicitly, before the boundary rather than excused inside it. This is a behaviour change: `.` used to be tolerated and is now a no-op, which is what it always was in effect, since `MkdirAll(destDir)` on a directory that exists does nothing.
+
+`destDir = filepath.Clean(destDir)` once per extractor, so the prefix compares against exactly what `Join` produces. The one caller passes `filepath.Join(workDir, "src")`, which is already clean, so this changes nothing today; an uncleaned `destDir` would have failed closed on every entry rather than open, but "rejects every legitimate upload" is still a bug.
+
+Two barriers now, not one, and both are the real check rather than a restatement of it: `IsLocal` constrains the name, the prefix check constrains the path actually about to be opened.
+
+### On the check not taken
+
+`strings.Contains(name, "..")` is what the `go/zipslip` help text itself recommends, and it is the barrier most certain to clear the alert. It is not here. It rejects `foo..bar.go` and any other legitimate filename containing two dots, which is a real narrowing of what a source tree may contain in exchange for nothing the two checks above don't already give. If #10 or #11 somehow survive this, that is the fallback — but it should be a deliberate second step, not the first thing reached for.
+
+### Tests
+
+Four in `internal/upgrade/upgrade_test.go`, three of them new coverage rather than new assertions on old coverage:
+
+- Zip traversal. The zip extractor had **no** traversal test at all — only the tar one did, despite zip being the path an operator taking GitHub's "Download ZIP" button actually uses, i.e. the likelier of the two to be exercised in the field.
+- Absolute entry names. `filepath.Join(destDir, "/etc/passwd")` is `destDir/etc/passwd`, so a check looking only at the joined result sees nothing wrong. This asserts the name is refused, not quietly reinterpreted.
+- The `"./"` root entry, which guards the behaviour change above — without it, a later edit that folds `.` back into the boundary check would silently start rejecting every GNU tar archive.
+- The existing tar traversal test is unchanged and still passes on the new code.
+
+### Verification
+
+**Not run.** This release was prepared in an environment with no Go toolchain and no route to fetch one, so `go build`, `go vet`, `gofmt` and `go test ./internal/upgrade/` have not been executed against these changes. That is a gap in this entry that every prior entry filled, and it is recorded here rather than glossed: run them before this goes anywhere near a node.
+
+Likewise, the CodeQL reasoning above is from the query's own barrier definitions, not from a run of the query. The shape is the one the barriers describe; whether #10 and #11 actually close is unconfirmed until the next scan.
+
+The two pre-existing failures from v887 are untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
 ## v927 — 2026-08-23
 
 **CodeQL `go/cookie-secure-not-set` #8 is the `Secure` sibling of #9, closed by v926 in the same edit. This release closes the cross-site logout v926 left open — and corrects how large v926 said that was.**
