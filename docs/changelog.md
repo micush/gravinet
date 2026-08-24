@@ -2,6 +2,32 @@
 
 ---
 
+## v930 — 2026-08-23
+
+**No code changes. v928 and v929 both shipped with their Verification sections reading "Not run"; this release amends them to what has since been confirmed, and records the amendment rather than making it silently.**
+
+### What changed
+
+`docs/changelog.md` only, in the two entries below this one.
+
+Both said the build, vet, gofmt and test runs had not happened, because when they were written they had not. Since then: v929 builds and runs, confirmed by the operator, which also covers v928's changes since v929 carries them forward unmodified. Both alert sets — `go/zipslip` #10–#11 and `go/disabled-certificate-check` #2–#6 — closed on the next scan of `main`, so both pieces of reasoning about CodeQL's barrier and exclusion sets held.
+
+Both sections now read "Partial" rather than flipping to the full battery v926 and v927 claim. What is confirmed is compilation and the scan outcome. What is not is `go vet`, `gofmt`, and the test suites — including v928's four new extraction tests, which nobody has yet watched pass. An entry that claimed those would be worth less than one that says plainly which half is missing.
+
+### Why this is a release rather than an edit
+
+The two entries were published, and v927 set the precedent: it corrected v926's overstatement in its own entry rather than rewriting v926. A changelog whose past entries can quietly improve is not a record. The version bump costs nothing and makes the amendment visible in the same place every other change is.
+
+### Verification
+
+Nothing to build. `cmd/gravinet/main.go`'s version constant and one documentation file are the whole diff, and the constant is the only thing a build would exercise.
+
+The gap named above stays open until someone runs `go vet ./...`, `gofmt -l .` and `go test ./internal/upgrade/ ./internal/webadmin/ ./internal/transport/` against this tree.
+
+The two pre-existing failures from v887 are untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
 ## v929 — 2026-08-23
 
 **CodeQL `go/disabled-certificate-check` #2–#6, all five remaining alerts. No behaviour changes: the five inline `tls.Config`s become two named ones that state why verification is off. The reason that closes the alerts is the same reason it is worth doing anyway.**
@@ -42,11 +68,13 @@ The exclusion is name-based, which means it is now permanently easier to add a *
 
 ### Verification
 
-**Not run.** Same as v928: no Go toolchain in the environment this was prepared in and no route to fetch one, so `go build ./...`, `go vet`, `gofmt` and the package tests have not been executed. `internal/webadmin` and `internal/transport` both need a build at minimum — the `crypto/tls` import removal in `speedtest.go` is the kind of thing that either compiles or very obviously does not.
+**Partial.** This release was prepared in an environment with no Go toolchain, so nothing was run at authoring time. Since then the operator has confirmed v929 builds and runs. `go vet`, `gofmt` and the package test suites have *not* been reported either way, so this entry does not claim them — unlike v926 and v927 above, which claim a full battery because one was run.
+
+The build result covers the one mechanical risk this change carried: the `crypto/tls` import removal in `speedtest.go` either compiles or very obviously does not, and it compiled.
 
 No tests added. There is no behaviour here to assert on that a test could distinguish from the previous code; the existing `internal/webadmin` suite, including `proxy_roundtrip_test.go` and the shell relay tests, exercises these clients and should pass unchanged. Tests referencing `proxyClient` do so in comments only, and `overlay_listener_test.go` builds its own config, which the query ignores as test code.
 
-Whether #2–#6 actually close is, as with v928, unconfirmed until the next scan — the reasoning is from the query's exclusion set, not from a run of it.
+#2–#6 closed on the next scan of `main`, confirming the exclusion applies as the query source describes.
 
 The two pre-existing failures from v887 are untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
 
@@ -95,9 +123,9 @@ Four in `internal/upgrade/upgrade_test.go`, three of them new coverage rather th
 
 ### Verification
 
-**Not run.** This release was prepared in an environment with no Go toolchain and no route to fetch one, so `go build`, `go vet`, `gofmt` and `go test ./internal/upgrade/` have not been executed against these changes. That is a gap in this entry that every prior entry filled, and it is recorded here rather than glossed: run them before this goes anywhere near a node.
+**Partial.** This release was prepared in an environment with no Go toolchain and no route to fetch one, so `go build`, `go vet`, `gofmt` and `go test ./internal/upgrade/` were not executed at authoring time. The operator has since confirmed that v929 — which carries these changes forward unmodified — builds and runs. That covers compilation. It does not cover the four tests this release adds, which have not been reported as run, and this entry does not claim them: the traversal, absolute-name and archive-root cases are asserted by code that nobody has yet watched pass.
 
-Likewise, the CodeQL reasoning above is from the query's own barrier definitions, not from a run of the query. The shape is the one the barriers describe; whether #10 and #11 actually close is unconfirmed until the next scan.
+The CodeQL reasoning above was from the query's own barrier definitions rather than a run of the query. #10 and #11 closed on the next scan of `main`, so the barrier shape was the right one.
 
 The two pre-existing failures from v887 are untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
 
