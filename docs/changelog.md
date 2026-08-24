@@ -2,6 +2,375 @@
 
 ---
 
+## v926 — 2026-08-23
+
+**CodeQL `go/cookie-httponly-not-set` on the logout cookie: cosmetic as reported, and the handler it points at accepted unauthenticated writes into the session revocation map.**
+
+### Assessment of the finding as reported
+
+Cosmetic. The cookie CodeQL flagged is the one logout sends to *clear* the session:
+
+    Set-Cookie: gravinetadmin=; Path=/; Max-Age=0
+
+Its value is empty, so there is nothing for a script to steal, and the login cookie one function up has always carried `HttpOnly`, `Secure` and `SameSite=Strict`. Browsers key cookie replacement on name, domain and path — not on the security attributes — and webadmin serves TLS only (`ServeTLS` on every listener, no plaintext path exists), so the clearing cookie did delete the real one. CodeQL sees a `sessionCookie` write without `HttpOnly` and cannot tell a deletion from an issuance.
+
+It is still worth changing, for a reason the alert does not give. `validSession`'s comment explains that the revocation list can live in memory because "logout also clears the browser cookie". That is a real security argument resting on a real browser behaviour, and writing the clearing cookie in a different shape from the cookie it clears is a poor thing to rest it on — it survives only as long as nobody adds a `Domain`, adopts a `__Host-` prefix, or meets a browser that tightens the rules. All four attributes now mirror the login cookie, so the pair is symmetric by inspection.
+
+### The bug in the same handler
+
+`/api/logout` is deliberately not behind `authed()`, which is right: logging out with a stale or unparseable session has to work. But it filed whatever arrived in the cookie straight into `s.revoked` — unsigned, unparsed, unauthenticated — held for `sessionTTL`, which is eight hours.
+
+The opportunistic sweep in that block cannot help, because it only deletes entries that have already expired and none of these has. So the map only grows.
+
+Measured before changing anything: 1,000 unauthenticated requests with junk cookies left 1,000 entries. Keys are attacker-chosen, and `MaxHeaderBytes` is 1 MiB, so the cost per request is bounded by the request header rather than by anything this code decides. `GET` was accepted too.
+
+Logout now records a token only if `validSession` accepts it. That bounds the map by real logins, which is what it was always meant to hold, and revoking a token that was never valid accomplishes nothing in the first place — the map exists to reject tokens that would otherwise pass.
+
+### The cross-site shape, partly closed
+
+With `GET` accepted, `<img src="https://node:8443/api/logout">` on any page an operator visited would clear their session. `SameSite=Strict` meant the session cookie was not sent, so nothing was revoked — but the clearing cookie in the response is honoured regardless, so the admin was logged out by an image tag. A nuisance, not a credential issue, and it needs the operator to have accepted the node's certificate first.
+
+`handleLogout` now requires `POST`, matching `handleLogin`, which has always checked. **This does not close cross-site logout** — a form post from another origin still reaches it, and `SameSite` on the clearing cookie does not change that, since `SameSite` governs when a cookie is *sent*, not whether a `Set-Cookie` is honoured. Closing it properly means a CSRF token or an `Origin` check across the mutating API surface, which is a wider change than this one and is not attempted here. The UI already posts, so nothing on the front end changes.
+
+### Verification
+
+`go build ./...` clean; cross-compiles clean for `linux/arm`, `linux/amd64`, `darwin/arm64`, `windows/amd64`, `openbsd/amd64` and `freebsd/amd64`. `go vet` and `gofmt` clean on the touched package. `internal/webadmin`, `internal/upgrade`, `internal/config`, `cmd/gravinet`, `internal/hostnet` and `internal/control` pass in full.
+
+`logout_cookie_test.go` adds five tests: that the clearing cookie mirrors the login cookie on all four attributes; that 1,000 unauthenticated junk cookies leave the revocation map empty; that a validly signed token is still revoked *and* stops validating afterwards, which is the half that matters more than the refusal; that an already-expired token is not filed, a deliberate consequence of gating on `validSession` rather than on the signature alone, pinned so it is not rediscovered as a surprise; and that `GET`, `HEAD`, `PUT` and `DELETE` are refused without clearing the cookie.
+
+Each guard was reverted and confirmed to fail: the bare clearing cookie fails the attribute test on three of four fields, removing the validity gate restores all 1,000 junk entries, and accepting `GET` clears the session cookie on every method.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
+## v925 — 2026-08-23
+
+**CodeQL `go/zipslip` #10 is the tar half of #11, already assessed and tested in v924. No boundary work was needed, so this release spends itself on the entry-count ceiling v924 flagged and deferred.**
+
+### Assessment
+
+Alert #10 points at `extractSourceTarGz`'s loop; #11, handled yesterday in v924, pointed at `extractSourceZip`'s. Same hazard, same checks, two formats. The tar path was assessed and tested as part of that release rather than after this alert arrived, so nothing here is new:
+
+- `TestTarGzRefusesEscapingEntries` already exercises nine escaping entry shapes against this exact function, asserting on bytes-written-outside-the-destination separately from the error.
+- `TestExtractorsRefuseSymlinks` already covers the tar symlink *and* hard-link rejections — the tar-only case, since zip has no hard links, and the thing that makes a name-based boundary sufficient at all.
+- `TestTarGzCeilingBoundsTheCopy` and `TestCeilingIsCumulativeAcrossEntries` already cover this loop's size handling.
+
+All three pass unchanged. CodeQL reports both functions because it does not recognise the clean-reject-join-prefix sequence as a sanitizer, not because the two differ.
+
+Recording it rather than closing it silently: two alerts on sibling functions is exactly the shape where "we fixed that one" quietly becomes "we assumed that one".
+
+### The deferred item, now done
+
+v924 flagged that entry *count* is unbounded and said it "wants to be its own change with its own thought about vendored dependencies". This alert landing on the same loop is a reasonable moment for that change.
+
+Measured on the current code: an empty tar entry compresses to **under five bytes on the wire** (4.94 B/entry at 100k entries), so a `MaxSourceUploadSize` upload could ask for roughly **27 million** files. The byte ceiling is no help — a zero-length file costs no bytes and still costs an inode and a directory entry.
+
+Both extractors now count entries against `maxSourceEntries`, counted after the type switch so skipped entry types spend no budget, and before anything is created so the cap bounds what is made rather than reporting on what was.
+
+**On the number.** 100,000, chosen against real trees rather than against the attack. gravinet's own source archive is 690 files. A Go project that vendors heavily runs to a few tens of thousands. So the cap is two orders of magnitude above what this project ships, clear of any vendored tree an operator might legitimately upload, and 270 times below what an upload can currently demand. If a real tree ever hits it the right response is to raise the number, so the error names the limit instead of saying "too many files".
+
+### A correction to v924
+
+v924's write-up said "inodes and directory entries are as exhaustible as blocks", which overstated it. `extractToTemp` calls its cleanup on every error path, so a failed extraction removes the whole temp tree — the exhaustion is transient, lasting the extraction plus the `RemoveAll`, not persistent. That is a smaller problem than the sentence implied, and it is a DoS window rather than a disk that stays full. The cap is still worth having at 27 million entries; the severity claim was wrong and is corrected here rather than left standing.
+
+### Verification
+
+`go build ./...` clean; cross-compiles clean for `linux/arm`, `linux/amd64`, `darwin/arm64`, `windows/amd64`, `openbsd/amd64` and `freebsd/amd64`. `go vet` and `gofmt` clean on the touched package. `internal/upgrade`, `internal/webadmin`, `internal/config`, `cmd/gravinet`, `internal/hostnet` and `internal/control` pass in full, including all eight tests v924 added to this file.
+
+Three tests added: that a tar archive past the ceiling is refused with the message that names the limit and leaves no more than the cap on disk; that the zip path has the same check; and — the half that matters more for a limit — that a 60,000-file vendored tree still extracts, with a static assertion that the cap stays clear of that figure so raising one without the other fails the build rather than the operator.
+
+Both caps were neutralised and both refusal tests confirmed to fail (100,010 entries accepted past a 100,000-entry ceiling on each path). Worth noting the first attempt at that revert deleted the counter outright and failed to compile on `entries declared and not used` — the revert had to be written as a no-op that keeps the variable live, which is a small sign the check is load-bearing rather than decorative.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
+## v924 — 2026-08-23
+
+**CodeQL `go/zipslip` on the source-upload zip extractor: the boundary holds, and the size ceiling next to it did not.**
+
+### Assessment of the finding as reported
+
+Not exploitable. Both extractors already do the recommended thing and do it in the stronger of the two forms: clean the entry name, reject an absolute path or a leading `..` component, join against the destination, and then confirm the *result* is still inside it. CodeQL's own guidance suggests checking the raw name for `..`; the prefix check on the joined path is what actually closes the hole, and the comment in `extractSourceTarGz` already said why cleaning alone is not the boundary.
+
+Verified before changing anything, against nine entry shapes on both extractors. Every one was refused, and nothing landed outside the destination:
+
+    "../escaped"                -> refusing to extract: escapes the upload directory
+    "a/b/../../../escaped"      -> refusing to extract: escapes the upload directory
+    "/etc/passwd"               -> refusing to extract: escapes the upload directory
+
+Two shapes are worth naming because they are *not* refused and are still safe. `..\windows.txt` and `....//escaped` are written, as files literally named `..\windows.txt` and `..../escaped` inside the destination. On Linux a backslash is an ordinary character in a filename, and `....` is an ordinary directory name; neither escapes. On Windows `filepath.Separator` is a backslash, so `filepath.Clean` folds both into the traversal form and the existing check refuses them there. The behaviour is correct on both, for different reasons, which is exactly the sort of thing to have a test for rather than a memory of.
+
+The symlink rejection is what makes a name-only boundary sufficient at all — extract `link -> /etc`, then `link/passwd`, and every name is innocent. Both extractors refuse symlinks and hard links outright, and that is now pinned too.
+
+### The bug next to it
+
+The constant governing extraction size said this:
+
+> Enforced per-file and cumulatively as bytes are copied, not read from the tar header (which is attacker-controlled and never verified against the actual stream).
+
+The second half was true and the first half was not. Each entry was copied through `io.LimitReader(tr, hdr.Size+1)` — limited by the size *the archive declares* — and the cumulative total was compared against the ceiling only after the entry had been fully written. So the ceiling did not bound anything; it reported an overrun once the bytes were on the disk.
+
+Measured, with the ceiling temporarily lowered to 1 MiB to keep the numbers small: a 64 KiB archive declaring and containing 64 MiB of zeros returned `upload expands past the 1048576-byte extraction ceiling` and left 67,108,864 bytes on disk. Sixty-four times the ceiling, from an upload three orders of magnitude under the wire cap.
+
+At the shipped constants that scales badly. Zeros gzip at about 1028:1, so a 128 MiB upload — inside `MaxSourceUploadSize`, inside the handler's `MaxBytesReader`, inside every check that exists — could declare and write on the order of 138 GB before the 512 MiB ceiling was consulted. The upload endpoint is authenticated, so this is an authenticated disk-exhaustion DoS, not a remote one.
+
+### What changed
+
+Both extractors now clamp each copy to the lesser of what the header claims and what is left of the budget, so the ceiling bounds the write rather than describing it afterwards. The same 64 MiB bomb now leaves 1,048,577 bytes — the ceiling plus the one byte that detects going over.
+
+The zip path also gets an explicit refusal for a `UncompressedSize64` that will not fit an `int64`. The old conversion made such a value negative, which the size-mismatch check below caught by accident; a header declaring an impossible size should say so rather than be rescued by an unrelated comparison.
+
+The constant's comment now describes what the code does. It was the comment that made this worth finding — the property it claimed is the right one, and reading it next to the loop is what showed the loop did not implement it.
+
+### The finding neither CodeQL nor this release fixes
+
+Entry *count* is unbounded, and the byte ceiling does nothing about it because empty files cost no bytes. Measured: 200,000 zero-length entries compress to 985 KB on the wire, and extraction created 200,001 files in about 17 seconds with the byte counter still reading zero. Inodes and directory entries are as exhaustible as blocks.
+
+It is flagged rather than fixed because closing it means choosing a number, and a number chosen badly rejects a legitimate upload — a vendored tree can be surprisingly large, and this is the path an operator uses to recover a node. That is a decision with a blast radius, not a rider on a bounds fix. A cap somewhere around 100k entries would be far above any real gravinet source tree and far below a useful attack, but it wants to be its own change with its own thought about vendored dependencies.
+
+### Verification
+
+`go build ./...` clean; cross-compiles clean for `linux/arm`, `linux/amd64`, `darwin/arm64`, `windows/amd64`, `openbsd/amd64` and `freebsd/amd64`. `go vet` and `gofmt` clean on the touched packages. `internal/upgrade`, `internal/webadmin`, `internal/config`, `cmd/gravinet`, `internal/hostnet` and `internal/control` pass in full.
+
+`source_bounds_test.go` adds eight tests: that nine escaping entry shapes are refused by each extractor, asserted on bytes-outside-the-destination separately from the error, since an entry could in principle be reported as refused after something had been written; that symlinks and hard links are refused, that being what makes a name-based boundary sufficient; that each extractor's copy is bounded by the budget rather than the declared size; that the budget is cumulative across entries; that an ordinary source tree still extracts with every byte intact; and that a short entry is still reported rather than silently accepted.
+
+Each guard was reverted and confirmed to fail. Two are worth recording. Restoring the old copy limit reproduced the measurement above at the shipped ceiling — 545,259,520 bytes written against 536,870,912. And the *plausible wrong fix* — clamping each copy to the whole ceiling instead of to the remainder, which bounds any single entry and nothing else — was tried explicitly: it passes the single-entry test and fails the cumulative one, seven entries of 96 MiB each getting through a 512 MiB ceiling. That test exists because that is the fix someone reaches for first.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
+## v923 — 2026-08-23
+
+**CodeQL `go/path-injection` on the snapshot read: the flagged line was already safe, and the unflagged one twenty lines above it in the same file was not.**
+
+### Assessment of the finding as reported
+
+Not exploitable. `readEnvelope` called `validID` before building the path, and `validID` admitted digits and nothing else — strictly tighter than the "no separator, no `..`" check CodeQL's own guidance asks for. All four flows the alert counts (`?id=` on history-get, `?a=`/`?b=` on history-diff, `{"ID":...}` on history-restore) go through `config.Get` into that one function, and a traversal id was refused at the door.
+
+CodeQL does not recognise a hand-written `for` loop over runes as a sanitizer, so it sees a request parameter reaching `filepath.Join` and reports it. Same shape as v920's `validHostname`.
+
+### The line it did not flag
+
+`readMeta`, twenty lines earlier in the same file, built its sidecar path by concatenation with **no check at all**:
+
+    os.ReadFile(filepath.Join(d, id+".meta"))
+
+Confirmed by direct probe before changing anything — `readMeta(d, "../../secret")` read a `.meta` from outside the history directory and returned the parsed contents, while `readEnvelope(d, "../../secret")` correctly refused. The two functions sat one above the other, took the same argument, and disagreed about whether it needed checking.
+
+Reachability, stated honestly: nothing reached it. `List` is the only caller and passes ids it generated itself from `listIDs`. This was a latent gap, not a live vulnerability, and it is being reported that way.
+
+It is worth more than its reachability suggests for two reasons. First, `readMeta` writes as well as reads — on a sidecar miss it rebuilds one — so an unchecked id there is a write primitive, not just a disclosure. That half happened to be blocked, but only transitively: the write is reached through `readEnvelope`, which refused first. The protection came from a different function's check, which is not a property anyone was maintaining on purpose. Second, adding a caller is the obvious way to make this reachable, and "safe because of who calls it" is precisely what v922 was about.
+
+### What changed
+
+Every per-id path in the package now comes from one place, and the id is an `int64` by the time it reaches `filepath.Join`.
+
+`snapshotFile(d, id int64, ext)` is the builder. `snapshotFileFor(d, id string, ext)` is the entry point for an id that arrived as text: it parses to an `int64` and rebuilds the path from the *number*, so what reaches `filepath.Join` cannot contain a separator or a dot whatever the caller sent. This is not a new idea in the file — `writeOne` and `prune` have always built their paths from an `int64` with `%d`; only the read side took the caller's string and concatenated it. Now neither does, and all six construction sites go through the pair.
+
+`validID` is gone. Its problem was never its strictness; it was that it guarded one of the two functions that built a path from an id, and nothing obliged the other to call it. Replacing a validator-plus-convention with a constructor removes the question.
+
+The round trip through `FormatInt` narrows the accepted set to exactly the canonical ids, turning away leading zeros, a leading plus, and anything that overflows an `int64`. All of those were accepted by `validID` and then failed to name a file, so the operator-visible outcome — `no such snapshot` — is unchanged; only the reason is.
+
+### Not changed
+
+The history directory is `0700` and snapshots are `0600`, so the symlink variant of this — replacing `1719245412123.json` with a link to somewhere else — needs write access to a root-owned directory and is out of scope for a path check here.
+
+`Get` still special-cases the string `current` before any path is built. That is a sentinel, not an id, and it never reaches the filesystem; the new builder refuses it, which is correct and is pinned by a test.
+
+### Verification
+
+`go build ./...` clean; cross-compiles clean for `linux/arm`, `linux/amd64`, `darwin/arm64`, `windows/amd64`, `openbsd/amd64` and `freebsd/amd64`. `go vet` and `gofmt` clean on the touched packages. `internal/config`, `internal/webadmin`, `cmd/gravinet`, `internal/hostnet` and `internal/control` pass in full.
+
+`history_path_test.go` adds nine tests: that traversal ids are refused; that non-canonical ids are refused; that every id this package generates round-trips, including `9223372036854775807`; that any accepted path is directly inside the history directory and already clean; that `readEnvelope` still refuses, since the flagged line must not regress while the check moves; that `readMeta` refuses and discloses nothing; that `readMeta` creates no sidecar outside the history directory; that a real snapshot is still listable, readable and rebuildable from its envelope when the sidecar is deleted; and that `Get` refuses at the boundary the handlers actually call.
+
+Each guard was individually reverted and confirmed to fail — the `readMeta` revert reproducing the probe result above, `{User:root Summary:leaked}` returned from outside the directory. One of the new tests was itself wrong on the first run: the sidecar-write test swept the parent directory for any `.meta` file, and the fixture puts one there, so it failed against correct code. It now compares against the directory listing taken before the call.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
+## v922 — 2026-08-23
+
+**CodeQL `go/path-injection` on the IPv6 sysctl write: the traversal it describes does not work, but chasing it found a real one next door — `iface=all` silently turned off router advertisements host-wide.**
+
+### Assessment of the finding as reported
+
+Not exploitable as path traversal. `safeIface` admits no `/`, so the interface name is stuck as a single component and can climb exactly one level: `..` yields `/proc/sys/net/ipv6/accept_ra`, a directory that has no `accept_ra` or `autoconf` in it. The write failed with ENOENT and was swallowed by the "no IPv6 on this interface" branch directly below.
+
+That is a fact about the kernel's `/proc` layout, though, not about this code — and it was being relied on silently. The function's own comment conceded the shape of the problem: the name "has already been through safeIface by the time Apply reaches here ... the check is repeated nowhere on the assumption that Apply is the only caller." A property that depends on who calls you is one that stops holding the day someone else does.
+
+Worth noting why this call site and not the other three. `Persist`'s Linux backends put the same tainted name into `99-gravinet-%s.yaml`, `70-gravinet-%s.network` and `gravinet-%s` — but there it lands in the *middle* of a filename, between a prefix and a suffix, where a lone `..` cannot become a component of its own. Here the name **is** the component. That difference is the whole finding, and it is why the check belongs in this file.
+
+### The bug the finding led to
+
+Following the taint back to its source turned up something that does work, and it is worse than the alert.
+
+`/proc/sys/net/ipv6/conf/` holds one directory per interface *and two that are not interfaces*: `all` and `default`. Writing `accept_ra` under `all` applies to every interface on the host; under `default`, to every interface created afterwards.
+
+`safeIface` admits both — correctly, since they are perfectly well-formed names — and nothing else checked. `handleSystemInterfaceEdit` takes `iface` straight from the request body, trims it, confirms it is not a mesh device, and passes it through. So:
+
+    POST /api/system/interface-edit
+    {"op":"mode","iface":"all","mode6":"static"}
+
+wrote `accept_ra=0` and `autoconf=0` under `conf/all`, switching IPv6 autoconfiguration off across the whole machine.
+
+The reason nobody noticed is the ordering. `Apply` did require the interface to exist — `GlobalAddrs` fails on a name the kernel does not know — but it found out *after* `applyMode`, which had already written to `/proc`. The request came back `no such network interface`. An operator saw a request that failed, and a host that had quietly stopped accepting router advertisements. Reverting it means knowing to go and look at a sysctl nothing in the UI mentions.
+
+This is authenticated — the route is behind `s.authed` — so it is a scope-escalation on an endpoint documented as editing one interface, not a pre-auth issue. It is still an endpoint that changes host-wide kernel state and reports failure while doing it.
+
+### What changed
+
+Two checks, with two different jobs, deliberately not merged into one.
+
+`ifaceSysctlPath6` now builds the path and is the only thing that does, applying the test CodeQL's guidance gives for a value that must be a single component: no separator in either spelling, and no `..`. It is slightly broader than strictly needed — it would also refuse a NIC named `eth..0` — but no such interface exists, and the narrower version of this check is the one that gets got by `.../...//`. The point is that the path is now provably inside `conf/` by reading this function, rather than by reading a validator in another file and trusting the call graph.
+
+`Apply` now requires the interface to exist before `applyMode` runs. That is the fix for `all` and `default`, and it is not a Linux-only concern: every platform's `applyMode` runs at that point, and a name that names nothing should not be handed to any of them. `safeIface` was not extended to cover this, because the reason to refuse `all` is not its spelling.
+
+The existence check is behaviour-preserving for every input that used to succeed — those all name a real interface, or `GlobalAddrs` would have rejected them anyway. The only difference is that inputs that were always going to fail now fail before the kernel is touched instead of after.
+
+### Not changed
+
+`safeIface` still admits `..`, and the three `Persist` filename call sites still rely on the prefix/suffix embedding described above rather than on a check of their own. Both are fine as they stand and neither was touched, but the reasoning is written down here rather than left to be re-derived: if a fourth backend is ever added that uses the interface name as a bare filename component, it needs `ifaceSysctlPath6`'s treatment, not `safeIface`'s.
+
+Also unchanged: the interface-edit endpoint does not verify that `iface` is one of the interfaces the table actually offers. `Apply` now rejects anything that is not a live interface, which closes the consequence, but the handler is still willing to *try* any name it is given. Narrowing it to the enumerated set is a better shape and a separate change.
+
+### Verification
+
+`go build ./...` clean; cross-compiles clean for `linux/arm`, `linux/amd64`, `darwin/arm64`, `windows/amd64`, `openbsd/amd64` and `freebsd/amd64`. `go vet` and `gofmt` clean on the touched packages. `internal/hostnet`, `internal/webadmin`, `cmd/gravinet`, `internal/config` and `internal/control` pass in full — including the pre-existing `TestApplyOnlyPrunesWhenAsked`, which uses `lo` and is therefore transparent to the new gate.
+
+`mode_linux_test.go` adds five tests: that non-component names are refused; that every shape Linux actually produces still builds a path, VLAN sub-interfaces (`eth0.100`) especially, since a single dot must not read as traversal; that the result is always exactly one level below `conf/`; that `all` and `default` are refused; and that the refusal comes from the existence check rather than from `GlobalAddrs` further down, which is the ordering property that actually matters.
+
+Both guards were individually reverted and confirmed to fail. The second revert is the useful one to record: with the existence check removed, `Apply("all")` still fails, with `route ip+net: no such network interface` — the *same message the operator saw before*. The test distinguishes the two by which check produced the error, because the observable outcome of the bug and the fix are otherwise identical from outside.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
+## v921 — 2026-08-23
+
+**CodeQL `go/incorrect-integer-conversion` on the `fw move` index: exploitable on linux/arm, where it puts a firewall rule at the top of the rulebase instead of the bottom.**
+
+### Assessment
+
+Real, and worse on a shipped target than it looks on a laptop.
+
+`cmd/gravinet/main.go` parsed the `fw move` destination as `int(parseUint(pos[1]))`. On a 64-bit build every over-large value comes back negative and is caught by the `dest < 0` check three lines down, which is why this looks like a false positive. But `int` is 32 bits on **linux/arm**, which is in `scripts/build-release.sh`'s matrix, and there the value is truncated to its low 32 bits:
+
+    fw move 7 4294967296   ->  64-bit: 4294967296     32-bit: 0
+    fw move 7 4294967299   ->  64-bit: 4294967299     32-bit: 3
+
+`insertAt` clamps an out-of-range position to the end of the rulebase, so on amd64 the first command puts rule 7 **last**. On arm it puts it **first** — at the top of an ordered, first-match evaluator. That is precisely the silent mis-placement the `-to` default was deleted to prevent, and the comment recording that decision sits directly above the line CodeQL flagged. The neighbouring values are the nastier ones, because a rule landing at position 3 looks like something the operator meant.
+
+### The fix
+
+`parseIndex` replaces the conversion. It parses at 64 bits and bounds-checks against `math.MaxInt32` — the constant-comparison form CodeQL's own guidance recommends and can recognise — then returns `(int, error)` so the single call site reports the problem instead of the value being reinterpreted. The ceiling is what makes the conversion *total*: anything `parseIndex` accepts fits an int on every platform Go targets, so there is no architecture-dependent behaviour left in this path to reason about. No rulebase is within nine orders of magnitude of the bound.
+
+It returns an error rather than calling `fatal` directly, which is what makes the bound unit-testable without a subprocess re-exec.
+
+### The same conversion, one command over
+
+Following the alert's own "add bound checks" recommendation through the rest of the `fw` surface turned up `parsePortRange`, which discarded `strconv`'s error entirely and returned whatever `Atoi` left behind. Two endings, both the same shape as the finding — a number the operator did not write, substituted for the one they did:
+
+- **Above 65535.** The CLI passed it through intact and `mesh.resolveLegs` narrowed it later with an unchecked `uint16()`, one wire hop away where nothing could report it. `-dport 80-100000` became `80-34464`.
+- **Not a number at all.** `-dport http` parsed as `0`, which cleared `hasPorts` in `resolveLegs` and left the rule with **no port leg at all**. A rule meant to deny one port denied every port; its allow counterpart opened every port. Silently widening a firewall rule is not an acceptable response to a typo.
+
+`parsePortRange` now returns `(int, int, error)` and bounds each end at 0-65535, checked in the CLI because that is the last point at which a wrong number can still be shown to the person who typed it. Empty stays the only input that yields a zero range, since that is how `-sport`/`-dport` are left unset. Inverted ranges (`443-80`) are now rejected too; they previously produced a leg matching nothing, and the NAT path already rejected them with its own check, so this only makes the two agree.
+
+The second caller — the DNAT translation loop in `natRules` — deliberately does **not** `fatal`. It translates an already-saved config at runtime, so an unparseable field is skipped exactly as before; its existing `lo >= 1 && hi <= 65535` guard already rejected the zeroes `Atoi` used to hand it, so nothing about that path's behaviour changes.
+
+### The finding CodeQL did not raise, and why it is not fixed here
+
+The actual truncation site is `uint16(fr.SrcPortMin)` and its three siblings in `resolveLegs`. The CLI is not the only way in: `webadmin` decodes `mesh.FirewallRule` straight from JSON, so a POST can still deliver an out-of-range port. And `config.Validate` bounds the **service catalog's** ports at `config.go:3050` while leaving the **rules'** inline ports — the sibling field, in the same validator — unchecked.
+
+Closing it there is a bigger change than it looks, and it is being flagged rather than done quietly, because the obvious fix makes things worse:
+
+- `loadRules` **skips** rules that fail to compile, with a warning. Adding the bound would turn a truncated deny rule into an **absent** deny rule at startup. Fail-open, worse than the truncation.
+- `ReloadFirewallRules` returns the error instead, failing the whole reload.
+- Adding it to `config.Validate` means a daemon that currently starts would refuse to, on an existing on-disk config.
+
+Doing this properly means deciding what a rule with an invalid port should *do* — reject at the boundary, or compile to something that fails closed — and that is a release of its own, not a rider on this one.
+
+### Verification
+
+`go build ./...` clean; cross-compiles clean for `linux/arm`, `linux/amd64`, `windows/amd64`, `darwin/arm64`, `openbsd/amd64` and `freebsd/amd64` — `linux/arm` being the target the finding actually bites on. `go vet` and `gofmt` clean on the touched packages. `cmd/gravinet`, `internal/control`, `internal/config` and `internal/netfilter` pass in full.
+
+`fwparse_test.go` adds seven tests: that values which truncate on 32-bit are refused, with the cases chosen so the truncated result is a *plausible* position (`4294967299` -> 3) rather than an obviously broken one; that every representable position still parses unchanged, including `2147483647`; that out-of-range and non-numeric ports are refused; that the valid forms and the empty-means-unset case are untouched; and that inverted ranges are refused. Each guard was individually reverted and the corresponding test confirmed to fail, then restored — with one honest exception: `-dport 80-` is caught by the inversion check rather than the parse check, so it survives a broken parse guard. It is still pinned, just by a different line than its neighbours in that table.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
+## v920 — 2026-08-23
+
+**CodeQL `go/command-injection` on the Windows hostname rename: not exploitable, and the interpolation is gone anyway.**
+
+### Assessment
+
+Not exploitable. `SetHostname` calls `validHostname` before dispatching to any OS branch, and it permits only letters, digits, hyphens and dots, with leading and trailing hyphens rejected per label. No quote, semicolon, space, dollar or backtick can reach the PowerShell string, so `-NewName '...'` could not be broken out of. `TestValidHostnameRejectsInjection` has pinned this since the validator was written, and one of its cases is `host'name`, commented as breaking out of exactly this quote.
+
+CodeQL does not recognise a custom `error`-returning validator as a sanitizer, so it sees the query-string hostname reaching a command string and reports it.
+
+### What changed anyway
+
+The same weakness as v919's proxy finding, in a different file: safe, but safe *because of* a check 750 lines away. The name now reaches PowerShell through the environment —
+
+    Rename-Computer -NewName $env:GRAVINET_NEW_HOSTNAME -Force
+
+— with the value supplied via `cmd.Env`. This is not a new idea here: `psRun` in `sysusers.go` already does exactly this for passwords, with a comment explaining that a secret goes in "via an environment variable ... never interpolated into the script text itself". The rename simply had not been written that way. The property is now local, unconditional, and survives the validator being loosened.
+
+### The rest of the shell surface, checked
+
+Every `-Command`, `sh -c` and `/C` invocation in the tree was reviewed for the same pattern. Two others build a script containing a variable: `psRun` already uses the environment, and `hosttime.go`'s `Set-Date` interpolates `t.Format("2006-01-02 15:04:05")`, which a `time.Time` cannot make into anything but a fixed-shape numeric string. Nothing else takes caller-controlled text.
+
+### On the tests
+
+The first version of this change added two tests asserting that `validHostname` rejects shell metacharacters. **Both were redundant** — `hostresolver_test.go` already covers that ground, more thoroughly and with the PowerShell case called out by name — and one of them was also wrong, rejecting `x--flag`, which is a legitimate hostname (`xn--` punycode labels contain a double hyphen and do not start with one). They were deleted rather than kept as duplicates.
+
+What remains is what was actually missing: that the rename script does not contain the name, and that `validHostname` runs *before* the OS dispatch rather than inside one branch — the validator protects the argv call sites too, where `sysrc`, `scutil` and `hostname` would read a leading hyphen as an option. Both were confirmed to fail with the guard broken (the interpolated form restored; the check moved below the dispatch) and to pass on restore.
+
+### Verification
+
+`go build ./...` and `GOOS=windows go build ./...` clean, `go vet` clean, `gofmt` clean. `internal/service`, `internal/webadmin`, `cmd/gravinet` and `internal/config` pass in full.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
+## v919 — 2026-08-23
+
+**CodeQL `go/request-forgery` on `handleProxy`: the finding is not exploitable, but the code it points at is now structural rather than conditional.**
+
+### Assessment
+
+Not an SSRF. The alert tracks `path`, which comes off the query string, into the outgoing URL. The host does not: `node` is only a lookup key, and `resolveManagedTarget` scans the live managed-peer set for an exact `NodeID` match, takes the address and port **from the peer record**, and then requires `OverlayContains(ip)` — a peer advertising an address outside the overlay is rejected as spoofed. That is exactly the "choose from a list of authorized targets" remedy CodeQL's own guidance recommends; the tool cannot see it because the allowlist lookup and the request are far apart.
+
+Nor could `path` reach the authority. It must begin with a slash, so the authority is closed before it starts, and it must match `/api/`, with traversal rejected raw and percent-encoded, then re-verified after parsing.
+
+### What changed anyway
+
+The URL was `"https://" + hostport + path`. That was safe, but safe *because of* a check several lines away. It is now built from a `neturl.URL` with `Host` assigned from the resolved target, so user input cannot reach the authority at all — provable locally, by a reader as much as by a tool. `net/url` parses the caller's value in its own right, the path and query travel as separate fields, and a post-parse check confirms the request still targets the resolved peer.
+
+### An honest note on one of the new tests
+
+`TestProxyRejectsAnAbsoluteURLAsPath` was written to demonstrate the parse guard. It does not: those inputs were already rejected by the leading-slash and `/api/` prefix checks that predate this change, and removing the new guard leaves the test passing. The guard is cheap defence-in-depth and stays, the behaviour is worth pinning, but the test's comment now says which layer actually does the work rather than claiming credit for the new one. Two of the four negative checks initially failed to fire — this was one; the other was an edit of mine that did not compile, so the test never ran.
+
+### The finding CodeQL did not raise
+
+Sensitive endpoints are kept off the proxy by a **denylist**: twelve paths named in `handleProxy` against **113 registered `/api/` handlers**. Everything not named is proxyable, so a new sensitive endpoint is remotely reachable the day it is added unless someone remembers to add it here — and the existing entries exist because that has already gone wrong once, which the `/api/managed` comment records. An allowlist inverts that default. It is a behavioural change that needs every proxyable endpoint enumerated, and getting it wrong breaks peer viewing, so it is flagged here rather than done quietly.
+
+### Verification
+
+`go build ./...` clean, `go vet` clean, `gofmt` clean. All four suites pass, including the ten existing proxy tests — the SSRF guard, traversal, `/api/`-only, local-only paths and peer routing — unchanged.
+
+`proxy_url_test.go` adds: that the request always arrives at the resolved peer's host; that the query string survives being moved from inside a concatenated string to a separate `RawQuery` field, which is exactly the kind of thing such a change drops silently; and that the URL is built from parts with `Host` assigned from the target. Each was confirmed to fail with its guard broken and to pass on restore.
+
+The two pre-existing failures from v887 are unchanged and untouched: `internal/mesh`'s duplicated test files, and six files that are not `gofmt` clean.
+
+---
+
 ## v918 — 2026-08-23
 
 **Fix: a peer that upgraded successfully was reported as having failed, and stopped the rollout.**

@@ -71,6 +71,33 @@ func Apply(s Spec) (added, removed int, err error) {
 	if !safeIface(s.Iface) {
 		return 0, 0, fmt.Errorf("refusing to configure interface name %q", s.Iface)
 	}
+	// The interface has to exist before anything is written, not after.
+	//
+	// Apply always required this — GlobalAddrs below fails on a name the
+	// kernel does not know — but it found out after applyMode had run, and on
+	// Linux applyMode has written to /proc by then. For an ordinary typo that
+	// cost nothing. For the two names the kernel keeps in among the real
+	// interfaces it cost a good deal: "all" and "default" are directories in
+	// /proc/sys/net/ipv6/conf, so an interface-edit request naming one of them
+	// wrote accept_ra and autoconf under it — "all" meaning every interface on
+	// the host, "default" meaning every interface created afterwards — and
+	// then returned "no such network interface". The operator saw a request
+	// that failed and a machine that had quietly stopped accepting router
+	// advertisements.
+	//
+	// safeIface does not catch this and should not be asked to: "all" is a
+	// perfectly well-formed interface name, and the reason to refuse it is not
+	// its spelling but that there is no such interface. Nor is this only a
+	// Linux concern — every platform's applyMode runs before this point, and a
+	// name that names nothing is not something to hand any of them.
+	//
+	// Checking here is behaviour-preserving for every input that used to
+	// succeed: all of those name a real interface, or GlobalAddrs would have
+	// rejected them anyway. The only difference is that the ones that were
+	// always going to fail now fail before the kernel is touched.
+	if _, err := net.InterfaceByName(s.Iface); err != nil {
+		return 0, 0, fmt.Errorf("no interface named %q on this host", s.Iface)
+	}
 	// The mode goes first, and for one family it has to. Switching IPv6 to
 	// static means turning off RA acceptance and autoconfiguration; doing
 	// that after pruning would let the kernel put an autoconfigured address

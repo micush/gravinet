@@ -166,7 +166,7 @@ func nowMillis() int64 { return time.Now().UnixMilli() }
 func writeOne(d string, cfg *Config, user, summary string) (string, error) {
 	id := nowMillis()
 	for {
-		if _, err := os.Stat(filepath.Join(d, fmt.Sprintf("%d.json", id))); os.IsNotExist(err) {
+		if _, err := os.Stat(snapshotFile(d, id, ".json")); os.IsNotExist(err) {
 			break
 		}
 		id++
@@ -180,11 +180,11 @@ func writeOne(d string, cfg *Config, user, summary string) (string, error) {
 		Summary: summary,
 		Config:  cfg,
 	}
-	if err := writeJSONAtomic(filepath.Join(d, fmt.Sprintf("%d.json", id)), snap); err != nil {
+	if err := writeJSONAtomic(snapshotFile(d, id, ".json"), snap); err != nil {
 		return "", err
 	}
 	meta := SnapshotMeta{ID: snap.ID, TS: snap.TS, Stamp: snap.Stamp, User: snap.User, Summary: snap.Summary}
-	_ = writeJSONAtomic(filepath.Join(d, fmt.Sprintf("%d.meta", id)), meta)
+	_ = writeJSONAtomic(snapshotFile(d, id, ".meta"), meta)
 	return snap.ID, nil
 }
 
@@ -258,22 +258,47 @@ func prune(d string, limit int) {
 		return
 	}
 	for _, id := range ids[:len(ids)-limit] {
-		_ = os.Remove(filepath.Join(d, fmt.Sprintf("%d.json", id)))
-		_ = os.Remove(filepath.Join(d, fmt.Sprintf("%d.meta", id)))
+		_ = os.Remove(snapshotFile(d, id, ".json"))
+		_ = os.Remove(snapshotFile(d, id, ".meta"))
 	}
 }
 
-// idPattern guards against path traversal: valid ids are pure digit strings.
-func validID(id string) bool {
-	if id == "" {
-		return false
+// snapshotFile builds the path of one file in the history directory from a
+// numeric snapshot id. Every per-id path in this package is built here, and
+// the id is an int64 by the time it arrives, so the value reaching
+// filepath.Join is digits and nothing else by construction.
+func snapshotFile(d string, id int64, ext string) string {
+	return filepath.Join(d, fmt.Sprintf("%d%s", id, ext))
+}
+
+// snapshotFileFor is the same, for an id that arrived as a string — from a
+// query parameter, a request body, or a CLI argument.
+//
+// The id does not stay a string. It is parsed to an int64 and the path is
+// rebuilt from the number, which is the same construction the writers have
+// always used: writeOne and prune build their paths from an int64 with %d,
+// and only the read side ever took the caller's text and concatenated it.
+// Now neither does, so what reaches filepath.Join cannot contain a
+// separator or a dot whatever the caller sent, and that is provable by
+// reading these six lines rather than by tracing a validator through the
+// call graph.
+//
+// The round trip through FormatInt is what makes the accepted set exactly
+// the canonical ids: it turns away leading zeros, a leading plus, and
+// anything that does not fit an int64. All of those used to be accepted by
+// validID and then fail to name a file, so the outcome an operator sees —
+// "no such snapshot" — is unchanged; only the reason is.
+//
+// This replaces validID, whose problem was not its strictness (digits-only
+// is tighter than the check CodeQL's guidance asks for) but that it guarded
+// one of the two functions here that build a path from an id, and nothing
+// obliged the other to call it.
+func snapshotFileFor(d, id, ext string) (string, error) {
+	n, err := strconv.ParseInt(id, 10, 64)
+	if err != nil || n < 0 || strconv.FormatInt(n, 10) != id {
+		return "", fmt.Errorf("invalid snapshot id %q", id)
 	}
-	for _, c := range id {
-		if c < '0' || c > '9' {
-			return false
-		}
-	}
-	return true
+	return snapshotFile(d, n, ext), nil
 }
 
 // Count is how many config snapshots currently exist.
@@ -306,9 +331,27 @@ func List(configPath string) ([]SnapshotMeta, error) {
 // the sidecar, so subsequent loads are cheap) if it's missing for any reason
 // — a snapshot is never silently dropped from the list just because its
 // sidecar didn't get written.
+// readMeta reads a snapshot's metadata for the list view: the .meta sidecar
+// if present, falling back to a full parse of the envelope (and then writing
+// the sidecar, so subsequent loads are cheap) if it's missing for any reason
+// — a snapshot is never silently dropped from the list just because its
+// sidecar didn't get written.
+//
+// The sidecar path is built the same way the envelope path is. It was not:
+// readEnvelope below validated its id and this function did not, so
+// readMeta(d, "../../secret") read a .meta outside the history directory and
+// returned what it found. Only List calls this, and List passes ids it
+// generated itself, so nothing reached it — but "safe because of who calls
+// it" is the property that stops holding when someone adds a caller, and the
+// sidecar write two lines down would have made that a write primitive rather
+// than a read one.
 func readMeta(d, id string) (SnapshotMeta, bool) {
 	var m SnapshotMeta
-	if data, err := os.ReadFile(filepath.Join(d, id+".meta")); err == nil {
+	path, err := snapshotFileFor(d, id, ".meta")
+	if err != nil {
+		return m, false
+	}
+	if data, err := os.ReadFile(path); err == nil {
 		if json.Unmarshal(data, &m) == nil {
 			return m, true
 		}
@@ -318,7 +361,7 @@ func readMeta(d, id string) (SnapshotMeta, bool) {
 		return m, false
 	}
 	m = SnapshotMeta{ID: env.ID, TS: env.TS, Stamp: env.Stamp, User: env.User, Summary: env.Summary}
-	_ = writeJSONAtomic(filepath.Join(d, id+".meta"), m)
+	_ = writeJSONAtomic(path, m)
 	return m, true
 }
 
@@ -346,10 +389,11 @@ type rawEnvelope struct {
 // config file.
 func readEnvelope(d, id string) (Snapshot, bool) {
 	var s Snapshot
-	if !validID(id) {
+	path, err := snapshotFileFor(d, id, ".json")
+	if err != nil {
 		return s, false
 	}
-	data, err := os.ReadFile(filepath.Join(d, id+".json"))
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return s, false
 	}

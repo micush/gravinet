@@ -1001,23 +1001,59 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	// Clear the browser cookie and record the token as revoked for the rest of
-	// its lifetime so a replay within this process is rejected.
-	if c, err := r.Cookie(sessionCookie); err == nil && c.Value != "" {
-		s.mu.Lock()
-		if s.revoked == nil {
-			s.revoked = map[string]time.Time{}
-		}
-		now := time.Now()
-		for tok, exp := range s.revoked { // opportunistic cleanup
-			if now.After(exp) {
-				delete(s.revoked, tok)
-			}
-		}
-		s.revoked[c.Value] = now.Add(sessionTTL)
-		s.mu.Unlock()
+	if r.Method != http.MethodPost {
+		// Matching handleLogin, which has always checked. A GET here was
+		// reachable from an <img> tag on any page the operator visited: the
+		// session cookie is SameSite=Strict so nothing got revoked, but the
+		// clearing cookie below is honoured on a cross-site response all the
+		// same, so an arbitrary web page could log an admin out. Requiring
+		// POST closes the <img>/<script> shape of that. It does not close a
+		// cross-site form post, which needs its own answer; see the note in
+		// the changelog.
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1})
+	// Record the token as revoked for the rest of its lifetime so a replay
+	// within this process is rejected, then clear the browser cookie.
+	//
+	// Only a token that actually validates is recorded. This used to take
+	// whatever was in the cookie: unauthenticated, unsigned, unparsed, and
+	// held for sessionTTL. Since /api/logout is deliberately not behind
+	// authed() — you must be able to log out with a stale session — that
+	// made the map an unauthenticated write primitive. Measured at 1,000
+	// requests with junk cookies: 1,000 entries retained for eight hours,
+	// keys attacker-chosen and bounded only by MaxHeaderBytes, and the
+	// opportunistic sweep below never reaches them because none has expired
+	// yet. Requiring a valid signature bounds the map by real logins, which
+	// is what it was always meant to hold; revoking a token that was never
+	// valid accomplishes nothing anyway.
+	if _, ok := s.validSession(r); ok {
+		if c, err := r.Cookie(sessionCookie); err == nil && c.Value != "" {
+			s.mu.Lock()
+			if s.revoked == nil {
+				s.revoked = map[string]time.Time{}
+			}
+			now := time.Now()
+			for tok, exp := range s.revoked { // opportunistic cleanup
+				if now.After(exp) {
+					delete(s.revoked, tok)
+				}
+			}
+			s.revoked[c.Value] = now.Add(sessionTTL)
+			s.mu.Unlock()
+		}
+	}
+	// Every attribute here mirrors the cookie handleLogin sets, which is what
+	// makes this a replacement of that cookie rather than something that
+	// happens to share its name. Browsers key on name/domain/path, so the
+	// bare form did delete it — but the security argument for keeping the
+	// revocation list in memory (see validSession) is precisely "logout also
+	// clears the browser cookie", and a clearing cookie written in a
+	// different shape from the one it clears is a poor thing to rest that on.
+	http.SetCookie(w, &http.Cookie{
+		Name: sessionCookie, Value: "", Path: "/", MaxAge: -1,
+		HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode,
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 

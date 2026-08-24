@@ -206,7 +206,22 @@ func SetHostname(name string) (bool, string) {
 		if !haveCmd(shell) {
 			shell = "pwsh"
 		}
-		out, err := exec.Command(shell, "-NoProfile", "-Command", "Rename-Computer -NewName '"+name+"' -Force").CombinedOutput()
+		// The name goes in through the environment rather than into the
+		// script text, the same way psRun passes a password — see its comment
+		// in sysusers.go, which is the convention this follows.
+		//
+		// validHostname above already restricts this to letters, digits,
+		// hyphens and dots, so no quote, semicolon, space, dollar or backtick
+		// can reach a PowerShell string and the interpolated form could not be
+		// broken out of. But that check sits 750 lines away, which makes the
+		// safety conditional on a reader finding it — CodeQL's
+		// go/command-injection flagged this line for precisely that reason.
+		// Interpolating nothing makes the property local and unconditional,
+		// and keeps it true if the validator is ever loosened.
+		cmd := exec.Command(shell, "-NoProfile", "-Command",
+			"Rename-Computer -NewName $env:GRAVINET_NEW_HOSTNAME -Force")
+		cmd.Env = append(os.Environ(), "GRAVINET_NEW_HOSTNAME="+name)
+		out, err := cmd.CombinedOutput()
 		if err != nil {
 			return false, cmdErr("rename this computer", out, err)
 		}

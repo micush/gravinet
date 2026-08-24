@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,10 +29,31 @@ const MaxSourceUploadSize = 128 << 20
 
 // maxSourceExtractedSize caps the *decompressed* total a tgz may expand to —
 // a gzip bomb is a handful of KiB on the wire and gigabytes off it, and the
-// wire-side cap above does nothing to stop that. Enforced per-file and
-// cumulatively as bytes are copied, not read from the tar header (which is
-// attacker-controlled and never verified against the actual stream).
+// wire-side cap above does nothing to stop that.
+//
+// This is a bound on the copy, not a check run after each entry is written.
+// The distinction is the whole value of the constant: the header's declared
+// size is attacker-controlled and never verified against the actual stream,
+// so limiting a copy to it and totting up afterwards let one entry write as
+// much as it liked and reported the overrun once the bytes were already on
+// disk. Both extractors now clamp each copy to whatever is left of the
+// budget.
 const maxSourceExtractedSize = 512 << 20
+
+// maxSourceEntries caps how many files and directories an upload may create,
+// which the byte ceiling above cannot do: a zero-length file costs no bytes
+// and still costs an inode and a directory entry. Measured, an empty tar
+// entry compresses to under five bytes on the wire, so a MaxSourceUploadSize
+// upload could ask for roughly 27 million of them.
+//
+// The number is chosen against real trees, not against the attack. gravinet's
+// own source archive is 690 files; a Go project that vendors heavily runs to
+// a few tens of thousands. 100,000 is two orders of magnitude above what this
+// project ships, comfortably above any vendored tree an operator might
+// legitimately upload, and 270 times below what an upload can currently
+// demand. If a real source tree ever hits it, the fix is to raise the number,
+// not to remove the check — so the error says the limit out loud.
+const maxSourceEntries = 100_000
 
 // buildTimeout bounds a full `go build`, including any module/toolchain
 // fetch it triggers. Generous, matching what the old peer-fetch machinery
@@ -138,6 +160,7 @@ func extractSourceTarGz(r io.Reader, destDir string) (moduleRoot string, err err
 
 	tr := tar.NewReader(gz)
 	var total int64
+	var entries int
 	var foundGoMod string
 	for {
 		hdr, err := tr.Next()
@@ -158,6 +181,15 @@ func extractSourceTarGz(r io.Reader, destDir string) (moduleRoot string, err err
 			// skip rather than fail, the same way most tar readers do for
 			// entry types they don't understand.
 			continue
+		}
+
+		// Counted after the type switch, so entries this extractor skips
+		// entirely (device nodes and the like) do not spend budget — and
+		// before anything is created, so the cap bounds what is made rather
+		// than reporting on what was.
+		entries++
+		if entries > maxSourceEntries {
+			return "", fmt.Errorf("upload contains more than %d files and directories", maxSourceEntries)
 		}
 
 		// Clean, reject absolute paths and any ".." component, then confirm
@@ -191,18 +223,32 @@ func extractSourceTarGz(r io.Reader, destDir string) (moduleRoot string, err err
 		if err != nil {
 			return "", err
 		}
-		n, err := io.Copy(f, io.LimitReader(tr, hdr.Size+1))
+		// The ceiling bounds the copy itself; it is not a check run
+		// afterwards. Limiting to hdr.Size — a number the archive supplies
+		// and nothing has verified — meant an entry declaring 64 MiB got
+		// 64 MiB written to disk and only then had the cumulative total
+		// consulted. Measured on a 128 MiB upload of compressible zeros
+		// (1028:1), that was roughly 138 GB on disk for an upload inside
+		// every wire-side cap. The limit is now the lesser of what the
+		// header claims and what is left of the budget, plus the one byte
+		// that detects going over.
+		remaining := int64(maxSourceExtractedSize) - total
+		limit := hdr.Size
+		if limit > remaining {
+			limit = remaining
+		}
+		n, err := io.Copy(f, io.LimitReader(tr, limit+1))
 		f.Close()
 		if err != nil {
 			return "", err
+		}
+		if n > remaining {
+			return "", fmt.Errorf("upload expands past the %d-byte extraction ceiling", int64(maxSourceExtractedSize))
 		}
 		if n != hdr.Size {
 			return "", fmt.Errorf("%q: tar header claimed %d bytes, stream had at least %d", hdr.Name, hdr.Size, n)
 		}
 		total += n
-		if total > maxSourceExtractedSize {
-			return "", fmt.Errorf("upload expands past the %d-byte extraction ceiling", int64(maxSourceExtractedSize))
-		}
 
 		if foundGoMod == "" && filepath.Base(target) == "go.mod" {
 			foundGoMod = filepath.Dir(target)
@@ -240,6 +286,7 @@ func extractSourceZip(r io.ReaderAt, size int64, destDir string) (moduleRoot str
 	}
 
 	var total int64
+	var entries int
 	var foundGoMod string
 	for _, zf := range zr.File {
 		fi := zf.FileInfo()
@@ -252,6 +299,13 @@ func extractSourceZip(r io.ReaderAt, size int64, destDir string) (moduleRoot str
 			// rather than fail, the same as extractSourceTarGz does for tar
 			// entry types it doesn't recognize.
 			continue
+		}
+
+		// Same entry ceiling as extractSourceTarGz, counted at the same
+		// point in the loop.
+		entries++
+		if entries > maxSourceEntries {
+			return "", fmt.Errorf("upload contains more than %d files and directories", maxSourceEntries)
 		}
 
 		// Same boundary check as extractSourceTarGz, applied to a zip
@@ -289,20 +343,34 @@ func extractSourceZip(r io.ReaderAt, size int64, destDir string) (moduleRoot str
 			rc.Close()
 			return "", err
 		}
+		// zf.UncompressedSize64 is a uint64 straight out of the archive, so
+		// it can be a value int64 cannot hold. The conversion would make it
+		// negative, which the mismatch check below would catch, but by
+		// accident rather than on purpose — say so here instead.
+		if zf.UncompressedSize64 > math.MaxInt64 {
+			return "", fmt.Errorf("%q: zip entry declares an impossible size", zf.Name)
+		}
 		declared := int64(zf.UncompressedSize64)
-		nCopied, copyErr := io.Copy(out, io.LimitReader(rc, declared+1))
+		// See extractSourceTarGz for why the ceiling bounds the copy rather
+		// than being checked after it.
+		remaining := int64(maxSourceExtractedSize) - total
+		limit := declared
+		if limit > remaining {
+			limit = remaining
+		}
+		nCopied, copyErr := io.Copy(out, io.LimitReader(rc, limit+1))
 		out.Close()
 		rc.Close()
 		if copyErr != nil {
 			return "", copyErr
 		}
+		if nCopied > remaining {
+			return "", fmt.Errorf("upload expands past the %d-byte extraction ceiling", int64(maxSourceExtractedSize))
+		}
 		if nCopied != declared {
 			return "", fmt.Errorf("%q: zip entry claimed %d bytes, stream had at least %d", zf.Name, declared, nCopied)
 		}
 		total += nCopied
-		if total > maxSourceExtractedSize {
-			return "", fmt.Errorf("upload expands past the %d-byte extraction ceiling", int64(maxSourceExtractedSize))
-		}
 
 		if foundGoMod == "" && filepath.Base(target) == "go.mod" {
 			foundGoMod = filepath.Dir(target)

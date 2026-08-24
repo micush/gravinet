@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	neturl "net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -486,22 +487,53 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Build the URL from parts rather than by concatenation, so the authority
+	// is assigned by this function and cannot be reached from the query
+	// parameter at all.
+	//
+	// The string form ("https://" + hostport + path) was safe — path has to
+	// begin with a slash, so the authority is already closed before it starts
+	// — but safe only because of a check several lines away. Parsing the
+	// caller's value as a URL in its own right and then setting Scheme and
+	// Host makes it structurally impossible instead of conditionally true, and
+	// it rejects an absolute URL outright rather than mangling it into the
+	// path. It is also what a reader, or a static analyzer, can see locally:
+	// CodeQL's go/request-forgery flagged the concatenated form for exactly
+	// this reason, unable to tell from the assignment that the host came from
+	// the managed-peer set rather than from the request.
+	ref, err := neturl.Parse(path)
+	if err != nil || ref.Scheme != "" || ref.Host != "" || ref.Opaque != "" {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "only /api/ paths may be proxied"})
+		return
+	}
 	hostport := net.JoinHostPort(target.ip.String(), strconv.Itoa(target.port))
-	url := "https://" + hostport + path
+	// Re-check on the parsed path: the string checks above ran on the raw
+	// value, and this is the one that will actually be sent.
+	if !strings.HasPrefix(ref.Path, "/api/") {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "only /api/ paths may be proxied"})
+		return
+	}
+	u := &neturl.URL{
+		Scheme:   "https",
+		Host:     hostport, // from resolveManagedTarget, never from the caller
+		Path:     ref.Path,
+		RawPath:  ref.RawPath,
+		RawQuery: ref.RawQuery,
+	}
 
 	var body io.Reader
 	if r.Body != nil {
 		body = r.Body
 	}
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, url, body)
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, u.String(), body)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	// Belt-and-suspenders: after net/url has normalized the request, the path it
-	// will actually send must still be under /api/. Catches any traversal the
-	// string checks above didn't anticipate.
-	if !strings.HasPrefix(req.URL.Path, "/api/") {
+	// Belt-and-suspenders: after net/url has normalized the request, the path
+	// it will actually send must still be under /api/, and the host must still
+	// be the one resolved above.
+	if !strings.HasPrefix(req.URL.Path, "/api/") || req.URL.Host != hostport {
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": "only /api/ paths may be proxied"})
 		return
 	}

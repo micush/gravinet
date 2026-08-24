@@ -16,6 +16,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/netip"
 	"os"
@@ -48,7 +49,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "918"
+	version = "926"
 	commit  = "none"
 )
 
@@ -2222,8 +2223,14 @@ func cmdFW(args []string) {
 		dport := fs.String("dport", "", "dest port or range a-b")
 		notes := fs.String("notes", "", "notes")
 		fs.Parse(rest)
-		spMin, spMax := parsePortRange(*sport)
-		dpMin, dpMax := parsePortRange(*dport)
+		spMin, spMax, err := parsePortRange(*sport)
+		if err != nil {
+			fatal("fw add -sport: %v", err)
+		}
+		dpMin, dpMax, err := parsePortRange(*dport)
+		if err != nil {
+			fatal("fw add -dport: %v", err)
+		}
 		rule := mesh.FirewallRule{
 			Action: *action, Direction: *dir, Proto: *proto, Src: *src, Dst: *dst,
 			SrcNegate: *srcNegate, DstNegate: *dstNegate, ServicesNegate: *svcNegate,
@@ -2270,7 +2277,11 @@ func cmdFW(args []string) {
 		}
 		dest := *to
 		if len(pos) > 1 {
-			dest = int(parseUint(pos[1]))
+			d, err := parseIndex(pos[1])
+			if err != nil {
+				fatal("fw move: %v", err)
+			}
+			dest = d
 		}
 		if dest < 0 {
 			fatal("usage: gravinet fw move %s INDEX  (where in the rulebase to put it; positions from `gravinet fw list`)", pos[0])
@@ -2352,18 +2363,101 @@ func parseUint(s string) uint64 {
 	return v
 }
 
-func parsePortRange(s string) (int, int) {
+// parseIndex parses a rulebase position — the INDEX argument of `fw move`.
+//
+// It is deliberately not parseUint. A position indexes an ordered slice, so
+// it has to land in an int, and `int(parseUint(s))` is not a conversion that
+// can be relied on: int is 32 bits on linux/arm, which is in the release
+// matrix, and there the parsed value is silently truncated to its low 32
+// bits.
+//
+// The truncation is not cosmetic. insertAt clamps an out-of-range position
+// to the end of the rulebase, so on a 64-bit build `fw move 7 4294967296`
+// puts rule 7 last — but the same command on linux/arm truncates to 0 and
+// puts it *first*, at the top of a first-match evaluator. That is exactly
+// the silent mis-placement the `-to` default was removed to prevent (see the
+// comment on the move case), reintroduced by an integer conversion. The
+// off-by-a-power-of-two neighbours are worse still, because they look
+// deliberate: 4294967299 lands at position 3.
+//
+// The MaxInt32 ceiling is what makes the conversion total — anything this
+// accepts fits an int on every platform Go targets, so there is no
+// architecture-dependent behaviour left to reason about here. No real
+// rulebase is within nine orders of magnitude of the ceiling; a value above
+// it was a typo or a paste accident, and now says so instead of being
+// reinterpreted as a plausible one.
+func parseIndex(s string) (int, error) {
+	s = strings.TrimSpace(s)
+	v, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("bad index %q (positions are whole numbers, from `gravinet fw list`)", s)
+	}
+	if v > math.MaxInt32 {
+		return 0, fmt.Errorf("index %d is out of range (maximum %d)", v, math.MaxInt32)
+	}
+	return int(v), nil
+}
+
+// parsePortRange parses a "port" or "lo-hi" field into an inclusive range.
+//
+// An empty string means unset — the zero range, which the firewall reads as
+// "any port" — and that is now the only input that yields a zero range
+// without an error. Everything else is either a valid 0-65535 range or a
+// refusal.
+//
+// It used to discard strconv's error and hand back whatever Atoi left
+// behind, which had two bad endings, both the same shape as the `fw move`
+// index above: a number the user did not write, silently substituted for the
+// one they did.
+//
+//   - A non-numeric field parsed as 0. `-dport http` did not fail, it
+//     produced a rule with no port leg at all — so a rule meant to deny one
+//     port denied every port, and its allow counterpart opened every port.
+//   - A field above 65535 passed the CLI intact and was narrowed later by an
+//     unchecked uint16() in mesh.resolveLegs, one wire hop away where nothing
+//     could report it. `-dport 80-100000` became 80-34464.
+//
+// The 65535 bound is checked here, before the value is sent, because this is
+// the last point at which a wrong number can still be shown to the person
+// who typed it.
+func parsePortRange(s string) (int, int, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return 0, 0
+		return 0, 0, nil
 	}
 	if i := strings.IndexByte(s, '-'); i >= 0 {
-		lo, _ := strconv.Atoi(strings.TrimSpace(s[:i]))
-		hi, _ := strconv.Atoi(strings.TrimSpace(s[i+1:]))
-		return lo, hi
+		lo, err := parsePort(strings.TrimSpace(s[:i]))
+		if err != nil {
+			return 0, 0, err
+		}
+		hi, err := parsePort(strings.TrimSpace(s[i+1:]))
+		if err != nil {
+			return 0, 0, err
+		}
+		if hi < lo {
+			return 0, 0, fmt.Errorf("port range %q is inverted (%d is below %d)", s, hi, lo)
+		}
+		return lo, hi, nil
 	}
-	p, _ := strconv.Atoi(s)
-	return p, p
+	p, err := parsePort(s)
+	if err != nil {
+		return 0, 0, err
+	}
+	return p, p, nil
+}
+
+// parsePort parses a single port. The upper bound is what makes the uint16()
+// conversions downstream of the control socket total rather than lossy; 0 is
+// admitted because the firewall's port fields use it to mean "unset".
+func parsePort(s string) (int, error) {
+	v, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("bad port %q (want a number 0-65535)", s)
+	}
+	if v > 65535 {
+		return 0, fmt.Errorf("port %d is out of range (want 0-65535)", v)
+	}
+	return int(v), nil
 }
 
 // tunOpenRetryBudget bounds how long newTunRetrying keeps trying. Comfortably
@@ -3014,8 +3108,13 @@ func kernelNATRules(cfg *config.Config) []netfilter.Rule {
 				}
 				var dpLo, dpHi uint16
 				if r.DestPort != "" {
-					lo, hi := parsePortRange(r.DestPort)
-					if lo >= 1 && lo <= 65535 && hi >= lo && hi <= 65535 {
+					// Deliberately not fatal: this loop translates an
+					// already-saved config at runtime, so an unparseable
+					// field is skipped the way it always was (the bounds
+					// check below rejected the zeroes Atoi used to return),
+					// not turned into a daemon exit.
+					lo, hi, perr := parsePortRange(r.DestPort)
+					if perr == nil && lo >= 1 && lo <= 65535 && hi >= lo && hi <= 65535 {
 						dpLo, dpHi = uint16(lo), uint16(hi)
 					}
 				}
