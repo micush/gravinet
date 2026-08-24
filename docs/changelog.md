@@ -2,6 +2,44 @@
 
 ---
 
+## v939 — 2026-08-24
+
+**Renaming the host under System > Resolver now rewrites gravinet's own advertised hostname too. v938 made `config.Hostname` persistent, which silently broke the rename path that used to work by leaving it empty.**
+
+### The regression
+
+The System > Resolver rename has always ended with a self-restart, and the comment on `handleSystemResolver` says why: the name gravinet advertises to peers is read once at daemon startup, so a fresh process is how the new name reaches the mesh. That worked because `config.Hostname` was normally *empty*, and an empty field was resolved from `os.Hostname()` at every startup. The restart was the entire mechanism.
+
+v938 filled that field in and wrote it back. Everything the release said about why is still true — a random `node_id` regenerated each boot makes one node look like many, and the hostname was persisted alongside it — and v938's own changelog flagged the hostname half as the arguable one, noting that `hostnamectl set-hostname` would no longer reach gravinet. What it did not notice is that the same reasoning applies to the admin UI's own rename button. After v938 the restart re-reads the old name out of the config, and the rename reaches the OS, lldpd and snmpd but never the mesh.
+
+That is worse than the pre-v938 behaviour, because the UI still says it restarted to apply the change.
+
+### What changed
+
+`internal/webadmin/edit.go`, `handleSystemResolver`'s `hostname` op now sets `cfg.Hostname` alongside `h.Resolver.Hostname`, in the same save.
+
+The same save matters. A second `mutateConfig` would be a second load-modify-save for one operator action: a second history snapshot, and a window in which the file has the new host setting and the old advertised name. `recordHostSettings` only hands its closure the `HostSettings`, so it now delegates to `recordHostSettingsCfg`, which passes the `Config` as well. The hostname op is the only caller that needs it; the other three are unchanged.
+
+The name is shortened on the way in. `shortHostname` moved to `config.ShortHostname` — it is now applied to `Config.Hostname` from two packages, and two copies of the rule would be two chances to diverge. `cmd/gravinet`'s `shortHostname` is a one-line delegate so its own tests still pin the behaviour where it is used.
+
+### What this does not do
+
+It does not make `config.Hostname` follow the OS again. Renaming the host from a shell still leaves gravinet advertising the old name until the config is edited or the field cleared. That is v938's deliberate trade and this release does not revisit it — it makes the admin UI's rename, which is a gravinet action with a gravinet restart attached, actually do what the restart is there for.
+
+It also does not touch a `hostname` an operator set directly in the config, except on an actual rename. A node that wants an advertised label different from its host's name still gets one; it just does not survive someone renaming the host through this page, which is the same thing that happens to every other field this page writes.
+
+### Verification
+
+`go build ./...`, `go vet` and `gofmt -l` clean, the last identical to baseline (the same six files, none of them mine).
+
+`cmd/gravinet`, `internal/config` and `internal/webadmin` all pass in full — the webadmin suite included, since `recordHostSettings` is on the path of three other handlers and the delegation had to not disturb them.
+
+**Not verified:** the round trip through a browser, and the restart actually bringing the new name up on a live mesh. `handleSystemResolver` is driven in tests through the `setHostnameFn`/`restartFn` seams, so what is exercised is the handler's ordering and what it commits, not a real rename on a real host.
+
+The two pre-existing failures from v887 are untouched: `internal/mesh`'s duplicated test files, and the six files that are not `gofmt` clean.
+
+---
+
 ## v938 — 2026-08-24
 
 **`node_id` and `hostname` are generated and written back to the config at startup when empty. Two nodes left with the default empty `node_id` could not peer with each other at all, and nothing in the logs said so.**

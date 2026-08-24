@@ -2400,6 +2400,28 @@ func (b BanPolicy) EffectiveBanSeconds() int {
 func (h HostsSync) TTL() time.Duration { return time.Duration(h.TTLSeconds) * time.Second }
 
 // Default returns a config with sane defaults and one empty disabled network.
+// ShortHostname strips any domain suffix from a hostname.
+//
+// os.Hostname() conventionally returns a short name on Linux, macOS, Windows
+// and FreeBSD, but OpenBSD's /etc/myname is very commonly a full FQDN (e.g.
+// "gn-openbsd.cush.local") and os.Hostname() there echoes it back verbatim.
+// gravinet's Hostname is gossiped mesh-wide and used for peer display and
+// bare-hostname resolution, so a lone FQDN breaks both: the peers table shows
+// it inconsistently beside every other node's short name, and "ping
+// gn-openbsd" would not resolve the way "ping gn-cush1" does.
+//
+// Applied at the two points where a name enters Config.Hostname from outside
+// — cmd/gravinet's startup fill-in, and the web admin's host rename under
+// System > Resolver — rather than on every read, so the value in the file is
+// already the value advertised. A Hostname edited directly in the config is
+// taken verbatim and never passed through here.
+func ShortHostname(s string) string {
+	if i := strings.IndexByte(s, '.'); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
 func Default() *Config {
 	return &Config{
 		LogLevel:      "info",

@@ -49,7 +49,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "938"
+	version = "939"
 	commit  = "none"
 )
 
@@ -2346,13 +2346,13 @@ func negPrefix(negate bool) string {
 // written into the config. So the shortening happens once, at fill-in,
 // instead of on every boot — and a non-empty config.Hostname seen later is
 // no longer necessarily one a human chose, only one that was settled on an
-// earlier run. It is short either way, so nothing downstream need care.
-func shortHostname(s string) string {
-	if i := strings.IndexByte(s, '.'); i >= 0 {
-		return s[:i]
-	}
-	return s
-}
+// earlier run, or one the web admin's host rename wrote. It is short either
+// way, so nothing downstream need care.
+//
+// The rule itself lives in internal/config, because that rename (System >
+// Resolver) applies it to the same field from a different package, and two
+// copies of it would be two chances to diverge.
+func shortHostname(s string) string { return config.ShortHostname(s) }
 
 // splitIDs pulls a leading comma-separated id list out of args.
 func splitIDs(args []string) ([]uint64, []string) {

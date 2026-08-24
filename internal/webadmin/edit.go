@@ -1636,8 +1636,8 @@ func hostSyslogJSON(sy service.SyslogInfo) map[string]any {
 // reply-then-restart mechanism handleRestart uses. This has nothing to do
 // with the OS-level rename, which already took effect synchronously inside
 // SetHostname; it's for gravinet's *own* identity: the name this node
-// advertises to mesh peers (config.Hostname, falling back to the OS
-// hostname) is read once at daemon startup and would otherwise sit stale
+// advertises to mesh peers (config.Hostname, which the handler rewrites to
+// match) is read once at daemon startup and would otherwise sit stale
 // until whenever this process next happened to restart on its own. Rather
 // than require the operator to separately notice that and click Restart,
 // this just does it — the same "structural change, so restart to apply it"
@@ -1724,21 +1724,41 @@ func (s *Server) handleSystemResolver(w http.ResponseWriter, r *http.Request) {
 	// killed by the restart before its own timer fires. Recorded afterwards, a
 	// hostname change reached config.json and no snapshot at all: it survived
 	// a restart and was absent from every restore.
-	s.recordHostSettings(r, func(h *config.HostSettings) {
+	s.recordHostSettingsCfg(r, func(cfg *config.Config, h *config.HostSettings) {
 		if h.Resolver == nil {
 			h.Resolver = &config.HostResolver{}
 		}
 		switch req.Op {
 		case "hostname":
 			h.Resolver.Hostname = req.Hostname
+			// And gravinet's own advertised name, which is a separate
+			// field and no longer follows the OS on its own. Before v938
+			// an empty config.Hostname was resolved from os.Hostname() at
+			// every startup, so the restart below was the whole of the
+			// mechanism: rename the host, restart, new name on the mesh.
+			// v938 made the field persistent — filled in once and then
+			// left alone — which is what makes it editable and stable, and
+			// which also means a restart now re-reads the *old* name from
+			// the config and the rename never reaches peers at all.
+			//
+			// Shortened for the same reason a detected OS name is
+			// shortened at fill-in: this name is gossiped mesh-wide and
+			// used for bare-name resolution, and a lone FQDN sits wrong in
+			// the peers table next to every other node's short name. An
+			// operator entering "node7.example" here is naming the host,
+			// not choosing gravinet's advertised label; a node that wants
+			// a different label from its host still gets one by editing
+			// hostname in the config directly, which this does not touch
+			// except on an actual rename.
+			cfg.Hostname = config.ShortHostname(req.Hostname)
 		case "dns":
 			h.Resolver.DNSServers, h.Resolver.SearchDomain = req.Servers, req.SearchDomain
 		}
 	})
 
 	// A hostname change only takes effect on the OS immediately — the name
-	// gravinet itself advertises to mesh peers (config.Hostname, falling back
-	// to the OS hostname) is read once at daemon startup and cached for the
+	// gravinet itself advertises to mesh peers (config.Hostname, rewritten
+	// just above) is read once at daemon startup and cached for the
 	// process's life. Rather than make the operator go find and click Restart
 	// separately, restart right here — the same reply-then-restart mechanism
 	// handleRestart itself uses, so a fresh process picks the new name up on
@@ -2581,11 +2601,22 @@ func (s *Server) handleInterfaces(w http.ResponseWriter, r *http.Request) {
 // from tomorrow's backup — is worth a log line rather than an error on a
 // screen where nothing went wrong.
 func (s *Server) recordHostSettings(r *http.Request, edit func(*config.HostSettings)) {
+	s.recordHostSettingsCfg(r, func(_ *config.Config, h *config.HostSettings) { edit(h) })
+}
+
+// recordHostSettingsCfg is recordHostSettings for a caller that also has to
+// touch a field outside HostSettings in the same save. Only the hostname op
+// needs it: renaming the host has to update gravinet's own advertised name as
+// well as the record of the host setting, and doing that in a second
+// mutateConfig would be a second load-modify-save — a second history snapshot
+// for one operator action, and a window in which the config on disk has the
+// new host setting and the old advertised name.
+func (s *Server) recordHostSettingsCfg(r *http.Request, edit func(*config.Config, *config.HostSettings)) {
 	if err := s.mutateConfig(r, func(cfg *config.Config) error {
 		if cfg.HostSettings == nil {
 			cfg.HostSettings = &config.HostSettings{}
 		}
-		edit(cfg.HostSettings)
+		edit(cfg, cfg.HostSettings)
 		return cfg.HostSettings.Validate()
 	}); err != nil {
 		s.log.Warnf("webadmin: applied a host setting but could not record it in gravinet's configuration (a restored backup will not bring it back): %v", err)
