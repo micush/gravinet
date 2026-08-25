@@ -57,13 +57,13 @@ func TestHandleNATRuleUpdate(t *testing.T) {
 	}
 	rule0 := func() config.NATRule {
 		c2, _ := config.Load(cfgPath)
-		return c2.Networks[0].NAT.Rules[0]
+		return c2.NAT.Rules[0]
 	}
 
 	// edit rule 0: masquerade -> port-forward (DNAT), new dest. State
 	// (disabled) and position preserved. There's no separate "direction" key
 	// to post anymore — port-forward: is part of translate itself.
-	if ok, _ := post(map[string]any{"op": "update", "net": "lan", "index": 0,
+	if ok, _ := post(map[string]any{"op": "update", "index": 0,
 		"source": "10.0.0.0/24", "dest": "203.0.113.0/24", "translate": "port-forward:192.0.2.5"})["ok"].(bool); !ok {
 		t.Fatal("update rejected")
 	}
@@ -75,21 +75,21 @@ func TestHandleNATRuleUpdate(t *testing.T) {
 		t.Fatal("update must preserve the disabled state")
 	}
 	c2, _ := config.Load(cfgPath)
-	if len(c2.Networks[0].NAT.Rules) != 2 || c2.Networks[0].NAT.Rules[1].Source != "10.0.1.0/24" {
-		t.Fatalf("update must not reorder/drop rules: %+v", c2.Networks[0].NAT.Rules)
+	if len(c2.NAT.Rules) != 2 || c2.NAT.Rules[1].Source != "10.0.1.0/24" {
+		t.Fatalf("update must not reorder/drop rules: %+v", c2.NAT.Rules)
 	}
 
 	// masquerade without an interface is rejected.
-	if ok, _ := post(map[string]any{"op": "update", "net": "lan", "index": 0, "translate": "masquerade"})["ok"].(bool); ok {
+	if ok, _ := post(map[string]any{"op": "update", "index": 0, "translate": "masquerade"})["ok"].(bool); ok {
 		t.Error("masquerade without iface should be rejected")
 	}
 	// out-of-range index rejected.
-	if ok, _ := post(map[string]any{"op": "update", "net": "lan", "index": 9, "translate": "192.0.2.9"})["ok"].(bool); ok {
+	if ok, _ := post(map[string]any{"op": "update", "index": 9, "translate": "192.0.2.9"})["ok"].(bool); ok {
 		t.Error("out-of-range index should be rejected")
 	}
 
 	// dest_port/proto (PAT) round-trip through the same update op.
-	if ok, _ := post(map[string]any{"op": "update", "net": "lan", "index": 0,
+	if ok, _ := post(map[string]any{"op": "update", "index": 0,
 		"dest": "203.0.113.5", "dest_port": "32400", "proto": "tcp", "translate": "port-forward:10.0.0.5:32400"})["ok"].(bool); !ok {
 		t.Fatal("PAT update rejected")
 	}
@@ -97,7 +97,7 @@ func TestHandleNATRuleUpdate(t *testing.T) {
 		t.Fatalf("PAT fields not stored: %+v", r)
 	}
 	// dest_port without proto is rejected (needs both, or neither).
-	if ok, _ := post(map[string]any{"op": "update", "net": "lan", "index": 0,
+	if ok, _ := post(map[string]any{"op": "update", "index": 0,
 		"dest": "203.0.113.5", "dest_port": "32400", "translate": "port-forward:10.0.0.5"})["ok"].(bool); ok {
 		t.Error("dest_port without proto should be rejected")
 	}

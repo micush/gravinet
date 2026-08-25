@@ -830,12 +830,11 @@ func (c *Config) routeTarget(netName, cidr string) (*Network, error) {
 
 // ---- NAT ---------------------------------------------------------------------
 
-func (c *Config) NATSetEnabled(netName string, on bool) error {
-	n, err := c.PickNetwork(netName)
-	if err != nil {
-		return err
-	}
-	n.NAT.Enabled = on
+// NATSetEnabled turns this node's address translation on or off. Node-global
+// since v953: NAT is a statement about packets rather than about an overlay,
+// so there is one switch rather than one per mesh network.
+func (c *Config) NATSetEnabled(on bool) error {
+	c.NAT.Enabled = on
 	return nil
 }
 
@@ -1108,43 +1107,55 @@ func (c *Config) FirewallRuleMove(netName string, fromIdx, toIdx int) error {
 }
 
 // NATAdd adds a masquerade (overlay→underlay) rule out the given interface.
-func (c *Config) NATAdd(netName, iface string) error {
+func (c *Config) NATAdd(iface, scope string) error {
 	if iface == "" {
 		return fmt.Errorf("NAT rule needs an interface")
 	}
-	n, err := c.PickNetwork(netName)
-	if err != nil {
-		return err
-	}
-	for _, r := range n.NAT.Rules {
-		if r.Interface == iface {
+	for _, r := range c.NAT.Rules {
+		if r.Interface == iface && strings.EqualFold(r.Scope, scope) {
 			return fmt.Errorf("NAT rule for %s already exists", iface)
 		}
 	}
-	n.NAT.Enabled = true
-	n.NAT.Rules = append(n.NAT.Rules, NATRule{
+	if err := c.checkNATScope(scope); err != nil {
+		return err
+	}
+	c.NAT.Enabled = true
+	c.NAT.Rules = append(c.NAT.Rules, NATRule{
 		Translate: "masquerade",
 		Interface: iface,
+		Scope:     scope,
 		Enabled:   true,
 	})
 	return nil
 }
 
-func (c *Config) NATDelete(netName, iface string) error {
-	n, err := c.PickNetwork(netName)
-	if err != nil {
-		return err
+// checkNATScope refuses a scope that names no mesh network. Empty is always
+// valid — that is the ordinary router rule, enforced in the kernel only, and
+// is what a node with no mesh networks writes.
+func (c *Config) checkNATScope(scope string) error {
+	scope = strings.TrimSpace(scope)
+	if scope == "" {
+		return nil
 	}
-	out := n.NAT.Rules[:0]
+	for i := range c.Networks {
+		if strings.EqualFold(c.Networks[i].Name, scope) || strings.EqualFold(c.Networks[i].ID, scope) {
+			return nil
+		}
+	}
+	return fmt.Errorf("no mesh network named %q — leave the scope blank for a rule about traffic crossing this host's own interfaces", scope)
+}
+
+func (c *Config) NATDelete(iface string) error {
+	out := c.NAT.Rules[:0]
 	found := false
-	for _, r := range n.NAT.Rules {
+	for _, r := range c.NAT.Rules {
 		if r.Interface == iface {
 			found = true
 			continue
 		}
 		out = append(out, r)
 	}
-	n.NAT.Rules = out
+	c.NAT.Rules = out
 	if !found {
 		return fmt.Errorf("no NAT rule for interface %s", iface)
 	}
@@ -1451,18 +1462,14 @@ func applyNATNegate(r *NATRule, srcNeg, dstNeg bool) error {
 	return nil
 }
 
-func (c *Config) NATRuleAdd(netName, source, dest, destPort, proto, translate, iface string) error {
-	return c.NATRuleAddNeg(netName, source, dest, destPort, proto, translate, iface, false, false)
+func (c *Config) NATRuleAdd(source, dest, destPort, proto, translate, iface, scope string) error {
+	return c.NATRuleAddNeg(source, dest, destPort, proto, translate, iface, scope, false, false)
 }
 
 // NATRuleAddNeg is NATRuleAdd with the source/dest negation flags. Kept as a
 // separate entry point so the six-argument form stays valid for every existing
 // caller and test.
-func (c *Config) NATRuleAddNeg(netName, source, dest, destPort, proto, translate, iface string, srcNeg, dstNeg bool) error {
-	n, err := c.PickNetwork(netName)
-	if err != nil {
-		return err
-	}
+func (c *Config) NATRuleAddNeg(source, dest, destPort, proto, translate, iface, scope string, srcNeg, dstNeg bool) error {
 	rule, err := buildNATRule(source, dest, destPort, proto, translate, iface)
 	if err != nil {
 		return err
@@ -1470,27 +1477,27 @@ func (c *Config) NATRuleAddNeg(netName, source, dest, destPort, proto, translate
 	if err := applyNATNegate(&rule, srcNeg, dstNeg); err != nil {
 		return err
 	}
+	if err := c.checkNATScope(scope); err != nil {
+		return err
+	}
+	rule.Scope = strings.TrimSpace(scope)
 	rule.Enabled = true
-	n.NAT.Enabled = true
-	n.NAT.Rules = append(n.NAT.Rules, rule)
+	c.NAT.Enabled = true
+	c.NAT.Rules = append(c.NAT.Rules, rule)
 	return nil
 }
 
 // NATRuleUpdateAt replaces the rule at index idx (as shown by NAT list / the UI)
 // in place, preserving its enabled/disabled state and its position. It backs the
 // click-to-edit rule fields in the UI. Validation matches NATRuleAdd.
-func (c *Config) NATRuleUpdateAt(netName string, idx int, source, dest, destPort, proto, translate, iface string) error {
-	return c.NATRuleUpdateAtNeg(netName, idx, source, dest, destPort, proto, translate, iface, false, false)
+func (c *Config) NATRuleUpdateAt(idx int, source, dest, destPort, proto, translate, iface, scope string) error {
+	return c.NATRuleUpdateAtNeg(idx, source, dest, destPort, proto, translate, iface, scope, false, false)
 }
 
 // NATRuleUpdateAtNeg is NATRuleUpdateAt with the negation flags.
-func (c *Config) NATRuleUpdateAtNeg(netName string, idx int, source, dest, destPort, proto, translate, iface string, srcNeg, dstNeg bool) error {
-	n, err := c.PickNetwork(netName)
-	if err != nil {
-		return err
-	}
-	if idx < 0 || idx >= len(n.NAT.Rules) {
-		return fmt.Errorf("no NAT rule at index %d (have %d)", idx, len(n.NAT.Rules))
+func (c *Config) NATRuleUpdateAtNeg(idx int, source, dest, destPort, proto, translate, iface, scope string, srcNeg, dstNeg bool) error {
+	if idx < 0 || idx >= len(c.NAT.Rules) {
+		return fmt.Errorf("no NAT rule at index %d (have %d)", idx, len(c.NAT.Rules))
 	}
 	rule, err := buildNATRule(source, dest, destPort, proto, translate, iface)
 	if err != nil {
@@ -1499,21 +1506,21 @@ func (c *Config) NATRuleUpdateAtNeg(netName string, idx int, source, dest, destP
 	if err := applyNATNegate(&rule, srcNeg, dstNeg); err != nil {
 		return err
 	}
-	rule.Enabled = n.NAT.Rules[idx].Enabled // preserve current state
-	n.NAT.Rules[idx] = rule
+	if err := c.checkNATScope(scope); err != nil {
+		return err
+	}
+	rule.Scope = strings.TrimSpace(scope)
+	rule.Enabled = c.NAT.Rules[idx].Enabled // preserve current state
+	c.NAT.Rules[idx] = rule
 	return nil
 }
 
 // NATRuleDeleteAt removes the rule at index idx (as shown by NAT list / the UI).
-func (c *Config) NATRuleDeleteAt(netName string, idx int) error {
-	n, err := c.PickNetwork(netName)
-	if err != nil {
-		return err
+func (c *Config) NATRuleDeleteAt(idx int) error {
+	if idx < 0 || idx >= len(c.NAT.Rules) {
+		return fmt.Errorf("no NAT rule at index %d (have %d)", idx, len(c.NAT.Rules))
 	}
-	if idx < 0 || idx >= len(n.NAT.Rules) {
-		return fmt.Errorf("no NAT rule at index %d (have %d)", idx, len(n.NAT.Rules))
-	}
-	n.NAT.Rules = append(n.NAT.Rules[:idx], n.NAT.Rules[idx+1:]...)
+	c.NAT.Rules = append(c.NAT.Rules[:idx], c.NAT.Rules[idx+1:]...)
 	return nil
 }
 
@@ -1521,15 +1528,11 @@ func (c *Config) NATRuleDeleteAt(netName string, idx int) error {
 // NAT list / the UI). A disabled rule stays in config (match intact for
 // re-enabling) but is skipped when translating. This mirrors the per-rule
 // enable/disable used for firewall rules.
-func (c *Config) NATRuleSetEnabled(netName string, idx int, on bool) error {
-	n, err := c.PickNetwork(netName)
-	if err != nil {
-		return err
+func (c *Config) NATRuleSetEnabled(idx int, on bool) error {
+	if idx < 0 || idx >= len(c.NAT.Rules) {
+		return fmt.Errorf("no NAT rule at index %d (have %d)", idx, len(c.NAT.Rules))
 	}
-	if idx < 0 || idx >= len(n.NAT.Rules) {
-		return fmt.Errorf("no NAT rule at index %d (have %d)", idx, len(n.NAT.Rules))
-	}
-	n.NAT.Rules[idx].Enabled = on
+	c.NAT.Rules[idx].Enabled = on
 	return nil
 }
 
@@ -1978,12 +1981,10 @@ func (c *Config) DNSRejectSetEnabled(netName, domain string, on bool) error {
 
 // ---- QoS ---------------------------------------------------------------------
 
-func (c *Config) QoSSetEnabled(netName string, on bool) error {
-	n, err := c.PickNetwork(netName)
-	if err != nil {
-		return err
-	}
-	n.QoS.Enabled = on
+// QoSSetEnabled turns this node's classifier on or off. Node-global since
+// v954 — one switch, not one per mesh network.
+func (c *Config) QoSSetEnabled(on bool) error {
+	c.QoS.Enabled = on
 	return nil
 }
 
@@ -1992,19 +1993,18 @@ func (c *Config) QoSSetEnabled(netName string, on bool) error {
 // like FirewallRule.Services — see QoSRule's doc comment) to a class index.
 // services may be nil/empty for a plain proto/port rule, matching the
 // pre-Services behavior exactly.
-func (c *Config) QoSAdd(netName, proto string, port int, services []string, class int) error {
-	n, err := c.PickNetwork(netName)
-	if err != nil {
+func (c *Config) QoSAdd(proto string, port int, services []string, class int, scope string) error {
+	if c.QoS.Classes < 5 {
+		c.QoS.Classes = 5
+	}
+	if c.QoS.DefaultClass <= 0 {
+		c.QoS.DefaultClass = 3
+	}
+	if class < 0 || class >= c.QoS.Classes {
+		return fmt.Errorf("class %d out of range (0..%d)", class, c.QoS.Classes-1)
+	}
+	if err := c.checkQoSScope(scope); err != nil {
 		return err
-	}
-	if n.QoS.Classes < 5 {
-		n.QoS.Classes = 5
-	}
-	if n.QoS.DefaultClass <= 0 {
-		n.QoS.DefaultClass = 3
-	}
-	if class < 0 || class >= n.QoS.Classes {
-		return fmt.Errorf("class %d out of range (0..%d)", class, n.QoS.Classes-1)
 	}
 	proto = strings.ToLower(proto)
 	if proto != "tcp" && proto != "udp" && proto != "icmp" && proto != "any" && proto != "" {
@@ -2013,31 +2013,43 @@ func (c *Config) QoSAdd(netName, proto string, port int, services []string, clas
 	if port < 0 || port > 65535 {
 		return fmt.Errorf("port %d out of range", port)
 	}
-	n.QoS.Enabled = true
-	n.QoS.Rules = append(n.QoS.Rules, QoSRule{
+	c.QoS.Enabled = true
+	c.QoS.Rules = append(c.QoS.Rules, QoSRule{
 		Protocol: proto, PortMin: port, PortMax: port, Services: cloneQoSServices(services), Class: class,
+		Scope: strings.TrimSpace(scope),
 	})
 	return nil
 }
 
+// checkQoSScope refuses a scope naming no mesh network. Empty is always valid
+// and means every network — see QoSRule.Scope.
+func (c *Config) checkQoSScope(scope string) error {
+	scope = strings.TrimSpace(scope)
+	if scope == "" {
+		return nil
+	}
+	for i := range c.Networks {
+		if strings.EqualFold(c.Networks[i].Name, scope) || strings.EqualFold(c.Networks[i].ID, scope) {
+			return nil
+		}
+	}
+	return fmt.Errorf("no mesh network named %q — leave the scope blank to classify on every network", scope)
+}
+
 // QoSDelete removes every QoS rule matching proto/port/services exactly (the
 // same key QoSAdd wrote it under — see qosRuleKeyMatches).
-func (c *Config) QoSDelete(netName, proto string, port int, services []string) error {
-	n, err := c.PickNetwork(netName)
-	if err != nil {
-		return err
-	}
+func (c *Config) QoSDelete(proto string, port int, services []string, scope string) error {
 	proto = strings.ToLower(proto)
-	out := n.QoS.Rules[:0]
+	out := c.QoS.Rules[:0]
 	found := false
-	for _, r := range n.QoS.Rules {
-		if qosRuleKeyMatches(r, proto, port, services) {
+	for _, r := range c.QoS.Rules {
+		if qosRuleKeyMatches(r, proto, port, services, scope) {
 			found = true
 			continue
 		}
 		out = append(out, r)
 	}
-	n.QoS.Rules = out
+	c.QoS.Rules = out
 	if !found {
 		return fmt.Errorf("no QoS rule for %s", qosRuleKeyLabel(proto, port, services))
 	}
@@ -2049,16 +2061,12 @@ func (c *Config) QoSDelete(netName, proto string, port int, services []string) e
 // re-enabling) but is skipped by the classifier. It is keyed the same way as
 // QoSDelete, so it toggles every rule sharing that key. This mirrors the
 // per-rule enable/disable used for firewall rules.
-func (c *Config) QoSRuleSetEnabled(netName, proto string, port int, services []string, on bool) error {
-	n, err := c.PickNetwork(netName)
-	if err != nil {
-		return err
-	}
+func (c *Config) QoSRuleSetEnabled(proto string, port int, services []string, scope string, on bool) error {
 	proto = strings.ToLower(proto)
 	found := false
-	for i := range n.QoS.Rules {
-		if qosRuleKeyMatches(n.QoS.Rules[i], proto, port, services) {
-			n.QoS.Rules[i].Disabled = !on
+	for i := range c.QoS.Rules {
+		if qosRuleKeyMatches(c.QoS.Rules[i], proto, port, services, scope) {
+			c.QoS.Rules[i].Disabled = !on
 			found = true
 		}
 	}
@@ -2073,8 +2081,13 @@ func (c *Config) QoSRuleSetEnabled(netName, proto string, port int, services []s
 // services is compared case-insensitively and order-independently, so a
 // round trip through the UI (which may reorder a comma-separated list)
 // still finds the rule it means to.
-func qosRuleKeyMatches(r QoSRule, proto string, port int, services []string) bool {
-	return r.Protocol == proto && r.PortMin == port && sameServiceSet(r.Services, services)
+// Scope is part of the key from v954. Without it, two rules that differ only
+// by the network they classify on — the ordinary result of hoisting a config
+// that had the same rule on two networks — would be indistinguishable, and
+// deleting or toggling one would silently take the other with it.
+func qosRuleKeyMatches(r QoSRule, proto string, port int, services []string, scope string) bool {
+	return r.Protocol == proto && r.PortMin == port && sameServiceSet(r.Services, services) &&
+		strings.EqualFold(strings.TrimSpace(r.Scope), strings.TrimSpace(scope))
 }
 
 // sameServiceSet reports whether a and b name the same set of services,
@@ -2124,38 +2137,30 @@ func qosRuleKeyLabel(proto string, port int, services []string) string {
 // marks its traffic with a standard-codepoint default (see
 // mesh.DefaultClassDSCP); this is only needed to match a specific
 // organization's existing Diffserv policy instead of that default.
-func (c *Config) QoSSetClassDSCP(netName string, class, dscp int) error {
-	n, err := c.PickNetwork(netName)
-	if err != nil {
-		return err
+func (c *Config) QoSSetClassDSCP(class, dscp int) error {
+	if c.QoS.Classes < 5 {
+		c.QoS.Classes = 5
 	}
-	if n.QoS.Classes < 5 {
-		n.QoS.Classes = 5
-	}
-	if class < 0 || class >= n.QoS.Classes {
-		return fmt.Errorf("class %d out of range (0..%d)", class, n.QoS.Classes-1)
+	if class < 0 || class >= c.QoS.Classes {
+		return fmt.Errorf("class %d out of range (0..%d)", class, c.QoS.Classes-1)
 	}
 	if dscp < 0 || dscp > 63 {
 		return fmt.Errorf("dscp %d out of range (0..63)", dscp)
 	}
-	for len(n.QoS.ClassDSCP) <= class {
-		n.QoS.ClassDSCP = append(n.QoS.ClassDSCP, -1)
+	for len(c.QoS.ClassDSCP) <= class {
+		c.QoS.ClassDSCP = append(c.QoS.ClassDSCP, -1)
 	}
-	n.QoS.ClassDSCP[class] = dscp
+	c.QoS.ClassDSCP[class] = dscp
 	return nil
 }
 
 // QoSClearClassDSCP removes a class's DSCP override, reverting it to the
 // standard-codepoint default.
-func (c *Config) QoSClearClassDSCP(netName string, class int) error {
-	n, err := c.PickNetwork(netName)
-	if err != nil {
-		return err
-	}
-	if class < 0 || class >= len(n.QoS.ClassDSCP) || n.QoS.ClassDSCP[class] < 0 {
+func (c *Config) QoSClearClassDSCP(class int) error {
+	if class < 0 || class >= len(c.QoS.ClassDSCP) || c.QoS.ClassDSCP[class] < 0 {
 		return fmt.Errorf("no DSCP override for class %d", class)
 	}
-	n.QoS.ClassDSCP[class] = -1
+	c.QoS.ClassDSCP[class] = -1
 	return nil
 }
 
@@ -2166,33 +2171,72 @@ func (c *Config) QoSClearClassDSCP(netName string, class int) error {
 // ThrottleSetEnabled (the web toggle / CLI enable|disable). Keeping these
 // independent means editing a rate can't flip the enabled state out from under
 // the operator: state stays consistent through editing.
+// netName selects which limit to change: "" for this node's default, or a
+// network name for that network's override. Setting an override on a network
+// that had none starts it from the node default, so changing one direction
+// does not silently drop the other to unlimited.
 func (c *Config) ThrottleSet(netName, dir string, bps int) error {
-	n, err := c.PickNetwork(netName)
+	t, err := c.throttleTarget(netName)
 	if err != nil {
 		return err
 	}
 	switch dir {
 	case "up":
-		n.Throttle.UpBytesPerSec = bps
+		t.UpBytesPerSec = bps
 	case "down":
-		n.Throttle.DownBytesPerSec = bps
+		t.DownBytesPerSec = bps
 	case "both":
-		n.Throttle.UpBytesPerSec = bps
-		n.Throttle.DownBytesPerSec = bps
+		t.UpBytesPerSec = bps
+		t.DownBytesPerSec = bps
 	default:
 		return fmt.Errorf("direction must be up, down, or both")
 	}
 	return nil
 }
 
-// ThrottleSetEnabled turns a network's bandwidth limit on or off without changing
-// the configured rates, so a cap can be lifted temporarily and later restored.
+// ThrottleSetEnabled turns this node's bandwidth limit on or off without
+// changing the configured rates, so a cap can be lifted temporarily and later
+// restored. Node-global since v955.
 func (c *Config) ThrottleSetEnabled(netName string, on bool) error {
+	t, err := c.throttleTarget(netName)
+	if err != nil {
+		return err
+	}
+	t.Enabled = on
+	return nil
+}
+
+// throttleTarget resolves a name to the Throttle a write should land on,
+// creating a network's override if it does not have one yet.
+func (c *Config) throttleTarget(netName string) (*Throttle, error) {
+	if strings.TrimSpace(netName) == "" {
+		return &c.Throttle, nil
+	}
+	n, err := c.PickNetwork(netName)
+	if err != nil {
+		return nil, err
+	}
+	if n.Throttle == nil {
+		// Seeded from the node default rather than from zero: an operator
+		// overriding the up rate on one link has not asked for its down rate
+		// to become unlimited.
+		t := c.Throttle
+		n.Throttle = &t
+	}
+	return n.Throttle, nil
+}
+
+// ThrottleClearOverride drops a network's own limit so it follows the node
+// default again.
+func (c *Config) ThrottleClearOverride(netName string) error {
 	n, err := c.PickNetwork(netName)
 	if err != nil {
 		return err
 	}
-	n.Throttle.Enabled = on
+	if n.Throttle == nil {
+		return fmt.Errorf("network %s has no bandwidth override to clear", n.Name)
+	}
+	n.Throttle = nil
 	return nil
 }
 

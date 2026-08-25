@@ -18,12 +18,15 @@ import (
 // network itself disabled, and a port-forward rule with an unparsable
 // target (matches the old direction-based code's behavior of silently
 // skipping a malformed DNAT rather than erroring the whole pass).
+//
+// NAT is node-global from v953, so the rules hang off the Config rather than a
+// network — and, notably, this builder never referenced the network anyway.
+// That is the whole reason the hoist was possible: a kernel NAT rule carries a
+// Kind, two prefixes, an interface and a target, and no overlay identity at
+// all.
 func TestKernelNATRulesModes(t *testing.T) {
 	mk := func(rules []config.NATRule) *config.Config {
-		return &config.Config{Networks: []config.Network{{
-			ID: "1", Name: "n", Enabled: true,
-			NAT: config.NAT{Enabled: true, Rules: rules},
-		}}}
+		return &config.Config{NAT: config.NAT{Enabled: true, Rules: rules}}
 	}
 
 	t.Run("masquerade", func(t *testing.T) {
@@ -122,19 +125,38 @@ func TestKernelNATRulesModes(t *testing.T) {
 		}
 	})
 
-	t.Run("NAT disabled network-wide excluded", func(t *testing.T) {
+	t.Run("NAT disabled node-wide excluded", func(t *testing.T) {
 		cfg := mk([]config.NATRule{{Translate: "masquerade", Interface: "eth0", Enabled: true}})
-		cfg.Networks[0].NAT.Enabled = false
+		cfg.NAT.Enabled = false
 		if out := kernelNATRules(cfg); len(out) != 0 {
-			t.Fatalf("expected NAT-disabled network to produce no kernel rules, got %+v", out)
+			t.Fatalf("expected NAT switched off to produce no kernel rules, got %+v", out)
 		}
 	})
 
-	t.Run("network disabled excluded", func(t *testing.T) {
-		cfg := mk([]config.NATRule{{Translate: "masquerade", Interface: "eth0", Enabled: true}})
-		cfg.Networks[0].Enabled = false
-		if out := kernelNATRules(cfg); len(out) != 0 {
-			t.Fatalf("expected a disabled network to produce no kernel rules, got %+v", out)
+	// A node with no mesh networks at all still programs its rules. This is
+	// the case v953 exists for: gravinet running as a plain LAN router, where
+	// "masquerade 192.168.1.0/24 out eth0" is an ordinary thing to want and
+	// was previously impossible to express.
+	t.Run("no mesh networks still produces kernel rules", func(t *testing.T) {
+		cfg := mk([]config.NATRule{{Source: "192.168.1.0/24", Translate: "masquerade", Interface: "eth0", Enabled: true}})
+		if len(cfg.Networks) != 0 {
+			t.Fatalf("test setup should have no networks, has %d", len(cfg.Networks))
+		}
+		out := kernelNATRules(cfg)
+		if len(out) != 1 || out[0].Kind != netfilter.Masquerade || out[0].OutIface != "eth0" {
+			t.Fatalf("a node with no mesh networks produced no kernel NAT: %+v", out)
+		}
+	})
+
+	// Scope decides the overlay half only. A host-scoped rule and a
+	// network-scoped one are both programmed into the kernel identically,
+	// because the kernel rule has nowhere to put an overlay identity.
+	t.Run("scope does not affect kernel rules", func(t *testing.T) {
+		host := mk([]config.NATRule{{Source: "10.0.0.0/24", Translate: "203.0.113.9", Enabled: true}})
+		scoped := mk([]config.NATRule{{Source: "10.0.0.0/24", Translate: "203.0.113.9", Scope: "n", Enabled: true}})
+		a, b := kernelNATRules(host), kernelNATRules(scoped)
+		if len(a) != 1 || len(b) != 1 || a[0] != b[0] {
+			t.Fatalf("scope changed the kernel rule: host=%+v scoped=%+v", a, b)
 		}
 	})
 

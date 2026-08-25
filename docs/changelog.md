@@ -2,6 +2,196 @@
 
 ---
 
+## v956 — 2026-08-25
+
+**Fixes v955. Per-network bandwidth limits are back, as overrides of a node default. v955 collapsed them into one rate and took the largest where networks disagreed; that destroyed real configuration.**
+
+### What v955 got wrong
+
+v955 made the bandwidth limit node-global so a node with no mesh network had somewhere to put a rate. That part was right. Collapsing the existing per-network rates into one number was not.
+
+Different links carry different rates for ordinary reasons — Tun1→Tun2 at one speed, Tun1→Tun3 at another. One number cannot hold two, and "largest wins" is not a migration, it is data loss with a tie-break. A node with a 1 Mbit/s link and a 9 Mbit/s link would have come back with 9 on both, silently uncapping the slow one.
+
+### The shape now
+
+Two levels, because both facts are real:
+
+- **`Config.Throttle`** — the node default. Applies to every network without one of its own, and settable with no networks at all. This is what v955 added and it stays.
+- **`Network.Throttle`** — that network's own rate, overriding the default. This is what v955 removed and v956 restores.
+
+`Config.EffectiveThrottle(n)` resolves the two, and is what the spec builder now uses.
+
+It is a **pointer** (`*Throttle`) rather than a value, so "no override, follow the default" and "this network is explicitly uncapped" stay distinguishable — as a value both are the zero `Throttle` and one silently becomes the other. `Validate` drops a zero-valued override, since it is indistinguishable from none and would otherwise shadow the default forever.
+
+Setting an override on a network that has none seeds it from the node default rather than from zero: overriding one direction is not a request for the other to become unlimited.
+
+A rate is still always applied to one tunnel's shaper — one bounded queue and one drainer per tunnel, with no point at which two tunnels meet — so any rate means that much to **each** network it covers, never a total shared between them. Unchanged from v955, and the card, the help topic and `bandwidth list` all say it.
+
+### Migration
+
+Per-network rates are read straight back into the override field they already occupied. A config from v954 or earlier comes back with every network on exactly the rate it had, and the node default off.
+
+**A config already written by v955 cannot be recovered**, because v955 wrote the collapsed rate and cleared the per-network fields — the information was gone at write time, not at read time. v955 existed for a matter of minutes and any node that loaded it will need its per-network rates re-entered.
+
+### Elsewhere
+
+The page shows the node default in one card and a PER-NETWORK table under it: network, state, up, down, and whether the rate is inherited or an override. Double-click a rate cell to override; tick and − to clear back to inherited. `gravinet bandwidth` takes `-net` again for a network's override, absent for the default, and gains `clear -net NAME`; `bandwidth list` shows the default and every network's effective rate with its source.
+
+### Verification
+
+`internal/config`, `internal/webadmin`, `internal/dhcrelay` and `cmd/gravinet` pass uncached. `go build ./...`, `go vet` and `gofmt` clean on every package touched.
+
+The load-bearing test is that a config with different rates on different networks comes back with those rates. Also covered: the default applying to each network without an override, a new override seeding from the default rather than zero, clearing an override, and a zero override collapsing to inherit. The v955 tests that asserted the collapse were deleted rather than adapted — they encoded the bug.
+
+### Still outstanding: firewall
+
+Unchanged from v955: firewall is the only one of the four still requiring a mesh, and it is not a hoist. Its admin path reads the live mesh engine rather than config, and rule IDs do not exist in `config.FirewallRule` — the engine assigns them and the UI keys off them. Making it authorable without a mesh means moving the source of truth to config with stable rule IDs there and the engine as a consumer.
+
+---
+
+## v955 — 2026-08-25
+
+**The bandwidth limit is node-global. One rate, applied to each mesh network separately — 10 Mbit/s means 10 to each, not 10 shared.**
+
+### Which reading, and why
+
+This was the one of the four that needed a decision rather than just a hoist. A bandwidth limit is not a rule list; it is a rate pair enforced by a per-network shaper, so "node-global bandwidth" is ambiguous on a node running two overlays.
+
+**Each.** The shaper is one bounded queue and one drainer goroutine per tunnel, and there is no point at which two tunnels meet to be metered together — a shared reading would need a token bucket spanning networks, which does not exist. So each network gets the configured rate. The card and `gravinet bandwidth list` both say so outright once there is more than one network, because the number alone does not tell you which way it goes.
+
+`Config.Throttle` is now the node-global rate; `Network.Throttle` is a legacy field that only parses.
+
+### Config format change, and the one lossy case
+
+A node whose networks all carried the same rate — the ordinary case — comes back with exactly that rate.
+
+Where they **did** differ there is genuine information loss: one number cannot hold two. The largest of each field wins, following the rule `Config.NATStateTimeout`'s migration already uses. Largest rather than smallest because a throttle is a cap: taking the largest leaves no network newly starved, and an under-throttled link is visible and one edit away, whereas silently halving a working link's rate is neither. This is the only migration in the v953–v955 series that can change what a node does, and it only fires on a node that had different rates on different overlays.
+
+**It does not migrate backwards.** A v955 config on a v954 binary parses, but its limit comes back off.
+
+### The QoS coupling collapsed to one statement
+
+Enabling QoS has always switched the up-throttle on and seeded a placeholder, because a classifier is inert without a rate cap to create contention. In v954 that was node-global QoS driving a per-network throttle — one statement per network. Both are node-global now, so it is one statement.
+
+### Elsewhere
+
+One card with the standard pill. `gravinet bandwidth` drops `-net`; it also drops the `interface IFACE` selector, which existed only to pick which network's rate to set and has nothing left to select.
+
+### Verification
+
+`internal/config`, `internal/webadmin`, `internal/dhcrelay` and `cmd/gravinet` pass uncached. `go build ./...`, `go vet` and `gofmt` clean on every package touched.
+
+New tests cover the uniform hoist, the largest-wins case when networks differ, a node with **no** mesh networks setting a rate, and that a config already node-global is left alone. `TestQoSKeepsExistingUpRate` now exercises the migration incidentally — it still seeds the legacy per-network field and asserts on the node-global one.
+
+### Still outstanding: firewall
+
+Firewall remains the only one of the four still requiring a mesh, and it is not a hoist. Its admin path reads the live mesh engine (`FirewallRules(networkID uint64)`, `FirewallAdd(networkID uint64, ...)`) rather than config, and rule IDs do not exist in `config.FirewallRule` at all — the engine assigns them and the UI keys off them. With no network there is no engine to read from or add to, so the gate is load-bearing.
+
+Doing it properly means moving the source of truth to config, with stable rule IDs there and the engine as a consumer loaded from it. That is worth doing deliberately rather than bolting a config fallback beside the engine path and ending up with two sources of truth for the same rules.
+
+---
+
+## v954 — 2026-08-25
+
+**QoS is node-global. A node with no mesh network can now write classification rules, which it could not before. Enforcement is unchanged.**
+
+### What moved, and what deliberately did not
+
+Only the authoring moved. The classifier still runs where it always did — on each network's tunnel egress, feeding that network's shaper — because that is the only place QoS is enforced. What changed is that writing a rule no longer requires an overlay to file it under.
+
+`Config.QoS` is the single node-global set; `Network.QoS` is a legacy field that only parses.
+
+### Scope, and why its blank means the opposite of NAT's
+
+Each rule carries a `Scope`:
+
+- **blank (shown as `any`)**: classify on every mesh network this node runs. The default.
+- **a network name**: only that one.
+
+Blank meaning *every* network is the opposite of v953's NAT, where blank means the kernel and no overlay at all. That is deliberate rather than sloppy: NAT has a kernel path, so a scopeless NAT rule still does something; QoS has none, so a scopeless QoS rule that reached no overlay would do nothing whatsoever. "Any overlay" is the only reading that leaves it meaningful — and it is what makes a rule written before any network exists start working the moment one does, which is the point of the move.
+
+**Scope is part of a rule's key.** QoS rules are addressed by proto/port/services rather than by index, so hoisting a config that had the same rule on two networks would otherwise produce two indistinguishable rules, and deleting or toggling one would silently take the other. `qosRuleKeyMatches` now compares scope too, and the in-place editor deletes under the rule's *old* scope before re-adding under the new one.
+
+### Config format change
+
+Per-network rules hoist automatically, scoped to the network they came from. As with NAT in v953, **a network whose QoS switch was off contributes its rules disabled** — the per-network gate has no equivalent now, so it folds into the rules and the node classifies exactly what it classified before. The class geometry (count, default class, DSCP overrides) comes from the first network that had QoS on; it is one setting per node now, and in practice it was the default 5 classes with 3 as normal on every network anyway.
+
+**It does not migrate backwards.** A v954 config on a v953 binary parses, but its QoS comes back empty.
+
+### The QoS/throttle coupling had to move too
+
+QoS is inert without an egress rate cap to create contention for the priority queue to reorder, so enabling it has always switched the up-throttle on and seeded a placeholder rate. That coupling was per-network. With the classifier node-global and the shaper still per-network — one queue per tunnel — the switch is now node-wide and the rate stays per network: enabling QoS enables the throttle on every network, each keeping its own rate. Class geometry validation likewise runs once per node rather than once per network.
+
+### Elsewhere
+
+One card with the standard pill and a scope column. `gravinet qos` drops `-net` and gains a `scope` keyword; `qos list` shows each rule's scope. Search indexes QoS rules once rather than once per network.
+
+### Verification
+
+`internal/config`, `internal/webadmin`, `internal/dhcrelay` and `cmd/gravinet` pass uncached. `go build ./...`, `go vet` and `gofmt` clean on every package touched.
+
+New tests cover the hoist (including the disabled-network fold and the class geometry), that a node with **no** mesh networks stores a rule and defaults it to every network, that two rules differing only by scope are independently deletable, and that the section no longer renders per network or behind the networks gate.
+
+### Still outstanding: firewall, and bandwidth
+
+**Firewall is not a hoist.** Unlike NAT and QoS, its admin path does not read config — it reads the live mesh engine (`FirewallRules(networkID uint64)`, `FirewallAdd(networkID uint64, ...)`), and rule IDs do not exist in `config.FirewallRule` at all; the engine assigns them and the UI keys off them. With no mesh network there is no engine to read from or add to, so the gate is load-bearing rather than cosmetic. Making firewall rules authorable without a mesh means moving the admin path onto config as the source of truth with the engine as a consumer, which needs stable rule IDs in config. That is its own change, and worth doing deliberately rather than bolting a config fallback beside the engine path and ending up with two sources of truth.
+
+**Bandwidth needs a decision.** It is not a rule list but a rate pair per network, enforced by a per-network shaper, so "node-global bandwidth" is ambiguous in a way the others were not: on a node running two overlays, is 10 Mbit/s ten each or ten shared? Per-network-each is free — it is what the shaper already does. Shared needs a token bucket across networks that does not exist. And if two networks currently hold different rates, a single node-global number loses one unless the per-network value is retained as an override.
+
+---
+
+## v953 — 2026-08-25
+
+**NAT is node-global. A node with no mesh network can now write a NAT rule, which it could not before.**
+
+### Why it moved
+
+A NAT rule is a statement about packets, not about an overlay. The per-network nesting was history, and the code showed it: `kernelNATRules` never referenced the network it was iterating. The rules it emits carry a Kind, two prefixes, an in/out interface and a target — no overlay identity anywhere — and `internal/netfilter`'s own doc says it exists so the host can translate gateway traffic as it is forwarded out a physical interface.
+
+So "masquerade 192.168.1.0/24 out eth0" was always an ordinary router rule that the kernel would have executed happily. It was just unwritable: the rules lived under `Network`, the page rendered a card per network behind a `No networks.` gate, and a node running gravinet as a plain LAN router had nowhere to put one.
+
+`Config.NAT` is now the single node-global set, and `Network.NAT` is a legacy field that only parses.
+
+### Scope
+
+The overlay half of NAT does still need a network — `internal/mesh`'s userspace table is per-network — so each rule carries a `Scope`:
+
+- **blank (shown as `host`)**: a rule about traffic crossing this host's own interfaces. The ordinary case, and what a node with no mesh networks writes.
+- **a mesh network name**: also applied to that network's overlay↔overlay traffic.
+
+Every rule is programmed into the kernel regardless of scope, because the kernel rule has nowhere to put an overlay identity. Scope decides only the *second* place a rule can be enforced. A masquerade bound to an interface its traffic never egresses simply never matches, which is how it already worked.
+
+A scope naming a network that does not exist is refused, so a typo cannot silently produce a rule that reaches no overlay table.
+
+### Config format change
+
+Per-network rules hoist automatically, each scoped to the network it came from — which is precisely what it already meant. Two details keep this behaviour-identical rather than merely similar:
+
+- **A network whose NAT switch was off contributes its rules disabled.** The old per-network gate has no equivalent now, so it folds into the rules themselves. A node comes back translating exactly what it translated before; what changes is that re-enabling is per rule.
+- **The node-global switch comes on if any network had NAT on.**
+
+Found while wiring this: the v-era `Direction` migration walked the per-network rules, so it had to run *after* the hoist or a config already in the node-global shape would skip it and carry a legacy `Direction` forever. It now runs over the hoisted list.
+
+**It does not migrate backwards.** A v953 config on a v952 binary parses, but its NAT comes back empty and the node stops translating. Relevant only if you roll a node back.
+
+### Elsewhere
+
+The page is one card with the standard pill (`sectionCardHead`, as DHCP got in v952) and a scope column. `gravinet nat` drops `-net` and gains a `scope` keyword; `nat list` shows each rule's scope. Search indexes NAT rules once rather than once per network.
+
+### Verification
+
+`internal/webadmin`, `internal/config`, `internal/dhcrelay` and `cmd/gravinet` pass uncached. `go build ./...`, `go vet` and `gofmt` clean on every package touched.
+
+New tests cover the hoist (including the disabled-network fold), that a node with **no** mesh networks both stores and programs a rule, that scope changes nothing about the kernel rule, and that the section no longer renders per network or behind the networks gate.
+
+Unverified, as ever: no rule here has been programmed into a live kernel. `internal/netfilter` shells out to `nft`/`iptables`, and this container has neither — the same standing gap as the systemd caveat from v951, which also still stands.
+
+### Still outstanding
+
+Firewall, QoS and shaping remain overlay-only, and unlike NAT that is not merely where they are filed: their enforcement lives entirely in userspace on the TUN path (`fw.allow(fwIn|fwOut)`, the classifier feeding the tunnel shaper). Making them node-global needs kernel backends that do not exist here — an nft/pf *filter* generator, and tc/HTB or ALTQ for shaping, with no real answer on Windows. Worth knowing too that the overlay firewall's FQDN objects and userspace conntrack have no clean nft equivalent, so a kernel path would express a strict subset of the current rule model.
+
+---
+
 ## v952 — 2026-08-25
 
 **System > DHCP is two cards with the standard enabled/disabled pill, one for the server and one for the relay. The role dropdown is gone.**

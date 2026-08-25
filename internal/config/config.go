@@ -304,6 +304,22 @@ type Config struct {
 	// applies to every network's NAT and replaces the former per-network setting.
 	NATStateTimeout int `json:"nat_state_timeout,omitempty"`
 
+	// NAT is this node's address translation, node-global since v953. See the
+	// NAT type's doc comment for why it is not per mesh network, and
+	// NATRule.Scope for how a rule still reaches one when it needs to.
+	NAT NAT `json:"nat,omitempty"`
+
+	// QoS is this node's traffic classifier, node-global since v954. See the
+	// QoS type's doc comment, and QoSRule.Scope for how a rule reaches one
+	// overlay rather than all of them.
+	QoS QoS `json:"qos,omitempty"`
+
+	// Throttle is this node's default bandwidth limit, applied to every mesh
+	// network that has no override of its own. Node-global since v955 so that
+	// a rate can be set before any network exists; per-network rates were
+	// restored as overrides in v956 (see Network.Throttle).
+	Throttle Throttle `json:"throttle,omitempty"`
+
 	// LogFile is where the daemon mirrors its log output (in addition to the
 	// console). Empty means the default: "gravinet.log" alongside the config
 	// file. Set an explicit path to override, or "-"/"none" to disable the file.
@@ -1014,8 +1030,21 @@ type Network struct {
 	// partial-mesh network for a broadcast-dependent protocol.
 	Mesh string `json:"mesh,omitempty"`
 
-	StormControl   StormControl `json:"storm_control"`
-	Throttle       Throttle     `json:"throttle"`
+	StormControl StormControl `json:"storm_control"`
+	// Throttle overrides the node default (Config.Throttle) for this network.
+	//
+	// A pointer, so that "no override, use the node default" and "this network
+	// is explicitly uncapped" are distinguishable — as a value they would both
+	// be the zero Throttle and one would silently become the other.
+	//
+	// v955 collapsed these into a single node-global rate, taking the largest
+	// where networks disagreed. That was wrong: different links genuinely
+	// carry different rates, and one number cannot hold two. Restored in v956.
+	Throttle *Throttle `json:"throttle,omitempty"`
+	// QoS is the pre-v954 per-network classifier. Retained as a field so an
+	// existing config still parses; Config.Validate hoists it into the
+	// node-global Config.QoS with each rule scoped to this network, and clears
+	// it so it is never written back out.
 	QoS            QoS          `json:"qos"`
 	Firewall       Firewall     `json:"firewall"`
 	HostsSync      HostsSync    `json:"hosts_sync"`
@@ -1061,7 +1090,11 @@ type Network struct {
 	// gossips carries. One value for the whole selection, not per-prefix
 	// like Route.Metric.
 	RedistributeBGPMetric int `json:"redistribute_bgp_metric,omitempty"`
-	NAT                   NAT `json:"nat"`
+	// NAT is the pre-v953 per-network address translation. Retained as a
+	// field so an existing config still parses; Config.Validate hoists it into
+	// the node-global Config.NAT with each rule scoped to this network, and
+	// clears it so it is never written back out. Nothing reads it after load.
+	NAT NAT `json:"nat"`
 
 	// DisabledPeers is a local-only blocklist of peer node IDs this node refuses
 	// to connect to. Unlike bans (which flood mesh-wide), disabling a peer only
@@ -1353,6 +1386,15 @@ type StormControl struct {
 // Throttle caps tunnel bandwidth. Up is the egress (shaped) rate; Down is the
 // ingress (policed) rate. Set one for a single direction, both for "both",
 // neither for unlimited. All values are bytes per second; 0 = unlimited.
+// Throttle is a bandwidth limit: an egress rate, an ingress rate, and the
+// bucket/queue sizing around them.
+//
+// It appears twice. Config.Throttle is this node's default, settable without
+// any mesh network existing; Network.Throttle is an optional per-network
+// override. A rate is always applied to one tunnel's shaper — the shaper is
+// one bounded queue and one drainer per tunnel, with no point at which two
+// tunnels meet — so the node default means "this much to each network that has
+// not been given its own", never "this much shared between them".
 type Throttle struct {
 	Enabled         bool `json:"enabled"` // off by default
 	UpBytesPerSec   int  `json:"up_bytes_per_sec"`
@@ -2046,6 +2088,12 @@ func (c *Config) WebAdminPort() int {
 }
 
 // up-throttle is set (a rate cap is what creates the contention to prioritise).
+// QoS is this node's traffic classifier. Node-global from v954, not per mesh
+// network: a classification rule is a statement about packets, and there is no
+// reason a node should need an overlay before it can be told that SSH outranks
+// backups. Enforcement stays where it always was — the classifier runs on each
+// network's tunnel egress, feeding that network's shaper — so a rule reaches an
+// overlay via QoSRule.Scope. See its doc comment.
 type QoS struct {
 	Enabled      bool      `json:"enabled"`
 	Classes      int       `json:"classes"`       // number of priority levels (default 3)
@@ -2091,6 +2139,20 @@ type QoSRule struct {
 	DSCP     *int     `json:"dscp,omitempty"`     // nil = any
 	Class    int      `json:"class"`
 	Disabled bool     `json:"disabled,omitempty"` // true = rule is skipped; active by default
+
+	// Scope names the mesh network this rule classifies traffic on, or is
+	// empty to classify on every network this node runs.
+	//
+	// Empty is the default and the useful one: unlike NAT, QoS has no kernel
+	// path, so a rule that named no network would otherwise do nothing at all
+	// — "any overlay" is the only reading that leaves a scopeless rule
+	// meaningful. It also means a rule written before any network exists
+	// starts working the moment one does, which is the point of the move.
+	//
+	// A named scope is what every pre-v954 rule migrates to, since each was
+	// already filed under exactly one network, and is how a node keeps
+	// different priorities on different overlays.
+	Scope string `json:"scope,omitempty"`
 }
 
 // HostsSync controls writing peer hostnames into the OS hosts file.
@@ -2262,6 +2324,22 @@ type NATRule struct {
 	Interface string `json:"interface,omitempty"` // egress interface for masquerade
 	Enabled   bool   `json:"enabled"`
 
+	// Scope names the mesh network whose overlay traffic this rule also
+	// applies to, or is empty for a rule that is only ever about traffic
+	// crossing this host's physical interfaces.
+	//
+	// Every rule is programmed into the kernel regardless of Scope: a
+	// masquerade or SNAT rule is bound to a specific OutIface, so one whose
+	// traffic never egresses that interface simply never matches (see
+	// kernelNATRules). Scope decides only the *second* place a rule can be
+	// enforced — the userspace overlay↔overlay path in internal/mesh, which
+	// has to know which network's table to go in.
+	//
+	// So an empty Scope is the ordinary router case, and is what a node with
+	// no mesh networks writes. A named one is what every pre-v953 rule
+	// migrates to, since each was already filed under exactly one network.
+	Scope string `json:"scope,omitempty"`
+
 	// Direction and DestNetwork are deprecated. An earlier version had a
 	// separate 3-value direction selector (overlay2underlay/
 	// underlay2overlay/overlay2overlay) alongside Translate, with
@@ -2280,8 +2358,20 @@ type NATRule struct {
 	Direction string `json:"direction,omitempty"`
 }
 
-// NAT is a network's address translation. It is off by default; when disabled no
-// translation happens. Individual rules also have their own Enabled flag.
+// NAT is this node's address translation. It is off by default; when disabled
+// no translation happens. Individual rules also have their own Enabled flag.
+//
+// Node-global from v953, not per mesh network. A NAT rule is a statement about
+// packets, not about an overlay: the kernel rules this produces (see
+// kernelNATRules and internal/netfilter) carry no overlay identity whatsoever
+// — a Kind, two prefixes, an interface and a target — so "masquerade
+// 192.168.1.0/24 out eth0" is an ordinary router rule that a node with no mesh
+// network at all can and should be able to write. The per-network nesting was
+// history, and its only real effect was to make NAT unreachable on a node
+// running gravinet as a plain LAN router.
+//
+// What the overlay half still needs is a network, which is what NATRule.Scope
+// carries. See its doc comment.
 type NAT struct {
 	Enabled bool      `json:"enabled"`
 	Rules   []NATRule `json:"rules"`
@@ -2870,9 +2960,18 @@ func (c *Config) Validate() error {
 	// it's never written back out. "overlay2underlay" and "overlay2overlay"
 	// both already meant plain SNAT and need no Translate change, just the
 	// field cleared.
-	for i := range c.Networks {
-		for j := range c.Networks[i].NAT.Rules {
-			r := &c.Networks[i].NAT.Rules[j]
+	// NAT moved from per-network to node-global in v953. Hoist first, so the
+	// Direction migration below has a single list to walk — running it over
+	// the per-network rules instead would silently skip a config already in
+	// the node-global shape, leaving a legacy Direction to be written back out
+	// forever.
+	c.migrateNAT()
+	// QoS made the same move in v954, and the bandwidth limit in v955.
+	c.migrateQoS()
+	c.migrateThrottle()
+	for j := range c.NAT.Rules {
+		{
+			r := &c.NAT.Rules[j]
 			if strings.EqualFold(r.Direction, "underlay2overlay") {
 				t := strings.TrimSpace(r.Translate)
 				if t != "" && !strings.EqualFold(t, "masquerade") && !strings.HasPrefix(strings.ToLower(t), "port-forward:") {
@@ -3006,23 +3105,33 @@ func (c *Config) Validate() error {
 		if n.RouteRej == nil {
 			n.RouteRej = []RejectRoute{{CIDR: "0.0.0.0/0"}, {CIDR: "::/0"}}
 		}
-		// QoS: 5 priority classes by default with class 3 (normal) for unmatched
-		// traffic. Classes 0-2 are above normal, 4 is bulk. Migrate older 3-class
-		// configs up so existing rules (classes 0-2) keep working.
-		if n.QoS.Enabled {
-			if n.QoS.Classes < 5 {
-				n.QoS.Classes = 5
-			}
-			if n.QoS.DefaultClass <= 0 || n.QoS.DefaultClass >= n.QoS.Classes {
-				n.QoS.DefaultClass = 3
-			}
-			// QoS is inert without an egress rate cap to create contention for
-			// the priority queue to reorder, so enabling QoS enables the
-			// up-throttle. If no rate is configured yet, seed a placeholder the
-			// operator should lower to their real uplink.
-			n.Throttle.Enabled = true
-			if n.Throttle.UpBytesPerSec <= 0 {
-				n.Throttle.UpBytesPerSec = defaultQoSUpBytesPerSec
+	}
+	// QoS is inert without an egress rate cap to create contention for the
+	// priority queue to reorder, so a node with QoS on needs the up-throttle
+	// on. Both are node-global now (v954, v955), so this is one statement
+	// rather than one per network. The placeholder is one the operator should
+	// lower to their real uplink.
+	if c.QoS.Enabled {
+		c.Throttle.Enabled = true
+		if c.Throttle.UpBytesPerSec <= 0 {
+			c.Throttle.UpBytesPerSec = defaultQoSUpBytesPerSec
+		}
+	}
+	// QoS class geometry: 5 priority classes by default with class 3 (normal)
+	// for unmatched traffic. Classes 0-2 are above normal, 4 is bulk. Migrates
+	// older 3-class configs up so existing rules (classes 0-2) keep working.
+	// One geometry per node from v954, so this runs once rather than per
+	// network.
+	if c.QoS.Enabled {
+		if c.QoS.Classes < 5 {
+			c.QoS.Classes = 5
+		}
+		if c.QoS.DefaultClass <= 0 || c.QoS.DefaultClass >= c.QoS.Classes {
+			c.QoS.DefaultClass = 3
+		}
+		for _, r := range c.QoS.Rules {
+			if err := c.checkQoSScope(r.Scope); err != nil {
+				return fmt.Errorf("qos: %v", err)
 			}
 		}
 	}
@@ -3951,4 +4060,142 @@ func trimStrings(in []string) []string {
 		}
 	}
 	return out
+}
+
+// migrateNAT hoists the pre-v953 per-network NAT into the node-global one.
+//
+// Each network's rules move up with Scope set to that network, which is
+// exactly what they already meant: a rule filed under a network was enforced
+// in the kernel (where the network was never referenced at all) and in that
+// network's overlay table. Scope preserves the second half; the first was
+// always node-global in effect.
+//
+// Two details keep behaviour identical rather than merely similar:
+//
+//   - A network whose NAT was switched off contributes its rules disabled.
+//     The old per-network Enabled flag gated a whole network's rules, and
+//     there is no per-network gate to hold that any more, so it is folded into
+//     the rules themselves. A node comes back translating exactly what it
+//     translated before; what changes is that re-enabling is now per rule.
+//   - The node-global switch comes on if any network had NAT on. Off for
+//     everyone means off, and the rules are disabled anyway by the line above.
+//
+// A config already carrying node-global rules is left alone, the rule every
+// other migration here follows.
+func (c *Config) migrateNAT() {
+	if len(c.NAT.Rules) == 0 {
+		for i := range c.Networks {
+			n := &c.Networks[i]
+			for _, r := range n.NAT.Rules {
+				r.Scope = n.Name
+				if r.Scope == "" {
+					r.Scope = n.ID
+				}
+				if !n.NAT.Enabled {
+					r.Enabled = false
+				}
+				c.NAT.Rules = append(c.NAT.Rules, r)
+			}
+			if n.NAT.Enabled {
+				c.NAT.Enabled = true
+			}
+		}
+	}
+	for i := range c.Networks {
+		c.Networks[i].NAT = NAT{}
+	}
+}
+
+// migrateQoS hoists the pre-v954 per-network classifier into the node-global
+// one.
+//
+// Each network's rules move up with Scope set to that network, which is what
+// they already meant: classified on that overlay's egress and nowhere else.
+// The class geometry — how many classes, which is the default, any DSCP
+// overrides — comes from the first network that has QoS switched on, falling
+// back to the first that has any rules. It is one setting per node now, and in
+// practice it was the same on every network anyway: nothing but the default 5
+// classes with 3 as normal unless an operator went looking for it.
+//
+// A network whose QoS switch was off contributes its rules disabled, the same
+// fold migrateNAT does and for the same reason: the per-network gate holding
+// them off has no equivalent any more, so it moves into the rules. The node
+// classifies exactly what it classified before.
+//
+// A config already carrying node-global rules is left alone.
+func (c *Config) migrateQoS() {
+	if len(c.QoS.Rules) == 0 {
+		geom := -1
+		for i := range c.Networks {
+			n := &c.Networks[i]
+			for _, r := range n.QoS.Rules {
+				r.Scope = qosScopeName(n)
+				if !n.QoS.Enabled {
+					r.Disabled = true
+				}
+				c.QoS.Rules = append(c.QoS.Rules, r)
+			}
+			if n.QoS.Enabled {
+				c.QoS.Enabled = true
+				if geom < 0 {
+					geom = i
+				}
+			}
+			if geom < 0 && len(n.QoS.Rules) > 0 {
+				geom = i
+			}
+		}
+		if geom >= 0 {
+			src := c.Networks[geom].QoS
+			c.QoS.Classes, c.QoS.DefaultClass = src.Classes, src.DefaultClass
+			c.QoS.ClassDSCP = append([]int(nil), src.ClassDSCP...)
+		}
+	}
+	for i := range c.Networks {
+		c.Networks[i].QoS = QoS{}
+	}
+}
+
+// qosScopeName is the name a rule uses to reach one network: its name, or its
+// id for a network that has none. Same pair natRuleInScope and the scope
+// picker use.
+func qosScopeName(n *Network) string {
+	if strings.TrimSpace(n.Name) != "" {
+		return n.Name
+	}
+	return n.ID
+}
+
+// migrateThrottle hoists the pre-v955 per-network bandwidth limit into the
+// node-global one.
+//
+// A node whose networks all carried the same rate — the ordinary case, since
+// there was rarely a reason to differ — comes back with exactly that rate.
+//
+// Where they *did* differ there is genuine information loss: one number cannot
+// hold two, and "10 each" is what the node-global rate means. The largest of
+// each field wins, following the same rule Config.NATStateTimeout's migration
+// already uses for the same reason. Largest rather than smallest because a
+// throttle is a cap: taking the largest leaves no network newly starved, and
+// an under-throttled link is visible and one edit away, whereas silently
+// halving a working link's rate is neither.
+//
+// A config already carrying a node-global rate is left alone.
+func (c *Config) migrateThrottle() {
+	for i := range c.Networks {
+		if t := c.Networks[i].Throttle; t != nil && *t == (Throttle{}) {
+			// A zero override is indistinguishable from no override and would
+			// otherwise pin the network to "uncapped" forever.
+			c.Networks[i].Throttle = nil
+		}
+	}
+}
+
+// EffectiveThrottle is the limit actually applied to a network's shaper: its
+// own override if it has one, otherwise this node's default.
+func (c *Config) EffectiveThrottle(n Network) Throttle {
+	if n.Throttle != nil {
+		return *n.Throttle
+	}
+	return c.Throttle
 }

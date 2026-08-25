@@ -50,7 +50,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "952"
+	version = "956"
 	commit  = "none"
 )
 
@@ -1207,7 +1207,7 @@ func cmdRun(args []string) {
 					// Already up: apply the hot-reloadable runtime settings + keys.
 					var spec mesh.NetSpec
 					spec.ID = id
-					fillRuntimeSpec(&spec, n, newCfg.EffectiveFirewallExempt(), newCfg.NATStateTimeout, newCfg.FirewallServices, newCfg.BGP)
+					fillRuntimeSpec(&spec, n, newCfg.EffectiveFirewallExempt(), newCfg.NATStateTimeout, newCfg.FirewallServices, newCfg.BGP, newCfg.NAT, newCfg.QoS, newCfg.EffectiveThrottle(n))
 					// fillRuntimeSpec doesn't resolve seeds (only buildOneNetSpec does
 					// at startup); resolve them here so a seed added at runtime is
 					// dialed live via ReloadRuntime's seed merge, and one just
@@ -2762,7 +2762,7 @@ func buildOneNetSpec(n config.Network, cfg *config.Config, overlays []netip.Pref
 	spec.MulticastPPS = n.StormControl.MulticastPPS
 	spec.StormBurst = n.StormControl.Burst
 
-	fillRuntimeSpec(&spec, n, cfg.EffectiveFirewallExempt(), cfg.NATStateTimeout, cfg.FirewallServices, cfg.BGP)
+	fillRuntimeSpec(&spec, n, cfg.EffectiveFirewallExempt(), cfg.NATStateTimeout, cfg.FirewallServices, cfg.BGP, cfg.NAT, cfg.QoS, cfg.EffectiveThrottle(n))
 	return spec, dev, nil
 }
 
@@ -2849,7 +2849,7 @@ func autoMeshRoutesFromBGP(n config.Network, bgp config.BGPConfig) []netip.Prefi
 	return out
 }
 
-func fillRuntimeSpec(spec *mesh.NetSpec, n config.Network, exempts []config.FirewallExempt, natStateTimeout int, fwServices []config.FirewallService, bgp config.BGPConfig) {
+func fillRuntimeSpec(spec *mesh.NetSpec, n config.Network, exempts []config.FirewallExempt, natStateTimeout int, fwServices []config.FirewallService, bgp config.BGPConfig, nat config.NAT, qos config.QoS, thr config.Throttle) {
 	// Redistributed routes (hot-reloadable; applied live on reload). Disabled
 	// route entries are skipped.
 	for _, rt := range n.Routes {
@@ -2939,20 +2939,37 @@ func fillRuntimeSpec(spec *mesh.NetSpec, n config.Network, exempts []config.Fire
 	}
 
 	// Bandwidth throttling (off by default).
-	if n.Throttle.Enabled {
-		spec.ThrottleUp = n.Throttle.UpBytesPerSec
-		spec.ThrottleDown = n.Throttle.DownBytesPerSec
-		spec.ThrottleBurst = n.Throttle.BurstBytes
-		spec.ThrottleQueue = n.Throttle.QueueBytes
+	// The rate actually applied to this tunnel: the network's own override if
+	// it has one, otherwise the node default. Resolved by the caller via
+	// Config.EffectiveThrottle — a node default means "this much to each
+	// network that has not been given its own", never a total shared between
+	// them, because the shaper is one queue and one drainer per tunnel with no
+	// point at which two meet.
+	if thr.Enabled {
+		spec.ThrottleUp = thr.UpBytesPerSec
+		spec.ThrottleDown = thr.DownBytesPerSec
+		spec.ThrottleBurst = thr.BurstBytes
+		spec.ThrottleQueue = thr.QueueBytes
 	}
 
 	// QoS classifier (off by default; also needs an up-throttle to bite).
-	if n.QoS.Enabled {
-		classes := n.QoS.Classes
+	//
+	// Node-global from v954, so the rules come from the config and each
+	// network takes the ones in scope for it — its own, plus every rule that
+	// named no network. Enforcement is unchanged: one classifier per network,
+	// on that network's tunnel egress, feeding that network's shaper.
+	if qos.Enabled {
+		classes := qos.Classes
 		if classes < 1 {
 			classes = 5
 		}
-		spec.QoS = mesh.NewClassifier(classes, n.QoS.DefaultClass, qosClassRules(n.QoS.Rules, fwServices, n.Name), n.QoS.ClassDSCP)
+		var mine []config.QoSRule
+		for _, r := range qos.Rules {
+			if qosRuleInScope(r, n) {
+				mine = append(mine, r)
+			}
+		}
+		spec.QoS = mesh.NewClassifier(classes, qos.DefaultClass, qosClassRules(mine, fwServices, n.Name), qos.ClassDSCP)
 	}
 
 	// Firewall: the enabled flag governs *enforcement* (allow() short-circuits to
@@ -3008,7 +3025,7 @@ func fillRuntimeSpec(spec *mesh.NetSpec, n config.Network, exempts []config.Fire
 	}
 
 	// NAT (off by default).
-	spec.NATEnabled = n.NAT.Enabled
+	spec.NATEnabled = nat.Enabled
 	spec.NATStateTimeout = time.Duration(natStateTimeout) * time.Second
 	spec.AdvHosts = spec.AdvHosts[:0]
 	for _, h := range n.HostsAdvertise {
@@ -3076,10 +3093,14 @@ func fillRuntimeSpec(spec *mesh.NetSpec, n config.Network, exempts []config.Fire
 		}
 		spec.SearchDomains = append(spec.SearchDomains, d.Domain)
 	}
+	// The overlay half of NAT: the node-global rules that name this network in
+	// their Scope. A rule with an empty Scope is about traffic crossing a
+	// physical interface and is enforced in the kernel only (see
+	// kernelNATRules), so it contributes nothing here.
 	spec.NAT = spec.NAT[:0]
-	if n.NAT.Enabled {
-		for _, nr := range n.NAT.Rules {
-			if !nr.Enabled {
+	if nat.Enabled {
+		for _, nr := range nat.Rules {
+			if !nr.Enabled || !natRuleInScope(nr, n) {
 				continue
 			}
 			spec.NAT = append(spec.NAT, mesh.NATRuleSpec{
@@ -3107,12 +3128,8 @@ func fillRuntimeSpec(spec *mesh.NetSpec, n config.Network, exempts []config.Fire
 // kernel-side attempt here regardless of what its traffic turns out to be.
 func kernelNATRules(cfg *config.Config) []netfilter.Rule {
 	var out []netfilter.Rule
-	for i := range cfg.Networks {
-		n := &cfg.Networks[i]
-		if !n.Enabled || !n.NAT.Enabled {
-			continue
-		}
-		for _, r := range n.NAT.Rules {
+	if cfg.NAT.Enabled {
+		for _, r := range cfg.NAT.Rules {
 			if !r.Enabled {
 				continue
 			}
@@ -4012,4 +4029,37 @@ func overlayAddrChanged(engine *mesh.Engine, id uint64, n config.Network) bool {
 		}
 	}
 	return false
+}
+
+// natRuleInScope reports whether a node-global NAT rule also applies to this
+// mesh network's overlay traffic.
+//
+// A rule names its network by Name, falling back to ID for a network that has
+// no name — the same pair the migration writes, and the same pair the web
+// admin's scope picker offers. An empty Scope is a rule about traffic crossing
+// a physical interface: it is programmed into the kernel and belongs to no
+// overlay table.
+func natRuleInScope(r config.NATRule, n config.Network) bool {
+	scope := strings.TrimSpace(r.Scope)
+	if scope == "" {
+		return false
+	}
+	return strings.EqualFold(scope, n.Name) || strings.EqualFold(scope, n.ID)
+}
+
+// qosRuleInScope reports whether a node-global QoS rule classifies traffic on
+// this network.
+//
+// A blank scope means every network, which is the opposite of what it means
+// for NAT — and deliberately so. NAT has a kernel path, so a scopeless NAT
+// rule still does something; QoS has none, so a scopeless QoS rule that
+// reached no overlay would do nothing at all. "Any overlay" is the only
+// reading that leaves it meaningful, and it is what makes a rule written
+// before any network exists start working once one does.
+func qosRuleInScope(r config.QoSRule, n config.Network) bool {
+	scope := strings.TrimSpace(r.Scope)
+	if scope == "" {
+		return true
+	}
+	return strings.EqualFold(scope, n.Name) || strings.EqualFold(scope, n.ID)
 }

@@ -1032,27 +1032,29 @@ func cmdHost(args []string) {
 
 func cmdNAT(args []string) {
 	if len(args) == 0 {
-		fatal("usage: gravinet nat <add IFACE|delete IFACE|enable-rule INDEX|disable-rule INDEX|enable|disable|list> [-net NAME]")
+		fatal("usage: gravinet nat <add IFACE|delete IFACE|enable-rule INDEX|disable-rule INDEX|enable|disable|list> [scope NAME]")
 	}
 	sub := args[0]
-	netName, rest := extractOpt(args[1:], "net")
-	cfg, path, rest := openCfg(rest)
-	n := pickNetwork(cfg, netName)
+	// -net is gone: NAT is node-global from v953. A rule's optional "scope"
+	// keyword names a mesh network whose overlay traffic it also applies to,
+	// which is a property of the rule rather than a selector for which
+	// network's table to edit.
+	cfg, path, rest := openCfg(args[1:])
 
 	sub = expandVerb(sub, v("list"), v("enable", "disable"), v("enable-rule", "disable-rule"), v("state"), v("add"), v("delete", "del", "remove"))
 	switch sub {
 	case "list":
-		fmt.Printf("network %s NAT (%s)", n.Name, onOff(n.NAT.Enabled))
+		fmt.Printf("NAT (%s)", onOff(cfg.NAT.Enabled))
 		st := cfg.NATStateTimeout
 		if st <= 0 {
 			fmt.Printf("  state-timeout=120s (global default)\n")
 		} else {
 			fmt.Printf("  state-timeout=%ds (global)\n", st)
 		}
-		if len(n.NAT.Rules) == 0 {
+		if len(cfg.NAT.Rules) == 0 {
 			fmt.Println("  (no rules)")
 		}
-		for i, r := range n.NAT.Rules {
+		for i, r := range cfg.NAT.Rules {
 			src := r.Source
 			if src == "" {
 				src = "any"
@@ -1068,15 +1070,19 @@ func cmdNAT(args []string) {
 			if r.Interface != "" {
 				tgt = r.Translate + " (" + r.Interface + ")"
 			}
-			fmt.Printf("  [%d] src=%-18s dst=%-24s -> %-22s %s\n",
-				i, src, dst, tgt, onOff(r.Enabled))
+			scope := r.Scope
+			if scope == "" {
+				scope = "host"
+			}
+			fmt.Printf("  [%d] src=%-18s dst=%-24s -> %-22s scope=%-10s %s\n",
+				i, src, dst, tgt, scope, onOff(r.Enabled))
 		}
 		return
 	case "enable", "disable":
-		if err := cfg.NATSetEnabled(netName, sub == "enable"); err != nil {
+		if err := cfg.NATSetEnabled(sub == "enable"); err != nil {
 			fatal("%v", err)
 		}
-		fmt.Printf("%sd NAT on %s\n", sub, n.Name)
+		fmt.Printf("%sd NAT\n", sub)
 	case "enable-rule", "disable-rule":
 		if len(rest) == 0 {
 			fatal("usage: gravinet nat %s INDEX  (see `gravinet nat list`)", sub)
@@ -1085,14 +1091,14 @@ func cmdNAT(args []string) {
 		if err != nil {
 			fatal("rule index must be a number")
 		}
-		if err := cfg.NATRuleSetEnabled(netName, idx, sub == "enable-rule"); err != nil {
+		if err := cfg.NATRuleSetEnabled(idx, sub == "enable-rule"); err != nil {
 			fatal("%v", err)
 		}
 		verb := "enabled"
 		if sub == "disable-rule" {
 			verb = "disabled"
 		}
-		fmt.Printf("%s NAT rule [%d] on %s\n", verb, idx, n.Name)
+		fmt.Printf("%s NAT rule [%d]\n", verb, idx)
 	case "state":
 		if len(rest) == 0 {
 			fatal("usage: gravinet nat state SECONDS  (0 = default 120s)")
@@ -1120,30 +1126,31 @@ func cmdNAT(args []string) {
 		proto := kw(rest, "proto")
 		translate := kw(rest, "translate")
 		iface := kw(rest, "iface")
+		scope := kw(rest, "scope")
 		if src == "" && dst == "" && destPort == "" && proto == "" && translate == "" && iface == "" {
 			if len(rest) == 0 {
 				fatal("usage: gravinet nat add IFACE  |  nat add [source CIDR] [dest CIDR] [dest-port N|N-M] [proto tcp|udp] (translate ADDR|masquerade|port-forward:ADDR[:PORT] | iface IFACE)")
 			}
 			iface = rest[0] // bare-interface masquerade shorthand
 		}
-		if err := cfg.NATRuleAdd(netName, src, dst, destPort, proto, translate, iface); err != nil {
+		if err := cfg.NATRuleAdd(src, dst, destPort, proto, translate, iface, scope); err != nil {
 			fatal("%v", err)
 		}
-		fmt.Printf("added NAT rule on %s\n", n.Name)
+		fmt.Println("added NAT rule")
 	case "delete", "del", "remove":
 		if len(rest) == 0 {
 			fatal("usage: gravinet nat delete INDEX  (see `gravinet nat list`)  |  nat delete IFACE")
 		}
 		if idx, err := strconv.Atoi(rest[0]); err == nil {
-			if e := cfg.NATRuleDeleteAt(netName, idx); e != nil {
+			if e := cfg.NATRuleDeleteAt(idx); e != nil {
 				fatal("%v", e)
 			}
-			fmt.Printf("deleted NAT rule [%d] on %s\n", idx, n.Name)
+			fmt.Printf("deleted NAT rule [%d]\n", idx)
 		} else {
-			if e := cfg.NATDelete(netName, rest[0]); e != nil {
+			if e := cfg.NATDelete(rest[0]); e != nil {
 				fatal("%v", e)
 			}
-			fmt.Printf("deleted NAT rule for %s on %s\n", rest[0], n.Name)
+			fmt.Printf("deleted NAT rule for %s\n", rest[0])
 		}
 	default:
 		fatal("unknown: gravinet nat %s", sub)
@@ -1160,53 +1167,58 @@ func cmdQoS(args []string) {
 			"  names entries from the firewall's service catalog ('gravinet firewall service ...').")
 	}
 	sub := args[0]
-	netName, rest := extractOpt(args[1:], "net")
-	cfg, path, rest := openCfg(rest)
-	n := pickNetwork(cfg, netName)
+	// -net is gone: QoS is node-global from v954. A rule's optional "scope"
+	// keyword names the mesh network it classifies on, blank for every one.
+	cfg, path, rest := openCfg(args[1:])
 
-	if n.QoS.Classes == 0 {
-		n.QoS.Classes = 3
+	if cfg.QoS.Classes == 0 {
+		cfg.QoS.Classes = 3
 	}
 
 	sub = expandVerb(sub, v("list"), v("enable", "disable"), v("enable-rule", "disable-rule"), v("add"), v("delete", "del", "remove"), v("mark"), v("unmark"))
 	switch sub {
 	case "list":
-		fmt.Printf("network %s QoS (%s, %d classes, default class %d):\n",
-			n.Name, onOff(n.QoS.Enabled), n.QoS.Classes, n.QoS.DefaultClass)
-		for cl := 0; cl < n.QoS.Classes; cl++ {
-			dscp := mesh.DefaultClassDSCP(cl, n.QoS.Classes, n.QoS.DefaultClass)
+		fmt.Printf("QoS (%s, %d classes, default class %d):\n",
+			onOff(cfg.QoS.Enabled), cfg.QoS.Classes, cfg.QoS.DefaultClass)
+		for cl := 0; cl < cfg.QoS.Classes; cl++ {
+			dscp := mesh.DefaultClassDSCP(cl, cfg.QoS.Classes, cfg.QoS.DefaultClass)
 			override := ""
-			if cl < len(n.QoS.ClassDSCP) && n.QoS.ClassDSCP[cl] >= 0 {
-				dscp = n.QoS.ClassDSCP[cl]
+			if cl < len(cfg.QoS.ClassDSCP) && cfg.QoS.ClassDSCP[cl] >= 0 {
+				dscp = cfg.QoS.ClassDSCP[cl]
 				override = " (override)"
 			}
-			fmt.Printf("  class %d (%-7s) marks traffic %s%s\n", cl, className(cl, n.QoS.Classes), config.DSCPName(dscp), override)
+			fmt.Printf("  class %d (%-7s) marks traffic %s%s\n", cl, className(cl, cfg.QoS.Classes), config.DSCPName(dscp), override)
 		}
-		if len(n.QoS.Rules) == 0 {
+		if len(cfg.QoS.Rules) == 0 {
 			fmt.Println("  (no rules)")
 		}
-		for _, r := range n.QoS.Rules {
-			fmt.Printf("  %-28s -> class %d (%s) %s\n", qosRuleMatchLabel(r), r.Class, className(r.Class, n.QoS.Classes), onOff(!r.Disabled))
+		for _, r := range cfg.QoS.Rules {
+			scope := r.Scope
+			if scope == "" {
+				scope = "any"
+			}
+			fmt.Printf("  %-28s -> class %d (%s) scope=%-10s %s\n",
+				qosRuleMatchLabel(r), r.Class, className(r.Class, cfg.QoS.Classes), scope, onOff(!r.Disabled))
 		}
 		return
 	case "enable", "disable":
-		if err := cfg.QoSSetEnabled(netName, sub == "enable"); err != nil {
+		if err := cfg.QoSSetEnabled(sub == "enable"); err != nil {
 			fatal("%v", err)
 		}
-		fmt.Printf("%sd QoS on %s\n", sub, n.Name)
+		fmt.Printf("%sd QoS \n", sub)
 	case "enable-rule", "disable-rule":
 		if len(rest) < 1 {
 			fatal("usage: gravinet qos %s MATCH", sub)
 		}
 		proto, port, services, _ := parseQoSMatch(sub, rest)
-		if err := cfg.QoSRuleSetEnabled(netName, proto, port, services, sub == "enable-rule"); err != nil {
+		if err := cfg.QoSRuleSetEnabled(proto, port, services, kw(rest, "scope"), sub == "enable-rule"); err != nil {
 			fatal("%v", err)
 		}
 		verb := "enabled"
 		if sub == "disable-rule" {
 			verb = "disabled"
 		}
-		fmt.Printf("%s QoS rule %s on %s\n", verb, qosRuleMatchLabel(config.QoSRule{Protocol: proto, PortMin: port, PortMax: port, Services: services}), n.Name)
+		fmt.Printf("%s QoS rule %s\n", verb, qosRuleMatchLabel(config.QoSRule{Protocol: proto, PortMin: port, PortMax: port, Services: services}))
 	case "add":
 		// gravinet qos add tcp 3389 priority highest
 		// gravinet qos add service ssh,rdp priority highest
@@ -1214,20 +1226,20 @@ func cmdQoS(args []string) {
 			fatal("usage: gravinet qos add MATCH priority LEVEL")
 		}
 		proto, port, services, remainder := parseQoSMatch(sub, rest)
-		class := priorityToClass(kw(remainder, "priority"), n.QoS.Classes)
-		if err := cfg.QoSAdd(netName, proto, port, services, class); err != nil {
+		class := priorityToClass(kw(remainder, "priority"), cfg.QoS.Classes)
+		if err := cfg.QoSAdd(proto, port, services, class, kw(rest, "scope")); err != nil {
 			fatal("%v", err)
 		}
-		fmt.Printf("added QoS %s -> class %d (%s) on %s\n", qosRuleMatchLabel(config.QoSRule{Protocol: proto, PortMin: port, PortMax: port, Services: services}), class, className(class, n.QoS.Classes), n.Name)
+		fmt.Printf("added QoS %s -> class %d (%s)\n", qosRuleMatchLabel(config.QoSRule{Protocol: proto, PortMin: port, PortMax: port, Services: services}), class, className(class, cfg.QoS.Classes))
 	case "delete", "del", "remove":
 		if len(rest) < 1 {
 			fatal("usage: gravinet qos delete MATCH")
 		}
 		proto, port, services, _ := parseQoSMatch(sub, rest)
-		if err := cfg.QoSDelete(netName, proto, port, services); err != nil {
+		if err := cfg.QoSDelete(proto, port, services, kw(rest, "scope")); err != nil {
 			fatal("%v", err)
 		}
-		fmt.Printf("deleted QoS rule %s on %s\n", qosRuleMatchLabel(config.QoSRule{Protocol: proto, PortMin: port, PortMax: port, Services: services}), n.Name)
+		fmt.Printf("deleted QoS rule %s\n", qosRuleMatchLabel(config.QoSRule{Protocol: proto, PortMin: port, PortMax: port, Services: services}))
 	case "mark":
 		// gravinet qos mark 0 46   (mark class 0's traffic EF/DSCP 46)
 		if len(rest) < 2 {
@@ -1241,10 +1253,10 @@ func cmdQoS(args []string) {
 		if err != nil {
 			fatal("invalid dscp %q", rest[1])
 		}
-		if err := cfg.QoSSetClassDSCP(netName, class, dscp); err != nil {
+		if err := cfg.QoSSetClassDSCP(class, dscp); err != nil {
 			fatal("%v", err)
 		}
-		fmt.Printf("class %d (%s) on %s now marks traffic %s\n", class, className(class, n.QoS.Classes), n.Name, config.DSCPName(dscp))
+		fmt.Printf("class %d (%s) now marks traffic %s\n", class, className(class, cfg.QoS.Classes), config.DSCPName(dscp))
 	case "unmark":
 		if len(rest) < 1 {
 			fatal("usage: gravinet qos unmark CLASS")
@@ -1253,11 +1265,11 @@ func cmdQoS(args []string) {
 		if err != nil {
 			fatal("invalid class %q", rest[0])
 		}
-		if err := cfg.QoSClearClassDSCP(netName, class); err != nil {
+		if err := cfg.QoSClearClassDSCP(class); err != nil {
 			fatal("%v", err)
 		}
-		def := mesh.DefaultClassDSCP(class, n.QoS.Classes, n.QoS.DefaultClass)
-		fmt.Printf("class %d (%s) on %s reverted to default mark %s\n", class, className(class, n.QoS.Classes), n.Name, config.DSCPName(def))
+		def := mesh.DefaultClassDSCP(class, cfg.QoS.Classes, cfg.QoS.DefaultClass)
+		fmt.Printf("class %d (%s) reverted to default mark %s\n", class, className(class, cfg.QoS.Classes), config.DSCPName(def))
 	default:
 		fatal("unknown: gravinet qos %s", sub)
 	}
@@ -1320,57 +1332,76 @@ func qosRuleMatchLabel(r config.QoSRule) string {
 
 func cmdBandwidth(args []string) {
 	if len(args) == 0 {
-		fatal("usage: gravinet bandwidth <up|down|both RATE [interface IFACE]|enable|disable|list> [-net NAME]")
+		fatal("usage: gravinet bandwidth <up|down|both RATE|enable|disable|clear|list> [-net NAME]")
 	}
 	sub := args[0]
+	// -net picks which limit to change: absent for this node's default, which
+	// applies to every network without one of its own; present for that
+	// network's override.
 	netName, rest := extractOpt(args[1:], "net")
 	cfg, path, rest := openCfg(rest)
 
 	if sub == "list" {
+		d := cfg.Throttle
+		fmt.Printf("%-16s %-9s up=%s down=%s\n", "(node default)", onOff(d.Enabled),
+			rateStr(d.UpBytesPerSec), rateStr(d.DownBytesPerSec))
 		for _, n := range cfg.Networks {
-			t := n.Throttle
-			fmt.Printf("%-16s %-9s up=%s down=%s (tun=%s)\n",
-				n.Name, onOff(t.Enabled), rateStr(t.UpBytesPerSec), rateStr(t.DownBytesPerSec), n.TUNName)
+			t := cfg.EffectiveThrottle(n)
+			src := "inherited"
+			if n.Throttle != nil {
+				src = "override"
+			}
+			fmt.Printf("%-16s %-9s up=%s down=%s (%s, tun=%s)\n",
+				n.Name, onOff(t.Enabled), rateStr(t.UpBytesPerSec), rateStr(t.DownBytesPerSec), src, n.TUNName)
+		}
+		if len(cfg.Networks) > 1 {
+			// Worth saying outright: a rate is applied to one tunnel's shaper,
+			// so the default is that much to each network, not a total.
+			fmt.Println("  a rate applies to each network separately, never shared between them")
 		}
 		return
 	}
 
-	if sub == "enable" || sub == "disable" {
-		n := pickNetwork(cfg, netName)
-		if err := cfg.ThrottleSetEnabled(n.Name, sub == "enable"); err != nil {
+	if sub == "clear" {
+		if netName == "" {
+			fatal("usage: gravinet bandwidth clear -net NAME  (drops a network's override so it follows the node default)")
+		}
+		if err := cfg.ThrottleClearOverride(netName); err != nil {
 			fatal("%v", err)
 		}
-		fmt.Printf("%sd bandwidth limit on %s\n", sub, n.Name)
+		fmt.Printf("cleared the bandwidth override on %s; it now follows the node default\n", netName)
+		commitCfg(cfg, path)
+		return
+	}
+
+	target := "node default"
+	if netName != "" {
+		target = netName
+	}
+
+	if sub == "enable" || sub == "disable" {
+		if err := cfg.ThrottleSetEnabled(netName, sub == "enable"); err != nil {
+			fatal("%v", err)
+		}
+		fmt.Printf("%sd bandwidth limit on %s\n", sub, target)
 		commitCfg(cfg, path)
 		return
 	}
 
 	if len(rest) == 0 {
-		fatal("usage: gravinet bandwidth %s RATE [interface IFACE]", sub)
+		fatal("usage: gravinet bandwidth %s RATE [-net NAME]", sub)
 	}
 	bps := mustRate(rest[0])
-	iface := kw(rest, "interface")
-	var n *config.Network
-	if iface != "" {
-		for i := range cfg.Networks {
-			if cfg.Networks[i].TUNName == iface {
-				n = &cfg.Networks[i]
-				break
-			}
-		}
-		if n == nil {
-			n = pickNetwork(cfg, netName)
-			n.TUNName = iface // record the requested interface name
-		}
-	} else {
-		n = pickNetwork(cfg, netName)
-	}
-
-	if err := cfg.ThrottleSet(n.Name, sub, bps); err != nil {
+	if err := cfg.ThrottleSet(netName, sub, bps); err != nil {
 		fatal("%v", err)
 	}
-	msg := fmt.Sprintf("set %s bandwidth on %s to %s", sub, n.Name, rateStr(bps))
-	if !n.Throttle.Enabled {
+	msg := fmt.Sprintf("set %s bandwidth on %s to %s", sub, target, rateStr(bps))
+	on := cfg.Throttle.Enabled
+	if netName != "" {
+		n, _ := cfg.PickNetwork(netName)
+		on = cfg.EffectiveThrottle(*n).Enabled
+	}
+	if !on {
 		msg += " (limiting is off — run 'gravinet bandwidth enable' to apply it)"
 	}
 	fmt.Println(msg)

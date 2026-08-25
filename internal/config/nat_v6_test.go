@@ -156,14 +156,14 @@ func TestNATNegateRequiresAPrefix(t *testing.T) {
 	c := &Config{UDPPorts: []int{51820}, EnableIPv4: true,
 		Networks: []Network{{ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24"}}}
 
-	if err := c.NATRuleAddNeg("lan", "", "", "", "", "192.0.2.1", "", true, false); err == nil {
+	if err := c.NATRuleAddNeg("", "", "", "", "192.0.2.1", "", "", true, false); err == nil {
 		t.Error("negating a blank source should be refused")
 	}
-	if err := c.NATRuleAddNeg("lan", "10.1.1.0/24", "", "", "", "192.0.2.1", "", false, true); err == nil {
+	if err := c.NATRuleAddNeg("10.1.1.0/24", "", "", "", "192.0.2.1", "", "", false, true); err == nil {
 		t.Error("negating a blank dest should be refused")
 	}
-	if len(c.Networks[0].NAT.Rules) != 0 {
-		t.Fatalf("no rule should have been stored: %+v", c.Networks[0].NAT.Rules)
+	if len(c.NAT.Rules) != 0 {
+		t.Fatalf("no rule should have been stored: %+v", c.NAT.Rules)
 	}
 
 	// The three shapes an operator actually wants all save.
@@ -175,11 +175,11 @@ func TestNATNegateRequiresAPrefix(t *testing.T) {
 		{"", "10.3.3.0/24", false, true},
 		{"10.1.1.0/24", "10.3.3.0/24", true, true},
 	} {
-		if err := c.NATRuleAddNeg("lan", tc.src, tc.dst, "", "", "192.0.2.1", "", tc.srcNeg, tc.dstNeg); err != nil {
+		if err := c.NATRuleAddNeg(tc.src, tc.dst, "", "", "192.0.2.1", "", "", tc.srcNeg, tc.dstNeg); err != nil {
 			t.Fatalf("src=%q(%v) dst=%q(%v): %v", tc.src, tc.srcNeg, tc.dst, tc.dstNeg, err)
 		}
 	}
-	rules := c.Networks[0].NAT.Rules
+	rules := c.NAT.Rules
 	if len(rules) != 3 {
 		t.Fatalf("want 3 rules, got %d", len(rules))
 	}
@@ -199,21 +199,21 @@ func TestNATNegateRequiresAPrefix(t *testing.T) {
 func TestNATNegateUpdateInPlace(t *testing.T) {
 	c := &Config{UDPPorts: []int{51820}, EnableIPv4: true,
 		Networks: []Network{{ID: "1234", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24"}}}
-	if err := c.NATRuleAddNeg("lan", "10.1.1.0/24", "", "", "", "192.0.2.1", "", true, false); err != nil {
+	if err := c.NATRuleAddNeg("10.1.1.0/24", "", "", "", "192.0.2.1", "", "", true, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.NATRuleUpdateAtNeg("lan", 0, "10.1.1.0/24", "", "", "", "192.0.2.1", "", false, false); err != nil {
+	if err := c.NATRuleUpdateAtNeg(0, "10.1.1.0/24", "", "", "", "192.0.2.1", "", "", false, false); err != nil {
 		t.Fatal(err)
 	}
-	if c.Networks[0].NAT.Rules[0].SourceNegate {
+	if c.NAT.Rules[0].SourceNegate {
 		t.Error("turning negation off in an edit must clear it")
 	}
 	// And the plain (non-Neg) entry points leave a rule un-negated, so every
 	// existing caller keeps its old behaviour.
-	if err := c.NATRuleUpdateAt("lan", 0, "10.1.1.0/24", "", "", "", "192.0.2.1", ""); err != nil {
+	if err := c.NATRuleUpdateAt(0, "10.1.1.0/24", "", "", "", "192.0.2.1", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	if c.Networks[0].NAT.Rules[0].SourceNegate {
+	if c.NAT.Rules[0].SourceNegate {
 		t.Error("the six-argument form must not set negation")
 	}
 }

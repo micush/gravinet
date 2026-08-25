@@ -56,23 +56,23 @@ func TestHandleNATRuleEnableDisable(t *testing.T) {
 	}
 
 	// disable rule 0.
-	if ok, _ := post(map[string]any{"op": "rule-disable", "net": "lan", "index": 0})["ok"].(bool); !ok {
+	if ok, _ := post(map[string]any{"op": "rule-disable", "index": 0})["ok"].(bool); !ok {
 		t.Fatal("rule-disable rejected")
 	}
 	got, _ := config.Load(cfgPath)
-	if len(got.Networks[0].NAT.Rules) != 1 || got.Networks[0].NAT.Rules[0].Enabled {
-		t.Fatalf("rule should be present and disabled: %+v", got.Networks[0].NAT.Rules)
+	if len(got.NAT.Rules) != 1 || got.NAT.Rules[0].Enabled {
+		t.Fatalf("rule should be present and disabled: %+v", got.NAT.Rules)
 	}
 	// re-enable it.
-	if ok, _ := post(map[string]any{"op": "rule-enable", "net": "lan", "index": 0})["ok"].(bool); !ok {
+	if ok, _ := post(map[string]any{"op": "rule-enable", "index": 0})["ok"].(bool); !ok {
 		t.Fatal("rule-enable rejected")
 	}
 	got, _ = config.Load(cfgPath)
-	if !got.Networks[0].NAT.Rules[0].Enabled {
-		t.Fatalf("rule should be enabled again: %+v", got.Networks[0].NAT.Rules)
+	if !got.NAT.Rules[0].Enabled {
+		t.Fatalf("rule should be enabled again: %+v", got.NAT.Rules)
 	}
 	// out-of-range index is rejected.
-	if ok, _ := post(map[string]any{"op": "rule-disable", "net": "lan", "index": 9})["ok"].(bool); ok {
+	if ok, _ := post(map[string]any{"op": "rule-disable", "index": 9})["ok"].(bool); ok {
 		t.Error("out-of-range index should be rejected")
 	}
 }

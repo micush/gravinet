@@ -51,31 +51,31 @@ func TestHandleQoSRuleEnableDisable(t *testing.T) {
 		return out
 	}
 
-	if ok, _ := post(map[string]any{"op": "add", "net": "lan", "proto": "tcp", "port": 22, "class": 0})["ok"].(bool); !ok {
+	if ok, _ := post(map[string]any{"op": "add", "proto": "tcp", "port": 22, "class": 0})["ok"].(bool); !ok {
 		t.Fatal("add rejected")
 	}
 	got, _ := config.Load(cfgPath)
-	if len(got.Networks[0].QoS.Rules) != 1 || got.Networks[0].QoS.Rules[0].Disabled {
-		t.Fatalf("rule should be present and enabled: %+v", got.Networks[0].QoS.Rules)
+	if len(got.QoS.Rules) != 1 || got.QoS.Rules[0].Disabled {
+		t.Fatalf("rule should be present and enabled: %+v", got.QoS.Rules)
 	}
 	// disable the rule.
-	if ok, _ := post(map[string]any{"op": "rule-disable", "net": "lan", "proto": "tcp", "port": 22})["ok"].(bool); !ok {
+	if ok, _ := post(map[string]any{"op": "rule-disable", "proto": "tcp", "port": 22})["ok"].(bool); !ok {
 		t.Fatal("rule-disable rejected")
 	}
 	got, _ = config.Load(cfgPath)
-	if len(got.Networks[0].QoS.Rules) != 1 || !got.Networks[0].QoS.Rules[0].Disabled {
-		t.Fatalf("rule should be present and disabled: %+v", got.Networks[0].QoS.Rules)
+	if len(got.QoS.Rules) != 1 || !got.QoS.Rules[0].Disabled {
+		t.Fatalf("rule should be present and disabled: %+v", got.QoS.Rules)
 	}
 	// re-enable it.
-	if ok, _ := post(map[string]any{"op": "rule-enable", "net": "lan", "proto": "tcp", "port": 22})["ok"].(bool); !ok {
+	if ok, _ := post(map[string]any{"op": "rule-enable", "proto": "tcp", "port": 22})["ok"].(bool); !ok {
 		t.Fatal("rule-enable rejected")
 	}
 	got, _ = config.Load(cfgPath)
-	if got.Networks[0].QoS.Rules[0].Disabled {
-		t.Fatalf("rule should be enabled again: %+v", got.Networks[0].QoS.Rules)
+	if got.QoS.Rules[0].Disabled {
+		t.Fatalf("rule should be enabled again: %+v", got.QoS.Rules)
 	}
 	// toggling a missing rule is rejected.
-	if ok, _ := post(map[string]any{"op": "rule-disable", "net": "lan", "proto": "udp", "port": 9999})["ok"].(bool); ok {
+	if ok, _ := post(map[string]any{"op": "rule-disable", "proto": "udp", "port": 9999})["ok"].(bool); ok {
 		t.Error("disabling a missing rule should be rejected")
 	}
 }
@@ -120,21 +120,21 @@ func TestHandleQoSServices(t *testing.T) {
 		return out
 	}
 
-	if ok, _ := post(map[string]any{"op": "add", "net": "lan", "services": []string{"ssh", "rdp"}, "class": 0})["ok"].(bool); !ok {
+	if ok, _ := post(map[string]any{"op": "add", "services": []string{"ssh", "rdp"}, "class": 0})["ok"].(bool); !ok {
 		t.Fatal("add rejected")
 	}
 	got, _ := config.Load(cfgPath)
-	if len(got.Networks[0].QoS.Rules) != 1 {
-		t.Fatalf("rule should be present: %+v", got.Networks[0].QoS.Rules)
+	if len(got.QoS.Rules) != 1 {
+		t.Fatalf("rule should be present: %+v", got.QoS.Rules)
 	}
-	if svc := got.Networks[0].QoS.Rules[0].Services; len(svc) != 2 {
+	if svc := got.QoS.Rules[0].Services; len(svc) != 2 {
 		t.Fatalf("services = %v, want [ssh rdp]", svc)
 	}
-	if ok, _ := post(map[string]any{"op": "delete", "net": "lan", "services": []string{"ssh", "rdp"}})["ok"].(bool); !ok {
+	if ok, _ := post(map[string]any{"op": "delete", "services": []string{"ssh", "rdp"}})["ok"].(bool); !ok {
 		t.Fatal("delete rejected")
 	}
 	got, _ = config.Load(cfgPath)
-	if len(got.Networks[0].QoS.Rules) != 0 {
-		t.Fatalf("rule should be gone: %+v", got.Networks[0].QoS.Rules)
+	if len(got.QoS.Rules) != 0 {
+		t.Fatalf("rule should be gone: %+v", got.QoS.Rules)
 	}
 }

@@ -254,3 +254,89 @@ func TestDHCPRuntimeReportsAServerRunningBesideTheRelay(t *testing.T) {
 		t.Error("the relay branch reports the relay as healthy without first checking for a server running beside it")
 	}
 }
+
+// NAT is node-global from v953, so its section must render on a node with no
+// mesh networks. Guarding the shape, since the old per-network loop plus the
+// "No networks." gate is exactly what made NAT unreachable on a LAN router.
+func TestNATSectionIsNodeGlobal(t *testing.T) {
+	sec := between(t, indexHTML, "function secNAT(c) {", "\n}")
+	if strings.Contains(sec, "No networks.") {
+		t.Error("the NAT section is gated on a mesh network existing again")
+	}
+	if strings.Contains(sec, "for (const cf of state.cfg)") {
+		t.Error("the NAT section renders a card per mesh network again")
+	}
+	if !strings.Contains(sec, "sectionCardHead('NAT'") {
+		t.Error("the NAT card no longer uses the node-global card head")
+	}
+	// Scope is what carries a rule to an overlay; without the column there is
+	// no way to author one from the page.
+	if !strings.Contains(sec, "<th>scope</th>") {
+		t.Error("the NAT table has no scope column")
+	}
+}
+
+// QoS is node-global from v954, so its section must render on a node with no
+// mesh networks — same guard as NAT's, and for the same reason.
+func TestQoSSectionIsNodeGlobal(t *testing.T) {
+	sec := between(t, indexHTML, "function secQoS(c) {", "\n}")
+	if strings.Contains(sec, "No networks.") {
+		t.Error("the QoS section is gated on a mesh network existing again")
+	}
+	if strings.Contains(sec, "for (const cf of state.cfg)") {
+		t.Error("the QoS section renders a card per mesh network again")
+	}
+	if !strings.Contains(sec, "sectionCardHead('QOS'") {
+		t.Error("the QoS card no longer uses the node-global card head")
+	}
+	if !strings.Contains(sec, "<th>scope</th>") {
+		t.Error("the QoS table has no scope column")
+	}
+	// Scope is part of a rule's key, so every op that addresses an existing
+	// rule has to carry it or it will hit the wrong one.
+	for _, op := range []string{"rule-enable", "delete"} {
+		i := strings.Index(sec, op)
+		if i < 0 {
+			t.Errorf("op %q not found in the QoS section", op)
+			continue
+		}
+		if !strings.Contains(sec[i:min(i+220, len(sec))], "scope") {
+			t.Errorf("the %q op does not carry scope, so it can address the wrong rule", op)
+		}
+	}
+}
+
+// The bandwidth limit is node-global from v955 — one card, no networks gate.
+func TestBandwidthSectionIsNodeGlobal(t *testing.T) {
+	sec := between(t, indexHTML, "function secBandwidth(c) {", "\n}")
+	if strings.Contains(sec, "No networks.") {
+		t.Error("the bandwidth section is gated on a mesh network existing again")
+	}
+	// The section does loop networks — to build the per-network override rows
+	// — so a loop is not the tell. A card per network is: that is the shape
+	// that carried the "No networks." gate with it.
+	if strings.Contains(sec, "netCardHead(cf") {
+		t.Error("the bandwidth section renders a card per mesh network again")
+	}
+	// The node default must be rendered before the networks are consulted, or
+	// a node with none has nowhere to set a rate.
+	if strings.Index(sec, "sectionCardHead('BANDWIDTH'") > strings.Index(sec, "state.cfg") {
+		t.Error("the node default is rendered after the network list, so a node with no networks cannot set a rate")
+	}
+	if !strings.Contains(sec, "sectionCardHead('BANDWIDTH'") {
+		t.Error("the bandwidth card no longer uses the node-global card head")
+	}
+	// A rate applies to one tunnel's shaper, so the default is that much to
+	// each network without an override, never a total. Ambiguous until said.
+	if !strings.Contains(sec, "never shared between them") {
+		t.Error("the card no longer says a rate applies to each network rather than being shared")
+	}
+	// Per-network overrides have to be reachable, or a node with different
+	// rates on different links has nowhere to express them — the v955 mistake.
+	if !strings.Contains(sec, "clear-override") {
+		t.Error("a network's bandwidth override cannot be cleared back to the node default")
+	}
+	if !strings.Contains(sec, "tr.dataset.net") {
+		t.Error("the per-network rows no longer address a network, so overrides cannot be set")
+	}
+}

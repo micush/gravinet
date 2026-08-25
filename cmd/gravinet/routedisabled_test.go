@@ -27,7 +27,7 @@ func TestDisabledRoutesNotInSpec(t *testing.T) {
 		},
 	}
 	var spec mesh.NetSpec
-	fillRuntimeSpec(&spec, n, nil, 0, nil, config.BGPConfig{})
+	fillRuntimeSpec(&spec, n, nil, 0, nil, config.BGPConfig{}, config.NAT{}, config.QoS{}, config.Throttle{})
 
 	// Advertised routes: only the enabled one reaches the spec.
 	if len(spec.Routes) != 1 || spec.Routes[0] != netip.MustParsePrefix("192.168.1.0/24") {

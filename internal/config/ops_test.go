@@ -165,62 +165,60 @@ func TestNetworkSetRedistributeBGPRoutes(t *testing.T) {
 
 func TestThrottleSetPreservesEnabled(t *testing.T) {
 	c := &Config{Networks: []Network{{Name: "n", ID: "0000000000000001", Subnet4: "10.1.0.0/16"}}}
-	tn := &c.Networks[0]
 
 	// Disabled: setting a rate stores it but must NOT enable the limiter.
-	if err := c.ThrottleSet("n", "up", 5_000_000); err != nil {
+	if err := c.ThrottleSet("", "up", 5_000_000); err != nil {
 		t.Fatalf("set up: %v", err)
 	}
-	if tn.Throttle.Enabled {
+	if c.Throttle.Enabled {
 		t.Fatal("setting a rate while disabled must not enable the limiter")
 	}
-	if tn.Throttle.UpBytesPerSec != 5_000_000 {
-		t.Fatalf("rate not stored: up=%d", tn.Throttle.UpBytesPerSec)
+	if c.Throttle.UpBytesPerSec != 5_000_000 {
+		t.Fatalf("rate not stored: up=%d", c.Throttle.UpBytesPerSec)
 	}
 	// Editing the other direction must also leave the (still disabled) state alone.
-	if err := c.ThrottleSet("n", "down", 1_000_000); err != nil {
+	if err := c.ThrottleSet("", "down", 1_000_000); err != nil {
 		t.Fatalf("set down: %v", err)
 	}
-	if tn.Throttle.Enabled {
+	if c.Throttle.Enabled {
 		t.Fatal("editing a second rate must not flip the enabled state")
 	}
 
 	// Now turn it on explicitly, then edit rates: it must STAY on.
-	if err := c.ThrottleSetEnabled("n", true); err != nil {
+	if err := c.ThrottleSetEnabled("", true); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.ThrottleSet("n", "up", 0); err != nil { // clear the up cap to unlimited
+	if err := c.ThrottleSet("", "up", 0); err != nil { // clear the up cap to unlimited
 		t.Fatalf("clear up: %v", err)
 	}
-	if !tn.Throttle.Enabled {
+	if !c.Throttle.Enabled {
 		t.Fatal("clearing one rate must not disable an explicitly-enabled limiter")
 	}
-	if err := c.ThrottleSet("n", "down", 0); err != nil { // clear the down cap too
+	if err := c.ThrottleSet("", "down", 0); err != nil { // clear the down cap too
 		t.Fatalf("clear down: %v", err)
 	}
-	if !tn.Throttle.Enabled {
+	if !c.Throttle.Enabled {
 		t.Fatal("clearing all rates must not disable; only the toggle does that")
 	}
 }
 
 func TestThrottleSetEnabledKeepsRates(t *testing.T) {
-	c := &Config{Networks: []Network{{Name: "n", ID: "0000000000000001", Subnet4: "10.1.0.0/16",
-		Throttle: Throttle{Enabled: true, UpBytesPerSec: 5_000_000}}}}
-	tn := &c.Networks[0]
+	c := &Config{Networks: []Network{{Name: "n", ID: "0000000000000001", Subnet4: "10.1.0.0/16"}},
+		Throttle: Throttle{Enabled: true, UpBytesPerSec: 5_000_000}}
 
 	// Disabling must not discard the configured rate.
-	if err := c.ThrottleSetEnabled("n", false); err != nil {
+	if err := c.ThrottleSetEnabled("", false); err != nil {
 		t.Fatalf("disable: %v", err)
 	}
-	if tn.Throttle.Enabled || tn.Throttle.UpBytesPerSec != 5_000_000 {
-		t.Fatalf("disable should keep the rate: enabled=%v up=%d", tn.Throttle.Enabled, tn.Throttle.UpBytesPerSec)
+	if c.Throttle.Enabled || c.Throttle.UpBytesPerSec != 5_000_000 {
+		t.Fatalf("disable should keep the rate: enabled=%v up=%d", c.Throttle.Enabled, c.Throttle.UpBytesPerSec)
 	}
 	// Re-enabling restores the limit with the same rate.
-	if err := c.ThrottleSetEnabled("n", true); err != nil {
+	if err := c.ThrottleSetEnabled("", true); err != nil {
 		t.Fatalf("enable: %v", err)
 	}
-	if !tn.Throttle.Enabled || tn.Throttle.UpBytesPerSec != 5_000_000 {
-		t.Fatalf("enable should restore the rate: enabled=%v up=%d", tn.Throttle.Enabled, tn.Throttle.UpBytesPerSec)
+	if !c.Throttle.Enabled || c.Throttle.UpBytesPerSec != 5_000_000 {
+		t.Fatalf("enable should restore the rate: enabled=%v up=%d", c.Throttle.Enabled, c.Throttle.UpBytesPerSec)
 	}
 }
 

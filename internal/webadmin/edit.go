@@ -1160,8 +1160,13 @@ func (s *Server) handleTCPPort(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleNAT(w http.ResponseWriter, r *http.Request) {
+	// Net is gone from every op: NAT is node-global from v953. Scope replaces
+	// it and means something different — not "which network owns this rule"
+	// but "which network's overlay traffic does it also apply to", empty for
+	// the ordinary router rule that only ever touches physical interfaces.
 	var req struct {
-		Op, Net                        string
+		Op                             string
+		Scope                          string
 		Iface, Source, Dest, Translate string
 		DestPort                       string `json:"dest_port"`
 		Proto                          string
@@ -1178,24 +1183,24 @@ func (s *Server) handleNAT(w http.ResponseWriter, r *http.Request) {
 			// Full rule when any rule field is set; otherwise the masquerade
 			// shorthand (interface only).
 			if req.Source != "" || req.Dest != "" || req.DestPort != "" || req.Translate != "" {
-				return cfg.NATRuleAddNeg(req.Net, req.Source, req.Dest, req.DestPort, req.Proto, req.Translate, req.Iface, req.SourceNegate, req.DestNegate)
+				return cfg.NATRuleAddNeg(req.Source, req.Dest, req.DestPort, req.Proto, req.Translate, req.Iface, req.Scope, req.SourceNegate, req.DestNegate)
 			}
-			return cfg.NATAdd(req.Net, req.Iface)
+			return cfg.NATAdd(req.Iface, req.Scope)
 		case "update":
-			return cfg.NATRuleUpdateAtNeg(req.Net, req.Index, req.Source, req.Dest, req.DestPort, req.Proto, req.Translate, req.Iface, req.SourceNegate, req.DestNegate)
+			return cfg.NATRuleUpdateAtNeg(req.Index, req.Source, req.Dest, req.DestPort, req.Proto, req.Translate, req.Iface, req.Scope, req.SourceNegate, req.DestNegate)
 		case "delete", "del", "remove":
 			if req.Iface != "" {
-				return cfg.NATDelete(req.Net, req.Iface)
+				return cfg.NATDelete(req.Iface)
 			}
-			return cfg.NATRuleDeleteAt(req.Net, req.Index)
+			return cfg.NATRuleDeleteAt(req.Index)
 		case "enable":
-			return cfg.NATSetEnabled(req.Net, true)
+			return cfg.NATSetEnabled(true)
 		case "disable":
-			return cfg.NATSetEnabled(req.Net, false)
+			return cfg.NATSetEnabled(false)
 		case "rule-enable":
-			return cfg.NATRuleSetEnabled(req.Net, req.Index, true)
+			return cfg.NATRuleSetEnabled(req.Index, true)
 		case "rule-disable":
-			return cfg.NATRuleSetEnabled(req.Net, req.Index, false)
+			return cfg.NATRuleSetEnabled(req.Index, false)
 		default:
 			return fmt.Errorf("unknown op %q", req.Op)
 		}
@@ -1210,11 +1215,14 @@ func (s *Server) handleNAT(w http.ResponseWriter, r *http.Request) {
 // catalog (Config.FirewallServices) — same catalog, same union-with-proto/
 // port convention as FirewallRule.Services.
 func (s *Server) handleQoS(w http.ResponseWriter, r *http.Request) {
+	// Net is gone: QoS is node-global from v954. Scope replaces it and means
+	// something different — which network's traffic a rule classifies, blank
+	// for every network this node runs.
 	var req struct {
-		Op, Net, Proto string
-		Port, Class    int
-		Services       []string
-		DSCP           int
+		Op, Proto, Scope string
+		Port, Class      int
+		Services         []string
+		DSCP             int
 	}
 	if !decode(w, r, &req) {
 		return
@@ -1222,21 +1230,21 @@ func (s *Server) handleQoS(w http.ResponseWriter, r *http.Request) {
 	err := s.mutateConfig(r, func(cfg *config.Config) error {
 		switch req.Op {
 		case "add":
-			return cfg.QoSAdd(req.Net, strings.ToLower(req.Proto), req.Port, req.Services, req.Class)
+			return cfg.QoSAdd(strings.ToLower(req.Proto), req.Port, req.Services, req.Class, req.Scope)
 		case "delete", "del", "remove":
-			return cfg.QoSDelete(req.Net, strings.ToLower(req.Proto), req.Port, req.Services)
+			return cfg.QoSDelete(strings.ToLower(req.Proto), req.Port, req.Services, req.Scope)
 		case "enable":
-			return cfg.QoSSetEnabled(req.Net, true)
+			return cfg.QoSSetEnabled(true)
 		case "disable":
-			return cfg.QoSSetEnabled(req.Net, false)
+			return cfg.QoSSetEnabled(false)
 		case "rule-enable":
-			return cfg.QoSRuleSetEnabled(req.Net, strings.ToLower(req.Proto), req.Port, req.Services, true)
+			return cfg.QoSRuleSetEnabled(strings.ToLower(req.Proto), req.Port, req.Services, req.Scope, true)
 		case "rule-disable":
-			return cfg.QoSRuleSetEnabled(req.Net, strings.ToLower(req.Proto), req.Port, req.Services, false)
+			return cfg.QoSRuleSetEnabled(strings.ToLower(req.Proto), req.Port, req.Services, req.Scope, false)
 		case "mark":
-			return cfg.QoSSetClassDSCP(req.Net, req.Class, req.DSCP)
+			return cfg.QoSSetClassDSCP(req.Class, req.DSCP)
 		case "unmark":
-			return cfg.QoSClearClassDSCP(req.Net, req.Class)
+			return cfg.QoSClearClassDSCP(req.Class)
 		default:
 			return fmt.Errorf("unknown op %q", req.Op)
 		}
@@ -1246,6 +1254,11 @@ func (s *Server) handleQoS(w http.ResponseWriter, r *http.Request) {
 
 // handleBandwidth: set up/down/both throttle (bytes/sec). Applied live.
 func (s *Server) handleBandwidth(w http.ResponseWriter, r *http.Request) {
+	// Net selects which limit to change: empty for this node's default,
+	// applied to every network without one of its own, or a network name for
+	// that network's override. Both exist because different links genuinely
+	// carry different rates (v956) while a node with no networks still needs
+	// somewhere to put a rate (v955).
 	var req struct {
 		Op, Net, Dir string
 		Bps          int
@@ -1259,6 +1272,8 @@ func (s *Server) handleBandwidth(w http.ResponseWriter, r *http.Request) {
 			return cfg.ThrottleSetEnabled(req.Net, true)
 		case "disable":
 			return cfg.ThrottleSetEnabled(req.Net, false)
+		case "clear-override":
+			return cfg.ThrottleClearOverride(req.Net)
 		default:
 			return cfg.ThrottleSet(req.Net, req.Dir, req.Bps)
 		}

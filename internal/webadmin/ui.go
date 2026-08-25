@@ -597,7 +597,7 @@ const indexHTML = `<!doctype html>
 <script>
 const $ = (h) => { const d=document.createElement('div'); d.innerHTML=h.trim(); return d.firstChild; };
 const app = document.getElementById('app');
-const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, geoipLookup:false, enableUpnp:false, allowRemoteShell:false, loginBanMaxFailures:3, loginBanSeconds:900, tlsSource:'self-signed', tlsCommonName:'', tlsNotAfter:'', configHistoryLimit:250, configHistoryCount:0, shellSupported:true, bgpSupported:false, snmpSupported:false, ipv6raSupported:false, dhcpSupported:false, lldpSupported:false, syslogSupported:false, selfId:null, selfHostname:'', targetSeq:0, pendingBgpHighlight:null, workerThreads:0, tunQueues:0, tunQueuesSupported:true, udpGSO:false, udpGSOSupported:true, socketBufferMB:16, socketBufferMaxMB:256, perfRestartPending:false, loginBanRestartPending:false, tableView:{} };
+const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, natCfg:{enabled:false, rules:[]}, qosCfg:{enabled:false, rules:[], classes:5, default_class:3}, throttleCfg:{enabled:false}, geoipLookup:false, enableUpnp:false, allowRemoteShell:false, loginBanMaxFailures:3, loginBanSeconds:900, tlsSource:'self-signed', tlsCommonName:'', tlsNotAfter:'', configHistoryLimit:250, configHistoryCount:0, shellSupported:true, bgpSupported:false, snmpSupported:false, ipv6raSupported:false, dhcpSupported:false, lldpSupported:false, syslogSupported:false, selfId:null, selfHostname:'', targetSeq:0, pendingBgpHighlight:null, workerThreads:0, tunQueues:0, tunQueuesSupported:true, udpGSO:false, udpGSOSupported:true, socketBufferMB:16, socketBufferMaxMB:256, perfRestartPending:false, loginBanRestartPending:false, tableView:{} };
 // setTarget is the only place state.target is ever assigned — bumping
 // targetSeq alongside it, once, exactly when the *selection itself* actually
 // changes. load()/startPolling()/refreshCluster() each capture targetSeq
@@ -1066,7 +1066,7 @@ const NAV_GROUPS = [
   ]},
   { name:'traffic', items: [
     ['firewall', 'rules controlling which traffic is allowed through the tunnel'],
-    ['nat', 'port forwarding and address translation for tunnel traffic'],
+    ['nat', 'port forwarding and address translation for this node’s traffic'],
     ['qos', 'traffic prioritization and queuing order'],
     ['ipv6ra', 'IPv6 router advertisements \u2014 announce this node as a router on a LAN, with DNS'],
     ['bandwidth', 'rate limiting per peer or network'],
@@ -1353,6 +1353,11 @@ async function load() {
   state.udpPorts = (c.body && c.body.udp_ports) || [];
   state.tcpPorts = (c.body && c.body.tcp_ports) || [];
   state.natStateTimeout = (c.body && c.body.nat_state_timeout) || 0;
+  // NAT is node-global from v953, so it rides on the config response itself
+  // rather than on each network. A node with no mesh networks still has one.
+  state.natCfg = (c.body && c.body.nat) || {enabled:false, rules:[]};
+  state.qosCfg = (c.body && c.body.qos) || {enabled:false, rules:[], classes:5, default_class:3};
+  state.throttleCfg = (c.body && c.body.throttle) || {enabled:false};
   state.geoipLookup = !!(c.body && c.body.geoip_lookup);
   state.enableUpnp = !!(c.body && c.body.enable_upnp);
   state.ipForwarding = c.body ? (c.body.ip_forwarding !== false) : true;
@@ -1549,14 +1554,6 @@ function buildSearchIndex(){
       const label = (f.action||'rule')+' '+(fwSvcLabel(f)||'any')+(f.src?' from '+f.src:'')+(f.dst?' to '+f.dst:'');
       add(label, 'Firewall rule \u00b7 '+cf.name, 'firewall', cf.id, {kind:'fw', id:f.id, tab:'rules'}, f.notes||'');
     }
-    ((cf.nat||{}).rules||[]).forEach((r,i) => {
-      const tgt = r.interface ? (r.translate||'masquerade')+' ('+r.interface+')' : (r.translate||'masquerade');
-      const label = (r.source||'any')+' \u2192 '+(r.dest||'any')+' \u21d2 '+tgt;
-      add(label, 'NAT rule \u00b7 '+cf.name, 'nat', cf.id, {kind:'nat', idx:i});
-    });
-    ((cf.qos||{}).rules||[]).forEach(r => {
-      add(qosSvcLabel(r)||'any', 'QoS rule \u00b7 '+cf.name, 'qos', cf.id, {kind:'qos', proto:r.protocol||'', port:r.port_min||0, services:(r.services||[]).join(',')}, (r.services||[]).join(' '));
-    });
   }
 
   // Peers and bans live in state.status (the live per-network view), not
@@ -1579,6 +1576,18 @@ function buildSearchIndex(){
       add(tgtHost || tgt, 'Ban \u00b7 '+netName, 'bans', n.id, {kind:'ban', nodeId:tgt}, tgt+' '+notes);
     }
   }
+  // NAT is node-global from v953, so its rules are indexed once here rather
+  // than once per network. No network id to jump to, and none needed: the
+  // section has a single card.
+  // QoS is node-global from v954, so its rules are indexed once, like NAT's.
+  ((state.qosCfg||{}).rules||[]).forEach(r => {
+    add(qosSvcLabel(r)||'any', 'QoS rule \u00b7 '+(r.scope||'any'), 'qos', null, {kind:'qos', proto:r.protocol||'', port:r.port_min||0, services:(r.services||[]).join(','), scope:r.scope||''}, r.scope||'');
+  });
+  ((state.natCfg||{}).rules||[]).forEach((r,i) => {
+    const tgt = r.interface ? (r.translate||'masquerade')+' ('+r.interface+')' : (r.translate||'masquerade');
+    const label = (r.source||'any')+' \u2192 '+(r.dest||'any')+' \u21d2 '+tgt;
+    add(label, 'NAT rule \u00b7 '+(r.scope||'host'), 'nat', null, {kind:'nat', idx:i}, r.scope||'');
+  });
   return idx;
 }
 
@@ -3624,18 +3633,20 @@ const HELP = {
     },
   },
   'nat': {
-    topic: 'Network address translation rewrites addresses as traffic crosses the tunnel. IPv4 and IPv6 are both supported \u2014 write one rule per family. Use \u00d8 next to <b>source</b> or <b>dest</b> to match everything EXCEPT that prefix.',
+    topic: 'Network address translation rewrites addresses as traffic crosses this node. IPv4 and IPv6 are both supported \u2014 write one rule per family. Use \u00d8 next to <b>source</b> or <b>dest</b> to match everything EXCEPT that prefix.<br><br>NAT belongs to the node, not to a mesh network: a rule is a statement about packets, and a masquerade out a physical interface is an ordinary router rule that needs no overlay at all. <b>Scope</b> is what decides whether a rule <i>also</i> applies to an overlay \u2014 <b>host</b> for traffic crossing this host\u2019s own interfaces, or a mesh network by name to add that network\u2019s overlay traffic as well. Every rule is programmed into the kernel either way; a rule bound to an interface its traffic never leaves simply never matches.',
     cols: {
       'source': '\u00d8 matches everything EXCEPT this prefix',
       'dest': '\u00d8 matches everything EXCEPT this prefix',
-      'translate': 'the address traffic is rewritten to as it crosses the tunnel',
+      'translate': 'the address traffic is rewritten to as it crosses this node',
+      'scope': 'host for traffic crossing this host\u2019s own interfaces; a mesh network name to also apply the rule to that network\u2019s overlay traffic',
     },
   },
   'qos': {
-    topic: 'Quality of Service modifies traffic priority. There are 5 priority classes - 0 = highest to 4 = lowest/bulk. Unmatched traffic uses class 3 (normal). Strict priority is maintained \u2014 higher classes drain first under contention. <b>Match</b> takes a comma-separated mix of named services and raw <code>proto</code>/<code>proto/port</code> entries (e.g. <code>https, tcp/8443, udp/53</code>); leave it blank to match anything. Use + to add a rule, double-click a rule to edit it, double-click the state tag to toggle it, tick rows and use \u2212 to remove.',
+    topic: 'Quality of Service modifies traffic priority. There are 5 priority classes - 0 = highest to 4 = lowest/bulk. Unmatched traffic uses class 3 (normal). Strict priority is maintained \u2014 higher classes drain first under contention. <b>Match</b> takes a comma-separated mix of named services and raw <code>proto</code>/<code>proto/port</code> entries (e.g. <code>https, tcp/8443, udp/53</code>); leave it blank to match anything. Use + to add a rule, double-click a rule to edit it, double-click the state tag to toggle it, tick rows and use \u2212 to remove.<br><br>QoS belongs to the node, not to a mesh network \u2014 a classification rule is a statement about packets, and there is no reason to need an overlay before saying that SSH outranks backups. <b>Scope</b> narrows a rule to one network; <b>any</b> classifies on every network this node runs, which also means a rule written before any network exists starts working the moment one does. Classification still happens on each network\u2019s tunnel egress, feeding that network\u2019s shaper, so QoS only bites behind an up-rate cap \u2014 enabling it switches the up-throttle on and seeds a placeholder rate you should lower to your real uplink.',
     cols: {
       'match': 'named services and raw proto or proto/port entries, comma-separated; blank matches anything',
       'class': '0 is highest, 4 is lowest; unmatched traffic uses 3. Higher classes drain first under contention.',
+      'scope': 'any classifies on every mesh network this node runs; a network name narrows the rule to that one',
     },
   },
   'ipv6ra': {
@@ -3647,7 +3658,7 @@ const HELP = {
     },
   },
   'bandwidth': {
-    topic: 'Limit traffic per network. Double-click a rate to set it \u2014 enter a number and pick the unit; clear the number for unlimited. Double-click the tag above to turn the cap on or off.',
+    topic: 'Limit tunnel traffic. Double-click a rate to set it \u2014 enter a number and pick the unit; clear the number for unlimited. Double-click a state tag to turn a cap on or off.<br><br>Two levels. The <b>node default</b> applies to every mesh network that has not been given its own rate, and can be set before any network exists. A network that needs a different rate takes an <b>override</b>: double-click its up or down cell. Tick a row and use \u2212 to drop the override and follow the default again.<br><br>A rate is always applied to one tunnel\u2019s shaper \u2014 one bounded queue and one drainer per tunnel, with no point at which two tunnels meet \u2014 so a rate means that much to <b>each</b> network it covers, never a total shared between them.<br><br>QoS only reorders traffic behind a rate cap, so enabling QoS switches the up-limit on and seeds a placeholder rate you should lower to your real uplink.',
   },
   'bgp': {
     topic: 'BGP configuration for dynamic routing. For neighbors and advertised networks: use + to add a row, double-click a field to edit it (double-click BFD to toggle it), tick rows and \u2212 to remove. Click the \ud83d\udc41\ufe0f next to a neighbor\u2019s MD5 password to reveal or mask it. Click a neighbor\u2019s \u201cfilters\u201d pill to restrict which prefixes BGP itself accepts from, or advertises to, that one neighbor \u2014 blank means unfiltered (the default). This is separate from the Redistribute pickers below, which control what feeds into BGP, not what BGP exchanges with a neighbor.',
@@ -7922,56 +7933,80 @@ function svcAddRow(table){
   };
 }
 
+// secNAT renders this node's address translation: one card, node-global.
+//
+// Was one card per mesh network through v952, which made NAT unreachable on a
+// node with no overlay — and a NAT rule is a statement about packets, not
+// about an overlay. The kernel rules this produces carry no overlay identity
+// at all (a Kind, two prefixes, an interface, a target), so "masquerade
+// 192.168.1.0/24 out eth0" is an ordinary router rule that a plain LAN router
+// running gravinet has every reason to write and, until v953, no way to.
+//
+// What the overlay half still needs is a network, and that is the scope
+// column: blank for a rule that only ever concerns traffic crossing this
+// host's own interfaces, or a network name for one that also applies to that
+// network's overlay↔overlay traffic. Every rule reaches the kernel either way.
 function secNAT(c) {
-  if (!state.cfg.length) return emptyCard(c, 'No networks.');
-  for (const cf of state.cfg) {
-    const nat = cf.nat||{}; const en = !!nat.enabled;
-    const card = $('<div class="card"></div>');
-    card.appendChild(netCardHead(cf, en, '/api/nat'));
+  const nat = state.natCfg || {enabled:false, rules:[]};
+  const en = !!nat.enabled;
+  const card = $('<div class="card"></div>');
+  card.appendChild(sectionCardHead('NAT', en, '/api/nat', on => ({op:(on?'enable':'disable')})));
 
-    const rules = nat.rules||[];
-    let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>source</th><th>dest</th><th>translate</th></tr>';
-    if (!rules.length) h += '<tr><td colspan="5" class="empty">no NAT rules — click + to add one</td></tr>';
-    else rules.forEach((r, i) => {
-      const tgt = r.interface ? (esc(r.translate||'masquerade')+' ('+esc(r.interface)+')') : esc(r.translate||'');
-      const enabled = r.enabled!==false;
-      const stTag = '<span class="tag-toggle '+(enabled?'on':'off')+'" data-natstate="1" title="double-click to '+(enabled?'disable':'enable')+'">'+(enabled?'enabled':'disabled')+'</span>';
-      const sNeg = !!r.source_negate, dNeg = !!r.dest_negate;
-      const srcShown = (sNeg?'<b>!</b>':'') + esc(r.source||'any');
-      const dstShown = (dNeg?'<b>!</b>':'') + esc(r.dest||'any') + (r.dest_port ? ':'+esc(r.dest_port)+'/'+esc(r.proto||'') : '');
-      h += '<tr class="natrow'+(enabled?'':' fw-disabled')+'" data-idx="'+i+'" data-enabled="'+(enabled?1:0)+'"'
-        + ' data-source="'+esc(r.source||'')+'" data-dest="'+esc(r.dest||'')+'" data-dest-port="'+esc(r.dest_port||'')+'" data-proto="'+esc(r.proto||'')+'" data-translate="'+esc(r.translate||'')+'" data-iface="'+esc(r.interface||'')+'" data-source-negate="'+(sNeg?1:0)+'" data-dest-negate="'+(dNeg?1:0)+'">'
-        + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
-        + '<td class="nat-state">'+stTag+'</td>'
-        + '<td class="nat-field nat-src-cell"'+(sNeg?' title="anything EXCEPT this"':'')+'>'+srcShown+'</td>'
-        + '<td class="nat-field nat-dst-cell"'+(dNeg?' title="anything EXCEPT this"':'')+'>'+dstShown+'</td>'
-        + '<td class="nat-field nat-tr-cell">'+tgt+'</td></tr>';
+  const rules = nat.rules||[];
+  let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>source</th><th>dest</th><th>translate</th><th>scope</th></tr>';
+  if (!rules.length) h += '<tr><td colspan="6" class="empty">no NAT rules \u2014 click + to add one</td></tr>';
+  else rules.forEach((r, i) => {
+    const tgt = r.interface ? (esc(r.translate||'masquerade')+' ('+esc(r.interface)+')') : esc(r.translate||'');
+    const enabled = r.enabled!==false;
+    const stTag = '<span class="tag-toggle '+(enabled?'on':'off')+'" data-natstate="1" title="double-click to '+(enabled?'disable':'enable')+'">'+(enabled?'enabled':'disabled')+'</span>';
+    const sNeg = !!r.source_negate, dNeg = !!r.dest_negate;
+    const srcShown = (sNeg?'<b>!</b>':'') + esc(r.source||'any');
+    const dstShown = (dNeg?'<b>!</b>':'') + esc(r.dest||'any') + (r.dest_port ? ':'+esc(r.dest_port)+'/'+esc(r.proto||'') : '');
+    // A blank scope reads as "host" rather than as an empty cell: empty would
+    // look like a field somebody forgot to fill in, when it is the ordinary
+    // and most common answer.
+    const scopeShown = r.scope ? esc(r.scope) : 'host';
+    h += '<tr class="natrow'+(enabled?'':' fw-disabled')+'" data-idx="'+i+'" data-enabled="'+(enabled?1:0)+'"'
+      + ' data-source="'+esc(r.source||'')+'" data-dest="'+esc(r.dest||'')+'" data-dest-port="'+esc(r.dest_port||'')+'" data-proto="'+esc(r.proto||'')+'" data-translate="'+esc(r.translate||'')+'" data-iface="'+esc(r.interface||'')+'" data-scope="'+esc(r.scope||'')+'" data-source-negate="'+(sNeg?1:0)+'" data-dest-negate="'+(dNeg?1:0)+'">'
+      + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
+      + '<td class="nat-state">'+stTag+'</td>'
+      + '<td class="nat-field nat-src-cell"'+(sNeg?' title="anything EXCEPT this"':'')+'>'+srcShown+'</td>'
+      + '<td class="nat-field nat-dst-cell"'+(dNeg?' title="anything EXCEPT this"':'')+'>'+dstShown+'</td>'
+      + '<td class="nat-field nat-tr-cell">'+tgt+'</td>'
+      + '<td class="nat-field nat-scope-cell">'+scopeShown+'</td></tr>';
+  });
+  const t = $('<div></div>'); t.innerHTML = h+'</table>'; card.appendChild(t);
+  const table = t.querySelector('table');
+  t.querySelectorAll('tr.natrow').forEach(tr => {
+    tr.querySelectorAll('.nat-field').forEach(td => {
+      td.title = 'double-click to edit';
+      td.ondblclick = () => startNATEdit(tr);
     });
-    const t = $('<div></div>'); t.innerHTML = h+'</table>'; card.appendChild(t);
-    const table = t.querySelector('table');
-    // Double-click any field cell to edit the rule in place (row-level editor,
-    // since translate and interface are interdependent). The state cell has its
-    // own toggle and is excluded.
-    t.querySelectorAll('tr.natrow').forEach(tr => {
-      tr.querySelectorAll('.nat-field').forEach(td => {
-        td.title = 'double-click to edit';
-        td.ondblclick = () => startNATEdit(tr, cf.name);
-      });
-    });
-    // Double-click the state tag to toggle the rule enabled/disabled — applied
-    // live via the reload, no restart. The busy flag guards against a
-    // re-entrant click before the request returns.
-    t.querySelectorAll('[data-natstate]').forEach(tag => {
-      tag.ondblclick = (e) => {
-        e.stopPropagation();
-        toggleTagState(tag, '/api/nat', on => ({op:(on?'rule-enable':'rule-disable'),net:cf.name,index:parseInt(tag.closest('tr').dataset.idx,10)}));
-      };
-    });
-    selAllWire(t);
-    table._rowAdd = () => natAddRow(table, cf.name);
-    table._rowRemove = () => removeCheckedRows(table, tr => api('/api/nat',{method:'POST',body:JSON.stringify({op:'delete',net:cf.name,index:parseInt(tr.dataset.idx,10)})}));
-    c.appendChild(card);
+  });
+  t.querySelectorAll('[data-natstate]').forEach(tag => {
+    tag.ondblclick = (e) => {
+      e.stopPropagation();
+      toggleTagState(tag, '/api/nat', on => ({op:(on?'rule-enable':'rule-disable'),index:parseInt(tag.closest('tr').dataset.idx,10)}));
+    };
+  });
+  selAllWire(t);
+  table._rowAdd = () => natAddRow(table);
+  table._rowRemove = () => removeCheckedRows(table, tr => api('/api/nat',{method:'POST',body:JSON.stringify({op:'delete',index:parseInt(tr.dataset.idx,10)})}));
+  c.appendChild(card);
+  enhanceTable(table);
+}
+
+// natScopeOpts renders the scope picker: every mesh network this node has,
+// plus "host" for a rule that belongs to no overlay. "host" is first and is
+// the default, because it is what a rule about physical traffic wants and
+// because a node with no networks has nothing else to pick.
+function natScopeOpts(sel){
+  let o = '<option value=""'+(!sel?' selected':'')+'>host</option>';
+  for (const cf of (state.cfg||[])){
+    const n = cf.name || cf.id;
+    o += '<option value="'+esc(n)+'"'+(n===sel?' selected':'')+'>'+esc(n)+'</option>';
   }
+  return o;
 }
 
 // natParseTranslate reads a stored translate string back into
@@ -8052,13 +8087,14 @@ function natReadTranslateCell(cell){
   return { translate: natBuildTranslate(mode, addr, port), iface: mode === 'masquerade' ? iface : '' };
 }
 
-function natAddRow(table, net){
+function natAddRow(table){
   const tr = document.createElement('tr');
   tr.innerHTML = '<td class="selcol"></td>'
     + '<td class="nat-state"><span class="on">enabled</span></td>'
     + '<td><span class="fwe-field"><input class="nate-src" placeholder="any or CIDR" style="width:120px">'+fwNegToggle('nate-src-negate','match anything EXCEPT this')+'</span></td>'
     + '<td><span class="fwe-field"><input class="nate-dst" placeholder="any or CIDR" style="width:110px">'+fwNegToggle('nate-dst-negate','match anything EXCEPT this')+'</span> <input class="nate-dport" placeholder="port(s)" title="dest-port: a single port or a range like 8000-8010 \u2014 port-forward rules only" style="width:70px"> <select class="nate-proto" title="required when dest-port is set"><option value="">any</option><option value="tcp">tcp</option><option value="udp">udp</option></select></td>'
-    + '<td class="nate-tr-cell-new">' + natTranslateCellHTML({mode:'masquerade'}) + '</td>';
+    + '<td class="nate-tr-cell-new">' + natTranslateCellHTML({mode:'masquerade'}) + '</td>'
+    + '<td><select class="nate-scope" title="host: a rule about traffic crossing this host\'s own interfaces. A mesh network: also applied to that network\'s overlay traffic.">'+natScopeOpts('')+'</select></td>';
   if (!insertNewRow(table, tr)) return;
   const trCell = tr.querySelector('.nate-tr-cell-new');
   natWireTranslateFields(trCell, '');
@@ -8074,7 +8110,8 @@ function natAddRow(table, net){
     if (sNeg && !srcV){ noticeModal('source \u00d8 is on but source is empty (any): that would match nothing; set source or turn its \u00d8 off'); return; }
     if (dNeg && !dstV){ noticeModal('dest \u00d8 is on but dest is empty (any): that would match nothing; set dest or turn its \u00d8 off'); return; }
     edit('/api/nat', {
-      op:'add', net:net,
+      op:'add',
+      scope: tr.querySelector('.nate-scope').value,
       source: srcV, dest: dstV,
       source_negate: sNeg, dest_negate: dNeg,
       dest_port: tr.querySelector('.nate-dport').value.trim(),
@@ -8094,7 +8131,7 @@ function natAddRow(table, net){
 // need an address instead); dest + dest-port + proto are edited together for
 // the same reason (dest-port only means anything alongside a port-forward
 // translate, and needs proto set alongside it).
-function startNATEdit(tr, net){
+function startNATEdit(tr){
   if (tr.querySelector('.nate-src')) return; // already editing
   const idx = parseInt(tr.dataset.idx, 10);
   const srcCell = tr.querySelector('.nat-src-cell');
@@ -8110,6 +8147,8 @@ function startNATEdit(tr, net){
     + '<option value="udp"'+(curProto==='udp'?' selected':'')+'>udp</option></select>';
   trCell.innerHTML = natTranslateCellHTML(natParseTranslate(tr.dataset.translate));
   natWireTranslateFields(trCell, tr.dataset.iface || '');
+  const scopeCell = tr.querySelector('.nat-scope-cell');
+  scopeCell.innerHTML = '<select class="nate-scope" title="host: a rule about traffic crossing this host\'s own interfaces. A mesh network: also applied to that network\'s overlay traffic.">'+natScopeOpts(tr.dataset.scope||'')+'</select>';
   // Same Ø control the firewall editor uses, including its click behavior.
   fwWireNegToggles(tr);
   if (tr.dataset.sourceNegate === '1') srcCell.querySelector('.nate-src-negate').classList.add('active');
@@ -8125,7 +8164,8 @@ function startNATEdit(tr, net){
     if (sNeg && !srcV){ await noticeModal('source \u00d8 is on but source is empty (any): that would match nothing; set source or turn its \u00d8 off'); return; }
     if (dNeg && !dstV){ await noticeModal('dest \u00d8 is on but dest is empty (any): that would match nothing; set dest or turn its \u00d8 off'); return; }
     const r = await api('/api/nat', { method:'POST', body: JSON.stringify({
-      op:'update', net:net, index:idx,
+      op:'update', index:idx,
+      scope: scopeCell.querySelector('.nate-scope').value,
       source: srcV, dest: dstV,
       source_negate: sNeg, dest_negate: dNeg,
       dest_port: dstCell.querySelector('.nate-dport').value.trim(),
@@ -9056,46 +9096,69 @@ function secDHCP(c){
   load();
 }
 
+// secQoS renders this node's traffic classifier: one card, node-global.
+//
+// Was one card per mesh network through v953, behind a "No networks." gate,
+// which meant a node had to have an overlay before it could be told that SSH
+// outranks backups. Enforcement is unchanged and still per-network — the
+// classifier runs on each network's tunnel egress feeding that network's
+// shaper — but where a rule is *written* no longer depends on that.
+//
+// Scope is how a rule reaches one overlay instead of all of them. Blank means
+// every network, which is the opposite of NAT's blank and deliberately so:
+// NAT has a kernel path, so a scopeless NAT rule still does something, while a
+// scopeless QoS rule that reached no overlay would do nothing at all. It also
+// means a rule written before any network exists starts working once one does.
 function secQoS(c) {
-  if (!state.cfg.length) return emptyCard(c, 'No networks.');
-  for (const cf of state.cfg) {
-    const q = cf.qos||{}; const en = !!q.enabled; const classes = q.classes||5;
-    const dflt = (q.default_class!=null)?q.default_class:3;
-    const card = $('<div class="card"></div>');
-    card.appendChild(netCardHead(cf, en, '/api/qos'));
-    const rules = q.rules||[];
-    let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>match</th><th>class</th></tr>';
-    if (!rules.length) h += '<tr><td colspan="4" class="empty">no QoS rules — click + to add one</td></tr>';
-    else for (const r of rules) {
-      const enabled = !r.disabled;
-      const svcTxt = qosSvcLabel(r);
-      const stTag = '<span class="tag-toggle '+(enabled?'on':'off')+'" data-qosstate="1" title="double-click to '+(enabled?'disable':'enable')+'">'+(enabled?'enabled':'disabled')+'</span>';
-      h += '<tr class="qrow'+(enabled?'':' fw-disabled')+'" data-proto="'+esc(r.protocol||'')+'" data-port="'+esc(r.port_min||0)+'" data-services="'+esc((r.services||[]).join(','))+'" data-class="'+esc(r.class)+'" data-enabled="'+(enabled?1:0)+'">'
-        + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
-        + '<td class="q-state">'+stTag+'</td>'
-        + '<td class="q-services">'+esc(svcTxt||'any')+'</td>'
-        + '<td class="q-class">'+esc(qosClassLabel(r.class,classes))+'</td></tr>';
-    }
-    const t = $('<div></div>'); t.innerHTML = h+'</table>'; card.appendChild(t);
-    const table = t.querySelector('table');
-    t.querySelectorAll('tr.qrow').forEach(tr => tr.ondblclick = (e) => {
-      if (e.target.closest('.q-state')) return; // state cell has its own toggle
-      startQoSEdit(tr, cf.name, classes);
-    });
-    // Double-click the state tag to toggle the rule enabled/disabled — applied
-    // live via the reload, no restart. The busy flag guards against a
-    // re-entrant click before the request returns.
-    t.querySelectorAll('[data-qosstate]').forEach(tag => {
-      tag.ondblclick = (e) => {
-        e.stopPropagation();
-        toggleTagState(tag, '/api/qos', on => ({op:(on?'rule-enable':'rule-disable'),net:cf.name,proto:tag.closest('tr').dataset.proto,port:Number(tag.closest('tr').dataset.port),services:qosServicesFromRow(tag.closest('tr'))}));
-      };
-    });
-    selAllWire(t);
-    table._rowAdd = () => qosAddRow(table, cf.name, classes);
-    table._rowRemove = () => removeCheckedRows(table, tr => api('/api/qos',{method:'POST',body:JSON.stringify({op:'delete',net:cf.name,proto:tr.dataset.proto,port:Number(tr.dataset.port),services:qosServicesFromRow(tr)})}));
-    c.appendChild(card);
+  const q = state.qosCfg || {};
+  const en = !!q.enabled;
+  const classes = q.classes||5;
+  const card = $('<div class="card"></div>');
+  card.appendChild(sectionCardHead('QOS', en, '/api/qos', on => ({op:(on?'enable':'disable')})));
+  const rules = q.rules||[];
+  let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>match</th><th>class</th><th>scope</th></tr>';
+  if (!rules.length) h += '<tr><td colspan="5" class="empty">no QoS rules \u2014 click + to add one</td></tr>';
+  else for (const r of rules) {
+    const enabled = !r.disabled;
+    const svcTxt = qosSvcLabel(r);
+    const stTag = '<span class="tag-toggle '+(enabled?'on':'off')+'" data-qosstate="1" title="double-click to '+(enabled?'disable':'enable')+'">'+(enabled?'enabled':'disabled')+'</span>';
+    h += '<tr class="qrow'+(enabled?'':' fw-disabled')+'" data-proto="'+esc(r.protocol||'')+'" data-port="'+esc(r.port_min||0)+'" data-services="'+esc((r.services||[]).join(','))+'" data-class="'+esc(r.class)+'" data-scope="'+esc(r.scope||'')+'" data-enabled="'+(enabled?1:0)+'">'
+      + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
+      + '<td class="q-state">'+stTag+'</td>'
+      + '<td class="q-services">'+esc(svcTxt||'any')+'</td>'
+      + '<td class="q-class">'+esc(qosClassLabel(r.class,classes))+'</td>'
+      + '<td class="q-scope">'+esc(r.scope||'any')+'</td></tr>';
   }
+  const t = $('<div></div>'); t.innerHTML = h+'</table>'; card.appendChild(t);
+  const table = t.querySelector('table');
+  t.querySelectorAll('tr.qrow').forEach(tr => tr.ondblclick = (e) => {
+    if (e.target.closest('.q-state')) return; // state cell has its own toggle
+    startQoSEdit(tr, classes);
+  });
+  t.querySelectorAll('[data-qosstate]').forEach(tag => {
+    tag.ondblclick = (e) => {
+      e.stopPropagation();
+      const tr = tag.closest('tr');
+      toggleTagState(tag, '/api/qos', on => ({op:(on?'rule-enable':'rule-disable'),proto:tr.dataset.proto,port:Number(tr.dataset.port),services:qosServicesFromRow(tr),scope:tr.dataset.scope||''}));
+    };
+  });
+  selAllWire(t);
+  table._rowAdd = () => qosAddRow(table, classes);
+  table._rowRemove = () => removeCheckedRows(table, tr => api('/api/qos',{method:'POST',body:JSON.stringify({op:'delete',proto:tr.dataset.proto,port:Number(tr.dataset.port),services:qosServicesFromRow(tr),scope:tr.dataset.scope||''})}));
+  c.appendChild(card);
+  enhanceTable(table);
+}
+
+// qosScopeOpts renders the scope picker. "any" is first and is the default:
+// it is what a rule wants unless an operator has a reason to narrow it, and
+// on a node with no mesh networks it is the only choice.
+function qosScopeOpts(sel){
+  let o = '<option value=""'+(!sel?' selected':'')+'>any</option>';
+  for (const cf of (state.cfg||[])){
+    const n = cf.name || cf.id;
+    o += '<option value="'+esc(n)+'"'+(n===sel?' selected':'')+'>'+esc(n)+'</option>';
+  }
+  return o;
 }
 
 // qosServicesFromRow reads a QoS row's data-services attribute (a
@@ -9123,18 +9186,19 @@ function qosSvcLabel(r){
 
 // qosAddRow inserts a blank editable row at the top of the table; saving creates
 // the rule via the add op.
-function qosAddRow(table, net, classes){
+function qosAddRow(table, classes){
   const tr = document.createElement('tr');
   tr.innerHTML = '<td class="selcol"></td>'
     + '<td class="q-state"><span class="on">enabled</span></td>'
     + '<td><span class="fwe-field"><input class="qe-services" placeholder="tcp/443, ssh, or blank for any" style="width:220px"></span></td>'
-    + '<td><select class="qe-class">'+qosClassOpts(classes,3)+'</select> <button class="sm qe-save">save</button> <button class="ghost sm qe-cancel">cancel</button></td>';
+    + '<td><select class="qe-class">'+qosClassOpts(classes,3)+'</select></td>'
+    + '<td><select class="qe-scope" title="any: classify on every mesh network this node runs. A network name: only that one.">'+qosScopeOpts('')+'</select> <button class="sm qe-save">save</button> <button class="ghost sm qe-cancel">cancel</button></td>';
   if (!insertNewRow(table, tr)) return;
   fwCatalogCombobox(tr.querySelector('.qe-services'), () => (state.fwServices||[]).map(s=>s.name));
   tr.querySelector('.qe-cancel').onclick = () => refresh();
   tr.querySelector('.qe-save').onclick = () => {
     const rule = qosCollectRule(tr); if (!rule) return;
-    edit('/api/qos', { op:'add', net:net, proto:rule.proto, port:rule.port, services:rule.services, class:rule.class });
+    edit('/api/qos', { op:'add', proto:rule.proto, port:rule.port, services:rule.services, class:rule.class, scope:tr.querySelector('.qe-scope').value });
   };
 }
 
@@ -9150,47 +9214,110 @@ function qosCollectRule(scope){
 
 // startQoSEdit turns a QoS rule row into an inline editor; saving re-keys the
 // rule by deleting the old (proto:port:services) and adding the edited one.
-function startQoSEdit(tr, net, classes){
+function startQoSEdit(tr, classes){
   if (tr.querySelector('.qe-services')) return; // already editing
   const oldProto = tr.dataset.proto, oldPort = Number(tr.dataset.port);
   const oldServices = qosServicesFromRow(tr);
   const wasDisabled = tr.dataset.enabled === '0';
-  const sc = tr.querySelector('.q-services'), cc = tr.querySelector('.q-class');
+  const oldScope = tr.dataset.scope || '';
+  const sc = tr.querySelector('.q-services'), cc = tr.querySelector('.q-class'), pc = tr.querySelector('.q-scope');
   const combo = qosSvcLabel({protocol:oldProto, port_min:oldPort, port_max:oldPort, services:oldServices});
   sc.innerHTML = '<span class="fwe-field"><input class="qe-services" style="width:220px" value="'+esc(combo)+'"></span>';
-  cc.innerHTML = '<select class="qe-class">'+qosClassOpts(classes, Number(tr.dataset.class))+'</select> <button class="sm qe-save">save</button>';
+  cc.innerHTML = '<select class="qe-class">'+qosClassOpts(classes, Number(tr.dataset.class))+'</select>';
+  pc.innerHTML = '<select class="qe-scope" title="any: classify on every mesh network this node runs. A network name: only that one.">'+qosScopeOpts(oldScope)+'</select> <button class="sm qe-save">save</button>';
   fwCatalogCombobox(sc.querySelector('.qe-services'), () => (state.fwServices||[]).map(s=>s.name));
   tr.ondblclick = null;
-  cc.querySelector('.qe-save').onclick = async () => {
+  pc.querySelector('.qe-save').onclick = async () => {
     const rule = qosCollectRule(tr); if (!rule) return;
-    const dr = await api('/api/qos',{method:'POST',body:JSON.stringify({op:'delete',net:net,proto:oldProto,port:oldPort,services:oldServices})});
+    const newScope = pc.querySelector('.qe-scope').value;
+    // The delete has to name the *old* scope: scope is part of a rule's key
+    // from v954, so deleting with the new one would miss the rule being
+    // edited and leave a duplicate behind.
+    const dr = await api('/api/qos',{method:'POST',body:JSON.stringify({op:'delete',proto:oldProto,port:oldPort,services:oldServices,scope:oldScope})});
     if (!dr.ok){ await noticeModal((dr.body&&dr.body.error)||'edit failed'); refresh(); return; }
-    const ar = await api('/api/qos',{method:'POST',body:JSON.stringify({op:'add',net:net,proto:rule.proto,port:rule.port,services:rule.services,class:rule.class})});
+    const ar = await api('/api/qos',{method:'POST',body:JSON.stringify({op:'add',proto:rule.proto,port:rule.port,services:rule.services,class:rule.class,scope:newScope})});
     if (!ar.ok){ await noticeModal((ar.body&&ar.body.error)||'edit failed'); refresh(); return; }
     // An edit re-keys the rule via delete+add, which would reset it to enabled;
     // carry the prior disabled state across so editing doesn't silently
     // re-enable a paused rule.
     if (wasDisabled){
-      const xr = await api('/api/qos',{method:'POST',body:JSON.stringify({op:'rule-disable',net:net,proto:rule.proto,port:rule.port,services:rule.services})});
+      const xr = await api('/api/qos',{method:'POST',body:JSON.stringify({op:'rule-disable',proto:rule.proto,port:rule.port,services:rule.services,scope:newScope})});
       if (!xr.ok) await noticeModal((xr.body&&xr.body.error)||'edit failed');
     }
     refresh();
   };
 }
 
+// secBandwidth renders this node's default bandwidth limit and any per-network
+// overrides.
+//
+// Two levels, because both facts are real. A node with no mesh network still
+// needs somewhere to put a rate, which is what the default is for (v955). And
+// different links genuinely carry different rates — Tun1→Tun2 at one speed,
+// Tun1→Tun3 at another — which one node-global number cannot hold, so a
+// network can take its own (v956).
+//
+// A rate is always applied to one tunnel's shaper: one bounded queue and one
+// drainer per tunnel, with no point at which two tunnels meet. So the default
+// means "this much to each network that has not been given its own", never a
+// total shared between them. The card says so once there is more than one.
 function secBandwidth(c) {
-  if (!state.cfg.length) return emptyCard(c, 'No networks.');
+  const d = state.throttleCfg || {};
+  const card = $('<div class="card"></div>');
+  card.appendChild(sectionCardHead('BANDWIDTH', !!d.enabled, '/api/bandwidth', on => ({op:(on?'enable':'disable')})));
+  const disp = $('<div>node default \u2014 up: <span class="bw-edit" data-dir="up" title="double-click to set">'+esc(rate(d.up_bytes_per_sec))+'</span>'
+    + ' \u00b7 down: <span class="bw-edit" data-dir="down" title="double-click to set">'+esc(rate(d.down_bytes_per_sec))+'</span></div>');
+  const spans = disp.querySelectorAll('.bw-edit');
+  spans[0].ondblclick = () => startBwEdit(spans[0], '', 'up', d.up_bytes_per_sec);
+  spans[1].ondblclick = () => startBwEdit(spans[1], '', 'down', d.down_bytes_per_sec);
+  card.appendChild(disp);
+  c.appendChild(card);
+
+  if (!(state.cfg||[]).length) return;
+
+  // One row per network, showing what it actually gets and whether that came
+  // from the default or from its own override. Editing a rate creates the
+  // override; the state tag toggles it; \u2212 clears it back to inherited.
+  const oc = $('<div class="card"></div>');
+  oc.appendChild($('<h3><span class="net-name">PER-NETWORK</span></h3>'));
+  let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>network</th><th>state</th><th>up</th><th>down</th><th>source</th></tr>';
   for (const cf of state.cfg) {
-    const t = cf.throttle||{}; const en = !!t.enabled; const card = $('<div class="card"></div>');
-    card.appendChild(netCardHead(cf, en, '/api/bandwidth'));
-    const disp = $('<div>up: <span class="bw-edit" data-dir="up" title="double-click to set">'+esc(rate(t.up_bytes_per_sec))+'</span>'
-      + ' · down: <span class="bw-edit" data-dir="down" title="double-click to set">'+esc(rate(t.down_bytes_per_sec))+'</span></div>');
-    const spans = disp.querySelectorAll('.bw-edit');
-    spans[0].ondblclick = () => startBwEdit(spans[0], cf.name, 'up', t.up_bytes_per_sec);
-    spans[1].ondblclick = () => startBwEdit(spans[1], cf.name, 'down', t.down_bytes_per_sec);
-    card.appendChild(disp);
-    c.appendChild(card);
+    const eff = cf.throttle_effective || {};
+    const own = !!cf.throttle;
+    const on = !!eff.enabled;
+    h += '<tr class="bwrow'+(on?'':' fw-disabled')+'" data-net="'+esc(cf.name||cf.id)+'" data-enabled="'+(on?1:0)+'" data-own="'+(own?1:0)+'">'
+      + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
+      + '<td>'+esc(cf.name||cf.id)+'</td>'
+      + '<td class="bw-state"><span class="tag-toggle '+(on?'on':'off')+'" data-bwstate="1" title="double-click to '+(on?'disable':'enable')+' \u2014 sets an override on this network">'+(on?'enabled':'disabled')+'</span></td>'
+      + '<td class="bw-cell" data-dir="up" title="double-click to set an override">'+esc(rate(eff.up_bytes_per_sec))+'</td>'
+      + '<td class="bw-cell" data-dir="down" title="double-click to set an override">'+esc(rate(eff.down_bytes_per_sec))+'</td>'
+      + '<td class="hint">'+(own?'override':'inherited')+'</td></tr>';
   }
+  const t = $('<div></div>'); t.innerHTML = h+'</table>'; oc.appendChild(t);
+  const table = t.querySelector('table');
+  t.querySelectorAll('tr.bwrow').forEach(tr => {
+    tr.querySelectorAll('.bw-cell').forEach(td => {
+      td.ondblclick = () => startBwEdit(td, tr.dataset.net, td.dataset.dir,
+        Number(td.dataset.dir === 'up'
+          ? (state.cfg.find(x => (x.name||x.id) === tr.dataset.net).throttle_effective||{}).up_bytes_per_sec || 0
+          : (state.cfg.find(x => (x.name||x.id) === tr.dataset.net).throttle_effective||{}).down_bytes_per_sec || 0));
+    });
+  });
+  t.querySelectorAll('[data-bwstate]').forEach(tag => {
+    tag.ondblclick = (e) => { e.stopPropagation();
+      toggleTagState(tag, '/api/bandwidth', on => ({op:(on?'enable':'disable'), net:tag.closest('tr').dataset.net}));
+    };
+  });
+  selAllWire(t);
+  // No + : a network cannot be added here, only given its own rate. \u2212
+  // clears an override rather than deleting anything.
+  table._rowRemove = () => removeCheckedRows(table, tr => tr.dataset.own === '1'
+    ? api('/api/bandwidth',{method:'POST',body:JSON.stringify({op:'clear-override',net:tr.dataset.net})})
+    : Promise.resolve({ok:true}));
+  if ((state.cfg||[]).length > 1)
+    oc.appendChild($('<div class="hint" style="margin-top:8px">a rate applies to each network separately, never shared between them \u2014 tick a row and use \u2212 to drop its override back to the node default</div>'));
+  c.appendChild(oc);
+  enhanceTable(table);
 }
 
 // ---- System ---------------------------------------------------------------
