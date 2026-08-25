@@ -1140,7 +1140,7 @@ function label(s){
   // heading (see sectionHeading): a nav rail is narrow, a standalone <h2>
   // is not.
   if (s==='ipv6ra') return 'v6 ra';
-  return s==='nat'||s==='qos'||s==='dns'||s==='bgp'||s==='api'||s==='snmp'||s==='lldp' ? s.toUpperCase() : s.charAt(0).toUpperCase()+s.slice(1);
+  return s==='nat'||s==='qos'||s==='dns'||s==='bgp'||s==='api'||s==='snmp'||s==='lldp'||s==='dhcp' ? s.toUpperCase() : s.charAt(0).toUpperCase()+s.slice(1);
 }
 // sectionHeading is what the content pane's own <h2> shows \u2014 label(s)
 // everywhere except ipv6ra, whose rail button is abbreviated to fit the
@@ -3697,6 +3697,18 @@ const HELP = {
   },
   'time': {
     topic: 'This host\u2019s clock, timezone, and time synchronization. [gravinet] refuses handshakes whose timestamp is too far from local time, so a node whose clock has drifted stops forming sessions rather than degrading \u2014 this is where to check that and fix it. Acts on the node you\u2019re currently managing.',
+  },
+  'dhcp': {
+    topic: 'This node\\u2019s DHCP role for the LANs it is attached to. Acts on the node you\\u2019re currently managing.<br><br><b>Role</b> is one setting, not two switches: <b>server</b> hands out leases itself (through Kea), <b>relay</b> forwards requests to a DHCP server somewhere else, and <b>off</b> leaves this host alone entirely \\u2014 a host already running its own DHCP server is untouched until you pick something here. A node is never both at once. A relay that also answered locally would shadow the central server for the subnets it relays, and clients would take whichever reply arrived first. Switching between them keeps both halves: going to relay for an afternoon does not discard your pools.<br><br><b>Server.</b> One row per subnet served. Use + to add one, double-click a field to edit it, double-click the state tag to park a subnet without deleting it, tick rows and \\u2212 to remove. Choosing an <b>interface</b> fills in the rest of the row from that interface\\u2019s own address \\u2014 the subnet it sits on, a pool inside it, itself as the gateway, and this host\\u2019s own resolvers \\u2014 and every one of those fields stays editable. The suggested pool keeps a handful of addresses clear at each end and either side of the gateway, so there is room for a printer or a second router later without shrinking a live pool.<br><br><b>Relay.</b> Pick the client-facing interfaces and the upstream servers. Every server gets a copy of each request and the client takes whichever reply arrives first, which is how a relay does redundancy \\u2014 there is no failover to configure. Relaying is Linux-only: it needs the arrival interface of a broadcast, which the other platforms do not offer the same way, and a relay that guessed would hand clients addresses from the wrong LAN\\u2019s subnet.<br><br>Serve or relay on a LAN interface, never a mesh device \\u2014 they are left out of the pickers, and refused on save even if one reaches them another way. An interface that cannot do its job says so in red under its own row: Kea matches a request to a subnet by the receiving interface\\u2019s address, so an interface addressed outside the subnet it serves runs, logs nothing unusual and never answers, and an interface with no IPv4 address at all has no relay address to stamp on what it forwards.',
+    cols: {
+      'state': 'a disabled subnet keeps its pool and settings but is not served',
+      'interface': 'the LAN interface to serve on, never a mesh device \\u2014 choosing one fills in the rest of the row from its own address',
+      'subnet': 'the CIDR served here; Kea matches a request to it by the receiving interface\\u2019s address, so the interface has to be addressed inside it',
+      'pool': 'the range actually handed out \\u2014 kept clear of the network and broadcast addresses and of the router, leaving room for static addresses later',
+      'router': 'the default gateway offered to clients \\u2014 inside the subnet and outside the pool, or blank to offer none',
+      'dns': 'the resolvers offered to clients, prefilled from whatever this host itself resolves through',
+      'lease': 'how long a lease is held before a client has to renew it; blank uses Kea\\u2019s own default',
+    },
   },
   'snmp': {
     topic: 'A read-only SNMPv2c monitoring agent (net-snmp\u2019s snmpd) on this host. Acts on the node you\u2019re currently managing. Double-click the state tag to toggle a community, or any other cell to edit it.',
@@ -8534,6 +8546,11 @@ function secDHCP(c){
   }
   const wrap = $('<div></div>'); c.appendChild(wrap);
   let ifaceNames = [];
+  // What choosing an interface fills the row in with, keyed by interface, plus
+  // this host's own resolvers. Both come from /api/dhcp rather than being
+  // derived here, so on a managed peer they describe that node and not
+  // whichever host this browser is pointed at.
+  let suggest = {}, systemDns = [];
 
   async function load(){
     wrap.innerHTML = '<div class="card"><div class="hint">loading\u2026</div></div>';
@@ -8546,6 +8563,8 @@ function secDHCP(c){
     // their requests to a LAN server that knows nothing about them.
     const meshIfaces = (r.body && r.body.mesh_ifaces) || [];
     ifaceNames = allIfaces.filter(n => meshIfaces.indexOf(n) < 0);
+    suggest = (r.body && r.body.suggest) || {};
+    systemDns = (r.body && r.body.system_dns) || [];
     if (!r || !r.ok || !r.body){ wrap.innerHTML = '<div class="card"><div class="hint">could not load: '+esc((r&&r.body&&r.body.error)||'no response')+'</div></div>'; return; }
     render(r.body);
   }
@@ -8571,7 +8590,11 @@ function secDHCP(c){
     const head = $('<div class="card"></div>');
     let hh = '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
       + '<label>role</label><select class="dh-mode">';
-    for (const m of [['','off'],['server','server \u2014 hand out leases (Kea)'],['relay','relay \u2014 forward to an upstream server']])
+    // Three bare words. What each role does is the rest of the page, and a
+    // dropdown that spells out its own options reads as a decision the
+    // operator is being talked through rather than a switch with three
+    // positions.
+    for (const m of [['','off'],['relay','relay'],['server','server']])
       hh += '<option value="'+m[0]+'"'+(m[0]===mode?' selected':'')+'>'+esc(m[1])+'</option>';
     hh += '</select></div>';
     if (mode === 'server' && !b.installed)
@@ -8624,6 +8647,7 @@ function secDHCP(c){
     });
     selAllWire(t);
     table._rowAdd = () => dhAddRow(table);
+    card.appendChild($('<div class="hint help-desc" style="margin:8px 0 0">Choosing an interface fills the rest of the row in from that interface\'s own address \u2014 the subnet it sits on, a pool inside it, itself as the gateway, and this host\'s resolvers. All of it is a starting point, and all of it is editable.</div>'));
     table._rowRemove = () => removeCheckedRows(table, tr => api('/api/dhcp',{method:'POST',body:JSON.stringify({op:'delete',index:parseInt(tr.dataset.idx,10)})}));
     wrap.appendChild(card);
     enhanceTable(table);
@@ -8651,6 +8675,87 @@ function secDHCP(c){
     return o;
   }
 
+  // --- prefill ---------------------------------------------------------
+  //
+  // Choosing an interface fills the rest of the row in from that interface's
+  // own address: the subnet it is on, a pool inside it, itself as the
+  // gateway, and this host's resolvers. The server works out the addresses
+  // (see dhcp_prefill.go); what is decided here is the narrower question of
+  // when a suggestion is allowed to overwrite something already in a field.
+  //
+  // The rule is that a prefill may replace a value the operator did not
+  // choose, and may replace one that cannot work on the interface they just
+  // picked, and otherwise leaves it alone. Both halves matter: filling only
+  // empty fields would leave a pool from the old subnet behind on an
+  // interface change, and the operator's first sight of it is the validator
+  // refusing to save. Filling every field unconditionally throws away a pool
+  // somebody typed before getting to the picker.
+
+  const DH_PREFILL = [['subnet','.dhe-subnet'],['pool_start','.dhe-start'],['pool_end','.dhe-end'],['router','.dhe-router'],['dns','.dhe-dns']];
+
+  // dhIP4 parses a dotted quad to a number, or null if it is not one.
+  function dhIP4(s){
+    const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec((s||'').trim());
+    if (!m) return null;
+    let v = 0;
+    for (let i = 1; i <= 4; i++){ const o = +m[i]; if (o > 255) return null; v = v * 256 + o; }
+    return v;
+  }
+
+  // dhInPrefix reports whether a dotted quad sits inside a CIDR. Both sides go
+  // through >>> 0 because JS bitwise operators work on signed 32-bit values,
+  // and every address from 128.0.0.0 up would otherwise compare as negative.
+  function dhInPrefix(ip, cidr){
+    const a = dhIP4(ip), p = /^(.+)\/(\d{1,2})$/.exec((cidr||'').trim());
+    if (a === null || !p) return false;
+    const base = dhIP4(p[1]), bits = +p[2];
+    if (base === null || bits > 32) return false;
+    const mask = bits === 0 ? 0 : (0xFFFFFFFF << (32 - bits)) >>> 0;
+    return ((a & mask) >>> 0) === ((base & mask) >>> 0);
+  }
+
+  // dhSuggestFor is one interface's prefill, or null when there is nothing to
+  // say about it — an interface with no IPv4 address of its own. Null means
+  // leave the row exactly as it is, which is not the same as suggesting blanks.
+  function dhSuggestFor(name){
+    const s = suggest[name];
+    if (!s) return null;
+    return {subnet:s.subnet||'', pool_start:s.pool_start||'', pool_end:s.pool_end||'',
+      router:s.router||'', dns:systemDns.join(', ')};
+  }
+
+  function dhPrefill(tr, name){
+    const next = dhSuggestFor(name);
+    if (!next) return;
+    let prev = {};
+    try { prev = JSON.parse(tr.dataset.dhsuggest || '{}'); } catch(_){}
+    // keep answers "is this the operator's, and does it still hold here?"
+    const keep = (k, cur) => {
+      if (cur === '') return false;              // nothing to keep
+      if (cur === (prev[k]||'')) return false;   // still the last suggestion, untouched
+      if (k === 'dns') return true;              // resolvers are not tied to this link
+      // A subnet wider than the link is a real choice, so it survives as long
+      // as it still contains the interface. A pool or gateway outside the new
+      // subnet belongs to the interface that was selected a moment ago.
+      if (k === 'subnet') return dhInPrefix(next.router, cur);
+      return dhInPrefix(cur, next.subnet);
+    };
+    for (const [k, q] of DH_PREFILL){
+      const el = tr.querySelector(q);
+      if (!el) continue;
+      const cur = (el.value||'').trim();
+      if (!keep(k, cur)) el.value = next[k];
+    }
+    // Recorded so the next change can tell what it wrote from what the
+    // operator did afterwards.
+    tr.dataset.dhsuggest = JSON.stringify(next);
+  }
+
+  function dhWire(tr){
+    const sel = tr.querySelector('.dhe-iface');
+    if (sel) sel.onchange = () => dhPrefill(tr, sel.value);
+  }
+
   function dhRead(tr){
     const csv = (sel) => (tr.querySelector(sel).value||'').split(',').map(x=>x.trim()).filter(Boolean);
     const lease = parseInt(tr.querySelector('.dhe-lease').value, 10);
@@ -8669,6 +8774,7 @@ function secDHCP(c){
     const tr = document.createElement('tr');
     tr.innerHTML = dhFields({});
     if (!insertNewRow(table, tr)) return;
+    dhWire(tr);
     tr.querySelector('.dhe-cancel').onclick = () => { say(''); load(); };
     tr.querySelector('.dhe-save').onclick = async () => {
       const body = Object.assign({op:'add'}, dhRead(tr));
@@ -8685,6 +8791,11 @@ function secDHCP(c){
     const cur = {iface:tr.dataset.iface, subnet:tr.dataset.subnet, pool_start:tr.dataset.pool_start,
       pool_end:tr.dataset.pool_end, router:tr.dataset.router, dns:tr.dataset.dns, lease:tr.dataset.lease};
     tr.innerHTML = dhFields(cur);
+    // The row starts with no recorded suggestion, so an interface change here
+    // keeps whatever still works on the new link and replaces only what
+    // cannot. An operator editing a configured subnet does not lose a pool
+    // they chose deliberately.
+    dhWire(tr);
     tr.querySelector('.dhe-cancel').onclick = () => { say(''); load(); };
     tr.querySelector('.dhe-save').onclick = () => post(Object.assign({op:'update', index:idx}, dhRead(tr)));
   }
@@ -8693,13 +8804,19 @@ function secDHCP(c){
     const r = d.relay || {};
     const card = $('<div class="card"></div>');
     const ifs = (r.interfaces||[]);
-    let h = '<div class="hint" style="margin-top:0">Requests arriving on the client-facing interfaces are forwarded to every upstream server; the client takes whichever reply arrives first.</div>'
-      + '<div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-start">'
+    // The relay half is a form rather than a table, so HELP's cols cannot
+    // reach it — a note per field, hidden behind the same toggle by
+    // .help-desc, is the equivalent. The line that used to sit permanently
+    // above these fields is in HELP now: prose belongs behind the toggle, and
+    // saying it twice means the two copies drift.
+    let h = '<div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-start">'
       + '<div><label>client-facing interfaces</label><br><select class="dh-relayifs" multiple size="5" style="min-width:150px">';
     for (const n of ifaceNames) h += '<option value="'+esc(n)+'"'+(ifs.indexOf(n)>=0?' selected':'')+'>'+esc(n)+'</option>';
-    h += '</select></div>'
-      + '<div><label>upstream servers</label><br><input class="dh-relaysrv" placeholder="10.0.0.5, 10.0.0.6" style="width:200px" value="'+esc((r.servers||[]).join(', '))+'"></div>'
-      + '<div><label>max hops</label><br><input class="dh-relayhops" placeholder="4" style="width:60px" value="'+esc(r.max_hops||'')+'"></div>'
+    h += '</select><div class="hint help-desc">the links clients ask on \u2014 never a mesh device, and never the link the upstream server is on, which would relay its replies back at it</div></div>'
+      + '<div><label>upstream servers</label><br><input class="dh-relaysrv" placeholder="10.0.0.5, 10.0.0.6" style="width:200px" value="'+esc((r.servers||[]).join(', '))+'">'
+      + '<div class="hint help-desc">every server gets a copy of each request and the client takes whichever reply arrives first</div></div>'
+      + '<div><label>max hops</label><br><input class="dh-relayhops" placeholder="4" style="width:60px" value="'+esc(r.max_hops||'')+'">'
+      + '<div class="hint help-desc">how many relays a request may already have crossed before this one drops it; blank uses the default of 4</div></div>'
       + '</div><div style="margin-top:10px"><button class="sm dh-relaysave">save</button></div>';
     for (const n of ifs) if (probs[n]) h += '<div class="err" style="margin-top:8px;font-size:12px">'+esc(probs[n])+'</div>';
     card.innerHTML = h;

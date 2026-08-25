@@ -146,18 +146,24 @@ func (s *Server) handleDHCP(w http.ResponseWriter, r *http.Request) {
 		// are on the RA page: serving DHCP into the overlay would hand mesh
 		// peers a lease, and relaying out of it would forward their traffic
 		// to a LAN server that knows nothing about them.
-		var meshIfaces []string
-		for _, i := range s.be.Interfaces() {
-			if i.Iface != "" {
-				meshIfaces = append(meshIfaces, i.Iface)
-			}
+		meshIfaces := s.dhcpMeshIfaces()
+		skip := make(map[string]bool, len(meshIfaces))
+		for _, n := range meshIfaces {
+			skip[n] = true
 		}
+		// The prefill rides along with the configuration rather than being a
+		// second request, so the addresses the editor suggests from are read
+		// from the same node, at the same moment, as the rows it is filling
+		// in. Fetched separately they could come from either side of a switch
+		// of the selected peer.
 		writeJSON(w, http.StatusOK, map[string]any{
 			"dhcp":        cfg.DHCP,
 			"installed":   keaInstalled(),
 			"owned":       keaOwned(keaConfPath),
 			"mesh_ifaces": meshIfaces,
 			"problems":    dhcpProblems(cfg.DHCP),
+			"suggest":     dhcpSuggestions(skip),
+			"system_dns":  systemDNSv4(),
 		})
 		return
 	}

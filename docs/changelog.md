@@ -2,6 +2,70 @@
 
 ---
 
+## v946 — 2026-08-24
+
+**The DHCP page was titled "Dhcp".**
+
+`label()` uppercases a list of acronym section keys — nat, qos, dns, bgp, api, snmp, lldp — and everything else it title-cases. `dhcp` was not on the list, so it took the title-case path. That branch feeds all three places a section names itself: the rail button, the page's own `<h2>` (`sectionHeading` returns `label(s)` for everything except ipv6ra), and the global search index. Fixing it at the ternary fixes all three; an override in `sectionHeading` would have fixed only the heading and left the rail still reading Dhcp.
+
+Pinned by a test on the ternary itself, the way the lldp case already is, which also checks no `sectionHeading` override crept in beside it.
+
+---
+
+## v945 — 2026-08-24
+
+**System > DHCP fills a subnet in for you. Choosing an interface derives the subnet, the pool, the gateway and the resolvers from that interface's own address, and every field stays editable. The page also explains itself now, which it did not.**
+
+### The role switch says three words
+
+`off`, `relay`, `server`. It used to say "server — hand out leases (Kea)" and "relay — forward to an upstream server", which is a dropdown talking an operator through a decision rather than a switch with three positions. What each role does is the rest of the page, and now the help topic; the control itself only has to name them.
+
+### Prefill
+
+Everything a served subnet needs is already true of the interface serving it. The CIDR is the interface's own prefix, the gateway is almost always the interface's own address, and the pool is what is left over. Retyping all of it from the addresses on the next page is how a pool ends up one octet outside the subnet it belongs to — which is exactly the fault `dhcp_preflight.go` was added to catch *after* it has been saved.
+
+New `internal/webadmin/dhcp_prefill.go`. It is computed in Go rather than in the browser for two reasons. The arithmetic has edges, and edges belong somewhere they can be tested. And the addresses are the *node's*, so on a managed peer they have to come from that node's reply — derived client-side they would quietly describe whichever host the browser happens to be pointed at. It rides along in the `/api/dhcp` GET body rather than as a second request, so the addresses the editor suggests from are read from the same node at the same moment as the rows it is filling in.
+
+The pool runs from ten past the network address to ten short of the broadcast address. Ten is a "few" that leaves room for the things that turn up on a segment somebody has just started serving — a second gateway, a printer, a switch's management address — without anyone having to shrink a live pool to make space.
+
+Three cases the obvious version gets wrong, each pinned by a test:
+
+- **The interface addressed in the middle of its own subnet.** `10.1.1.50/24` puts the gateway inside the naive pool, and `DHCPSubnet.Validate` rejects a router inside the pool — the form would refuse what it had just written. The pool splits around it and keeps the wider side, with the same margin either side of the gateway, because the addresses next to a router are the ones somebody reaches for first when they need a fixed one.
+- **The subnet too small for the margin.** It shrinks to fit rather than giving up; a `/29` still gets a two-address pool.
+- **The prefix with no host range.** A `/31` or `/32` fills in the subnet and the gateway and leaves the pool blank. There is no valid pool to suggest there, and an invalid suggestion is worse than none.
+
+The test that matters more than any of those individually is `TestSuggestDHCPSubnetAlwaysValidates`: every suggestion, across a dozen prefixes, has to survive the validator that runs when it is saved. Every off-by-one in the arithmetic turns into that one failure.
+
+**Loopback is dropped from the resolvers.** A host resolving through `127.0.0.53` is pointing at something running on itself; offered to a client over option 6, the same address means the *client's* loopback — so the setting that looks most like working DNS is the one guaranteed not to be. An empty field an operator has to fill is the better outcome.
+
+### When a suggestion may overwrite a field
+
+The narrower half of the problem, and the one decided in the page. A prefill may replace a value the operator did not choose, and may replace one that cannot work on the interface they just picked. Otherwise it leaves it alone.
+
+Both halves are load-bearing. Filling only empty fields leaves a pool from the previous subnet sitting on the new interface, and the operator's first sight of it is the validator refusing to save. Filling every field unconditionally throws away a pool somebody typed before they got to the picker. So the row remembers what was last suggested into it — a field still holding that verbatim was never touched — and anything else is kept only if it still sits inside the newly chosen subnet. A subnet wider than the link survives on the same test, since it still contains the interface.
+
+### Help
+
+There was none. `HELP` had no `dhcp` key, so the page rendered a help pill with nothing behind it — the toggle is drawn for every section, entry or not.
+
+A topic covering the exclusivity of the role, both editors, the prefill, and why a mesh device is never offered. Column notes on all seven columns of the subnet table. The relay half is a form rather than a table, so `cols` cannot reach it; it gets a note per field behind `.help-desc`, which the same toggle reveals. The line that used to sit permanently above the relay fields moved into the topic — prose belongs behind the toggle, and two copies drift.
+
+### A preflight that could never fire
+
+Found while refactoring the address lookup the prefill shares. `dhcpIfaceAddrs` built its result with `var out []netip.Prefix`, so an interface with no usable IPv4 address returned nil — indistinguishable from the "could not read the addresses" case. Both callers return early on nil, which left `dhcpServerProblem`'s "has no IPv4 address, so Kea cannot match it to subnet …" and `dhcpRelayProblem`'s "has no IPv4 address to use as the relay address (giaddr)" unreachable. Both are messages v944's notes describe as being reported.
+
+The filter is now `v4Prefixes`, shared with the prefill so the addresses the page suggests from are by construction the addresses the preflight judges the result against, and it returns an empty non-nil slice. The distinction is pinned by a test rather than left to the next reader of a `var` declaration.
+
+### Verification
+
+`go build ./...` clean, `gofmt -l` clean on everything touched, `go vet` clean on `internal/webadmin`. `internal/webadmin` (which parses the page JavaScript, including the help-mode suite that checks every column note names a real column), `internal/config` and `cmd/gravinet` all pass, uncached.
+
+**Not verified.** The page has not been rendered in a browser; no interface has been chosen from the picker and no field has been watched filling itself in. The overwrite rule is reasoned about and unit-tested only in the sense that its Go half is — the JavaScript half has no test of its own beyond the parse. Everything v944 listed as unverified still is: no packet relayed, no Kea has parsed a rendered file, no lease issued.
+
+`internal/mesh` does not build its tests — `fallbackdial_backoff_test.go` and `tcpdial_backoff_test.go` declare the same symbols, and `fallback_test.go` references identifiers that are not in the tree. This is v944's state, confirmed against a clean extraction of the v944 tarball, and is untouched here. The two pre-existing failures from v887 are also untouched.
+
+---
+
 ## v944 — 2026-08-24
 
 **New: System > DHCP. Serve leases through Kea, or relay to an upstream server — one role or the other, never both.**

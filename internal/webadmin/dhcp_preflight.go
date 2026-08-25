@@ -29,6 +29,13 @@ import (
 
 // dhcpIfaceAddrs returns an interface's global IPv4 addresses, or an error
 // describing why it cannot carry DHCP at all.
+//
+// A nil slice and a nil error mean the addresses could not be read at all, and
+// is distinct from an empty one, which means they were read and none of them
+// are usable IPv4. Callers below branch on exactly that difference — the first
+// is a lookup that failed and should stay quiet, the second is a real fault
+// worth reporting. Returning the zero value for both is what made those
+// reports unreachable until v945.
 func dhcpIfaceAddrs(name string) ([]netip.Prefix, error) {
 	ifi, err := net.InterfaceByName(name)
 	if err != nil {
@@ -44,7 +51,19 @@ func dhcpIfaceAddrs(name string) ([]netip.Prefix, error) {
 		// staying quiet and letting the daemon be the judge.
 		return nil, nil
 	}
-	var out []netip.Prefix
+	return v4Prefixes(addrs), nil
+}
+
+// v4Prefixes keeps the addresses of an interface that DHCP can actually use:
+// IPv4, and neither loopback nor link-local. Never nil, so the caller can tell
+// "read them, there are none" from "could not read them".
+//
+// Shared with the prefill in dhcp_prefill.go rather than copied, so the set of
+// addresses the page suggests from is by construction the same set the
+// preflight judges the result against. Two filters that drift apart would
+// produce a form that fills itself in and then complains about what it filled.
+func v4Prefixes(addrs []net.Addr) []netip.Prefix {
+	out := make([]netip.Prefix, 0, len(addrs))
 	for _, a := range addrs {
 		ipn, ok := a.(*net.IPNet)
 		if !ok {
@@ -61,7 +80,7 @@ func dhcpIfaceAddrs(name string) ([]netip.Prefix, error) {
 		ones, _ := ipn.Mask.Size()
 		out = append(out, netip.PrefixFrom(addr, ones))
 	}
-	return out, nil
+	return out
 }
 
 // dhcpProblems maps each interface that cannot do its configured job to the
