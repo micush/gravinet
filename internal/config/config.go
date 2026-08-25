@@ -2833,6 +2833,10 @@ func (c *Config) Validate() error {
 	if err := c.ValidateHostVLANs(); err != nil {
 		return err
 	}
+	// The relay grew from one global interface list to a list of links in
+	// v949. Fold any legacy shape in before validating, so nothing downstream
+	// ever sees the old fields — see migrateRelay.
+	c.DHCP.Relay.migrateRelay()
 	if err := c.DHCP.Validate(); err != nil {
 		return fmt.Errorf("dhcp: %v", err)
 	}
@@ -3686,11 +3690,32 @@ type DHCPSubnet struct {
 }
 
 // DHCPRelayConfig is the relay half.
+//
+// A list of links rather than one global setting, from v949. The relay was
+// always one socket per interface — the address bound on each is the giaddr
+// stamped on what it forwards — so the only thing shared between two links was
+// that they happened to be typed into the same form. Splitting them lets a
+// node relay one LAN to one server and another LAN somewhere else, and gives
+// each link the enable/disable that every other table in the UI has.
 type DHCPRelayConfig struct {
-	// Interfaces are the client-facing links to listen on. A relay has to be
-	// told which links are downstream: listening everywhere would relay the
-	// upstream server's own replies back at it.
-	Interfaces []string `json:"interfaces,omitempty"`
+	// Links are the client-facing links to relay from, one entry each. A
+	// relay has to be told which links are downstream: listening everywhere
+	// would relay the upstream server's own replies back at it.
+	Links []DHCPRelayLink `json:"links,omitempty"`
+
+	// The pre-v949 shape: one interface list sharing one server list and one
+	// hop limit. Retained as fields so an existing config still parses, folded
+	// into Links by Config.Validate, and cleared there so they are never
+	// written back out. Same treatment SNMP's Community got in v736.
+	LegacyInterfaces []string `json:"interfaces,omitempty"`
+	LegacyServers    []string `json:"servers,omitempty"`
+	LegacyMaxHops    int      `json:"max_hops,omitempty"`
+}
+
+// DHCPRelayLink is one client-facing link and where it forwards to.
+type DHCPRelayLink struct {
+	// Iface is the client-facing link to listen on.
+	Iface string `json:"iface"`
 	// Servers are the upstream DHCP servers to forward to. More than one is
 	// allowed and each gets a copy, which is how a relay does redundancy —
 	// there is no failover to sequence, the client takes whichever answer
@@ -3699,6 +3724,9 @@ type DHCPRelayConfig struct {
 	// MaxHops bounds the relay hop count before a packet is dropped, per RFC
 	// 1542 §4.1.1. 0 means the default of 4.
 	MaxHops int `json:"max_hops,omitempty"`
+	// Disabled parks a link without deleting it, the same convention every
+	// other table here uses.
+	Disabled bool `json:"disabled,omitempty"`
 }
 
 // EnabledSubnets returns the served subnets actually in service. Empty unless
@@ -3717,10 +3745,31 @@ func (c DHCPConfig) EnabledSubnets() []DHCPSubnet {
 	return out
 }
 
+// EnabledLinks returns the relay links actually in service: not parked, naming
+// an interface, and having somewhere to forward to. Empty unless the mode is
+// relay, so every caller gets the mutual exclusion for free — the same shape
+// as EnabledSubnets and for the same reason.
+//
+// A link with no server is dropped here rather than rejected on save. It is
+// half-written, not wrong: the row exists so the operator can fill the rest in,
+// and refusing to store it would mean losing the interface they just chose.
+func (c DHCPConfig) EnabledLinks() []DHCPRelayLink {
+	if c.Mode != DHCPRelay {
+		return nil
+	}
+	var out []DHCPRelayLink
+	for _, l := range c.Relay.Links {
+		if !l.Disabled && strings.TrimSpace(l.Iface) != "" && len(trimStrings(l.Servers)) > 0 {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
 // RelayActive reports whether the relay should be running. Same shape as
 // EnabledSubnets and for the same reason.
 func (c DHCPConfig) RelayActive() bool {
-	return c.Mode == DHCPRelay && len(c.Relay.Interfaces) > 0 && len(c.Relay.Servers) > 0
+	return len(c.EnabledLinks()) > 0
 }
 
 // ValidDHCPMode checks a mode string.
@@ -3822,8 +3871,35 @@ func (s DHCPSubnet) Validate() error {
 }
 
 // Validate checks the relay half.
+//
+// Every link is checked, parked ones included, for the reason DHCPConfig's own
+// Validate gives: a link left broken by an edit made while the node was
+// serving should not save cleanly and fail at the moment somebody switches
+// back to relaying.
 func (r DHCPRelayConfig) Validate() error {
-	for _, s := range r.Servers {
+	seen := map[string]bool{}
+	for _, l := range r.Links {
+		if err := l.Validate(); err != nil {
+			return err
+		}
+		// Two rows for one interface is not two relays, it is two answers to
+		// the same question: one socket can only be bound once, and the second
+		// row would be silently ignored at bind time.
+		k := strings.ToLower(strings.TrimSpace(l.Iface))
+		if k == "" {
+			continue
+		}
+		if seen[k] {
+			return fmt.Errorf("interface %s has more than one relay entry", l.Iface)
+		}
+		seen[k] = true
+	}
+	return nil
+}
+
+// Validate checks one relay link.
+func (l DHCPRelayLink) Validate() error {
+	for _, s := range l.Servers {
 		a, err := netip.ParseAddr(strings.TrimSpace(s))
 		if err != nil || !a.Is4() {
 			return fmt.Errorf("relay server %q: must be an IPv4 address", s)
@@ -3835,8 +3911,44 @@ func (r DHCPRelayConfig) Validate() error {
 			return fmt.Errorf("relay server %q: must be a unicast address", s)
 		}
 	}
-	if r.MaxHops < 0 || r.MaxHops > 16 {
-		return fmt.Errorf("max hops %d: must be between 0 and 16, or 0 for the default of 4", r.MaxHops)
+	if l.MaxHops < 0 || l.MaxHops > 16 {
+		return fmt.Errorf("max hops %d: must be between 0 and 16, or 0 for the default of 4", l.MaxHops)
 	}
 	return nil
+}
+
+// migrateRelay folds the pre-v949 relay shape — one interface list sharing one
+// server list and one hop limit — into the per-link form, and clears the old
+// fields so they are never written back out.
+//
+// One link per interface, each carrying a copy of what used to be shared, so a
+// node that upgrades relays exactly what it relayed before. A config that
+// already has Links is left alone rather than second-guessed, the rule every
+// other migration here follows.
+//
+// Legacy servers with no legacy interfaces are dropped, which loses nothing
+// that was running: the old RelayActive required both, so that combination was
+// a relay that had never started.
+func (r *DHCPRelayConfig) migrateRelay() {
+	if len(r.Links) == 0 {
+		for _, n := range trimStrings(r.LegacyInterfaces) {
+			r.Links = append(r.Links, DHCPRelayLink{
+				Iface:   n,
+				Servers: trimStrings(r.LegacyServers),
+				MaxHops: r.LegacyMaxHops,
+			})
+		}
+	}
+	r.LegacyInterfaces, r.LegacyServers, r.LegacyMaxHops = nil, nil, 0
+}
+
+// trimStrings drops surrounding whitespace and empty entries from a list.
+func trimStrings(in []string) []string {
+	var out []string
+	for _, s := range in {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }

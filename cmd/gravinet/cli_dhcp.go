@@ -40,12 +40,13 @@ func cmdSystemDHCP(args []string) {
 				s.Iface, onOff(!s.Disabled), s.Subnet, s.PoolStart, s.PoolEnd,
 				orDash(s.Router), orDash(joinComma(s.DNS)), orDash(leaseLabel(s.LeaseSeconds)))
 		}
-		fmt.Println("  relay:")
-		if len(d.Relay.Interfaces) == 0 && len(d.Relay.Servers) == 0 {
-			fmt.Println("    (not configured)")
-		} else {
-			fmt.Printf("    interfaces=%s servers=%s max_hops=%d\n",
-				orDash(joinComma(d.Relay.Interfaces)), orDash(joinComma(d.Relay.Servers)), d.Relay.MaxHops)
+		fmt.Println("  relay links:")
+		if len(d.Relay.Links) == 0 {
+			fmt.Println("    (none)")
+		}
+		for _, l := range d.Relay.Links {
+			fmt.Printf("    %-10s %-8s servers=%s max_hops=%s\n",
+				l.Iface, onOff(!l.Disabled), orDash(joinComma(l.Servers)), hopsLabel(l.MaxHops))
 		}
 		// Both halves are listed whichever is running, because both are
 		// stored whichever is running — switching to relay for an afternoon
@@ -87,4 +88,14 @@ func leaseLabel(n int) string {
 		return ""
 	}
 	return fmt.Sprintf("%ds", n)
+}
+
+// hopsLabel renders a relay hop limit, naming the default rather than printing
+// the 0 that stands for it — "max_hops=0" reads as a relay that drops
+// everything, which is the opposite of what it means.
+func hopsLabel(n int) string {
+	if n <= 0 {
+		return "4 (default)"
+	}
+	return fmt.Sprintf("%d", n)
 }

@@ -167,11 +167,21 @@ func TestReplyTargetRefusesAnotherRelaysReply(t *testing.T) {
 // looking healthy. Neither of these binds a socket, so the test does not need
 // port 67 or privileges.
 func TestStartRefusesEmptyConfig(t *testing.T) {
-	if _, err := Start(Config{Interfaces: []string{"eth0"}}, nil); err == nil {
+	if _, err := Start(Config{Links: []Link{{Iface: "eth0"}}}, nil); err == nil {
 		t.Error("started with no upstream servers")
 	}
-	if _, err := Start(Config{Servers: []netip.Addr{netip.MustParseAddr("10.0.0.5")}}, nil); err == nil {
+	if _, err := Start(Config{}, nil); err == nil {
 		t.Error("started with no client-facing interfaces")
+	}
+	// One link with nowhere to forward to fails the whole start rather than
+	// being skipped: that is a configuration error, not a host condition like
+	// an interface that cannot be bound.
+	cfg := Config{Links: []Link{
+		{Iface: "eth0", Servers: []netip.Addr{netip.MustParseAddr("10.0.0.5")}},
+		{Iface: "eth1"},
+	}}
+	if _, err := Start(cfg, nil); err == nil {
+		t.Error("started with a link that had no upstream servers")
 	}
 }
 

@@ -179,10 +179,22 @@ func TestKeaOwnership(t *testing.T) {
 
 // fakeRelay stands in for the real one so the apply path can be exercised
 // without binding port 67, which a test cannot do and should not.
-type fakeRelay struct{ started, stopped int }
+//
+// It mirrors liveRelay's own first move — a config with nothing to relay is a
+// no-op, not a start — so "started" here means the same thing it does on a
+// real host. A fake that counted every call instead would report a relay
+// running for a half-written row that the real one would have ignored.
+type fakeRelay struct {
+	started, stopped int
+	links            []config.DHCPRelayLink
+}
 
 func (f *fakeRelay) Apply(c config.DHCPConfig) error {
+	if !c.RelayActive() {
+		return nil
+	}
 	f.started++
+	f.links = c.EnabledLinks()
 	return nil
 }
 func (f *fakeRelay) Stop() { f.stopped++ }
@@ -225,7 +237,7 @@ func TestApplyDHCPStopsTheRoleThatIsNotSelected(t *testing.T) {
 	f = &fakeRelay{}
 	dhcpRelay = f
 	c := config.DHCPConfig{Mode: config.DHCPRelay, Relay: config.DHCPRelayConfig{
-		Interfaces: []string{"eth1"}, Servers: []string{"10.0.0.5"},
+		Links: []config.DHCPRelayLink{{Iface: "eth1", Servers: []string{"10.0.0.5"}}},
 	}}
 	if _, err := applyDHCP(c); err != nil {
 		t.Fatalf("apply: %v", err)
@@ -264,7 +276,7 @@ func TestDHCPProblemsOnlyCheckTheActiveMode(t *testing.T) {
 	c := config.DHCPConfig{
 		Mode:    config.DHCPRelay,
 		Subnets: []config.DHCPSubnet{{Iface: "definitely-not-a-nic", Subnet: "10.1.1.0/24", PoolStart: "10.1.1.10", PoolEnd: "10.1.1.20"}},
-		Relay:   config.DHCPRelayConfig{Interfaces: []string{"definitely-not-a-nic"}, Servers: []string{"10.0.0.5"}},
+		Relay:   config.DHCPRelayConfig{Links: []config.DHCPRelayLink{{Iface: "definitely-not-a-nic", Servers: []string{"10.0.0.5"}}}},
 	}
 	probs := dhcpProblems(c)
 	if len(probs) != 1 {
@@ -293,5 +305,81 @@ func TestDHCPProblemsOnlyCheckTheActiveMode(t *testing.T) {
 	}
 	if got := noteworthy(n); strings.HasSuffix(got, "; ") {
 		t.Errorf("noteworthy did not trim the trailing separator: %q", got)
+	}
+}
+
+// The relay is a table of links from v949, so every row op the page posts has
+// to exist in the handler. The two are joined only by the op string, which is
+// exactly the kind of seam that goes quietly wrong: a renamed op leaves a
+// button that posts something the handler answers with "unknown op".
+func TestDHCPRelayRowOpsAreHandled(t *testing.T) {
+	src := mustRead("dhcp_apply.go")
+	for _, op := range []string{"relay-add", "relay-update", "relay-delete", "relay-enable", "relay-disable"} {
+		if !strings.Contains(src, `"`+op+`"`) {
+			t.Errorf("the page posts %q but the handler does not implement it", op)
+		}
+		if !strings.Contains(indexHTML, op) {
+			t.Errorf("the handler implements %q but no control posts it", op)
+		}
+	}
+	// The pre-v949 whole-form op is gone on both sides. Leaving it in the
+	// handler would mean a stale client could still overwrite every link at
+	// once, which is the shape this change exists to remove.
+	if strings.Contains(src, `case "relay":`) {
+		t.Error("the handler still accepts the pre-v949 whole-form relay op")
+	}
+}
+
+// A link with no server is stored rather than refused: the row exists so the
+// operator can fill the rest in, and rejecting it would lose the interface
+// they just chose. It must not start a relay in that state, though.
+func TestDHCPRelayHalfWrittenLinkIsStoredButNotRun(t *testing.T) {
+	c := config.DHCPConfig{Mode: config.DHCPRelay, Relay: config.DHCPRelayConfig{
+		Links: []config.DHCPRelayLink{{Iface: "eth1"}},
+	}}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("a half-written relay row was refused on save: %v", err)
+	}
+	if c.RelayActive() {
+		t.Error("a link with nowhere to forward to started a relay")
+	}
+	f := &fakeRelay{}
+	old := dhcpRelay
+	dhcpRelay = f
+	defer func() { dhcpRelay = old }()
+	if _, err := applyDHCP(c); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if f.started != 0 {
+		t.Error("the apply started a relay that had nothing to forward to")
+	}
+}
+
+// Parking one link must not take the others down with it, and the link that
+// reaches the relay must be the one that was left enabled. This is the state
+// column doing its job at the layer below the page.
+func TestDHCPRelayParkedLinkIsExcluded(t *testing.T) {
+	c := config.DHCPConfig{Mode: config.DHCPRelay, Relay: config.DHCPRelayConfig{
+		Links: []config.DHCPRelayLink{
+			{Iface: "eth1", Servers: []string{"10.0.0.5"}, Disabled: true},
+			{Iface: "eth2", Servers: []string{"10.0.0.6"}, MaxHops: 8},
+		},
+	}}
+	f := &fakeRelay{}
+	old := dhcpRelay
+	dhcpRelay = f
+	defer func() { dhcpRelay = old }()
+	if _, err := applyDHCP(c); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if f.started != 1 {
+		t.Fatalf("relay started %d times, want 1", f.started)
+	}
+	if len(f.links) != 1 || f.links[0].Iface != "eth2" {
+		t.Fatalf("want only the enabled link relayed, got %v", f.links)
+	}
+	// Each link carries its own hop limit now, rather than sharing one.
+	if f.links[0].MaxHops != 8 {
+		t.Errorf("the link's own hop limit was lost: %d", f.links[0].MaxHops)
 	}
 }

@@ -16,12 +16,24 @@ type Logf func(format string, args ...any)
 // caller, so this package does not depend on the config schema and can be
 // tested without one.
 type Config struct {
-	// Interfaces are the client-facing links to listen on.
-	Interfaces []string
-	// Servers are the upstream DHCP servers. Each gets a copy of every
-	// forwarded request; the client uses whichever answer arrives first and
-	// ignores the rest, which is how a relay does redundancy — there is no
-	// failover to sequence.
+	// Links are the client-facing interfaces to listen on, each with its own
+	// upstream servers and hop limit.
+	Links []Link
+}
+
+// Link is one client-facing interface and where requests arriving on it go.
+//
+// Servers and MaxHops belong to the link rather than to the relay as a whole,
+// because the socket already does: there is one per interface, bound to that
+// interface's own address, and it was only ever the form above that made the
+// two links share a destination.
+type Link struct {
+	// Iface is the client-facing interface to listen on.
+	Iface string
+	// Servers are the upstream DHCP servers for this link. Each gets a copy
+	// of every forwarded request; the client uses whichever answer arrives
+	// first and ignores the rest, which is how a relay does redundancy —
+	// there is no failover to sequence.
 	Servers []netip.Addr
 	// MaxHops bounds the relay count. 0 means RFC 1542's default of 4.
 	MaxHops int
@@ -55,29 +67,34 @@ func Start(cfg Config, log Logf) (*Relay, error) {
 	if log == nil {
 		log = func(string, ...any) {}
 	}
-	if len(cfg.Servers) == 0 {
-		return nil, errors.New("no upstream DHCP servers configured")
-	}
-	if len(cfg.Interfaces) == 0 {
+	if len(cfg.Links) == 0 {
 		return nil, errors.New("no client-facing interfaces configured")
 	}
+	// A link with nowhere to forward to is a configuration error rather than
+	// a host condition, so it fails here instead of being logged and skipped
+	// the way an unbindable interface is.
+	for _, l := range cfg.Links {
+		if len(l.Servers) == 0 {
+			return nil, fmt.Errorf("%s: no upstream DHCP servers configured", l.Iface)
+		}
+	}
 	r := &Relay{cfg: cfg, log: log, done: make(chan struct{})}
-	for _, name := range cfg.Interfaces {
-		self, err := ifaceAddr4(name)
+	for _, l := range cfg.Links {
+		self, err := ifaceAddr4(l.Iface)
 		if err != nil {
-			log("dhcp relay: %s: %v", name, err)
+			log("dhcp relay: %s: %v", l.Iface, err)
 			continue
 		}
-		pc, err := listen(name, self)
+		pc, err := listen(l.Iface, self)
 		if err != nil {
-			log("dhcp relay: %s: %v", name, err)
+			log("dhcp relay: %s: %v", l.Iface, err)
 			continue
 		}
 		r.mu.Lock()
 		r.pcs = append(r.pcs, pc)
 		r.mu.Unlock()
 		r.wg.Add(1)
-		go r.serve(pc, name, self)
+		go r.serve(pc, l, self)
 	}
 	r.mu.Lock()
 	n := len(r.pcs)
@@ -86,7 +103,7 @@ func Start(cfg Config, log Logf) (*Relay, error) {
 		close(r.done)
 		return nil, fmt.Errorf("no configured interface could be listened on")
 	}
-	log("dhcp relay: listening on %d interface(s), forwarding to %d server(s)", n, len(cfg.Servers))
+	log("dhcp relay: listening on %d interface(s)", n)
 	return r, nil
 }
 
@@ -112,7 +129,12 @@ func (r *Relay) Stop() {
 }
 
 // serve reads one interface's socket until it is closed.
-func (r *Relay) serve(pc net.PacketConn, name string, self netip.Addr) {
+//
+// The link travels with the socket rather than being looked up per packet:
+// which servers a request goes to and how many hops it may already have
+// crossed are properties of the link it arrived on, and this is the one place
+// that pairing is known for certain.
+func (r *Relay) serve(pc net.PacketConn, l Link, self netip.Addr) {
 	defer r.wg.Done()
 	buf := make([]byte, maxLen)
 	for {
@@ -121,13 +143,13 @@ func (r *Relay) serve(pc net.PacketConn, name string, self netip.Addr) {
 			select {
 			case <-r.done:
 			default:
-				r.log("dhcp relay: %s: read: %v", name, err)
+				r.log("dhcp relay: %s: read: %v", l.Iface, err)
 			}
 			return
 		}
 		// The buffer is reused, so everything downstream either acts on it
 		// before the next read or copies. handle does the former.
-		r.handle(pc, name, self, buf[:n], from)
+		r.handle(pc, l, self, buf[:n], from)
 	}
 }
 
@@ -137,19 +159,19 @@ func (r *Relay) serve(pc net.PacketConn, name string, self netip.Addr) {
 // broadcast on the link, so malformed and irrelevant traffic is the normal
 // case rather than an error worth reporting to an operator — a relay that
 // logged a line per stray packet would bury the one line that mattered.
-func (r *Relay) handle(pc net.PacketConn, name string, self netip.Addr, b []byte, from net.Addr) {
+func (r *Relay) handle(pc net.PacketConn, l Link, self netip.Addr, b []byte, from net.Addr) {
 	m, err := parse(b)
 	if err != nil {
 		return
 	}
 	switch m.op() {
 	case opRequest:
-		if err := prepareRequest(m, self, r.cfg.MaxHops); err != nil {
+		if err := prepareRequest(m, self, l.MaxHops); err != nil {
 			return
 		}
-		for _, srv := range r.cfg.Servers {
+		for _, srv := range l.Servers {
 			if err := sendTo(pc, b, netip.AddrPortFrom(srv, ServerPort)); err != nil {
-				r.log("dhcp relay: %s -> %s: %v", name, srv, err)
+				r.log("dhcp relay: %s -> %s: %v", l.Iface, srv, err)
 			}
 		}
 	case opReply:
@@ -161,7 +183,7 @@ func (r *Relay) handle(pc net.PacketConn, name string, self netip.Addr, b []byte
 			return
 		}
 		if err := sendTo(pc, b, netip.AddrPortFrom(to, ClientPort)); err != nil {
-			r.log("dhcp relay: %s: returning reply to %s: %v", name, to, err)
+			r.log("dhcp relay: %s: returning reply to %s: %v", l.Iface, to, err)
 		}
 	}
 }

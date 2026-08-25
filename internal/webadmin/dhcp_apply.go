@@ -37,17 +37,30 @@ func (l *liveRelay) Apply(c config.DHCPConfig) error {
 	if !c.RelayActive() {
 		return nil
 	}
-	var servers []netip.Addr
-	for _, s := range c.Relay.Servers {
-		if a, err := netip.ParseAddr(strings.TrimSpace(s)); err == nil && a.Is4() {
-			servers = append(servers, a)
+	// EnabledLinks has already dropped the parked rows, the ones naming no
+	// interface, and the ones with nowhere to forward to — so every link built
+	// here is one that should be listening.
+	var links []dhcrelay.Link
+	for _, e := range c.EnabledLinks() {
+		var servers []netip.Addr
+		for _, s := range e.Servers {
+			if a, err := netip.ParseAddr(strings.TrimSpace(s)); err == nil && a.Is4() {
+				servers = append(servers, a)
+			}
 		}
+		if len(servers) == 0 {
+			continue
+		}
+		links = append(links, dhcrelay.Link{
+			Iface:   strings.TrimSpace(e.Iface),
+			Servers: servers,
+			MaxHops: e.MaxHops,
+		})
 	}
-	r, err := dhcrelay.Start(dhcrelay.Config{
-		Interfaces: trimAll(c.Relay.Interfaces),
-		Servers:    servers,
-		MaxHops:    c.Relay.MaxHops,
-	}, logRelay)
+	if len(links) == 0 {
+		return nil
+	}
+	r, err := dhcrelay.Start(dhcrelay.Config{Links: links}, logRelay)
 	if err != nil {
 		return err
 	}
@@ -90,7 +103,10 @@ func applyDHCP(c config.DHCPConfig) (note string, err error) {
 		if err := dhcpRelay.Apply(c); err != nil {
 			return "", fmt.Errorf("starting the DHCP relay: %w", err)
 		}
-		return "", nil
+		// Same treatment the server half gets: a link that cannot do its job
+		// is a property of the host rather than of what was just saved, so it
+		// is reported here rather than refused above.
+		return noteworthy(dhcpProblemNote(c)), nil
 
 	case config.DHCPServer:
 		installed := ""
@@ -196,7 +212,6 @@ func (s *Server) handleDHCP(w http.ResponseWriter, r *http.Request) {
 		DNS          []string `json:"dns"`
 		Search       []string `json:"search"`
 		LeaseSeconds int      `json:"lease_seconds"`
-		Interfaces   []string `json:"interfaces"`
 		Servers      []string `json:"servers"`
 		MaxHops      int      `json:"max_hops"`
 		Index        int      `json:"index"`
@@ -214,20 +229,59 @@ func (s *Server) handleDHCP(w http.ResponseWriter, r *http.Request) {
 				return err
 			}
 			d.Mode = m
-		case "relay":
-			d.Relay = config.DHCPRelayConfig{
-				Interfaces: trimAll(req.Interfaces),
-				Servers:    trimAll(req.Servers),
-				MaxHops:    req.MaxHops,
+		case "relay-add", "relay-update":
+			e := config.DHCPRelayLink{
+				Iface:   strings.TrimSpace(req.Iface),
+				Servers: trimAll(req.Servers),
+				MaxHops: req.MaxHops,
 			}
-			for _, n := range d.Relay.Interfaces {
-				if err := s.refuseMeshIface(n); err != nil {
-					return err
-				}
+			if e.Iface == "" {
+				return fmt.Errorf("choose an interface to relay from")
 			}
-			if err := d.Relay.Validate(); err != nil {
+			if err := e.Validate(); err != nil {
 				return err
 			}
+			// The picker hides mesh devices, but a picker is a convenience,
+			// not a control. This is what actually prevents it.
+			if err := s.refuseMeshIface(e.Iface); err != nil {
+				return err
+			}
+			if req.Op == "relay-add" {
+				for _, x := range d.Relay.Links {
+					if strings.EqualFold(x.Iface, e.Iface) {
+						return fmt.Errorf("interface %s already has a relay entry", e.Iface)
+					}
+				}
+				d.Relay.Links = append(d.Relay.Links, e)
+				// Adding the first link selects relay mode, the way adding the
+				// first subnet selects server mode. It cannot also leave Kea
+				// serving: Mode is one field.
+				if d.Mode == config.DHCPOff {
+					d.Mode = config.DHCPRelay
+				}
+			} else {
+				if req.Index < 0 || req.Index >= len(d.Relay.Links) {
+					return fmt.Errorf("no relay entry at index %d", req.Index)
+				}
+				// An edit must not collide with a different row's interface.
+				for i, x := range d.Relay.Links {
+					if i != req.Index && strings.EqualFold(x.Iface, e.Iface) {
+						return fmt.Errorf("interface %s already has a relay entry", e.Iface)
+					}
+				}
+				e.Disabled = d.Relay.Links[req.Index].Disabled // preserve state
+				d.Relay.Links[req.Index] = e
+			}
+		case "relay-delete", "relay-remove":
+			if req.Index < 0 || req.Index >= len(d.Relay.Links) {
+				return fmt.Errorf("no relay entry at index %d", req.Index)
+			}
+			d.Relay.Links = append(d.Relay.Links[:req.Index], d.Relay.Links[req.Index+1:]...)
+		case "relay-enable", "relay-disable":
+			if req.Index < 0 || req.Index >= len(d.Relay.Links) {
+				return fmt.Errorf("no relay entry at index %d", req.Index)
+			}
+			d.Relay.Links[req.Index].Disabled = req.Op == "relay-disable"
 		case "add", "update":
 			e := config.DHCPSubnet{
 				Iface: strings.TrimSpace(req.Iface), Subnet: strings.TrimSpace(req.Subnet),

@@ -61,7 +61,7 @@ func TestDHCPModeIsExclusive(t *testing.T) {
 	full := DHCPConfig{
 		Subnets: []DHCPSubnet{goodSubnet()},
 		Relay: DHCPRelayConfig{
-			Interfaces: []string{"eth1"}, Servers: []string{"10.0.0.5"},
+			Links: []DHCPRelayLink{{Iface: "eth1", Servers: []string{"10.0.0.5"}}},
 		},
 	}
 
@@ -92,7 +92,7 @@ func TestDHCPModeIsExclusive(t *testing.T) {
 	// Switching away and back must not have discarded the other half's
 	// configuration: an operator who relays for an afternoon should not have
 	// to retype their pools.
-	if len(rly.Subnets) != 1 || len(srv.Relay.Servers) != 1 {
+	if len(rly.Subnets) != 1 || len(srv.Relay.Links) != 1 {
 		t.Error("switching mode discarded the inactive half's configuration")
 	}
 }
@@ -107,8 +107,10 @@ func TestDHCPEnabledSubnetsAndRelayActive(t *testing.T) {
 		t.Error("a disabled subnet is still being served")
 	}
 	for name, r := range map[string]DHCPRelayConfig{
-		"no servers":    {Interfaces: []string{"eth1"}},
-		"no interfaces": {Servers: []string{"10.0.0.5"}},
+		"no servers":   {Links: []DHCPRelayLink{{Iface: "eth1"}}},
+		"no interface": {Links: []DHCPRelayLink{{Servers: []string{"10.0.0.5"}}}},
+		"parked link":  {Links: []DHCPRelayLink{{Iface: "eth1", Servers: []string{"10.0.0.5"}, Disabled: true}}},
+		"no links":     {},
 	} {
 		if (DHCPConfig{Mode: DHCPRelay, Relay: r}).RelayActive() {
 			t.Errorf("%s: relay reported active with nothing to do", name)
@@ -126,7 +128,7 @@ func TestDHCPValidatesTheInactiveHalfToo(t *testing.T) {
 	if err := (DHCPConfig{Mode: DHCPRelay, Subnets: []DHCPSubnet{bad}}).Validate(); err == nil {
 		t.Error("a broken subnet saved cleanly because the node was in relay mode")
 	}
-	if err := (DHCPConfig{Mode: DHCPServer, Relay: DHCPRelayConfig{Servers: []string{"nope"}}}).Validate(); err == nil {
+	if err := (DHCPConfig{Mode: DHCPServer, Relay: DHCPRelayConfig{Links: []DHCPRelayLink{{Iface: "eth1", Servers: []string{"nope"}}}}}).Validate(); err == nil {
 		t.Error("a broken relay server saved cleanly because the node was in server mode")
 	}
 	// Two pools on one interface is not a second scope, it is two answers to
@@ -138,20 +140,29 @@ func TestDHCPValidatesTheInactiveHalfToo(t *testing.T) {
 }
 
 func TestDHCPRelayValidation(t *testing.T) {
-	for name, r := range map[string]DHCPRelayConfig{
-		"broadcast server": {Servers: []string{"255.255.255.255"}},
-		"unspecified":      {Servers: []string{"0.0.0.0"}},
-		"multicast":        {Servers: []string{"224.0.0.1"}},
-		"ipv6 server":      {Servers: []string{"fd00::1"}},
-		"hops too high":    {MaxHops: 99},
-		"hops negative":    {MaxHops: -1},
+	for name, l := range map[string]DHCPRelayLink{
+		"broadcast server": {Iface: "eth1", Servers: []string{"255.255.255.255"}},
+		"unspecified":      {Iface: "eth1", Servers: []string{"0.0.0.0"}},
+		"multicast":        {Iface: "eth1", Servers: []string{"224.0.0.1"}},
+		"ipv6 server":      {Iface: "eth1", Servers: []string{"fd00::1"}},
+		"hops too high":    {Iface: "eth1", MaxHops: 99},
+		"hops negative":    {Iface: "eth1", MaxHops: -1},
 	} {
-		if err := r.Validate(); err == nil {
+		if err := (DHCPRelayConfig{Links: []DHCPRelayLink{l}}).Validate(); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	if err := (DHCPRelayConfig{Servers: []string{"10.0.0.5"}, MaxHops: 4}).Validate(); err != nil {
+	if err := (DHCPRelayConfig{Links: []DHCPRelayLink{{Iface: "eth1", Servers: []string{"10.0.0.5"}, MaxHops: 4}}}).Validate(); err != nil {
 		t.Errorf("an ordinary relay config was rejected: %v", err)
+	}
+	// One socket can only be bound once, so a second row for the same link is
+	// a second answer to the same question rather than a second relay.
+	dup := DHCPRelayConfig{Links: []DHCPRelayLink{
+		{Iface: "eth1", Servers: []string{"10.0.0.5"}},
+		{Iface: "ETH1", Servers: []string{"10.0.0.6"}},
+	}}
+	if err := dup.Validate(); err == nil || !strings.Contains(err.Error(), "more than one relay entry") {
+		t.Errorf("two relay entries on one interface accepted: %v", err)
 	}
 }
 
@@ -163,5 +174,61 @@ func TestConfigValidateReachesDHCP(t *testing.T) {
 	err := c.Validate()
 	if err == nil || !strings.Contains(err.Error(), "dhcp") {
 		t.Errorf("Config.Validate does not check the DHCP block: %v", err)
+	}
+}
+
+// The pre-v949 relay shape — one interface list sharing one server list and
+// one hop limit — has to keep parsing, and has to come back as exactly the
+// relaying the node was already doing. A node upgrading has one of these on
+// disk; getting it wrong stops DHCP on every LAN it relays for.
+func TestDHCPRelayMigratesTheLegacyShape(t *testing.T) {
+	c := Default()
+	c.DHCP = DHCPConfig{Mode: DHCPRelay, Relay: DHCPRelayConfig{
+		LegacyInterfaces: []string{"eth1", "eth2"},
+		LegacyServers:    []string{"10.0.0.5", "10.0.0.6"},
+		LegacyMaxHops:    6,
+	}}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("a v948 relay config no longer validates: %v", err)
+	}
+	links := c.DHCP.Relay.Links
+	if len(links) != 2 {
+		t.Fatalf("want one link per legacy interface, got %d", len(links))
+	}
+	for i, want := range []string{"eth1", "eth2"} {
+		if links[i].Iface != want {
+			t.Errorf("link %d: iface %q, want %q", i, links[i].Iface, want)
+		}
+		// Each link carries a copy of what used to be shared, so the node
+		// relays exactly where it did before.
+		if len(links[i].Servers) != 2 || links[i].MaxHops != 6 {
+			t.Errorf("link %d: servers %v hops %d, want both legacy values carried",
+				i, links[i].Servers, links[i].MaxHops)
+		}
+	}
+	if !c.DHCP.RelayActive() {
+		t.Error("a node that was relaying before the migration is not relaying after it")
+	}
+	// Cleared, so they are never written back out and cannot fight the new
+	// field on the next load.
+	if c.DHCP.Relay.LegacyInterfaces != nil || c.DHCP.Relay.LegacyServers != nil || c.DHCP.Relay.LegacyMaxHops != 0 {
+		t.Error("the legacy relay fields survived the migration and will be written back")
+	}
+}
+
+// A config already using the new shape is never second-guessed, even if the
+// legacy keys are somehow also present.
+func TestDHCPRelayMigrationLeavesNewConfigsAlone(t *testing.T) {
+	c := Default()
+	c.DHCP = DHCPConfig{Mode: DHCPRelay, Relay: DHCPRelayConfig{
+		Links:            []DHCPRelayLink{{Iface: "eth9", Servers: []string{"10.9.9.9"}}},
+		LegacyInterfaces: []string{"eth1"},
+		LegacyServers:    []string{"10.0.0.5"},
+	}}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if len(c.DHCP.Relay.Links) != 1 || c.DHCP.Relay.Links[0].Iface != "eth9" {
+		t.Errorf("the migration overwrote a config that already had links: %v", c.DHCP.Relay.Links)
 	}
 }

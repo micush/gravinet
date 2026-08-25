@@ -2,6 +2,66 @@
 
 ---
 
+## v949 — 2026-08-25
+
+**The state toggle on System > DHCP did nothing, on any row, in either direction. Two other tables had the same defect. The relay half is now a table of links rather than one shared form.**
+
+### The toggle could only ever enable
+
+Reported as "state enabled|disabled doesn't work at all — the page flashes, but nothing changes", and that is exactly what it did.
+
+`toggleTagState` decides which way a double-click goes by reading the row it is in:
+
+    const on = tr.dataset.enabled !== '1';
+
+The DHCP subnet rows never wrote `data-enabled`. So `tr.dataset.enabled` was `undefined`, `undefined !== '1'` is `true`, and every click on every row computed "turn it on" and posted `enable`. Disabling was unreachable. The flash was the optimistic repaint plus the background `refresh()` in the helper's `.finally`, which reloaded the section and put the row back exactly as it had been.
+
+The backend was never at fault: `dhcp_apply.go` implements `enable` and `disable` correctly and simply never received `disable`.
+
+**Two other tables shipped the same omission** and were broken the same way, unreported: Traffic > IPv6 RA (`rarow`) and the tagged-interfaces table on System > Interfaces (`vlrow`). Both are fixed here. The tables that worked — routes, seeds, hosts, DNS, firewall, NAT, QoS — all wrote the attribute, which is why this looked like a DHCP bug rather than a shared one.
+
+`toggleTagState` now falls back to the tag's own `on`/`off` class when the attribute is absent. The class is rendered from the same value, so it says the same thing, and a table that forgets the attribute in future degrades to a working toggle instead of a silent one-way switch. The attribute stays the source of truth where present: three other readers of `data-enabled` (the edit gating in the routes, seeds and QoS tables) have no such fallback.
+
+`tagtoggle_state_test.go` ties all seven tag-toggle row literals to the attribute. Checked by reverting the fix and confirming the guard fails — a guard that passes trivially is worth nothing.
+
+### The relay is a table
+
+Was one form: a multi-select of interfaces over one server list over one hop limit. Now a row per client-facing link, edited like every other table on the page — `+` to add, double-click a field to edit, double-click the state tag to park a link, tick and `−` to remove.
+
+    state   interface   servers            max hops
+    enabled eth1        10.0.0.5, 10.0.0.6 4 (default)
+    enabled eth2        10.9.0.5           8
+
+This needed the model to change, because the old shape could not express a per-row `servers` or `max hops`. `config.DHCPRelayConfig` now holds `Links []DHCPRelayLink{Iface, Servers, MaxHops, Disabled}`.
+
+That is closer to what the relay already was. It binds one socket per interface — the address bound is the giaddr stamped on what that link forwards, which is why it cannot be one wildcard socket — so the only thing two links ever shared was having been typed into the same form. `dhcrelay.Config` is a list of `Link`, and the servers and hop limit travel with the socket rather than being read off a global. A node can now relay one LAN to one server and another LAN somewhere else.
+
+It also gives each link the state toggle every other table has, and moves the field notes out of permanent `.help-desc` divs and into HELP's `cols`, where the rest of the page keeps them. Server and relay are never on screen together (role is one setting), but `helpAnnotate` matches notes to headers by name across a section, so the two shared columns are worded to hold for either.
+
+Handler ops are per-row: `relay-add`, `relay-update`, `relay-delete`, `relay-enable`, `relay-disable`. The pre-v949 whole-form `relay` op is gone from both sides — leaving it in the handler would let a stale client overwrite every link at once, which is the shape this change removes. `refuseMeshIface` is still enforced on the write path: the picker hiding mesh devices is a convenience, not a control.
+
+Two smaller things fell out of it. The relay branch of `applyDHCP` discarded its preflight and now reports it in the note, the way the server branch always has — so a relay link with no IPv4 address to use as a giaddr says so. And adding the first link selects relay mode, mirroring how adding the first subnet selects server mode.
+
+A link with no server is stored rather than refused. It is half-written, not wrong: the row exists so the operator can fill the rest in, and rejecting it would lose the interface they just chose. `EnabledLinks` drops it, so it is never relayed from.
+
+### Config format change
+
+**This changes the on-disk config.** Old configs migrate forward automatically: `migrateRelay` folds the pre-v949 `interfaces`/`servers`/`max_hops` into one link per interface, each carrying a copy of what used to be shared, then clears the legacy keys so they are never written back. A node that upgrades relays exactly what it relayed before — pinned by a test, because getting it wrong stops DHCP on every LAN a node relays for. A config already using `links` is left alone rather than second-guessed.
+
+The migration runs in `Config.Validate`, the same place and the same shape as the v736 SNMP community migration, so nothing downstream ever sees the old fields.
+
+**It does not migrate backwards.** A v949 config on a v948 binary parses, but its relay comes back empty and the node stops relaying. Relevant only if you roll a node back.
+
+`gravinet system dhcp list` lists relay links as rows to match. A hop limit of 0 prints as `4 (default)` rather than `max_hops=0`, which read as a relay that drops everything.
+
+### Verification
+
+`internal/webadmin`, `internal/config` and `internal/dhcrelay` pass uncached. `go build ./...` clean; `go vet` and `gofmt` clean on every package touched. (`internal/mesh`'s vet failure and six unformatted files elsewhere are pre-existing and untouched.)
+
+The relay changes are exercised through the fake, which now mirrors `liveRelay`'s own first move — a config with nothing to relay is a no-op, not a start — so a "started" in a test means what it means on a host. No relay has bound port 67 here: this container cannot, and the socket path is unchanged from v948 in any case. The Kea caveat from v948 stands unchanged; nothing in this release touches the renderer.
+
+---
+
 ## v948 — 2026-08-24
 
 **Kea 2.4.1 installed in the build environment, and the renderer's output run through it. The v947 fix is confirmed against a real parser and a real daemon; the run turned up one more failure that no amount of reading the manual would have.**

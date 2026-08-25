@@ -2380,9 +2380,20 @@ async function edit(path, payload, autoRestart){
 // common case to find out about the rare one. Rapid repeated toggles before
 // a slow request has settled can also race server-side, since nothing here
 // serializes them the way the old await-and-lock pattern did.
+// A row that omits data-enabled reads as disabled here, so every toggle
+// computes "turn it on" and the disable direction becomes unreachable — the
+// page flashes through its refresh and lands back exactly where it started.
+// Three tables shipped that way (DHCP, IPv6 RA, tagged interfaces) before
+// v949. The attribute is still the source of truth where it is present; where
+// it is not, the tag's own on/off class says the same thing, because both are
+// rendered from the same value. Falling back to it turns a missing attribute
+// into a working toggle rather than a silent one-way switch.
 function toggleTagState(tag, path, buildPayload){
   const tr = tag.closest('tr');
-  const on = tr.dataset.enabled !== '1';
+  const cur = tr.dataset.enabled !== undefined
+    ? tr.dataset.enabled === '1'
+    : tag.classList.contains('on');
+  const on = !cur;
   tr.dataset.enabled = on ? '1' : '0';
   tag.className = 'tag-toggle ' + (on ? 'on' : 'off');
   tag.textContent = on ? 'enabled' : 'disabled';
@@ -3699,10 +3710,16 @@ const HELP = {
     topic: 'This host\u2019s clock, timezone, and time synchronization. [gravinet] refuses handshakes whose timestamp is too far from local time, so a node whose clock has drifted stops forming sessions rather than degrading \u2014 this is where to check that and fix it. Acts on the node you\u2019re currently managing.',
   },
   'dhcp': {
-    topic: 'This node\u2019s DHCP role for the LANs it is attached to. Acts on the node you\u2019re currently managing.<br><br><b>Role</b> is one setting, not two switches: <b>server</b> hands out leases itself (through Kea), <b>relay</b> forwards requests to a DHCP server somewhere else, and <b>off</b> leaves this host alone entirely \u2014 a host already running its own DHCP server is untouched until you pick something here. A node is never both at once. A relay that also answered locally would shadow the central server for the subnets it relays, and clients would take whichever reply arrived first. Switching between them keeps both halves: going to relay for an afternoon does not discard your pools.<br><br><b>Server.</b> One row per subnet served. Use + to add one, double-click a field to edit it, double-click the state tag to park a subnet without deleting it, tick rows and \u2212 to remove. Choosing an <b>interface</b> fills in the rest of the row from that interface\u2019s own address \u2014 the subnet it sits on, a pool inside it, itself as the gateway, and this host\u2019s own resolvers \u2014 and every one of those fields stays editable. The suggested pool keeps a handful of addresses clear at each end and either side of the gateway, so there is room for a printer or a second router later without shrinking a live pool.<br><br><b>Relay.</b> Pick the client-facing interfaces and the upstream servers. Every server gets a copy of each request and the client takes whichever reply arrives first, which is how a relay does redundancy \u2014 there is no failover to configure. Relaying is Linux-only: it needs the arrival interface of a broadcast, which the other platforms do not offer the same way, and a relay that guessed would hand clients addresses from the wrong LAN\u2019s subnet.<br><br>Serve or relay on a LAN interface, never a mesh device \u2014 they are left out of the pickers, and refused on save even if one reaches them another way. An interface that cannot do its job says so in red under its own row: Kea matches a request to a subnet by the receiving interface\u2019s address, so an interface addressed outside the subnet it serves runs, logs nothing unusual and never answers, and an interface with no IPv4 address at all has no relay address to stamp on what it forwards.',
+    topic: 'This node\u2019s DHCP role for the LANs it is attached to. Acts on the node you\u2019re currently managing.<br><br><b>Role</b> is one setting, not two switches: <b>server</b> hands out leases itself (through Kea), <b>relay</b> forwards requests to a DHCP server somewhere else, and <b>off</b> leaves this host alone entirely \u2014 a host already running its own DHCP server is untouched until you pick something here. A node is never both at once. A relay that also answered locally would shadow the central server for the subnets it relays, and clients would take whichever reply arrived first. Switching between them keeps both halves: going to relay for an afternoon does not discard your pools.<br><br><b>Server.</b> One row per subnet served. Use + to add one, double-click a field to edit it, double-click the state tag to park a subnet without deleting it, tick rows and \u2212 to remove. Choosing an <b>interface</b> fills in the rest of the row from that interface\u2019s own address \u2014 the subnet it sits on, a pool inside it, itself as the gateway, and this host\u2019s own resolvers \u2014 and every one of those fields stays editable. The suggested pool keeps a handful of addresses clear at each end and either side of the gateway, so there is room for a printer or a second router later without shrinking a live pool.<br><br><b>Relay.</b> One row per client-facing link, edited exactly like the server table: + to add, double-click a field to edit, double-click the state tag to park a link, tick and \u2212 to remove. Each link has its own upstream servers and its own hop limit, so one LAN can relay somewhere different from another \u2014 the relay binds a socket per link regardless, and the address on that link is what it stamps on the requests it forwards. Every server on a row gets a copy of each request and the client takes whichever reply arrives first, which is how a relay does redundancy \u2014 there is no failover to configure. Do not relay from the link the upstream server is on: its replies would be relayed straight back at it. Relaying is Linux-only: it needs the arrival interface of a broadcast, which the other platforms do not offer the same way, and a relay that guessed would hand clients addresses from the wrong LAN\u2019s subnet.<br><br>Serve or relay on a LAN interface, never a mesh device \u2014 they are left out of the pickers, and refused on save even if one reaches them another way. An interface that cannot do its job says so in red under its own row: Kea matches a request to a subnet by the receiving interface\u2019s address, so an interface addressed outside the subnet it serves runs, logs nothing unusual and never answers, and an interface with no IPv4 address at all has no relay address to stamp on what it forwards.',
     cols: {
-      'state': 'a disabled subnet keeps its pool and settings but is not served',
-      'interface': 'the LAN interface to serve on, never a mesh device \u2014 choosing one fills in the rest of the row from its own address',
+      // Server and relay are separate tables, but they are never on screen
+      // together (role is one setting), and helpAnnotate matches notes to
+      // headers by name across the whole section \u2014 so the two shared
+      // columns are worded to hold for either.
+      'state': 'a disabled row keeps its settings but is not in service \u2014 the subnet is not served, or the link is not relayed from',
+      'interface': 'the LAN interface this row applies to, never a mesh device \u2014 on a served subnet, choosing one also fills in the rest of the row from its own address',
+      'servers': 'the upstream DHCP servers requests from this link are forwarded to; each gets a copy and the client takes whichever reply arrives first',
+      'max hops': 'how many relays a request may already have crossed before this link drops it; blank uses the default of 4',
       'subnet': 'the CIDR served here; Kea matches a request to it by the receiving interface\u2019s address, so the interface has to be addressed inside it',
       'pool': 'the range actually handed out \u2014 kept clear of the network and broadcast addresses and of the router, leaving room for static addresses later',
       'router': 'the default gateway offered to clients \u2014 inside the subnet and outside the pool, or blank to offer none',
@@ -8225,7 +8242,7 @@ function secInterfaces(c){
     if (!rows.length) h += '<tr><td colspan="5" class="empty">no tagged interfaces \u2014 click + to create one</td></tr>';
     else rows.forEach((v,i) => {
       const on = !v.disabled;
-      h += '<tr class="vlrow'+(on?'':' fw-disabled')+'" data-idx="'+i+'">'
+      h += '<tr class="vlrow'+(on?'':' fw-disabled')+'" data-idx="'+i+'" data-enabled="'+(on?1:0)+'">'
         + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
         + '<td class="vl-state"><span class="tag-toggle '+(on?'on':'off')+'" data-vlstate="1" title="double-click to '+(on?'disable':'enable')+'">'+(on?'enabled':'disabled')+'</span></td>'
         + '<td>'+esc(v.name)+'</td><td>'+esc(v.parent)+'</td><td>'+esc(v.id)+'</td></tr>';
@@ -8486,7 +8503,7 @@ function secRadvd(c){
     if (!list.length) h += '<tr><td colspan="7" class="empty">no interfaces \u2014 click + to advertise on one</td></tr>';
     else list.forEach((e,i) => {
       const on = !e.disabled;
-      h += '<tr class="rarow'+(on?'':' fw-disabled')+'" data-idx="'+i+'"'
+      h += '<tr class="rarow'+(on?'':' fw-disabled')+'" data-idx="'+i+'" data-enabled="'+(on?1:0)+'"'
         + ' data-iface="'+esc(e.iface||'')+'" data-prefixes="'+esc((e.prefixes||[]).join(', '))+'"'
         + ' data-dns="'+esc((e.dns||[]).join(', '))+'" data-search="'+esc((e.search||[]).join(', '))+'"'
         + ' data-preference="'+esc(e.preference||'')+'">'
@@ -8695,7 +8712,7 @@ function secDHCP(c){
     if (!list.length) h += '<tr><td colspan="8" class="empty">no subnets \u2014 click + to serve one</td></tr>';
     else list.forEach((e,i) => {
       const on = !e.disabled;
-      h += '<tr class="dhrow'+(on?'':' fw-disabled')+'" data-idx="'+i+'"'
+      h += '<tr class="dhrow'+(on?'':' fw-disabled')+'" data-idx="'+i+'" data-enabled="'+(on?1:0)+'"'
         + ' data-iface="'+esc(e.iface||'')+'" data-subnet="'+esc(e.subnet||'')+'"'
         + ' data-pool_start="'+esc(e.pool_start||'')+'" data-pool_end="'+esc(e.pool_end||'')+'"'
         + ' data-router="'+esc(e.router||'')+'" data-dns="'+esc((e.dns||[]).join(', '))+'"'
@@ -8881,34 +8898,93 @@ function secDHCP(c){
     tr.querySelector('.dhe-save').onclick = () => post(Object.assign({op:'update', index:idx}, dhRead(tr)));
   }
 
+  // The relay is a table of links, one row per client-facing interface, from
+  // v949. It was a single form until then — one interface multi-select over
+  // one server list over one hop limit — which made every link share a
+  // destination for no reason but the shape of the form. The relay binds one
+  // socket per interface anyway, and the address bound is the giaddr stamped
+  // on what that link forwards, so a row per link is what the thing already
+  // is. It also gives each link the state toggle every other table has, and
+  // puts the field notes in HELP's cols where the rest of the page keeps them.
   function renderRelay(d, probs){
     const r = d.relay || {};
+    const list = r.links || [];
     const card = $('<div class="card"></div>');
-    const ifs = (r.interfaces||[]);
-    // The relay half is a form rather than a table, so HELP's cols cannot
-    // reach it — a note per field, hidden behind the same toggle by
-    // .help-desc, is the equivalent. The line that used to sit permanently
-    // above these fields is in HELP now: prose belongs behind the toggle, and
-    // saying it twice means the two copies drift.
-    let h = '<div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-start">'
-      + '<div><label>client-facing interfaces</label><br><select class="dh-relayifs" multiple size="5" style="min-width:150px">';
-    for (const n of ifaceNames) h += '<option value="'+esc(n)+'"'+(ifs.indexOf(n)>=0?' selected':'')+'>'+esc(n)+'</option>';
-    h += '</select><div class="hint help-desc">the links clients ask on \u2014 never a mesh device, and never the link the upstream server is on, which would relay its replies back at it</div></div>'
-      + '<div><label>upstream servers</label><br><input class="dh-relaysrv" placeholder="10.0.0.5, 10.0.0.6" style="width:200px" value="'+esc((r.servers||[]).join(', '))+'">'
-      + '<div class="hint help-desc">every server gets a copy of each request and the client takes whichever reply arrives first</div></div>'
-      + '<div><label>max hops</label><br><input class="dh-relayhops" placeholder="4" style="width:60px" value="'+esc(r.max_hops||'')+'">'
-      + '<div class="hint help-desc">how many relays a request may already have crossed before this one drops it; blank uses the default of 4</div></div>'
-      + '</div><div style="margin-top:10px"><button class="sm dh-relaysave">save</button></div>';
-    for (const n of ifs) if (probs[n]) h += '<div class="err" style="margin-top:8px;font-size:12px">'+esc(probs[n])+'</div>';
-    card.innerHTML = h;
-    card.querySelector('.dh-relaysave').onclick = () => {
-      const sel = [...card.querySelectorAll('.dh-relayifs option')].filter(o=>o.selected).map(o=>o.value);
-      const hops = parseInt(card.querySelector('.dh-relayhops').value, 10);
-      post({op:'relay', interfaces:sel,
-        servers:(card.querySelector('.dh-relaysrv').value||'').split(',').map(x=>x.trim()).filter(Boolean),
-        max_hops: isNaN(hops) ? 0 : hops});
-    };
+    let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>interface</th><th>servers</th><th>max hops</th></tr>';
+    if (!list.length) h += '<tr><td colspan="5" class="empty">no relay links \u2014 click + to relay from one</td></tr>';
+    else list.forEach((e,i) => {
+      const on = !e.disabled;
+      h += '<tr class="dlrow'+(on?'':' fw-disabled')+'" data-idx="'+i+'" data-enabled="'+(on?1:0)+'"'
+        + ' data-iface="'+esc(e.iface||'')+'" data-servers="'+esc((e.servers||[]).join(', '))+'"'
+        + ' data-hops="'+esc(e.max_hops||'')+'">'
+        + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
+        + '<td class="dl-state"><span class="tag-toggle '+(on?'on':'off')+'" data-dlstate="1" title="double-click to '+(on?'disable':'enable')+'">'+(on?'enabled':'disabled')+'</span></td>'
+        + '<td class="dl-field">'+esc(e.iface||'')+'</td>'
+        + '<td class="dl-field">'+esc((e.servers||[]).join(', ')||'\u2014')+'</td>'
+        + '<td class="dl-field">'+esc(e.max_hops ? String(e.max_hops) : 'default')+'</td></tr>';
+      // Carries a colspan, which puts it outside enhanceTable's isData — so
+      // it is never sorted away from the row it explains or hidden by a
+      // filter its prose does not match. Same treatment the subnet rows get.
+      const why = on ? probs[e.iface] : '';
+      if (why) h += '<tr class="dl-problem"><td colspan="5" class="err" style="font-size:12px">'+esc(why)+'</td></tr>';
+    });
+    const t = $('<div></div>'); t.innerHTML = h+'</table>'; card.appendChild(t);
+    const table = t.querySelector('table');
+    t.querySelectorAll('[data-dlstate]').forEach(tag => {
+      tag.ondblclick = (e) => { e.stopPropagation();
+        const tr = tag.closest('tr');
+        toggleTagState(tag, '/api/dhcp', on => ({op:(on?'relay-enable':'relay-disable'), index:parseInt(tr.dataset.idx,10)}));
+      };
+    });
+    t.querySelectorAll('tr.dlrow .dl-field').forEach(td => {
+      td.title = 'double-click to edit';
+      td.ondblclick = () => dlEdit(td.closest('tr'));
+    });
+    selAllWire(t);
+    table._rowAdd = () => dlAddRow(table);
+    table._rowRemove = () => removeCheckedRows(table, tr => api('/api/dhcp',{method:'POST',body:JSON.stringify({op:'relay-delete',index:parseInt(tr.dataset.idx,10)})}));
     wrap.appendChild(card);
+    enhanceTable(table);
+  }
+
+  function dlFields(e){
+    e = e || {};
+    return '<td class="selcol"></td><td class="dl-state"><span class="on">enabled</span></td>'
+      + '<td><select class="dle-iface" style="width:100px">'+dhIfaceOpts(e.iface||'')+'</select></td>'
+      + '<td><input class="dle-servers" placeholder="10.0.0.5, 10.0.0.6" style="width:180px" value="'+esc(e.servers||'')+'"></td>'
+      + '<td><input class="dle-hops" placeholder="4" style="width:50px" value="'+esc(e.hops||'')+'">'
+      + ' <button class="sm dle-save">save</button> <button class="sm dle-cancel">cancel</button></td>';
+  }
+
+  function dlRead(tr){
+    const hops = parseInt(tr.querySelector('.dle-hops').value, 10);
+    return {
+      iface: tr.querySelector('.dle-iface').value.trim(),
+      servers: (tr.querySelector('.dle-servers').value||'').split(',').map(x=>x.trim()).filter(Boolean),
+      max_hops: isNaN(hops) ? 0 : hops
+    };
+  }
+
+  function dlAddRow(table){
+    const tr = document.createElement('tr');
+    tr.innerHTML = dlFields({});
+    if (!insertNewRow(table, tr)) return;
+    tr.querySelector('.dle-cancel').onclick = () => { say(''); load(); };
+    tr.querySelector('.dle-save').onclick = () => {
+      const body = Object.assign({op:'relay-add'}, dlRead(tr));
+      // The editor stays open on a rejection, so the operator fixes the row
+      // in front of them rather than losing it and starting again.
+      if (!body.iface){ say('choose an interface to relay from', true); return; }
+      post(body);
+    };
+  }
+
+  function dlEdit(tr){
+    if (tr.querySelector('.dle-iface')) return;
+    const idx = parseInt(tr.dataset.idx,10);
+    tr.innerHTML = dlFields({iface:tr.dataset.iface, servers:tr.dataset.servers, hops:tr.dataset.hops});
+    tr.querySelector('.dle-cancel').onclick = () => { say(''); load(); };
+    tr.querySelector('.dle-save').onclick = () => post(Object.assign({op:'relay-update', index:idx}, dlRead(tr)));
   }
 
   load();

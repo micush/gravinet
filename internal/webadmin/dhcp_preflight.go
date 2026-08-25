@@ -102,10 +102,8 @@ func dhcpProblems(c config.DHCPConfig) map[string]string {
 			}
 		}
 	case config.DHCPRelay:
-		if !c.RelayActive() {
-			return out
-		}
-		for _, iface := range trimAll(c.Relay.Interfaces) {
+		for _, l := range c.EnabledLinks() {
+			iface := strings.TrimSpace(l.Iface)
 			if p := dhcpRelayProblem(iface); p != "" {
 				out[iface] = p
 			}
