@@ -437,6 +437,24 @@ type Config struct {
 	// section that quietly claimed every NIC would be a much larger promise
 	// than the one being made.
 	HostInterfaces []HostIface `json:"host_interfaces,omitempty"`
+
+	// HostVLANs are 802.1Q tagged interfaces gravinet creates on this host.
+	//
+	// Separate from HostInterfaces because the two answer different
+	// questions. A HostIface record says what addressing an interface that
+	// already exists should have; a HostVLAN says the interface should exist
+	// at all. Once created, a tagged interface is addressed through
+	// HostInterfaces like any other — there is no second addressing model
+	// here, and the interfaces page shows it in the same table as its parent.
+	//
+	// This is the only kind of interface gravinet creates on the host, and it
+	// creates them the way it creates its own mesh devices: at every startup
+	// and reload, before addressing is reconciled onto them. That is what
+	// makes them survive a reboot. It also means they exist only while
+	// gravinet does — deliberately, because the alternative is writing VLAN
+	// stanzas into netplan or NetworkManager, which is co-owning the file
+	// that decides whether the host comes back with any networking at all.
+	HostVLANs []HostVLAN `json:"host_vlans,omitempty"`
 	// HostSettings is the rest of this host's own configuration that gravinet
 	// edits on an operator's behalf — syslog forwarding, timezone and NTP,
 	// hostname and DNS. It is here for the same reason HostInterfaces is:
@@ -2812,6 +2830,9 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("log_max_size: %v", err)
 		}
 	}
+	if err := c.ValidateHostVLANs(); err != nil {
+		return err
+	}
 	if err := c.DHCP.Validate(); err != nil {
 		return fmt.Errorf("dhcp: %v", err)
 	}
@@ -3272,6 +3293,105 @@ type HostIface struct {
 	// normally decided by the driver or the link, and an operator who has
 	// not touched the field has not asked gravinet to take it over.
 	MTU int `json:"mtu,omitempty"`
+}
+
+// HostVLAN is one 802.1Q tagged interface gravinet creates on this host.
+type HostVLAN struct {
+	// Parent is the interface the tagged traffic rides on. A physical NIC or
+	// a bond, never a mesh device: the overlay carries gravinet's own
+	// encapsulation and a VLAN header inside it addresses nothing.
+	Parent string `json:"parent"`
+	// ID is the 802.1Q VLAN identifier, 1-4094. 0 and 4095 are reserved by
+	// the standard, and 1 is the default VLAN on most switches — allowed,
+	// because a trunk that tags VLAN 1 is a real configuration, but it is
+	// the one an operator most often means to have typed differently.
+	ID int `json:"id"`
+	// Name is the device name. Empty means the conventional parent.id form,
+	// which is what an operator reading `ip link` expects to find, and what
+	// VLANName returns. Set explicitly when a site names its links something
+	// else, or when parent.id would exceed the kernel's 15-character limit.
+	Name string `json:"name,omitempty"`
+	// Disabled parks the definition without deleting it. A disabled VLAN is
+	// not created, and is torn down if it currently exists, which is the
+	// same convention every other table in this configuration uses.
+	Disabled bool `json:"disabled,omitempty"`
+}
+
+// VLANName is the device name this definition creates.
+func (v HostVLAN) VLANName() string {
+	if n := strings.TrimSpace(v.Name); n != "" {
+		return n
+	}
+	return fmt.Sprintf("%s.%d", strings.TrimSpace(v.Parent), v.ID)
+}
+
+// Validate checks one tagged interface definition.
+func (v HostVLAN) Validate() error {
+	parent := strings.TrimSpace(v.Parent)
+	if parent == "" {
+		return fmt.Errorf("parent interface is required")
+	}
+	if v.ID < 1 || v.ID > 4094 {
+		return fmt.Errorf("vlan id %d: must be between 1 and 4094 (0 and 4095 are reserved)", v.ID)
+	}
+	name := v.VLANName()
+	if name == parent {
+		return fmt.Errorf("vlan %s: cannot have the same name as its parent", name)
+	}
+	// IFNAMSIZ is 16 including the terminator, so 15 usable. A longer name is
+	// refused by the kernel at creation time; refusing it on save means the
+	// operator finds out while the field is still in front of them.
+	if len(name) > 15 {
+		return fmt.Errorf("vlan name %q is %d characters: the kernel allows 15, so set a shorter name explicitly", name, len(name))
+	}
+	// The characters a device name may not contain. A name with a slash or a
+	// space in it is refused by the kernel, and one with a colon collides
+	// with the alias syntax older tools use for secondary addresses.
+	if strings.ContainsAny(name, " /:\t\n") {
+		return fmt.Errorf("vlan name %q: must not contain spaces, slashes or colons", name)
+	}
+	return nil
+}
+
+// ValidateHostVLANs checks the tagged interfaces as a set. The collisions are
+// the interesting part: two definitions producing one device name, or two
+// producing the same tag on the same parent, are both configurations the
+// kernel would accept one of and silently drop the other.
+//
+// Disabled entries are checked too, for the same reason the DHCP halves are:
+// a definition broken during an edit and then parked saves cleanly and fails
+// at the moment somebody re-enables it, which is the moment they least want to
+// be reading a validation error.
+func (c *Config) ValidateHostVLANs() error {
+	names := map[string]bool{}
+	tags := map[string]bool{}
+	for _, v := range c.HostVLANs {
+		if err := v.Validate(); err != nil {
+			return err
+		}
+		n := strings.ToLower(v.VLANName())
+		if names[n] {
+			return fmt.Errorf("two tagged interfaces are both named %s", v.VLANName())
+		}
+		names[n] = true
+		k := fmt.Sprintf("%s|%d", strings.ToLower(strings.TrimSpace(v.Parent)), v.ID)
+		if tags[k] {
+			return fmt.Errorf("%s already has a tagged interface for vlan %d", v.Parent, v.ID)
+		}
+		tags[k] = true
+	}
+	// A VLAN whose parent is itself a VLAN this node defines is refused. The
+	// kernel permits stacked (QinQ) tagging, but nothing else here models the
+	// outer tag, so the result would come back from a restart in an order
+	// that may or may not have the parent yet.
+	for _, v := range c.HostVLANs {
+		for _, p := range c.HostVLANs {
+			if strings.EqualFold(strings.TrimSpace(v.Parent), p.VLANName()) {
+				return fmt.Errorf("vlan %s is stacked on %s, which is itself a tagged interface — that is not supported here", v.VLANName(), v.Parent)
+			}
+		}
+	}
+	return nil
 }
 
 // Validate checks a host interface entry.

@@ -123,12 +123,23 @@ func TestSystemInterfacesInventory(t *testing.T) {
 	}
 }
 
-// Addresses and gateway are editable; the table itself still offers no
-// add/remove, because an interface is not something this page creates.
+// Addresses and gateway are editable; the inventory table itself still offers
+// no add/remove, because a NIC is not something this page creates.
+//
+// Scoped to the inventory half rather than the whole section since v947. The
+// tagged-interfaces card below it does create interfaces, and does carry
+// add/remove — a whole-function search would read that card's toolbar as this
+// table having grown one.
 func TestSystemInterfacesSectionEditing(t *testing.T) {
 	sec := between(t, indexHTML, "function secInterfaces(", "function secRadvd(")
-	if strings.Contains(sec, "_rowAdd") || strings.Contains(sec, "_rowRemove") {
-		t.Error("the interfaces table offers add/remove; interfaces are not created here")
+	inv := sec
+	if i := strings.Index(sec, "--- tagged interfaces"); i > 0 {
+		inv = sec[:i]
+	} else {
+		t.Error("the tagged-interfaces marker is gone; this test can no longer tell the two tables apart")
+	}
+	if strings.Contains(inv, "_rowAdd") || strings.Contains(inv, "_rowRemove") {
+		t.Error("the interfaces inventory table offers add/remove; a NIC is not created here")
 	}
 	if !strings.Contains(sec, "enhanceTable(table)") {
 		t.Error("async-loaded table is not enhanced, so it would render with no toolbar")

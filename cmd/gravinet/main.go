@@ -50,7 +50,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "946"
+	version = "948"
 	commit  = "none"
 )
 
@@ -438,6 +438,7 @@ func cmdRun(args []string) {
 		// Host addressing gravinet owns, applied before the mesh comes up:
 		// a network whose underlay address is one of these needs it in place
 		// before anything tries to bind or dial on it.
+		reconcileHostVLANs(cfg)
 		reconcileHostInterfaces(cfg)
 		reconcileHostSettings(cfg)
 
@@ -1134,6 +1135,7 @@ func cmdRun(args []string) {
 			// reload, which is what makes a restored configuration bring the
 			// node's own addresses back with it rather than describing
 			// addressing nothing ever applies.
+			reconcileHostVLANs(newCfg)
 			reconcileHostInterfaces(newCfg)
 			reconcileHostSettings(newCfg)
 

@@ -38,3 +38,36 @@ func cmdSystemInterfaces(args []string) {
 		}
 	}
 }
+
+// cmdSystemVLANs lists the tagged interfaces gravinet is configured to create,
+// alongside what the host actually has.
+//
+// Read-only, the same split cmdSystemDHCP and cmdIPv6RA draw. Creating one
+// needs a parent that exists, a tag in range, and a name that does not collide
+// with either — a form that already checks all three, and reproducing it as
+// flags would be a second, weaker copy of it. What is worth having on a
+// terminal is seeing whether the device the config promises is actually there,
+// which is the question the daemon's own log answers only at startup.
+func cmdSystemVLANs(args []string) {
+	cfg, _, _ := openCfg(args)
+	if len(cfg.HostVLANs) == 0 {
+		fmt.Println("no tagged interfaces configured")
+		return
+	}
+	for _, v := range cfg.HostVLANs {
+		name := v.VLANName()
+		state := "enabled"
+		if v.Disabled {
+			state = "disabled"
+		}
+		present := "missing"
+		if ifi, err := net.InterfaceByName(name); err == nil {
+			present = "down"
+			if ifi.Flags&net.FlagUp != 0 {
+				present = "up"
+			}
+		}
+		fmt.Printf("%-15s %-8s vlan %-5d on %-12s %s\n", name, state, v.ID, v.Parent, present)
+	}
+	fmt.Println("note: tagged interfaces are created and removed through the web admin's System > Interfaces page")
+}

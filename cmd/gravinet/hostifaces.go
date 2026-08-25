@@ -135,3 +135,52 @@ func reconcileHostInterfaces(cfg *config.Config) {
 		}
 	}
 }
+
+// reconcileHostVLANs makes the host's tagged interfaces match what the
+// configuration defines. Run immediately before reconcileHostInterfaces, at
+// startup and on every reload, and the order is the point: a HostIface record
+// naming eth0.100 has nowhere to put an address until eth0.100 exists.
+//
+// This is also the whole of gravinet's VLAN persistence. Nothing is written to
+// netplan, NetworkManager or systemd-networkd — the devices are recreated here
+// on every start instead, which is how the mesh devices have always worked.
+// The trade is deliberate: co-owning the file that decides whether a host
+// comes back with any networking at all is the failure mode the hostnet
+// package exists to avoid, and it is not worth paying to save a device that
+// costs one syscall to recreate.
+//
+// Like its addressing counterpart, a failure here is logged and stepped over.
+// One VLAN that cannot be created must not stop a mesh from coming up.
+func reconcileHostVLANs(cfg *config.Config) {
+	if len(cfg.HostVLANs) == 0 {
+		return
+	}
+	if !hostnet.VLANSupported {
+		logx.Errorf("host vlans: %d defined, but gravinet can only create tagged interfaces on Linux", len(cfg.HostVLANs))
+		return
+	}
+	for _, v := range cfg.HostVLANs {
+		name := v.VLANName()
+		if v.Disabled {
+			// Torn down rather than merely skipped. A parked definition whose
+			// device stayed up would keep carrying traffic, which is not what
+			// disabling a row means anywhere else in this configuration.
+			if err := hostnet.DeleteVLAN(name); err != nil {
+				logx.Errorf("host vlan %s: %v", name, err)
+			}
+			continue
+		}
+		if err := v.Validate(); err != nil {
+			logx.Errorf("host vlan %s: %v", name, err)
+			continue
+		}
+		created, err := hostnet.EnsureVLAN(v.Parent, name, v.ID)
+		if err != nil {
+			logx.Errorf("host vlan %s: %v", name, err)
+			continue
+		}
+		if created {
+			logx.Infof("host vlan %s: created as vlan %d on %s", name, v.ID, v.Parent)
+		}
+	}
+}

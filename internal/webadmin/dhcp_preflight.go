@@ -174,3 +174,44 @@ func dhcpProblemNote(c config.DHCPConfig) string {
 	}
 	return b.String()
 }
+
+// servableSubnets drops the subnets naming an interface this host does not
+// have, and returns their interface names alongside the trimmed config.
+//
+// Kea refuses an entire configuration for one missing interface — not the
+// subnet, the file:
+//
+//	subnet configuration failed: Specified network interface name enp99s0
+//	for subnet 192.168.50.0/24 is not present in the system
+//
+// so a NIC renamed by a kernel upgrade, or a config restored onto different
+// hardware, stops DHCP on every other LAN this node serves. That is the exact
+// failure renderKea's own rule is written against: one bad subnet must not
+// take the leases for every other link down with it.
+//
+// A *down* interface is left in place. Kea accepts one and starts, and an
+// operator whose link is down for a minute should not come back to a subnet
+// silently missing from the running config. Absence is the condition that
+// breaks the file, so absence is the condition checked.
+//
+// The names come back rather than being logged here, so the apply can put them
+// in the note. A subnet quietly not served is the thing to avoid — dropping it
+// is only the better of two bad outcomes if it is also reported.
+func servableSubnets(c config.DHCPConfig) (config.DHCPConfig, []string) {
+	out := c
+	out.Subnets = make([]config.DHCPSubnet, 0, len(c.Subnets))
+	var dropped []string
+	for _, s := range c.Subnets {
+		name := strings.TrimSpace(s.Iface)
+		if s.Disabled || name == "" {
+			out.Subnets = append(out.Subnets, s)
+			continue
+		}
+		if _, err := net.InterfaceByName(name); err != nil {
+			dropped = append(dropped, name)
+			continue
+		}
+		out.Subnets = append(out.Subnets, s)
+	}
+	return out, dropped
+}

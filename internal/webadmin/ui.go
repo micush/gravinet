@@ -3699,15 +3699,15 @@ const HELP = {
     topic: 'This host\u2019s clock, timezone, and time synchronization. [gravinet] refuses handshakes whose timestamp is too far from local time, so a node whose clock has drifted stops forming sessions rather than degrading \u2014 this is where to check that and fix it. Acts on the node you\u2019re currently managing.',
   },
   'dhcp': {
-    topic: 'This node\\u2019s DHCP role for the LANs it is attached to. Acts on the node you\\u2019re currently managing.<br><br><b>Role</b> is one setting, not two switches: <b>server</b> hands out leases itself (through Kea), <b>relay</b> forwards requests to a DHCP server somewhere else, and <b>off</b> leaves this host alone entirely \\u2014 a host already running its own DHCP server is untouched until you pick something here. A node is never both at once. A relay that also answered locally would shadow the central server for the subnets it relays, and clients would take whichever reply arrived first. Switching between them keeps both halves: going to relay for an afternoon does not discard your pools.<br><br><b>Server.</b> One row per subnet served. Use + to add one, double-click a field to edit it, double-click the state tag to park a subnet without deleting it, tick rows and \\u2212 to remove. Choosing an <b>interface</b> fills in the rest of the row from that interface\\u2019s own address \\u2014 the subnet it sits on, a pool inside it, itself as the gateway, and this host\\u2019s own resolvers \\u2014 and every one of those fields stays editable. The suggested pool keeps a handful of addresses clear at each end and either side of the gateway, so there is room for a printer or a second router later without shrinking a live pool.<br><br><b>Relay.</b> Pick the client-facing interfaces and the upstream servers. Every server gets a copy of each request and the client takes whichever reply arrives first, which is how a relay does redundancy \\u2014 there is no failover to configure. Relaying is Linux-only: it needs the arrival interface of a broadcast, which the other platforms do not offer the same way, and a relay that guessed would hand clients addresses from the wrong LAN\\u2019s subnet.<br><br>Serve or relay on a LAN interface, never a mesh device \\u2014 they are left out of the pickers, and refused on save even if one reaches them another way. An interface that cannot do its job says so in red under its own row: Kea matches a request to a subnet by the receiving interface\\u2019s address, so an interface addressed outside the subnet it serves runs, logs nothing unusual and never answers, and an interface with no IPv4 address at all has no relay address to stamp on what it forwards.',
+    topic: 'This node\u2019s DHCP role for the LANs it is attached to. Acts on the node you\u2019re currently managing.<br><br><b>Role</b> is one setting, not two switches: <b>server</b> hands out leases itself (through Kea), <b>relay</b> forwards requests to a DHCP server somewhere else, and <b>off</b> leaves this host alone entirely \u2014 a host already running its own DHCP server is untouched until you pick something here. A node is never both at once. A relay that also answered locally would shadow the central server for the subnets it relays, and clients would take whichever reply arrived first. Switching between them keeps both halves: going to relay for an afternoon does not discard your pools.<br><br><b>Server.</b> One row per subnet served. Use + to add one, double-click a field to edit it, double-click the state tag to park a subnet without deleting it, tick rows and \u2212 to remove. Choosing an <b>interface</b> fills in the rest of the row from that interface\u2019s own address \u2014 the subnet it sits on, a pool inside it, itself as the gateway, and this host\u2019s own resolvers \u2014 and every one of those fields stays editable. The suggested pool keeps a handful of addresses clear at each end and either side of the gateway, so there is room for a printer or a second router later without shrinking a live pool.<br><br><b>Relay.</b> Pick the client-facing interfaces and the upstream servers. Every server gets a copy of each request and the client takes whichever reply arrives first, which is how a relay does redundancy \u2014 there is no failover to configure. Relaying is Linux-only: it needs the arrival interface of a broadcast, which the other platforms do not offer the same way, and a relay that guessed would hand clients addresses from the wrong LAN\u2019s subnet.<br><br>Serve or relay on a LAN interface, never a mesh device \u2014 they are left out of the pickers, and refused on save even if one reaches them another way. An interface that cannot do its job says so in red under its own row: Kea matches a request to a subnet by the receiving interface\u2019s address, so an interface addressed outside the subnet it serves runs, logs nothing unusual and never answers, and an interface with no IPv4 address at all has no relay address to stamp on what it forwards.',
     cols: {
       'state': 'a disabled subnet keeps its pool and settings but is not served',
-      'interface': 'the LAN interface to serve on, never a mesh device \\u2014 choosing one fills in the rest of the row from its own address',
-      'subnet': 'the CIDR served here; Kea matches a request to it by the receiving interface\\u2019s address, so the interface has to be addressed inside it',
-      'pool': 'the range actually handed out \\u2014 kept clear of the network and broadcast addresses and of the router, leaving room for static addresses later',
-      'router': 'the default gateway offered to clients \\u2014 inside the subnet and outside the pool, or blank to offer none',
+      'interface': 'the LAN interface to serve on, never a mesh device \u2014 choosing one fills in the rest of the row from its own address',
+      'subnet': 'the CIDR served here; Kea matches a request to it by the receiving interface\u2019s address, so the interface has to be addressed inside it',
+      'pool': 'the range actually handed out \u2014 kept clear of the network and broadcast addresses and of the router, leaving room for static addresses later',
+      'router': 'the default gateway offered to clients \u2014 inside the subnet and outside the pool, or blank to offer none',
       'dns': 'the resolvers offered to clients, prefilled from whatever this host itself resolves through',
-      'lease': 'how long a lease is held before a client has to renew it; blank uses Kea\\u2019s own default',
+      'lease': 'how long a lease is held before a client has to renew it; blank uses Kea\u2019s own default',
     },
   },
   'snmp': {
@@ -3729,7 +3729,7 @@ const HELP = {
     topic: 'Restart or shut down this host \u2014 the whole machine [gravinet] runs on, not just the service. This acts on the node you\u2019re currently managing.',
   },
   'interfaces': {
-    topic: 'Every network interface on this host, with its addresses and the default gateway in use. Double-click to edit \u2014 changes are applied to the running system straight away with no confirmation, so changing the address you are connected over will drop your session. Under anything but static the address and default route come from the network, so there is nothing to type. Changes are recorded in gravinet\u2019s own configuration \u2014 so they are included in backups and come back on restore \u2014 and written to this host\u2019s network configuration so they survive a reboot.',
+    topic: 'Every network interface on this host, with its addresses and the default gateway in use. Double-click to edit \u2014 changes are applied to the running system straight away with no confirmation, so changing the address you are connected over will drop your session. Under anything but static the address and default route come from the network, so there is nothing to type. Changes are recorded in gravinet\u2019s own configuration \u2014 so they are included in backups and come back on restore \u2014 and written to this host\u2019s network configuration so they survive a reboot.<br><br><b>Tagged interfaces</b> (802.1Q VLANs) are created in the second card, and are the one kind of interface gravinet makes rather than merely addresses. Pick a parent and a tag between 1 and 4094; the device is named <code>parent.tag</code> unless you name it something else. Once it exists it appears in the table above like any other interface and takes its address there \u2014 there is no separate addressing for it. A parent has to be a real interface on this host and never a mesh device: a VLAN tag inside the overlay\u2019s own encapsulation addresses nothing. Stacking a VLAN on another VLAN is refused.<br><br>Unlike addressing, a tagged interface is <i>not</i> written into this host\u2019s network configuration. gravinet recreates it at every start, before addressing is applied to it, which is how it survives a reboot \u2014 and means it exists only while gravinet does. Writing VLAN stanzas into netplan or NetworkManager would mean co-owning the file that decides whether this host comes back with any networking at all, which is the one thing gravinet does not do to a host. Deleting a row removes the device and its addressing record together. Linux only.',
     cols: {
       'interface': 'link name; a mesh device also names its network',
       'state': 'kernel link state, and whether it has carrier',
@@ -8195,7 +8195,88 @@ function secInterfaces(c){
     wrap.innerHTML = '';
     wrap.appendChild(card);
     enhanceTable(table); // async load, so this section is not in renderSection's sweep
+    renderVLANs(wrap);
   })();
+
+  // --- tagged interfaces -----------------------------------------------
+  //
+  // Its own card below the inventory rather than rows inside it. The table
+  // above is what the host has; this is what gravinet has been told to
+  // create, which is a different question with a different answer when a
+  // parent is missing or somebody removed a device by hand. A created VLAN
+  // then appears in the inventory like any other interface and takes its
+  // address there — there is no second addressing editor here.
+  async function renderVLANs(host){
+    const r = await api('/api/system/vlans');
+    if (state.section !== 'interfaces' || !r.ok || !r.body) return;
+    const rows = r.body.vlans || [], parents = r.body.parents || [];
+    const card = $('<div class="card"></div>');
+    const bar = $('<div style="display:none"></div>'); card.appendChild(bar);
+    const say = (t, bad) => { bar.textContent = t||''; bar.className = bad ? 'err' : 'hint'; bar.style.display = t ? '' : 'none'; };
+
+    card.appendChild($('<h3 style="margin:0 0 10px;font-size:13px;letter-spacing:.4px">TAGGED INTERFACES</h3>'));
+    if (!r.body.supported){
+      card.appendChild($('<div class="hint">Creating 802.1Q tagged interfaces is Linux-only \u2014 this host cannot do it, and gravinet will not approximate it.</div>'));
+      host.appendChild(card);
+      return;
+    }
+
+    let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>name</th><th>parent</th><th>vlan</th></tr>';
+    if (!rows.length) h += '<tr><td colspan="5" class="empty">no tagged interfaces \u2014 click + to create one</td></tr>';
+    else rows.forEach((v,i) => {
+      const on = !v.disabled;
+      h += '<tr class="vlrow'+(on?'':' fw-disabled')+'" data-idx="'+i+'">'
+        + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
+        + '<td class="vl-state"><span class="tag-toggle '+(on?'on':'off')+'" data-vlstate="1" title="double-click to '+(on?'disable':'enable')+'">'+(on?'enabled':'disabled')+'</span></td>'
+        + '<td>'+esc(v.name)+'</td><td>'+esc(v.parent)+'</td><td>'+esc(v.id)+'</td></tr>';
+      // Same colspan treatment the DHCP rows get, so enhanceTable's isData
+      // leaves the explanation attached to the row it explains.
+      if (v.problem) h += '<tr class="vl-problem"><td colspan="5" class="err" style="font-size:12px">'+esc(v.problem)+'</td></tr>';
+    });
+    const t = $('<div></div>'); t.innerHTML = h+'</table>'; card.appendChild(t);
+    card.appendChild($('<div class="hint help-desc" style="margin:8px 0 0">A tagged interface exists only while gravinet runs \u2014 it is recreated at every start, before addressing is applied to it, rather than written into this host\u2019s own network configuration. Give it an address in the table above once it appears there.</div>'));
+    const table = t.querySelector('table');
+
+    const post = async (body) => {
+      const q = await api('/api/system/vlans', {method:'POST', body:JSON.stringify(body)});
+      if (!q.ok){ say((q.body&&q.body.error)||'save failed', true); return false; }
+      say((q.body && q.body.note) || '');
+      renderSection();
+      return true;
+    };
+    t.querySelectorAll('[data-vlstate]').forEach(tag => {
+      tag.ondblclick = (e) => { e.stopPropagation();
+        const tr = tag.closest('tr');
+        toggleTagState(tag, '/api/system/vlans', on => ({op:(on?'enable':'disable'), index:parseInt(tr.dataset.idx,10)}));
+      };
+    });
+    selAllWire(t);
+    table._rowAdd = () => {
+      const tr = document.createElement('tr');
+      let o = parents.length ? '<option value="" selected>choose\u2026</option>' : '<option value="">(no interfaces found)</option>';
+      for (const n of parents) o += '<option value="'+esc(n)+'">'+esc(n)+'</option>';
+      tr.innerHTML = '<td class="selcol"></td><td class="vl-state"><span class="on">enabled</span></td>'
+        + '<td><input class="vle-name" placeholder="(parent.vlan)" style="width:110px"></td>'
+        + '<td><select class="vle-parent" style="width:110px">'+o+'</select></td>'
+        + '<td><input class="vle-id" placeholder="100" style="width:60px">'
+        + ' <button class="sm vle-save">save</button> <button class="sm vle-cancel">cancel</button></td>';
+      if (!insertNewRow(table, tr)) return;
+      tr.querySelector('.vle-cancel').onclick = () => { say(''); renderSection(); };
+      tr.querySelector('.vle-save').onclick = () => {
+        const parent = tr.querySelector('.vle-parent').value.trim();
+        const id = parseInt(tr.querySelector('.vle-id').value, 10);
+        // The editor stays open on a rejection, so the row is fixed in front
+        // of the operator rather than lost and retyped.
+        if (!parent){ say('choose a parent interface', true); return; }
+        if (isNaN(id)){ say('enter a vlan id between 1 and 4094', true); return; }
+        post({op:'add', parent:parent, id:id, name:tr.querySelector('.vle-name').value.trim()});
+      };
+    };
+    table._rowRemove = () => removeCheckedRows(table, tr =>
+      api('/api/system/vlans',{method:'POST',body:JSON.stringify({op:'delete',index:parseInt(tr.dataset.idx,10)})}));
+    host.appendChild(card);
+    enhanceTable(table);
+  }
 
   // The whole intended set is submitted, not individual adds and removes, so
   // re-addressing an interface is one operation rather than two chances to

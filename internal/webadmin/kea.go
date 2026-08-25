@@ -30,27 +30,42 @@ import (
 // config, but a comment is not something json.Marshal will emit, and a file
 // whose first line had to be written outside the marshaller would be a file
 // this code could no longer round-trip.
+//
+// Where inside the JSON is not a free choice, and v944 got it wrong. Kea's
+// grammar accepts exactly one key at the top level, Dhcp4, and rejects any
+// other outright rather than ignoring it:
+//
+//\tsyntax error, unexpected constant string, expecting Dhcp4
+//
+// which is a server that will not start at all. The marker goes in Dhcp4's
+// global user-context instead \u2014 the mechanism Kea documents for attaching
+// data of one's own to a scope, defined as ignored by the server.
 
 const keaConfPath = "/etc/kea/kea-dhcp4.conf"
 
-// keaMarker is the key gravinet writes into the top-level object to claim the
-// file. Kea ignores unknown top-level keys inside "Dhcp4" only for a few
-// documented names, so this goes alongside the Dhcp4 object rather than in it,
-// where Kea's parser will not object to it.
+// keaMarker is the key gravinet writes to claim the file. It lives in Dhcp4's
+// user-context, which is Kea's own mechanism for carrying data the server does
+// not interpret; a key beside Dhcp4 is a parse error, not an ignored field.
 const keaMarker = "gravinet-generated"
 
-// keaConf is the top-level config document.
+// keaConf is the top-level config document. Exactly one field, because Kea's
+// grammar permits exactly one key here.
 type keaConf struct {
-	Marker bool     `json:"gravinet-generated"`
-	Dhcp4  keaDhcp4 `json:"Dhcp4"`
+	Dhcp4 keaDhcp4 `json:"Dhcp4"`
+}
+
+// keaUserContext is where the ownership marker lives.
+type keaUserContext struct {
+	Marker bool `json:"gravinet-generated"`
 }
 
 type keaDhcp4 struct {
-	InterfacesConfig keaIfaces   `json:"interfaces-config"`
-	LeaseDatabase    keaLeaseDB  `json:"lease-database"`
-	ValidLifetime    int         `json:"valid-lifetime"`
-	Subnet4          []keaSubnet `json:"subnet4"`
-	Loggers          []keaLogger `json:"loggers,omitempty"`
+	UserContext      keaUserContext `json:"user-context"`
+	InterfacesConfig keaIfaces      `json:"interfaces-config"`
+	LeaseDatabase    keaLeaseDB     `json:"lease-database"`
+	ValidLifetime    int            `json:"valid-lifetime"`
+	Subnet4          []keaSubnet    `json:"subnet4"`
+	Loggers          []keaLogger    `json:"loggers,omitempty"`
 }
 
 type keaIfaces struct {
@@ -105,8 +120,8 @@ const defaultLease = 3600
 // other LAN is a far worse failure than that one LAN going unserved.
 func renderKea(c config.DHCPConfig) ([]byte, error) {
 	conf := keaConf{
-		Marker: true,
 		Dhcp4: keaDhcp4{
+			UserContext: keaUserContext{Marker: true},
 			// Kea listens only on the interfaces it is told about. Naming
 			// them explicitly, rather than using its "*" wildcard, is what
 			// keeps a DHCP server off every other link on the host — most
@@ -178,16 +193,29 @@ func keaOwned(path string) bool {
 	if err != nil {
 		return false
 	}
-	var probe map[string]json.RawMessage
+	var probe struct {
+		Dhcp4 struct {
+			UserContext map[string]json.RawMessage `json:"user-context"`
+		} `json:"Dhcp4"`
+		Legacy json.RawMessage `json:"gravinet-generated"`
+	}
 	if err := json.Unmarshal(b, &probe); err != nil {
 		return false
 	}
-	raw, ok := probe[keaMarker]
-	if !ok {
-		return false
+	// The v944 location, beside Dhcp4 rather than inside it. Still recognised
+	// on read, because a node upgrading from v944 has one of these on disk and
+	// the alternative is gravinet setting aside a file it wrote itself and
+	// telling the operator it preserved their configuration.
+	if marked(probe.Legacy) {
+		return true
 	}
-	var marked bool
-	return json.Unmarshal(raw, &marked) == nil && marked
+	return marked(probe.Dhcp4.UserContext[keaMarker])
+}
+
+// marked reports whether a raw JSON value is the boolean true.
+func marked(raw json.RawMessage) bool {
+	var b bool
+	return len(raw) > 0 && json.Unmarshal(raw, &b) == nil && b
 }
 
 // setAsideKeaConf renames an existing config out of the way and returns where

@@ -108,14 +108,23 @@ func applyDHCP(c config.DHCPConfig) (note string, err error) {
 			}
 			backedUp = "kept the previous config at " + to + "; "
 		}
-		if len(c.EnabledSubnets()) == 0 {
+		// Kea rejects a whole file for one interface it cannot find, so a
+		// subnet naming an absent one is left out rather than allowed to stop
+		// the LANs that are fine. Reported, never silent.
+		served, dropped := servableSubnets(c)
+		missing := ""
+		if len(dropped) > 0 {
+			missing = fmt.Sprintf("left out the subnet(s) on %s: no such interface on this host, and Kea refuses an entire configuration for one it cannot find; ",
+				strings.Join(dropped, ", "))
+		}
+		if len(served.EnabledSubnets()) == 0 {
 			// Server mode with nothing to serve. Kea refuses to start with no
 			// subnet4, so stopping is both what the operator meant and the
 			// only thing that would not crash-loop.
 			keaService("stop")
-			return noteworthy(installed, backedUp), nil
+			return noteworthy(installed, backedUp, missing), nil
 		}
-		conf, err := renderKea(c)
+		conf, err := renderKea(served)
 		if err != nil {
 			return "", err
 		}
@@ -125,11 +134,19 @@ func applyDHCP(c config.DHCPConfig) (note string, err error) {
 		if err := os.WriteFile(keaConfPath, conf, 0o644); err != nil {
 			return "", fmt.Errorf("write %s: %w", keaConfPath, err)
 		}
+		// Ask Kea's own parser before asking systemd to start it. A config it
+		// rejects produces a unit that exits immediately, and the only account
+		// of why is in the journal — so the operator is told to go and read a
+		// log to find out what the thing they just saved did wrong. The parser
+		// will say exactly what and where, so say that instead.
+		if why, ok := keaTestConf(keaConfPath); !ok {
+			return "", fmt.Errorf("wrote %s but Kea will not accept it: %s", keaConfPath, why)
+		}
 		if !keaService("restart") {
-			return "", fmt.Errorf("wrote %s but the Kea service would not start — check `journalctl -u kea-dhcp4-server`", keaConfPath)
+			return "", fmt.Errorf("wrote %s but the Kea service would not start — check `journalctl -u %s`", keaConfPath, keaUnit())
 		}
 		keaService("enable")
-		return noteworthy(installed, backedUp, dhcpProblemNote(c)), nil
+		return noteworthy(installed, backedUp, missing, dhcpProblemNote(c)), nil
 	}
 	return "", nil
 }

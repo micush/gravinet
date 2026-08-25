@@ -531,6 +531,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/radvd", s.authed(s.handleRouterAdvert))
 	mux.HandleFunc("/api/dhcp", s.authed(s.handleDHCP))
 	mux.HandleFunc("/api/system/interfaces", s.authed(s.handleSystemInterfaces))
+	mux.HandleFunc("/api/system/vlans", s.authed(s.handleSystemVLANs))
 	mux.HandleFunc("/api/system/interface-edit", s.authed(s.handleSystemInterfaceEdit))
 	mux.HandleFunc("/api/ban", s.authed(s.handleBan))
 	mux.HandleFunc("/api/ban/notes", s.authed(s.handleBanNotes))

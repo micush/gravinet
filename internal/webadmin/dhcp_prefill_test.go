@@ -3,6 +3,8 @@ package webadmin
 import (
 	"net"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -192,5 +194,60 @@ func TestDHCPSectionLabelIsUppercased(t *testing.T) {
 	head = head[:strings.Index(head, "\n}")]
 	if strings.Contains(head, "dhcp") {
 		t.Errorf("sectionHeading special-cases dhcp; label() already uppercases it, and an override there fixes only the <h2>:\n%s", head)
+	}
+}
+
+// Kea's grammar accepts exactly one key at the top level. v944 wrote the
+// ownership marker beside Dhcp4, which is not ignored but rejected:
+//
+//	kea-dhcp4.conf:2.3-22: syntax error, unexpected constant string, expecting Dhcp4
+//
+// so every config gravinet rendered produced a server that would not start.
+// The marker belongs in Dhcp4's user-context, which Kea defines as data it
+// carries and does not interpret.
+func TestRenderKeaTopLevelIsOnlyDhcp4(t *testing.T) {
+	m := renderKeaMap(t, config.DHCPConfig{Mode: config.DHCPServer, Subnets: []config.DHCPSubnet{dhcpSubnet()}})
+	for k := range m {
+		if k != "Dhcp4" {
+			t.Errorf("rendered a top-level key %q; Kea rejects the file outright, expecting Dhcp4", k)
+		}
+	}
+	d, _ := m["Dhcp4"].(map[string]any)
+	uc, _ := d["user-context"].(map[string]any)
+	if marked, _ := uc["gravinet-generated"].(bool); !marked {
+		t.Errorf("no ownership marker in Dhcp4.user-context: %v", d["user-context"])
+	}
+}
+
+// And the file gravinet writes has to be one it recognises as its own on the
+// next apply, or it sets its own config aside as if it were the operator's.
+func TestKeaOwnedRoundTripsWhatRenderKeaWrites(t *testing.T) {
+	b, err := renderKea(config.DHCPConfig{Mode: config.DHCPServer, Subnets: []config.DHCPSubnet{dhcpSubnet()}})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	p := filepath.Join(t.TempDir(), "kea-dhcp4.conf")
+	if err := os.WriteFile(p, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !keaOwned(p) {
+		t.Error("keaOwned does not recognise the file renderKea just wrote")
+	}
+	// The v944 marker is still honoured, so an upgrade does not set aside a
+	// file gravinet wrote itself.
+	legacy := filepath.Join(t.TempDir(), "kea-dhcp4.conf")
+	if err := os.WriteFile(legacy, []byte(`{"gravinet-generated":true,"Dhcp4":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !keaOwned(legacy) {
+		t.Error("a v944-era config is no longer recognised as gravinet's")
+	}
+	// Somebody else's config is still left alone.
+	theirs := filepath.Join(t.TempDir(), "kea-dhcp4.conf")
+	if err := os.WriteFile(theirs, []byte(`{"Dhcp4":{"subnet4":[]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if keaOwned(theirs) {
+		t.Error("claimed a config gravinet did not write")
 	}
 }

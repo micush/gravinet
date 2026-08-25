@@ -2,6 +2,86 @@
 
 ---
 
+## v948 — 2026-08-24
+
+**Kea 2.4.1 installed in the build environment, and the renderer's output run through it. The v947 fix is confirmed against a real parser and a real daemon; the run turned up one more failure that no amount of reading the manual would have.**
+
+### What was actually run
+
+`kea-dhcp4 -t` over a rendered two-subnet config with routers, resolvers, a search list and a lease time: accepted. Then the daemon itself, in the foreground, on that config:
+
+    DHCP4_CONFIG_COMPLETE DHCPv4 server has completed configuration: added IPv4 subnets: 1; DDNS: disabled
+    DHCP4_STARTED Kea DHCPv4 server version 2.4.1 started
+
+And the v944 shape, to confirm the diagnosis rather than assume it:
+
+    /tmp/v944-style.conf:2.3-22: syntax error, unexpected constant string, expecting Dhcp4
+
+which is the reported error, to the column. The marker in `Dhcp4.user-context` parses; the marker beside `Dhcp4` does not. v947 was right, and is now checked rather than argued.
+
+`internal/webadmin/kea_integration_test.go` keeps this: when a `kea-dhcp4` binary is on the machine running the tests, the rendered config goes through it. It skips where Kea is absent rather than failing, so it is a stronger check where one is available and not a new build dependency. Included is the v944 shape as a negative, so that specific mistake cannot return as a "Kea ignores unknown keys" assumption a second time.
+
+### One missing interface stopped every subnet
+
+Found by running it. Kea validates that each interface a subnet names is present, and refuses **the entire file** when one is not:
+
+    subnet configuration failed: Specified network interface name enp99s0 for
+    subnet 192.168.50.0/24 is not present in the system
+
+So a NIC renamed by a kernel upgrade, or a config restored onto different hardware, would stop DHCP on every other LAN this node serves — the exact failure `renderKea`'s own comment is written against, arriving one level up where that rule could not see it.
+
+`servableSubnets` drops those subnets before the render and returns their names for the apply note. Never silently: a subnet not being served is the thing to avoid, and dropping it is only the better of two bad outcomes if the operator is told.
+
+A **down** interface is deliberately kept. Kea accepts one and starts — checked, not assumed — and an operator whose link is out for a minute should not come back to a subnet missing from the running config. Absence is what breaks the file, so absence is what is checked.
+
+### Verification
+
+`internal/webadmin` and `internal/config` pass uncached, the five real-parser tests among them. `go build ./...` and `gofmt` clean.
+
+The caveat that has stood since v944 is now much smaller but not gone. Kea has parsed and started on this renderer's output, on 2.4.1 — the reporting node runs 3.0.3, and no lease has been handed to a client, because there is no client here to hand one to. `keaService`, `keaUnit` and the installer's `ensure_kea` still have not run on a host with systemd: this container has no init, so the unit was never started through `systemctl`, only the binary directly.
+
+---
+
+## v947 — 2026-08-24
+
+**Kea never started. The config gravinet wrote was rejected by its parser on line 2, every time, on every host — reported from a real Fedora node running Kea 3.0.3.**
+
+### The marker was a parse error, not an ignored key
+
+v944 put the ownership marker beside the `Dhcp4` object, on the reasoning that Kea would not object to it there. It objects:
+
+    kea-dhcp4.conf:2.3-22: syntax error, unexpected constant string, expecting Dhcp4
+
+Kea's grammar accepts exactly one key at the top level. Columns 3 to 22 of line 2 are `"gravinet-generated"` — so every config this ever rendered produced a server that exited on startup. The server half of System > DHCP has never worked.
+
+The marker moves into `Dhcp4`'s global `user-context`, which is the mechanism Kea documents for attaching data of one's own to a scope and defines as carried but not interpreted. `keaOwned` still recognises the v944 marker on read, because a node upgrading has one of those on disk and the alternative is gravinet setting its own file aside and reporting that it preserved the operator's configuration.
+
+Pinned by a test asserting the rendered document has no top-level key but `Dhcp4` — the invariant Kea actually enforces, which the previous tests never checked because they only ever reached in for `Dhcp4` and read what was inside it.
+
+### Ask the parser instead of pointing at the journal
+
+The apply now runs `kea-dhcp4 -t` over the file before asking systemd to start anything, and puts what Kea said in the reply. "The service would not start, check journalctl" is not an answer when the daemon will state precisely what is wrong and where; that message is why this bug had to be diagnosed from `/var/log/messages` rather than from the page that caused it.
+
+A missing or unrunnable binary counts as passing. This is a better error message, not a gate.
+
+### The wrong unit name
+
+The journalctl hint hardcoded `kea-dhcp4-server`, which is Debian's name. Fedora ships `kea-dhcp4` — so the one message sent an operator to look up a unit that does not exist on their machine. `keaService` was already trying both names when acting; only the message was fixed to a guess. It now asks which unit is actually present.
+
+### The help was rendering its own escape sequences
+
+The page JavaScript lives in a Go raw string literal, so a `\u2014` written with two backslashes reaches the browser as two characters and renders as the literal text. v945's DHCP help topic was written that way throughout: em dashes, apostrophes and the minus sign all appeared on screen as `\u2014`, `\u2019`, `\u2212`.
+
+Fixed there, and in the Interfaces help topic, which has had four of them since before this series and was rendering the same way.
+
+### Verification
+
+`internal/webadmin` passes uncached, including the suite that parses the page JavaScript. `go build ./...` and `gofmt` clean.
+
+**Still not verified, and this release is the reason to say so plainly.** No Kea has parsed a file this renders — the rendered document is checked against Kea's grammar as documented, which is exactly the check that passed for v944 while the server refused to start. The `-t` invocation and the `systemctl cat` probe have not been run on a host. What is different this time is that the top-level shape is now pinned by a test against the specific error a real daemon produced.
+
+---
+
 ## v946 — 2026-08-24
 
 **The DHCP page was titled "Dhcp".**
