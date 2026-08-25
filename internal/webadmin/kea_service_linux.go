@@ -84,3 +84,20 @@ func keaTestConf(path string) (string, bool) {
 	// reason, the rest is progress.
 	return strings.TrimSpace(lastLine(string(out))), false
 }
+
+// keaActive reports whether the Kea DHCPv4 unit is running right now.
+//
+// Asked of systemd rather than inferred from the configuration, because the
+// two are exactly what drift apart: an apply stops the unit when server mode
+// has no servable subnet, a rejected config leaves it dead, a package upgrade
+// or a hand-typed `systemctl stop` happens outside gravinet entirely. The
+// stored mode records what an operator chose; this records what the host is
+// doing about it.
+func keaActive() bool {
+	for _, unit := range keaUnits {
+		if exec.Command("timeout", "10", "systemctl", "is-active", "--quiet", unit).Run() == nil {
+			return true
+		}
+	}
+	return false
+}

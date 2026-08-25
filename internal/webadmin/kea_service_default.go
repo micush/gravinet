@@ -10,3 +10,5 @@ func keaService(string) bool { return false }
 func keaUnit() string { return "kea-dhcp4" }
 
 func keaTestConf(string) (string, bool) { return "", true }
+
+func keaActive() bool { return false }

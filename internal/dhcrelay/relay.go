@@ -45,8 +45,26 @@ type Relay struct {
 	log  Logf
 	mu   sync.Mutex
 	pcs  []net.PacketConn
+	live []string // links that actually bound, for Listening
 	done chan struct{}
 	wg   sync.WaitGroup
+}
+
+// Listening reports the links this relay actually bound, which is not always
+// the links it was configured with: an interface that cannot be bound is
+// logged and skipped so one bad NIC does not take the other LANs down with it.
+//
+// Exists so the page can say what is running rather than what was asked for.
+// Those two drift for ordinary reasons — a link with no address yet, a NIC
+// renamed by a kernel upgrade — and a page that only ever reflects the request
+// reports a relay running on interfaces it never bound.
+func (r *Relay) Listening() []string {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.live...)
 }
 
 // Start binds a listener on each configured interface and begins forwarding.
@@ -92,6 +110,7 @@ func Start(cfg Config, log Logf) (*Relay, error) {
 		}
 		r.mu.Lock()
 		r.pcs = append(r.pcs, pc)
+		r.live = append(r.live, l.Iface)
 		r.mu.Unlock()
 		r.wg.Add(1)
 		go r.serve(pc, l, self)
@@ -120,7 +139,7 @@ func (r *Relay) Stop() {
 		close(r.done)
 	}
 	pcs := r.pcs
-	r.pcs = nil
+	r.pcs, r.live = nil, nil
 	r.mu.Unlock()
 	for _, pc := range pcs {
 		_ = pc.Close()

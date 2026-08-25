@@ -2,6 +2,116 @@
 
 ---
 
+## v952 — 2026-08-25
+
+**System > DHCP is two cards with the standard enabled/disabled pill, one for the server and one for the relay. The role dropdown is gone.**
+
+### The picker was the wrong control
+
+A dropdown made the role something you *selected* rather than something you *turned on*, and everything awkward about the page followed from that:
+
+- Only the selected role's table rendered. Choosing **off** left the page blank apart from the dropdown, so there was no way to tell a kept configuration from a deleted one — and both halves *are* kept, deliberately, which the page never said.
+- Editing a subnet meant first switching the whole node into server mode. Looking at your own configuration was an apply.
+- It was a bespoke widget for a job the rest of the console already does one way. Every other card in the console carries a `.pill.tag-toggle` you double-click.
+
+Now: two cards, both always on the page, both always editable, each with the same pill. Enabling one disables the other.
+
+**The exclusion is unchanged and still comes from the model.** `Mode` is one field, so enabling a card is the same write that clears the other — the pills post the same `mode` op the dropdown did. There is no second switch to leave on by mistake and nothing for the page to keep in step; the reload after a toggle redraws both pills from the one value. `sectionCardHead` is `netCardHead` for a card that belongs to the node rather than a mesh network: same markup, same optimistic flip, caller-supplied payload.
+
+### Adding a row no longer enables the card
+
+v949 had adding the first subnet select server mode, and the first relay link select relay mode. That made sense when the mode was the only way to see a table; with a pill on the card it does not. A firewall rule added to a disabled firewall does not enable the firewall either, and auto-enabling here would flip a switch sitting visibly on the same card — or, with the other half running, have to choose between silently stopping it and silently doing nothing.
+
+### Running state moved onto the cards
+
+v950's report is unchanged in substance and now renders per card: a second pill beside the first saying *serving on eth1* / *relaying on eth1* / *not running*, and the reason underneath on the card it is about. The distinction the two pills draw is the one v950 introduced — the first is the request, the second is the outcome — and it survives the layout change because it has to: a card showing only what was asked for reports a role as on while its clients get nothing.
+
+### Selecting a role no longer installs a DHCP server
+
+Found while tracing what **off** actually did. `applyDHCP`'s server branch installed the Kea package before working out whether there was anything to serve, so switching the role back from off — to look at a subnet table, under the old layout the only way to see one — pulled Kea down from the distribution and then stopped and disabled it a moment later on finding no subnets. The page's own hint has always said *saving a subnet will install it*; the install and the `kea-dhcp4.conf` set-aside now both happen after that check, which makes the sentence true.
+
+### Verification
+
+`internal/webadmin`, `internal/config`, `internal/dhcrelay` and `cmd/gravinet` pass uncached. `go build ./...`, `go vet` and `gofmt` clean on every package touched.
+
+Guards pin the layout: the dropdown's marker class is absent, both cards render unconditionally, each pill is driven from the configured state and never from the running one, and neither add path writes `Mode`. Checked by reintroducing the v949 auto-enable and confirming the guard fails.
+
+The standing caveat is unchanged: this container has no init, so `keaService` and `keaActive` have still never run against a live systemd unit — including the `disable` added in v951.
+
+---
+
+## v951 — 2026-08-25
+
+**A node could come back from a reboot serving leases and relaying at the same time — the exact state `DHCPMode` exists to make unrepresentable. `systemctl enable` was run when serving started; `disable` was never run anywhere.**
+
+### The exclusion did not survive a reboot
+
+`applyDHCP` stops whichever role is not selected before starting the one that is, and that part was right. But the server branch also runs `keaService("enable")`, so a node configured to serve is serving again after a restart without anyone opening the page — and nothing in the tree ever ran `disable`. So the enablement outlived every switch away from server mode:
+
+    role = server, add a subnet   -> Kea started, and enabled for boot
+    role = relay                  -> Kea stopped now; still enabled
+    reboot                        -> systemd starts Kea; gravinet starts the
+                                     relay from the stored mode
+
+and the node is doing both, on the same links. Clients get two servers racing and take whichever reply arrives first: a lease from the local pool, or one from the central server the relay forwards to, depending on timing. The mode field made the overlap unrepresentable in the *configuration* while it stayed entirely representable on the *host*, because the mutual exclusion was only ever enforced at apply time against a service whose boot behaviour gravinet set and never unset.
+
+Setting the role to **off** had the same shape: Kea stopped, stayed enabled, came back at the next boot.
+
+`keaStopAndDisable` now does both, at both teardown sites. The second site is worth its own note — server mode with nothing servable returns *before* `renderKea`, so what is on disk is the previous apply's file, and an enabled unit would come back serving subnets the operator had since removed.
+
+### Healing a node that is already in that state
+
+Disabling on the next apply only helps a node whose operator happens to re-save the page. So the exclusion is now re-asserted at daemon startup: if the stored role is not server, the unit is stopped and disabled there too. Idempotent, once per start, and it is what fixes a node that was left with an enabled unit by any earlier version.
+
+And if the overlap is live right now, the page says so rather than reporting a healthy relay. v950's runtime report would have shown `relay` with its links and nothing else — true, and useless, when a Kea is answering the same broadcasts. A server running beside the relay, or a server running while the role is off, is now reported ahead of everything else, with what to do about it.
+
+### On configuring both halves
+
+Storing a server *configuration* and a relay *configuration* at once is deliberate and unchanged: `Mode` is one field, so only one is ever in service, and keeping the other means switching to relay for an afternoon and back does not cost you your pools. The page only ever renders the table for the selected role. That was never the problem — the problem was that only the configuration was exclusive, and the host was not.
+
+### Verification
+
+`internal/webadmin`, `internal/config`, `internal/dhcrelay` and `cmd/gravinet` pass uncached. `go build ./...`, `go vet` and `gofmt` clean on every package touched.
+
+The exclusion is pinned against the source rather than a live unit: a test asserts the teardown helper does both actions, that `applyDHCP` contains no bare `keaService("stop")` — a stop without a disable reads as completely reasonable on the line it is written on, which is how this survived seven releases — and that startup re-asserts it. Checked by reverting to a bare stop and confirming the guard fails.
+
+The standing caveat is unchanged and now matters more: this container has no init, so `keaService` and `keaActive` have still never run against a live systemd unit. The `disable` action is the same `systemctl` invocation path as the `stop`, `restart` and `enable` calls beside it, but it has not been observed working on a host.
+
+---
+
+## v950 — 2026-08-25
+
+**System > DHCP's role showed the last role selected, never the one actually in service. A node that had silently stopped serving looked identical to one that was serving fine.**
+
+### The select was the only thing on the page, and it only ever said what you asked for
+
+`Mode` is stored intent. Nothing on the page — and nothing in the API response behind it — reported what the host was doing about that intent, so the two could diverge with no indication at all. Every one of these leaves the role saying one thing and the node doing another, and none of them is something an operator did wrong:
+
+- **server selected with no enabled subnet.** The apply calls `keaService("stop")`, because Kea refuses to start with no `subnet4` and would otherwise crash-loop. Correct behaviour; it was just never reported.
+- **server selected and every subnet names an interface this host does not have.** `servableSubnets` drops them all — Kea refuses an entire file for one missing interface — and the same stop happens.
+- **server selected and the Kea install failed.** The note said so once, at save time, and was gone on the next page load.
+- **relay selected with no link that has both an interface and an upstream server.** `EnabledLinks` is empty, the relay never starts.
+- **relay selected but no configured interface could be bound** — no IPv4 address to use as a giaddr, or the NIC is gone. `dhcrelay.Start` logs and skips those, so a relay can be running on fewer links than it was configured with.
+- **anything changing outside gravinet at all**: a hand-typed `systemctl stop`, a package upgrade, a link losing its address an hour after the apply.
+
+### What changed
+
+The GET now carries a `running` block reporting what is in service, asked of the host rather than derived from the config — `systemctl is-active` for the Kea unit, and the relay object itself for the links it actually bound. `dhcrelay.Relay` grew a `Listening()` method for that second half, since the links it bound are not always the links it was given.
+
+The page shows it as a state tag beside the role, green when it matches the selection and grey when it does not, naming the interfaces in service. When they disagree, a line underneath says why — and the wording distinguishes cases that need different fixes, because "no relay link is configured yet", "every relay link is disabled" and "no enabled link has an upstream server to forward to" are three different things to go and do.
+
+**The select still shows the stored choice, deliberately.** It is how a role gets picked in the first place, so it has to hold "server" while the operator adds the first subnet that makes serving possible. Driving it from the running state instead would make an unconfigured role impossible to select — it would snap back to off on every reload. The select is the request; the tag beside it is the outcome. A test pins that separation, because collapsing the two is the obvious-looking wrong fix.
+
+`gravinet system dhcp list` now labels its line `dhcp role (configured)`. It is deliberately not given the running state: the relay runs inside the daemon, so a separate CLI process cannot see its sockets, and a confident wrong answer on a terminal is worse than an honestly narrow one.
+
+### Verification
+
+`internal/webadmin`, `internal/config`, `internal/dhcrelay` and `cmd/gravinet` pass uncached. `go build ./...`, `go vet` and `gofmt` clean on every package touched.
+
+The new tests cover each divergence above through the relay fake and through `servableSubnets`. Checked by removing the `running` block from the GET and confirming the guard fails — the same discipline v949's toggle guard got. The Kea half is exercised only where the binary is absent, which is the container's state: `keaActive` shells out to `systemctl`, and this container has no init, so that specific call has still never run against a live unit. That caveat is unchanged from v948.
+
+---
+
 ## v949 — 2026-08-25
 
 **The state toggle on System > DHCP did nothing, on any row, in either direction. Two other tables had the same defect. The relay half is now a table of links rather than one shared form.**

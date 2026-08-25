@@ -197,7 +197,18 @@ func (f *fakeRelay) Apply(c config.DHCPConfig) error {
 	f.links = c.EnabledLinks()
 	return nil
 }
-func (f *fakeRelay) Stop() { f.stopped++ }
+func (f *fakeRelay) Stop() { f.stopped++; f.links = nil }
+
+// Listening mirrors liveRelay's: the links a running relay actually bound.
+// The fake binds nothing, so it reports what it was asked to run — enough for
+// the runtime report to be exercised without a socket.
+func (f *fakeRelay) Listening() []string {
+	var out []string
+	for _, l := range f.links {
+		out = append(out, l.Iface)
+	}
+	return out
+}
 
 // The mutual exclusion at the point it actually has to hold: an apply. Leaving
 // the previous role running is how a node ends up both serving and relaying,

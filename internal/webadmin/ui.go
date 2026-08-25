@@ -710,6 +710,33 @@ function netCardHead(cf, en, apiPath, enOp, disOp){
   return h3;
 }
 
+// sectionCardHead is netCardHead for a card that belongs to the node rather
+// than to a mesh network: same <h3>, same .pill.tag-toggle, same double-click
+// to flip, same optimistic flip with the request in the background.
+//
+// netCardHead cannot be reused directly because it builds its own payload
+// around a network name, and a node-global feature has none. So the payload is
+// the caller's: onToggle(on) is handed the state being moved to and returns
+// the body to post. Everything an operator can see or do is identical, which
+// is the point — a pill that behaved differently here would be a second
+// convention to learn for no reason.
+function sectionCardHead(title, en, apiPath, onToggle){
+  const h3 = $('<h3><span class="net-name">'+esc(title)+'</span> </h3>');
+  const tag = $('<span class="pill tag-toggle '+(en?'on':'off')+'" title="double-click to '+(en?'disable':'enable')+'">'+(en?'enabled':'disabled')+'</span>');
+  tag.ondblclick = () => {
+    const on = !en;
+    en = on;
+    tag.className = 'pill tag-toggle ' + (on ? 'on' : 'off');
+    tag.textContent = on ? 'enabled' : 'disabled';
+    tag.title = 'double-click to ' + (on ? 'disable' : 'enable');
+    api(apiPath, { method:'POST', body: JSON.stringify(onToggle(on)) })
+      .then(r => { if (!r.ok) console.warn(apiPath+' toggle failed:', (r.body&&r.body.error)||'failed'); })
+      .finally(refresh);
+  };
+  h3.appendChild(tag);
+  return h3;
+}
+
 function theme(){ return document.documentElement.getAttribute('data-theme') || 'dark'; }
 function setTheme(t){ document.documentElement.setAttribute('data-theme', t); try{ localStorage.setItem('gravinet-theme', t); }catch(e){} }
 (function(){
@@ -3710,7 +3737,7 @@ const HELP = {
     topic: 'This host\u2019s clock, timezone, and time synchronization. [gravinet] refuses handshakes whose timestamp is too far from local time, so a node whose clock has drifted stops forming sessions rather than degrading \u2014 this is where to check that and fix it. Acts on the node you\u2019re currently managing.',
   },
   'dhcp': {
-    topic: 'This node\u2019s DHCP role for the LANs it is attached to. Acts on the node you\u2019re currently managing.<br><br><b>Role</b> is one setting, not two switches: <b>server</b> hands out leases itself (through Kea), <b>relay</b> forwards requests to a DHCP server somewhere else, and <b>off</b> leaves this host alone entirely \u2014 a host already running its own DHCP server is untouched until you pick something here. A node is never both at once. A relay that also answered locally would shadow the central server for the subnets it relays, and clients would take whichever reply arrived first. Switching between them keeps both halves: going to relay for an afternoon does not discard your pools.<br><br><b>Server.</b> One row per subnet served. Use + to add one, double-click a field to edit it, double-click the state tag to park a subnet without deleting it, tick rows and \u2212 to remove. Choosing an <b>interface</b> fills in the rest of the row from that interface\u2019s own address \u2014 the subnet it sits on, a pool inside it, itself as the gateway, and this host\u2019s own resolvers \u2014 and every one of those fields stays editable. The suggested pool keeps a handful of addresses clear at each end and either side of the gateway, so there is room for a printer or a second router later without shrinking a live pool.<br><br><b>Relay.</b> One row per client-facing link, edited exactly like the server table: + to add, double-click a field to edit, double-click the state tag to park a link, tick and \u2212 to remove. Each link has its own upstream servers and its own hop limit, so one LAN can relay somewhere different from another \u2014 the relay binds a socket per link regardless, and the address on that link is what it stamps on the requests it forwards. Every server on a row gets a copy of each request and the client takes whichever reply arrives first, which is how a relay does redundancy \u2014 there is no failover to configure. Do not relay from the link the upstream server is on: its replies would be relayed straight back at it. Relaying is Linux-only: it needs the arrival interface of a broadcast, which the other platforms do not offer the same way, and a relay that guessed would hand clients addresses from the wrong LAN\u2019s subnet.<br><br>Serve or relay on a LAN interface, never a mesh device \u2014 they are left out of the pickers, and refused on save even if one reaches them another way. An interface that cannot do its job says so in red under its own row: Kea matches a request to a subnet by the receiving interface\u2019s address, so an interface addressed outside the subnet it serves runs, logs nothing unusual and never answers, and an interface with no IPv4 address at all has no relay address to stamp on what it forwards.',
+    topic: 'What this node does about DHCP on the LANs it is attached to. Acts on the node you\u2019re currently managing.<br><br>Two cards, each with the same enabled/disabled pill every other card here carries: <b>server</b> hands out leases itself (through Kea), <b>relay</b> forwards requests to a DHCP server somewhere else. <b>Enabling one disables the other</b> \u2014 a node is never both at once, because a relay that also answered locally would shadow the central server for the subnets it relays and clients would take whichever reply arrived first. Leaving both disabled leaves this host alone entirely; one already running its own DHCP server is untouched until you enable something here.<br><br>Both cards stay on the page and stay editable whichever is on, so a configuration you are not currently using is still there to look at and change \u2014 running the relay for an afternoon does not cost you your pools. Adding a row does not enable a card; the pill does that.<br><br>Beside each pill is what that half is <i>actually</i> doing, which is not always the same thing \u2014 a card can be enabled before it has anything to run, and a server with no enabled subnet is stopped rather than left to crash-loop. When the two disagree the reason underneath says which to fix.<br><br><b>Server.</b> One row per subnet served. Use + to add one, double-click a field to edit it, double-click the state tag to park a subnet without deleting it, tick rows and \u2212 to remove. Choosing an <b>interface</b> fills in the rest of the row from that interface\u2019s own address \u2014 the subnet it sits on, a pool inside it, itself as the gateway, and this host\u2019s own resolvers \u2014 and every one of those fields stays editable. The suggested pool keeps a handful of addresses clear at each end and either side of the gateway, so there is room for a printer or a second router later without shrinking a live pool.<br><br><b>Relay.</b> One row per client-facing link, edited exactly like the server table: + to add, double-click a field to edit, double-click the state tag to park a link, tick and \u2212 to remove. Each link has its own upstream servers and its own hop limit, so one LAN can relay somewhere different from another \u2014 the relay binds a socket per link regardless, and the address on that link is what it stamps on the requests it forwards. Every server on a row gets a copy of each request and the client takes whichever reply arrives first, which is how a relay does redundancy \u2014 there is no failover to configure. Do not relay from the link the upstream server is on: its replies would be relayed straight back at it. Relaying is Linux-only: it needs the arrival interface of a broadcast, which the other platforms do not offer the same way, and a relay that guessed would hand clients addresses from the wrong LAN\u2019s subnet.<br><br>Serve or relay on a LAN interface, never a mesh device \u2014 they are left out of the pickers, and refused on save even if one reaches them another way. An interface that cannot do its job says so in red under its own row: Kea matches a request to a subnet by the receiving interface\u2019s address, so an interface addressed outside the subnet it serves runs, logs nothing unusual and never answers, and an interface with no IPv4 address at all has no relay address to stamp on what it forwards.',
     cols: {
       // Server and relay are separate tables, but they are never on screen
       // together (role is one setting), and helpAnnotate matches notes to
@@ -8675,39 +8702,73 @@ function secDHCP(c){
     return true;
   }
 
+  // Two cards, both always on the page, each with the same enabled/disabled
+  // pill every other card in the UI carries. There is no role picker.
+  //
+  // A dropdown was the wrong control for this. It made the role a thing you
+  // selected rather than a thing you turned on, so the page had no way to show
+  // a configuration that was not currently selected — pick "off" and both
+  // tables vanished, leaving no way to tell a kept configuration from a
+  // deleted one, and no way to edit a subnet without first switching the node
+  // into server mode. It also meant a bespoke widget for a job the rest of the
+  // console already does one way.
+  //
+  // The exclusion is unchanged and still comes from the model rather than from
+  // anything here: Mode is one field, so enabling one card is the same write
+  // that clears the other. There is no second switch to leave on by mistake
+  // and nothing to keep in step — the reload after a toggle redraws both pills
+  // from the one value.
   function render(b){
     const d = b.dhcp || {};
     const mode = d.mode || '';
     const probs = b.problems || {};
+    const run = b.running || {};
     wrap.innerHTML = '';
-
-    // The mode switch is the whole page's premise, so it renders first and
-    // alone. Server and relay are mutually exclusive in the model (one field,
-    // not two flags), and showing both editors stacked would suggest they can
-    // both be on.
-    const head = $('<div class="card"></div>');
-    let hh = '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
-      + '<label>role</label><select class="dh-mode">';
-    // Three bare words. What each role does is the rest of the page, and a
-    // dropdown that spells out its own options reads as a decision the
-    // operator is being talked through rather than a switch with three
-    // positions.
-    for (const m of [['','off'],['relay','relay'],['server','server']])
-      hh += '<option value="'+m[0]+'"'+(m[0]===mode?' selected':'')+'>'+esc(m[1])+'</option>';
-    hh += '</select></div>';
-    if (mode === 'server' && !b.installed)
-      hh += '<div class="err" style="margin-top:8px;font-size:12px">the Kea DHCPv4 server is not installed on this host \u2014 saving a subnet will install it</div>';
-    head.innerHTML = hh;
-    head.querySelector('.dh-mode').onchange = (e) => post({op:'mode', mode:e.target.value});
-    wrap.appendChild(head);
-
-    if (mode === 'server') renderServer(d, probs);
-    else if (mode === 'relay') renderRelay(d, probs);
+    renderServer(d, probs, mode === 'server', run, b);
+    renderRelay(d, probs, mode === 'relay', run);
   }
 
-  function renderServer(d, probs){
+  // dhRunTag reports what this role is actually doing, on its own card.
+  //
+  // Separate from the pill on purpose, and the distinction is the one v950
+  // introduced: the pill is the request, this is the outcome. They differ for
+  // ordinary reasons — a role enabled before it has anything to run, an
+  // interface that lost its address, a service stopped outside gravinet — and
+  // a card showing only the pill reports a role as on while its clients get
+  // nothing.
+  function dhRunTag(head, role, en, run){
+    const running = run.role === role;
+    if (running){
+      const where = (run.ifaces && run.ifaces.length) ? ' on ' + run.ifaces.join(', ') : '';
+      head.appendChild($('<span class="pill tag-toggle on" style="margin-left:6px" title="what this node is actually doing right now">'
+        + esc((role === 'server' ? 'serving' : 'relaying') + where) + '</span>'));
+    } else if (en){
+      head.appendChild($('<span class="pill tag-toggle off" style="margin-left:6px" title="what this node is actually doing right now">not running</span>'));
+    }
+  }
+
+  // dhWhy is the sentence under a card's heading explaining a pill and a run
+  // tag that disagree. Only ever rendered on the card the reason is about.
+  function dhWhy(card, role, en, run){
+    if (!run.why) return;
+    const about = run.role === role || (en && !run.role);
+    if (!about) return;
+    card.appendChild($('<div class="err" style="margin:0 0 8px;font-size:12px">'+esc(run.why)+'</div>'));
+  }
+
+  function renderServer(d, probs, en, run, b){
     const list = d.subnets || [];
     const card = $('<div class="card"></div>');
+    // Enabling posts the same mode op the picker used to. Mode is one field,
+    // so this write is also what disables the relay — the exclusion is the
+    // model's, not a second thing this page has to remember to do.
+    const head = sectionCardHead('DHCP SERVER', en, '/api/dhcp',
+      on => ({op:'mode', mode: on ? 'server' : ''}));
+    dhRunTag(head, 'server', en, run);
+    card.appendChild(head);
+    dhWhy(card, 'server', en, run);
+    if (en && !b.installed && !run.why)
+      card.appendChild($('<div class="err" style="margin:0 0 8px;font-size:12px">the Kea DHCPv4 server is not installed on this host \u2014 saving a subnet will install it</div>'));
     let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>interface</th><th>subnet</th><th>pool</th><th>router</th><th>dns</th><th>lease</th></tr>';
     if (!list.length) h += '<tr><td colspan="8" class="empty">no subnets \u2014 click + to serve one</td></tr>';
     else list.forEach((e,i) => {
@@ -8906,10 +8967,15 @@ function secDHCP(c){
   // on what that link forwards, so a row per link is what the thing already
   // is. It also gives each link the state toggle every other table has, and
   // puts the field notes in HELP's cols where the rest of the page keeps them.
-  function renderRelay(d, probs){
+  function renderRelay(d, probs, en, run){
     const r = d.relay || {};
     const list = r.links || [];
     const card = $('<div class="card"></div>');
+    const head = sectionCardHead('DHCP RELAY', en, '/api/dhcp',
+      on => ({op:'mode', mode: on ? 'relay' : ''}));
+    dhRunTag(head, 'relay', en, run);
+    card.appendChild(head);
+    dhWhy(card, 'relay', en, run);
     let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>interface</th><th>servers</th><th>max hops</th></tr>';
     if (!list.length) h += '<tr><td colspan="5" class="empty">no relay links \u2014 click + to relay from one</td></tr>';
     else list.forEach((e,i) => {

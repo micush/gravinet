@@ -25,12 +25,17 @@ import (
 type relayRunner interface {
 	Apply(config.DHCPConfig) error
 	Stop()
+	// Listening reports the links actually bound right now, so the page can
+	// show what is running rather than what was last selected.
+	Listening() []string
 }
 
 var dhcpRelay relayRunner = &liveRelay{}
 
 // liveRelay drives internal/dhcrelay.
 type liveRelay struct{ cur *dhcrelay.Relay }
+
+func (l *liveRelay) Listening() []string { return l.cur.Listening() }
 
 func (l *liveRelay) Apply(c config.DHCPConfig) error {
 	l.Stop()
@@ -92,10 +97,11 @@ func applyDHCP(c config.DHCPConfig) (note string, err error) {
 		dhcpRelay.Stop()
 	}
 	if c.Mode != config.DHCPServer {
-		keaService("stop")
+		keaStopAndDisable()
 		// The config file is left on disk rather than deleted. It is a record
-		// of what the operator configured, it costs nothing, and a stopped
-		// unit is what actually makes the server not serve.
+		// of what the operator configured, and it costs nothing — but it is
+		// emphatically not what makes the server not serve. Only the unit
+		// being stopped *and* disabled does that; see keaStopAndDisable.
 	}
 
 	switch c.Mode {
@@ -109,21 +115,9 @@ func applyDHCP(c config.DHCPConfig) (note string, err error) {
 		return noteworthy(dhcpProblemNote(c)), nil
 
 	case config.DHCPServer:
-		installed := ""
-		if !keaInstalled() {
-			if err := installKea(); err != nil {
-				return "configuration saved, but no DHCP server is available: " + err.Error(), nil
-			}
-			installed = "installed the Kea DHCPv4 server; "
-		}
-		backedUp := ""
-		if !keaOwned(keaConfPath) {
-			to, err := setAsideKeaConf(keaConfPath)
-			if err != nil {
-				return "", fmt.Errorf("could not set aside the existing %s: %w", keaConfPath, err)
-			}
-			backedUp = "kept the previous config at " + to + "; "
-		}
+		// What Kea would actually be given is worked out first, before
+		// anything is installed or moved aside.
+		//
 		// Kea rejects a whole file for one interface it cannot find, so a
 		// subnet naming an absent one is left out rather than allowed to stop
 		// the LANs that are fine. Reported, never silent.
@@ -137,8 +131,41 @@ func applyDHCP(c config.DHCPConfig) (note string, err error) {
 			// Server mode with nothing to serve. Kea refuses to start with no
 			// subnet4, so stopping is both what the operator meant and the
 			// only thing that would not crash-loop.
-			keaService("stop")
-			return noteworthy(installed, backedUp, missing), nil
+			//
+			// Disabled as well as stopped, and for a sharper reason than the
+			// mode switch above: this branch returns *before* renderKea, so
+			// whatever is on disk is the previous apply's file. An enabled
+			// unit would come back at the next boot serving subnets the
+			// operator has since removed.
+			//
+			// Returning here before the install is deliberate. Selecting
+			// "server" in the role dropdown is an apply like any other, and
+			// through v951 it installed the Kea package immediately — so
+			// switching the role back from off just to look at a subnet table
+			// pulled a DHCP server down from the distribution, then stopped
+			// and disabled it a moment later on discovering there was nothing
+			// to serve. The page's own hint has always said "saving a subnet
+			// will install it"; this is that sentence being true.
+			keaStopAndDisable()
+			return noteworthy(missing), nil
+		}
+		installed := ""
+		if !keaInstalled() {
+			if err := installKea(); err != nil {
+				return "configuration saved, but no DHCP server is available: " + err.Error(), nil
+			}
+			installed = "installed the Kea DHCPv4 server; "
+		}
+		backedUp := ""
+		if !keaOwned(keaConfPath) {
+			// Also after the check: setting an operator's hand-written
+			// kea-dhcp4.conf aside is only justified by being about to write
+			// one of our own.
+			to, err := setAsideKeaConf(keaConfPath)
+			if err != nil {
+				return "", fmt.Errorf("could not set aside the existing %s: %w", keaConfPath, err)
+			}
+			backedUp = "kept the previous config at " + to + "; "
 		}
 		conf, err := renderKea(served)
 		if err != nil {
@@ -195,6 +222,7 @@ func (s *Server) handleDHCP(w http.ResponseWriter, r *http.Request) {
 			"owned":       keaOwned(keaConfPath),
 			"mesh_ifaces": meshIfaces,
 			"problems":    dhcpProblems(cfg.DHCP),
+			"running":     dhcpRuntime(cfg.DHCP),
 			"suggest":     dhcpSuggestions(skip),
 			"system_dns":  systemDNSv4(),
 		})
@@ -253,12 +281,8 @@ func (s *Server) handleDHCP(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				d.Relay.Links = append(d.Relay.Links, e)
-				// Adding the first link selects relay mode, the way adding the
-				// first subnet selects server mode. It cannot also leave Kea
-				// serving: Mode is one field.
-				if d.Mode == config.DHCPOff {
-					d.Mode = config.DHCPRelay
-				}
+				// As with subnets above: adding a link does not turn the relay
+				// on. The pill on the card does that.
 			} else {
 				if req.Index < 0 || req.Index >= len(d.Relay.Links) {
 					return fmt.Errorf("no relay entry at index %d", req.Index)
@@ -305,12 +329,14 @@ func (s *Server) handleDHCP(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				d.Subnets = append(d.Subnets, e)
-				// Adding the first subnet selects server mode, the way adding
-				// the first RA interface turns that feature on. It cannot
-				// also leave the relay running: Mode is one field.
-				if d.Mode == config.DHCPOff {
-					d.Mode = config.DHCPServer
-				}
+				// Adding a subnet does not turn the server on. The card's own
+				// pill is the control, the way it is on every other card in
+				// the console — a firewall rule added to a disabled firewall
+				// does not enable it either. Auto-enabling here would flip a
+				// switch sitting visibly on the same card, and on a node with
+				// the relay running it would have to either silently stop the
+				// relay or silently do nothing, both of which are worse than
+				// leaving the operator to click the pill.
 			} else {
 				if req.Index < 0 || req.Index >= len(d.Subnets) {
 					return fmt.Errorf("no subnet at index %d", req.Index)
@@ -358,18 +384,32 @@ func (s *Server) handleDHCP(w http.ResponseWriter, r *http.Request) {
 // look" being different for the two halves of this page.
 func logRelay(format string, args ...any) { logx.Warnf(format, args...) }
 
-// StartDHCPRelay brings the relay up at daemon startup, so a node configured
-// to relay is relaying again after a restart without anyone opening the page.
+// StartDHCPRelay brings this node's DHCP role back up at daemon startup, so a
+// node configured to relay is relaying again after a restart without anyone
+// opening the page.
 //
-// The relay only, not the whole apply. Kea is a systemd unit that gravinet has
-// already enabled, so it comes back on its own; re-rendering its config and
-// bouncing it on every gravinet restart would be churn for no gain. The relay
-// has no unit of its own — it runs inside this process — so it is the half
-// that needs starting here.
+// Not the whole apply: Kea's config is not re-rendered and a running server is
+// not bounced, because that would be churn on every gravinet restart for no
+// gain. But the *exclusion* is re-asserted, which is not churn and is not
+// optional.
+//
+// A node that ever served and then switched away still has the Kea unit
+// enabled from that earlier apply — see keaStopAndDisable for how, and why
+// stopping alone never made that stick. Left alone, such a node comes back
+// from a reboot serving leases while this function starts the relay beside it.
+// Disabling here is what heals a node that was already in that state before
+// this code existed, since the alternative is waiting for somebody to happen
+// to re-save the DHCP page.
+//
+// Idempotent and cheap: disabling an already-disabled unit is a no-op, and it
+// runs once per daemon start.
 //
 // Returns an error rather than logging one, so the caller decides how loud a
 // failed relay is at boot.
 func StartDHCPRelay(c config.DHCPConfig) error {
+	if c.Mode != config.DHCPServer {
+		keaStopAndDisable()
+	}
 	if !c.RelayActive() {
 		return nil
 	}
@@ -379,3 +419,36 @@ func StartDHCPRelay(c config.DHCPConfig) error {
 // StopDHCPRelay shuts the relay down on clean exit, releasing port 67 so a
 // restart does not race its own predecessor for the socket.
 func StopDHCPRelay() { dhcpRelay.Stop() }
+
+// keaStopAndDisable takes the Kea unit out of service in a way that survives a
+// reboot.
+//
+// Stopping alone does not. The server branch runs `systemctl enable` so a node
+// configured to serve is serving again after a restart without anyone opening
+// the page — and through v950 nothing ever ran `disable`, so that enablement
+// outlived every switch away from server mode. The sequence is ordinary:
+//
+//	role = server, add a subnet   -> Kea started, and enabled for boot
+//	role = relay                  -> Kea stopped now; still enabled
+//	reboot                        -> systemd starts Kea; gravinet starts the
+//	                                 relay from the stored mode
+//
+// and the node comes back serving leases *and* relaying, on the same links.
+// That is the exact failure config.DHCPMode exists to make unrepresentable —
+// unrepresentable in the configuration, and entirely representable on the host,
+// because the mutual exclusion was only ever enforced at apply time against a
+// service whose boot behaviour gravinet had set and never unset. A relay
+// forwarding to a central server while a local Kea answers the same broadcasts
+// gives every client on that link two servers racing, and which one wins is
+// whichever reply arrives first.
+//
+// Both are attempted regardless of the other's result: a unit that is already
+// stopped still needs disabling, and a `disable` that fails should not stop the
+// `stop` from having happened. Neither result is reported, matching the
+// existing calls — the runtime report (see dhcp_runtime.go) is what tells an
+// operator whether the server is actually running, rather than a note about
+// one systemctl invocation.
+func keaStopAndDisable() {
+	keaService("stop")
+	keaService("disable")
+}

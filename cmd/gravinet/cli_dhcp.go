@@ -30,7 +30,12 @@ func cmdSystemDHCP(args []string) {
 		if mode == "" {
 			mode = "off"
 		}
-		fmt.Printf("dhcp role: %s\n", mode)
+		// Intent only, deliberately. What is actually running is daemon state:
+		// the relay lives inside that process, so a separate CLI process
+		// cannot see its sockets and would have to guess. The web admin asks
+		// the daemon and reports both (see dhcp_runtime.go); guessing here
+		// would put a confident wrong answer on a terminal.
+		fmt.Printf("dhcp role (configured): %s\n", mode)
 		fmt.Println("  server subnets:")
 		if len(d.Subnets) == 0 {
 			fmt.Println("    (none)")
