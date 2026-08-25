@@ -1252,30 +1252,32 @@ func (s *Server) handleQoS(w http.ResponseWriter, r *http.Request) {
 	s.editResult(w, err, false)
 }
 
-// handleBandwidth: set up/down/both throttle (bytes/sec). Applied live.
+// handleBandwidth: shaping, keyed by interface. Applied live.
+//
+// Iface names the interface whose entry is being written — the thing the
+// shaper is actually attached to. Before v960 this took a network name (or
+// blank for a node-wide default); both are gone, along with the resolution
+// step that turned them into an interface at the moment a spec was built.
 func (s *Server) handleBandwidth(w http.ResponseWriter, r *http.Request) {
-	// Net selects which limit to change: empty for this node's default,
-	// applied to every network without one of its own, or a network name for
-	// that network's override. Both exist because different links genuinely
-	// carry different rates (v956) while a node with no networks still needs
-	// somewhere to put a rate (v955).
 	var req struct {
-		Op, Net, Dir string
-		Bps          int
+		Op, Iface, Dir string
+		Bps            int
 	}
 	if !decode(w, r, &req) {
 		return
 	}
 	err := s.mutateConfig(r, func(cfg *config.Config) error {
 		switch req.Op {
+		case "add":
+			return cfg.ShapingAdd(req.Iface)
+		case "delete":
+			return cfg.ShapingDelete(req.Iface)
 		case "enable":
-			return cfg.ThrottleSetEnabled(req.Net, true)
+			return cfg.ShapingSetEnabled(req.Iface, true)
 		case "disable":
-			return cfg.ThrottleSetEnabled(req.Net, false)
-		case "clear-override":
-			return cfg.ThrottleClearOverride(req.Net)
+			return cfg.ShapingSetEnabled(req.Iface, false)
 		default:
-			return cfg.ThrottleSet(req.Net, req.Dir, req.Bps)
+			return cfg.ShapingSet(req.Iface, req.Dir, req.Bps)
 		}
 	})
 	s.editResult(w, err, false)

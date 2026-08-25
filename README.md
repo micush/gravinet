@@ -4,7 +4,7 @@
 
 A single-binary, full-mesh, encrypted overlay VPN. Pure Go, stdlib-only core,
 `CGO_ENABLED=0` static build. Targets Linux, Windows, macOS, FreeBSD, OpenBSD —
-the overlay, routing, firewall, NAT, QoS, bandwidth limiting, and per-network
+the overlay, routing, firewall, NAT, QoS, bandwidth shaping, and per-network
 DNS forwarding all work across every one of them; on OpenBSD, DNS forwarding
 needs unbound as the system resolver, which the installer sets up by default —
 pass --no-unbound to skip it.
@@ -45,7 +45,7 @@ control plane, relay fallback, and broadcast/multicast:
   willing third node, end-to-end encrypted (the relay sees only ciphertext).
 - **Broadcast / multicast** — overlay broadcast and multicast frames flood to
   the mesh, rate-limited by a per-class token bucket (storm control).
-- **Bandwidth throttling** — per-network rate caps in either direction: egress
+- **Bandwidth shaping** — per-interface rate caps in either direction: egress
   is shaped (queued and paced to the up-rate), ingress is policed (inbound over
   the down-rate is dropped). Control traffic is exempt.
 - **Quality of service** — outbound traffic is classified (by protocol, port, or
@@ -394,11 +394,13 @@ gravinet qos add tcp 3389 priority highest         # prioritise RDP
 gravinet qos add udp 53 priority normal
 gravinet qos list
 
-gravinet bandwidth up 150mbps interface tun0       # shape a network's uplink
-gravinet bandwidth both 1gbps
-gravinet bandwidth both 0                           # unlimited (removes the cap)
-gravinet bandwidth disable                          # lift the cap but keep the rate
-gravinet bandwidth enable                           # reapply the kept rate
+gravinet bandwidth add -iface mesh0                 # start shaping an interface
+gravinet bandwidth up 150mbps -iface mesh0          # cap its egress
+gravinet bandwidth both 1gbps -iface mesh0
+gravinet bandwidth both 0 -iface mesh0              # unlimited (removes the cap)
+gravinet bandwidth disable -iface mesh0             # lift the cap but keep the rate
+gravinet bandwidth enable -iface mesh0              # reapply the kept rate
+gravinet bandwidth del -iface mesh0                 # stop shaping it entirely
 gravinet bandwidth list
 
 gravinet host add nas 10.0.0.5 -net corp           # advertise a hostname record

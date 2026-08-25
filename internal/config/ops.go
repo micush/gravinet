@@ -2189,79 +2189,80 @@ func (c *Config) QoSClearClassDSCP(class int) error {
 	return nil
 }
 
-// ---- bandwidth ---------------------------------------------------------------
+// ---- shaping -----------------------------------------------------------------
 
-// ThrottleSet sets the up/down/both rate (bytes/s) on a network. It changes only
-// the rate, never the on/off state — turning the limiter on or off is the job of
-// ThrottleSetEnabled (the web toggle / CLI enable|disable). Keeping these
-// independent means editing a rate can't flip the enabled state out from under
-// the operator: state stays consistent through editing.
-// netName selects which limit to change: "" for this node's default, or a
-// network name for that network's override. Setting an override on a network
-// that had none starts it from the node default, so changing one direction
-// does not silently drop the other to unlimited.
-func (c *Config) ThrottleSet(netName, dir string, bps int) error {
-	t, err := c.throttleTarget(netName)
-	if err != nil {
-		return err
+// ShapingAdd creates an entry for an interface, unshaped and switched off:
+// adding a row and setting a rate on it are separate acts, and a new entry
+// that immediately started capping traffic would be a rate nobody chose.
+//
+// The interface need not exist. See IfaceShaping's doc comment for why that
+// is allowed and how both front ends report it.
+func (c *Config) ShapingAdd(iface string) error {
+	iface = strings.TrimSpace(iface)
+	if iface == "" {
+		return fmt.Errorf("name the interface to shape")
+	}
+	if strings.ContainsAny(iface, " \t/") {
+		return fmt.Errorf("%q is not an interface name", iface)
+	}
+	if c.ShapingFor(iface) != nil {
+		return fmt.Errorf("%s already has a shaping entry", iface)
+	}
+	c.Shaping = append(c.Shaping, IfaceShaping{Iface: iface})
+	return nil
+}
+
+// ShapingDelete removes an interface's entry, leaving it unshaped.
+func (c *Config) ShapingDelete(iface string) error {
+	iface = strings.TrimSpace(iface)
+	for i := range c.Shaping {
+		if c.Shaping[i].Iface == iface {
+			c.Shaping = append(c.Shaping[:i], c.Shaping[i+1:]...)
+			return nil
+		}
+	}
+	return fmt.Errorf("%s has no shaping entry", iface)
+}
+
+// ShapingSet sets the up/down/both rate (bytes/s) on an interface's entry. It
+// changes only the rate, never the on/off state — turning the limiter on or
+// off is the job of ShapingSetEnabled (the web toggle / CLI enable|disable).
+// Keeping these independent means editing a rate can't flip the enabled state
+// out from under the operator: state stays consistent through editing.
+//
+// The entry has to exist. Creating one here would turn a mistyped interface
+// name into a silent new row rather than an error, and that row would be the
+// one place the mistake did not show.
+func (c *Config) ShapingSet(iface, dir string, bps int) error {
+	s := c.ShapingFor(iface)
+	if s == nil {
+		return fmt.Errorf("%s has no shaping entry — add one first", strings.TrimSpace(iface))
+	}
+	if bps < 0 {
+		return fmt.Errorf("a rate cannot be negative")
 	}
 	switch dir {
 	case "up":
-		t.UpBytesPerSec = bps
+		s.UpBytesPerSec = bps
 	case "down":
-		t.DownBytesPerSec = bps
+		s.DownBytesPerSec = bps
 	case "both":
-		t.UpBytesPerSec = bps
-		t.DownBytesPerSec = bps
+		s.UpBytesPerSec = bps
+		s.DownBytesPerSec = bps
 	default:
 		return fmt.Errorf("direction must be up, down, or both")
 	}
 	return nil
 }
 
-// ThrottleSetEnabled turns this node's bandwidth limit on or off without
-// changing the configured rates, so a cap can be lifted temporarily and later
-// restored. Node-global since v955.
-func (c *Config) ThrottleSetEnabled(netName string, on bool) error {
-	t, err := c.throttleTarget(netName)
-	if err != nil {
-		return err
+// ShapingSetEnabled turns an interface's limit on or off without changing its
+// configured rates, so a cap can be lifted temporarily and later restored.
+func (c *Config) ShapingSetEnabled(iface string, on bool) error {
+	s := c.ShapingFor(iface)
+	if s == nil {
+		return fmt.Errorf("%s has no shaping entry — add one first", strings.TrimSpace(iface))
 	}
-	t.Enabled = on
-	return nil
-}
-
-// throttleTarget resolves a name to the Throttle a write should land on,
-// creating a network's override if it does not have one yet.
-func (c *Config) throttleTarget(netName string) (*Throttle, error) {
-	if strings.TrimSpace(netName) == "" {
-		return &c.Throttle, nil
-	}
-	n, err := c.PickNetwork(netName)
-	if err != nil {
-		return nil, err
-	}
-	if n.Throttle == nil {
-		// Seeded from the node default rather than from zero: an operator
-		// overriding the up rate on one link has not asked for its down rate
-		// to become unlimited.
-		t := c.Throttle
-		n.Throttle = &t
-	}
-	return n.Throttle, nil
-}
-
-// ThrottleClearOverride drops a network's own limit so it follows the node
-// default again.
-func (c *Config) ThrottleClearOverride(netName string) error {
-	n, err := c.PickNetwork(netName)
-	if err != nil {
-		return err
-	}
-	if n.Throttle == nil {
-		return fmt.Errorf("network %s has no bandwidth override to clear", n.Name)
-	}
-	n.Throttle = nil
+	s.Enabled = on
 	return nil
 }
 

@@ -227,7 +227,7 @@ recv_session + frag header) rather than relying on IP frag.
 6. ✅ Control plane: distributed bans, hostname→hosts sync, route redist/reject
 7. ✅ Relaying when direct mesh fails
 8. ✅ Broadcast/multicast + storm control (and ban TTL/refresh/adopt)
-9. ✅ Bandwidth throttling: per-network rate caps, up / down / both
+9. ✅ Bandwidth shaping: per-interface rate caps, up / down / both
 10. ✅ Quality of service: classify and prioritise traffic within the shaped link
 11. ✅ Firewalling: ordered rulebase, default allow-all, full rule management
 12. ✅ NAT (overlay↔underlay, overlay↔overlay)
@@ -900,10 +900,22 @@ cross-compiles to linux/windows/darwin on amd64/arm64. (Container IPv6 stays
 disabled, so v6 paths are validated by review and v4-equivalent tests; IPv6
 extension headers aren't walked when reading L4 ports for classification.)
 
-## Bandwidth throttling (step 9)
+## Bandwidth shaping (step 9)
 
-Per-network rate caps, configurable independently for each direction (set up
-only, down only, or both):
+Per-interface rate caps, configurable independently for each direction (set up
+only, down only, or both). Configuration is keyed by interface name
+(`Config.Shaping`, one `IfaceShaping` per interface) because that is what the
+shaper attaches to: one bounded queue and one drainer on one device, with no
+point at which two devices meet. Before v960 it was keyed by network — a node
+default plus per-network overrides — and resolved to an interface only when a
+`NetSpec` was built, which meant every surface showing it had to carry the
+caveat that a rate was "that much to each network, never a total shared
+between them". An interface with no entry is unshaped.
+
+Shaping happens in gravinet's own data path. No kernel qdisc is programmed, so
+an entry naming an interface this node runs no mesh network on is configuration
+nothing applies; `Config.ShapingUnenforced` names those, and both the admin UI
+and the CLI report them rather than leaving it to be discovered.
 
 - **Egress is shaped.** Outbound overlay packets enter a bounded queue, and a
   single drainer goroutine releases them paced to the up-rate by a byte token

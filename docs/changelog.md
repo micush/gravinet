@@ -2,6 +2,118 @@
 
 ---
 
+## v962 — 2026-08-25
+
+**Monitor > Packet Capture's "Capture all mesh peers" description now sits behind the help button. The disabled-control warning beside it does not.**
+
+The card opened with four lines explaining fan-out semantics — what gets captured, on which peers, what the download contains, and what it does to a capture already running elsewhere. Useful the first time, permanent scenery afterwards, and sitting between the heading and the controls where it pushed the duration picker and the button down the page.
+
+It is a description of a sub-card, which is what `.help-desc` is for. The single-node capture card directly above it carries no such paragraph, so the pair also read inconsistently; they now match.
+
+### What stayed visible
+
+The card has two other lines, and neither followed the description into hiding.
+
+The **remote-target warning** — *this always fans out from the node you're logged into, never from the peer selected above* — is a conditional explanation of why the button next to it is greyed out. Hiding it would leave a disabled control with no reason given, which is worse than the paragraph ever was. This is the same category as Upgrade's remote-node warning, which `TestSettingsAndCardProseAreHidden` has guarded against exactly this mistake since it was written; the new guard makes the same assertion for this card.
+
+The **live status line** under the controls is neither description nor warning, and `.hint` is deliberately not hidden wholesale for precisely that reason.
+
+### Verification
+
+`internal/webadmin` and `cmd/gravinet` pass uncached. `go build ./...`, `go vet` and `gofmt` clean on every package touched.
+
+The guard asserts both halves: that the description carries `.help-desc`, and that the warning does not. Checked by falsifying each independently — dropping the class off the description, then adding it to the warning — and confirming each produces its own distinct failure.
+
+Standing caveats, unchanged: no `nft`/`iptables` and no init in this container, so kernel NAT programming and the systemd calls from v951 remain unexercised against real system services. `internal/mesh`'s test build failure is pre-existing and unchanged since v948.
+
+---
+
+## v961 — 2026-08-25
+
+**Traffic > BGP's advertised-networks empty state no longer explains CIDR notation or what the list is for.**
+
+The line read *No advertised networks — click + to add a prefix (e.g. 10.0.0.0/24) to originate into BGP.* Two thirds of it was doing nothing.
+
+The example belongs where it helps, and it is already there: the add row's input and the inline editor both carry `e.g. 10.0.0.0/24` as their placeholder, visible at the moment you are actually typing a prefix. Showing it in the empty state instead teaches the format to someone who has not yet clicked anything, and then repeats it when they do.
+
+*"to originate into BGP"* restates the heading directly above it — **Advertised networks**, inside the BGP card. An empty state's job is to say why the table is empty and what to do about it, not to re-describe the section it sits in.
+
+What is left is the part only the empty state can say: `No advertised networks — click + to add a prefix.`
+
+### Verification
+
+`internal/webadmin` and `cmd/gravinet` pass uncached. `go build ./...`, `go vet` and `gofmt` clean on every package touched.
+
+No guard for this one, and none added. The string is not load-bearing — nothing keys off it, and a test asserting an empty state's exact wording would fail on every future rewording without catching a single real defect. The v960 shaping guards assert *which class* text carries, which is behaviour; this is copy.
+
+Standing caveats, unchanged: no `nft`/`iptables` and no init in this container, so kernel NAT programming and the systemd calls from v951 remain unexercised against real system services. `internal/mesh`'s test build failure is pre-existing and unchanged since v948.
+
+---
+
+## v960 — 2026-08-25
+
+**Shaping is per interface. The node-default card is gone, the remaining card is Bandwidth, and + adds a shaping entry for an interface. Also: Traffic > Routes' "Preferred peers" blurb now sits behind the help button.**
+
+### The shaper was always per interface
+
+A rate is applied to one device's shaper — one bounded queue and one drainer, with no point at which two devices meet. That has been true since step 9. The configuration said something else.
+
+Between v955 and v959 it said it in two levels: a node default (v955, so a node with no mesh network had somewhere to put a rate), plus per-network overrides (v956, after v955 collapsed genuinely different rates into one number and lost them). Both fixes were right about the problem in front of them. Neither questioned the key.
+
+The tell was the caveat. Every surface that showed the two levels also had to carry a sentence explaining that a rate meant *that much to each network, never a total shared between them* — the card said it, the CLI's `list` said it, `fillRuntimeSpec` said it in a comment, and `Throttle`'s own doc comment said it twice. Prose repeated in four places to stop one reading of the data is the data being shaped wrong. Keying the rate to the interface deletes the ambiguity rather than annotating it: there is nothing above an interface on which a total *could* be stated, so there is nothing to mistake it for.
+
+### What the page is now
+
+One card, **BANDWIDTH**, one row per entry: interface, state, up, down, carries. The node-default card above it is gone — there is no default, and no inheritance, so the `source` column (`inherited`/`override`) went with it.
+
+- **+** adds an entry. It picks from the interfaces this node's networks run on, and takes a typed name for anything else. A new entry is off and unlimited: adding a row and choosing a rate are separate acts, and a row that started capping traffic on creation would be a rate nobody chose.
+- **−** deletes the entry outright. In v956–v959 it cleared an override so the network fell back to the default; there is no default now, so this is a removal and the row goes with it. That also retires the v959 fix for `−` silently no-opping, since the case it guarded — a ticked row with no override to clear — cannot arise when the row *is* the entry.
+- **carries** replaces `network`, and answers the same question from the other side: which network this interface belongs to.
+
+An interface with no entry is unshaped. A node that has never configured shaping now shows an empty table that says so and points at `+`, rather than a row per network reading *disabled / unlimited / inherited* — which was true, and looked like a page that had failed to load.
+
+### The boundary, stated on the row
+
+gravinet shapes in its own data path: the queue and the token bucket sit on a tunnel device it owns and drains itself. It programs no kernel qdisc. So an entry naming `eth0` is a rate nothing applies — those packets never reach the code that would pace them.
+
+Such an entry is still allowed. Refusing it would also refuse a rate written for a mesh interface that is not up yet, and at the moment of writing the two are indistinguishable: both name a device that is not there. Writing one before the network that uses it is a reasonable thing to want.
+
+What is not allowed is finding out later. The `carries` cell reads **not shaped by this node**, `+` says so on creation, `bandwidth list` and `bandwidth add`/`up` say so on the CLI, and `/api/config` reports `shaping_unenforced`. This page has spent two releases fixing things that resolved successfully while doing nothing; adding a fifth would not have been an improvement on the fourth.
+
+### Config format change
+
+`Config.Shaping` is a list of `IfaceShaping` — an interface name plus the `Throttle` it already had, embedded so entries encode flat and the rate fields keep their names. `Config.Throttle` and `Network.Throttle` become legacy parse-only fields, the same treatment `Network.Firewall` got in v957.
+
+**The hoist preserves what each interface was actually getting.** A network with an override contributes that; one without contributes the node default, because that is the rate its shaper was already applying. Different rates on different links stay different — the property v956 exists to protect, which had to survive being re-keyed. Nothing is invented: an unshaped node comes back with an empty list, not a row per network saying *disabled, unlimited*.
+
+A node default on a node with **no** networks has no interface to name. It is hoisted to `mesh0` — the device the first network is given — rather than dropped. That is a guess, and it is made because the alternative is the v955 mistake: the rate is real configuration somebody typed, and a guess that lands as a visible, editable row is one an operator corrects in a double-click, where a silent discard is one they discover when a link runs uncapped. It is only ever taken when there is nothing else to go on.
+
+**It does not migrate backwards.** A v960 config on a v959 binary parses, and its shaping comes back empty.
+
+### QoS
+
+QoS needs an egress cap to reorder behind, so enabling it still switches shaping on and seeds a placeholder up-rate. That was one statement while the rate was node-global; it is now one per mesh interface. It deliberately does not touch an entry the operator wrote for a non-mesh interface — QoS does not classify there, and switching on a cap nobody asked for is a change to traffic rather than a consistency fix.
+
+### CLI
+
+`gravinet bandwidth` (alias `bw`, group form `traffic shaping`) takes `-iface NAME` where it took `-net NAME`. New: `add` and `del`. `clear` is gone — it dropped an override, and there is nothing to fall back to now. `list` reports each entry's interface, state, rates and what it carries, and names any entry nothing enforces.
+
+### Preferred peers
+
+Unrelated, and a one-line fix: the paragraph under **Traffic > Routes → Preferred peers** explaining ranking was a plain `.hint`, so it was always on screen. It is prose describing a sub-card, which is exactly what `.help-desc` is for — the class exists because `.hint` is also used for errors, empty states and live status, none of which may be hidden. It now appears with the rest of the page's notes when help is on. The empty states next to it (*no route is advertised by more than one peer right now*) stay unconditional, since those are status rather than explanation.
+
+### Verification
+
+`internal/config`, `internal/webadmin` and `cmd/gravinet` pass uncached. `go build ./...`, `go vet` and `gofmt` clean on every package touched.
+
+The migration is exercised against a real pre-v960 config file on disk — a node default plus one override plus an explicit `tun_name` — asserting on the resulting entries rather than on a return value, and separately on a node with no networks and on a config already in the v960 shape (which must not be hoisted twice over entries edited since). Guards assert the section renders one card with no `sectionCardHead('BANDWIDTH')` node default, that rows key off `dataset.iface` and not `dataset.net`, that `+` is wired and reports an unenforceable interface, that the rate cells still carry `.bw-edit`, and that the sharing caveat is gone rather than left as dead prose. Checked by reinstating the node-default card and confirming the guard fails.
+
+`TestBandwidthSectionIsNodeGlobal`, `TestBandwidthPerNetworkCellsLookEditable`, `TestBandwidthClearSaysWhenThereIsNothingToClear` and the v955/v956 throttle tests were rewritten rather than adapted. They assert the two-level model — that a default exists, that an override can be cleared back to it — which is the thing this release removes. Same treatment the v955 throttle tests got in v957: a test that passes because it agrees with a superseded design is worse than no test.
+
+Standing caveats, unchanged: no `nft`/`iptables` and no init in this container, so kernel NAT programming and the systemd calls from v951 remain unexercised against real system services. `internal/mesh`'s test build failure is pre-existing and unchanged since v948.
+
+---
+
 ## v959 — 2026-08-25
 
 **Traffic > Shaping's per-network table looked inert: the rates were editable but nothing said so, and the one button on it silently did nothing.**

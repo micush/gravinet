@@ -163,62 +163,109 @@ func TestNetworkSetRedistributeBGPRoutes(t *testing.T) {
 	}
 }
 
-func TestThrottleSetPreservesEnabled(t *testing.T) {
-	c := &Config{Networks: []Network{{Name: "n", ID: "0000000000000001", Subnet4: "10.1.0.0/16"}}}
+// Rate and on/off are independent: editing a rate must never flip the state
+// out from under the operator, in either direction.
+func TestShapingSetPreservesEnabled(t *testing.T) {
+	c := &Config{Networks: []Network{{Name: "n", ID: "0000000000000001", Subnet4: "10.1.0.0/16"}},
+		Shaping: []IfaceShaping{{Iface: "mesh0"}}}
 
 	// Disabled: setting a rate stores it but must NOT enable the limiter.
-	if err := c.ThrottleSet("", "up", 5_000_000); err != nil {
+	if err := c.ShapingSet("mesh0", "up", 5_000_000); err != nil {
 		t.Fatalf("set up: %v", err)
 	}
-	if c.Throttle.Enabled {
+	if c.ShapingFor("mesh0").Enabled {
 		t.Fatal("setting a rate while disabled must not enable the limiter")
 	}
-	if c.Throttle.UpBytesPerSec != 5_000_000 {
-		t.Fatalf("rate not stored: up=%d", c.Throttle.UpBytesPerSec)
+	if got := c.ShapingFor("mesh0").UpBytesPerSec; got != 5_000_000 {
+		t.Fatalf("rate not stored: up=%d", got)
 	}
 	// Editing the other direction must also leave the (still disabled) state alone.
-	if err := c.ThrottleSet("", "down", 1_000_000); err != nil {
+	if err := c.ShapingSet("mesh0", "down", 1_000_000); err != nil {
 		t.Fatalf("set down: %v", err)
 	}
-	if c.Throttle.Enabled {
+	if c.ShapingFor("mesh0").Enabled {
 		t.Fatal("editing a second rate must not flip the enabled state")
 	}
 
 	// Now turn it on explicitly, then edit rates: it must STAY on.
-	if err := c.ThrottleSetEnabled("", true); err != nil {
+	if err := c.ShapingSetEnabled("mesh0", true); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.ThrottleSet("", "up", 0); err != nil { // clear the up cap to unlimited
+	if err := c.ShapingSet("mesh0", "up", 0); err != nil { // clear the up cap to unlimited
 		t.Fatalf("clear up: %v", err)
 	}
-	if !c.Throttle.Enabled {
+	if !c.ShapingFor("mesh0").Enabled {
 		t.Fatal("clearing one rate must not disable an explicitly-enabled limiter")
 	}
-	if err := c.ThrottleSet("", "down", 0); err != nil { // clear the down cap too
+	if err := c.ShapingSet("mesh0", "down", 0); err != nil { // clear the down cap too
 		t.Fatalf("clear down: %v", err)
 	}
-	if !c.Throttle.Enabled {
+	if !c.ShapingFor("mesh0").Enabled {
 		t.Fatal("clearing all rates must not disable; only the toggle does that")
 	}
 }
 
-func TestThrottleSetEnabledKeepsRates(t *testing.T) {
+func TestShapingSetEnabledKeepsRates(t *testing.T) {
 	c := &Config{Networks: []Network{{Name: "n", ID: "0000000000000001", Subnet4: "10.1.0.0/16"}},
-		Throttle: Throttle{Enabled: true, UpBytesPerSec: 5_000_000}}
+		Shaping: []IfaceShaping{{Iface: "mesh0", Throttle: Throttle{Enabled: true, UpBytesPerSec: 5_000_000}}}}
 
 	// Disabling must not discard the configured rate.
-	if err := c.ThrottleSetEnabled("", false); err != nil {
+	if err := c.ShapingSetEnabled("mesh0", false); err != nil {
 		t.Fatalf("disable: %v", err)
 	}
-	if c.Throttle.Enabled || c.Throttle.UpBytesPerSec != 5_000_000 {
-		t.Fatalf("disable should keep the rate: enabled=%v up=%d", c.Throttle.Enabled, c.Throttle.UpBytesPerSec)
+	if s := c.ShapingFor("mesh0"); s.Enabled || s.UpBytesPerSec != 5_000_000 {
+		t.Fatalf("disable should keep the rate: enabled=%v up=%d", s.Enabled, s.UpBytesPerSec)
 	}
 	// Re-enabling restores the limit with the same rate.
-	if err := c.ThrottleSetEnabled("", true); err != nil {
+	if err := c.ShapingSetEnabled("mesh0", true); err != nil {
 		t.Fatalf("enable: %v", err)
 	}
-	if !c.Throttle.Enabled || c.Throttle.UpBytesPerSec != 5_000_000 {
-		t.Fatalf("enable should restore the rate: enabled=%v up=%d", c.Throttle.Enabled, c.Throttle.UpBytesPerSec)
+	if s := c.ShapingFor("mesh0"); !s.Enabled || s.UpBytesPerSec != 5_000_000 {
+		t.Fatalf("enable should restore the rate: enabled=%v up=%d", s.Enabled, s.UpBytesPerSec)
+	}
+}
+
+// Writing to an interface with no entry is an error, not a silent create: a
+// mistyped name that quietly became a new row would hide the mistake in the
+// one place it should be visible.
+func TestShapingWritesNeedAnEntry(t *testing.T) {
+	c := &Config{Networks: []Network{{Name: "n", ID: "0000000000000001", Subnet4: "10.1.0.0/16"}}}
+	if err := c.ShapingSet("mesh0", "up", 5_000_000); err == nil {
+		t.Error("setting a rate on an interface with no entry should say so")
+	}
+	if err := c.ShapingSetEnabled("mesh0", true); err == nil {
+		t.Error("enabling an interface with no entry should say so")
+	}
+	if len(c.Shaping) != 0 {
+		t.Errorf("a failed write created an entry anyway: %+v", c.Shaping)
+	}
+}
+
+// Add starts an entry off and unlimited — adding a row and choosing a rate are
+// separate acts — and refuses a duplicate rather than shadowing the first.
+func TestShapingAddAndDelete(t *testing.T) {
+	c := &Config{Networks: []Network{{Name: "n", ID: "0000000000000001", Subnet4: "10.1.0.0/16"}}}
+	if err := c.ShapingAdd("mesh0"); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	s := c.ShapingFor("mesh0")
+	if s == nil || s.Enabled || s.UpBytesPerSec != 0 || s.DownBytesPerSec != 0 {
+		t.Fatalf("a new entry should be off and unlimited, got %+v", s)
+	}
+	if err := c.ShapingAdd("mesh0"); err == nil {
+		t.Error("adding a second entry for one interface should say so")
+	}
+	if err := c.ShapingAdd(""); err == nil {
+		t.Error("adding a blank interface name should say so")
+	}
+	if err := c.ShapingDelete("mesh0"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if c.ShapingFor("mesh0") != nil {
+		t.Error("the entry survived its own deletion")
+	}
+	if err := c.ShapingDelete("mesh0"); err == nil {
+		t.Error("deleting an absent entry should report rather than no-op quietly")
 	}
 }
 

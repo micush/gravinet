@@ -1328,84 +1328,108 @@ func qosRuleMatchLabel(r config.QoSRule) string {
 	return strings.Join(parts, " + ")
 }
 
-// ---- bandwidth ---------------------------------------------------------------
+// ---- shaping -----------------------------------------------------------------
 
+// cmdBandwidth implements `gravinet bandwidth` (alias `bw`, group form
+// `traffic shaping`). Keyed by interface since v960: -iface names the
+// interface whose entry is being read or written, which is the thing the
+// shaper is actually attached to.
 func cmdBandwidth(args []string) {
 	if len(args) == 0 {
-		fatal("usage: gravinet bandwidth <up|down|both RATE|enable|disable|clear|list> [-net NAME]")
+		fatal("usage: gravinet bandwidth <list|add|del|enable|disable|up RATE|down RATE|both RATE> [-iface NAME]")
 	}
 	sub := args[0]
-	// -net picks which limit to change: absent for this node's default, which
-	// applies to every network without one of its own; present for that
-	// network's override.
-	netName, rest := extractOpt(args[1:], "net")
+	iface, rest := extractOpt(args[1:], "iface")
 	cfg, path, rest := openCfg(rest)
 
 	if sub == "list" {
-		d := cfg.Throttle
-		fmt.Printf("%-16s %-9s up=%s down=%s\n", "(node default)", onOff(d.Enabled),
-			rateStr(d.UpBytesPerSec), rateStr(d.DownBytesPerSec))
-		for _, n := range cfg.Networks {
-			t := cfg.EffectiveThrottle(n)
-			src := "inherited"
-			if n.Throttle != nil {
-				src = "override"
-			}
-			fmt.Printf("%-16s %-9s up=%s down=%s (%s, tun=%s)\n",
-				n.Name, onOff(t.Enabled), rateStr(t.UpBytesPerSec), rateStr(t.DownBytesPerSec), src, n.TUNName)
+		if len(cfg.Shaping) == 0 {
+			fmt.Println("no interface is shaped")
 		}
-		if len(cfg.Networks) > 1 {
-			// Worth saying outright: a rate is applied to one tunnel's shaper,
-			// so the default is that much to each network, not a total.
-			fmt.Println("  a rate applies to each network separately, never shared between them")
+		mesh := map[string]string{}
+		for i, n := range cfg.Networks {
+			mesh[cfg.IfaceForNetworkAt(i)] = n.Name
+		}
+		for _, sh := range cfg.Shaping {
+			carries := "not a gravinet interface — nothing enforces this"
+			if name, ok := mesh[sh.Iface]; ok {
+				carries = "carries " + name
+			}
+			fmt.Printf("%-16s %-9s up=%s down=%s (%s)\n", sh.Iface, onOff(sh.Enabled),
+				rateStr(sh.UpBytesPerSec), rateStr(sh.DownBytesPerSec), carries)
+		}
+		// Named once, at the end, rather than left to be inferred from the
+		// per-row note above: gravinet shapes in its own data path, so an
+		// entry on an interface it does not carry a network on is inert.
+		if un := cfg.ShapingUnenforced(); len(un) > 0 {
+			noun, poss := "this interface", "its"
+			if len(un) > 1 {
+				noun, poss = "these interfaces", "their"
+			}
+			fmt.Printf("  %s: gravinet moves no packets on %s, so %s rate is configured but not applied\n",
+				strings.Join(un, ", "), noun, poss)
 		}
 		return
 	}
 
-	if sub == "clear" {
-		if netName == "" {
-			fatal("usage: gravinet bandwidth clear -net NAME  (drops a network's override so it follows the node default)")
-		}
-		if err := cfg.ThrottleClearOverride(netName); err != nil {
+	if iface == "" {
+		fatal("usage: gravinet bandwidth %s -iface NAME", sub)
+	}
+
+	switch sub {
+	case "add":
+		if err := cfg.ShapingAdd(iface); err != nil {
 			fatal("%v", err)
 		}
-		fmt.Printf("cleared the bandwidth override on %s; it now follows the node default\n", netName)
+		msg := fmt.Sprintf("added a shaping entry for %s, off and unlimited", iface)
+		if !cfgHasMeshIface(cfg, iface) {
+			msg += "\n  note: this node carries no mesh network on " + iface + ", so nothing will enforce a rate set here"
+		}
+		fmt.Println(msg)
 		commitCfg(cfg, path)
 		return
-	}
-
-	target := "node default"
-	if netName != "" {
-		target = netName
-	}
-
-	if sub == "enable" || sub == "disable" {
-		if err := cfg.ThrottleSetEnabled(netName, sub == "enable"); err != nil {
+	case "del":
+		if err := cfg.ShapingDelete(iface); err != nil {
 			fatal("%v", err)
 		}
-		fmt.Printf("%sd bandwidth limit on %s\n", sub, target)
+		fmt.Printf("removed the shaping entry for %s; it is now unshaped\n", iface)
+		commitCfg(cfg, path)
+		return
+	case "enable", "disable":
+		if err := cfg.ShapingSetEnabled(iface, sub == "enable"); err != nil {
+			fatal("%v", err)
+		}
+		fmt.Printf("%sd shaping on %s\n", sub, iface)
 		commitCfg(cfg, path)
 		return
 	}
 
 	if len(rest) == 0 {
-		fatal("usage: gravinet bandwidth %s RATE [-net NAME]", sub)
+		fatal("usage: gravinet bandwidth %s RATE -iface NAME", sub)
 	}
 	bps := mustRate(rest[0])
-	if err := cfg.ThrottleSet(netName, sub, bps); err != nil {
+	if err := cfg.ShapingSet(iface, sub, bps); err != nil {
 		fatal("%v", err)
 	}
-	msg := fmt.Sprintf("set %s bandwidth on %s to %s", sub, target, rateStr(bps))
-	on := cfg.Throttle.Enabled
-	if netName != "" {
-		n, _ := cfg.PickNetwork(netName)
-		on = cfg.EffectiveThrottle(*n).Enabled
+	msg := fmt.Sprintf("set %s bandwidth on %s to %s", sub, iface, rateStr(bps))
+	if sh := cfg.ShapingFor(iface); sh != nil && !sh.Enabled {
+		msg += " (shaping is off — run 'gravinet bandwidth enable -iface " + iface + "' to apply it)"
 	}
-	if !on {
-		msg += " (limiting is off — run 'gravinet bandwidth enable' to apply it)"
+	if !cfgHasMeshIface(cfg, iface) {
+		msg += "\n  note: this node carries no mesh network on " + iface + ", so nothing enforces this rate"
 	}
 	fmt.Println(msg)
 	commitCfg(cfg, path)
+}
+
+// cfgHasMeshIface reports whether one of this node's networks runs on iface.
+func cfgHasMeshIface(cfg *config.Config, iface string) bool {
+	for _, name := range cfg.MeshIfaces() {
+		if name == iface {
+			return true
+		}
+	}
+	return false
 }
 
 // ---- list (whole config) -----------------------------------------------------

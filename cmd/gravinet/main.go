@@ -50,7 +50,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "959"
+	version = "962"
 	commit  = "none"
 )
 
@@ -1201,7 +1201,7 @@ func cmdRun(args []string) {
 					// Already up: apply the hot-reloadable runtime settings + keys.
 					var spec mesh.NetSpec
 					spec.ID = id
-					fillRuntimeSpec(&spec, n, newCfg.EffectiveFirewallExempt(), newCfg.NATStateTimeout, newCfg.FirewallServices, newCfg.BGP, newCfg.NAT, newCfg.QoS, newCfg.EffectiveThrottle(n), newCfg.Firewall, newCfg.FirewallRulesFor(n))
+					fillRuntimeSpec(&spec, n, newCfg.EffectiveFirewallExempt(), newCfg.NATStateTimeout, newCfg.FirewallServices, newCfg.BGP, newCfg.NAT, newCfg.QoS, newCfg.ShapingForNetwork(n), newCfg.Firewall, newCfg.FirewallRulesFor(n))
 					// fillRuntimeSpec doesn't resolve seeds (only buildOneNetSpec does
 					// at startup); resolve them here so a seed added at runtime is
 					// dialed live via ReloadRuntime's seed merge, and one just
@@ -2672,10 +2672,10 @@ func buildOneNetSpec(n config.Network, cfg *config.Config, overlays []netip.Pref
 	if err != nil {
 		return mesh.NetSpec{}, nil, fmt.Errorf("bad keys: %w", err)
 	}
-	name := n.TUNName
-	if name == "" {
-		name = fmt.Sprintf("mesh%d", idx)
-	}
+	// Same name Config.IfaceForNetworkAt reports, because the shaping entry
+	// for this network is looked up by it (v960) and a device created under
+	// any other name would be shaped by nothing.
+	name := cfg.IfaceForNetworkAt(idx)
 	queues := tunQueuesOrDefault(cfg.TunQueuesValue())
 	dev, extraQueues, err := newTunRetryingMQ(name, n.MTU, queues)
 	if err != nil {
@@ -2796,7 +2796,7 @@ func buildOneNetSpec(n config.Network, cfg *config.Config, overlays []netip.Pref
 	spec.MulticastPPS = n.StormControl.MulticastPPS
 	spec.StormBurst = n.StormControl.Burst
 
-	fillRuntimeSpec(&spec, n, cfg.EffectiveFirewallExempt(), cfg.NATStateTimeout, cfg.FirewallServices, cfg.BGP, cfg.NAT, cfg.QoS, cfg.EffectiveThrottle(n), cfg.Firewall, cfg.FirewallRulesFor(n))
+	fillRuntimeSpec(&spec, n, cfg.EffectiveFirewallExempt(), cfg.NATStateTimeout, cfg.FirewallServices, cfg.BGP, cfg.NAT, cfg.QoS, cfg.ShapingForNetwork(n), cfg.Firewall, cfg.FirewallRulesFor(n))
 	return spec, dev, nil
 }
 
@@ -2972,13 +2972,12 @@ func fillRuntimeSpec(spec *mesh.NetSpec, n config.Network, exempts []config.Fire
 		}
 	}
 
-	// Bandwidth throttling (off by default).
-	// The rate actually applied to this tunnel: the network's own override if
-	// it has one, otherwise the node default. Resolved by the caller via
-	// Config.EffectiveThrottle — a node default means "this much to each
-	// network that has not been given its own", never a total shared between
-	// them, because the shaper is one queue and one drainer per tunnel with no
-	// point at which two meet.
+	// Bandwidth shaping (off by default).
+	// The rate applied to this tunnel: the entry for the interface it runs
+	// on, resolved by the caller via Config.ShapingForNetwork. An interface
+	// with no entry is unshaped. Since v960 the configuration is keyed by
+	// interface, which is where the shaper always lived — one bounded queue
+	// and one drainer on one device, with no point at which two meet.
 	if thr.Enabled {
 		spec.ThrottleUp = thr.UpBytesPerSec
 		spec.ThrottleDown = thr.DownBytesPerSec
@@ -3437,10 +3436,7 @@ func clearStaleDNSForwards(cfg *config.Config) {
 			continue
 		}
 		tag := fmt.Sprintf("%016x", id)
-		iface := n.TUNName
-		if iface == "" {
-			iface = fmt.Sprintf("mesh%d", idx) // must match buildNetSpecs' auto-naming
-		}
+		iface := cfg.IfaceForNetworkAt(idx)
 		if err := resolver.Clear(tag, iface); err != nil {
 			logx.Debugf("startup: clearing stale dns forwards (tag %s, iface %s): %v", tag, iface, err)
 		}

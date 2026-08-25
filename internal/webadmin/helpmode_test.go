@@ -250,6 +250,71 @@ func TestSettingsAndCardProseAreHidden(t *testing.T) {
 	}
 }
 
+// Preferred peers' explanatory paragraph is a description of a sub-card, so
+// it belongs behind the help toggle like every other one. It shipped as a
+// plain .hint, which meant five sentences of ranking semantics sat on the
+// Routes page permanently, above a control most operators never touch.
+//
+// The empty states beside it must NOT follow it into hiding: "no route is
+// advertised by more than one peer right now" is why the card is empty, and a
+// card that renders as a bare heading with help off would be worse than the
+// paragraph ever was.
+func TestPreferredPeersProseIsBehindHelp(t *testing.T) {
+	src := uiFuncSrc(t, "buildPreferredPeers")
+	i := strings.Index(src, "Pick the routes you want to choose an exit for")
+	if i < 0 {
+		t.Fatal("the Preferred peers description is gone")
+	}
+	open := strings.LastIndex(src[:i], "class=\"")
+	if open < 0 || !strings.Contains(src[open:i], "help-desc") {
+		t.Error("the Preferred peers description is not .help-desc, so it shows whether or not help is on")
+	}
+	for _, empty := range []string{
+		"No route is advertised by more than one peer right now",
+		"Search above to pick one",
+	} {
+		j := strings.Index(src, empty)
+		if j < 0 {
+			t.Fatalf("empty state %q is gone", empty)
+		}
+		o := strings.LastIndex(src[:j], "class=\"")
+		if o >= 0 && strings.Contains(src[o:j], "help-desc") {
+			t.Errorf("empty state %q was hidden behind help; it explains why the card is empty", empty)
+		}
+	}
+}
+
+// Monitor > Packet Capture's "Capture all mesh peers" description belongs
+// behind the help toggle, like every other sub-card description. It shipped as
+// a plain .hint, so a four-line explanation of fan-out semantics sat above the
+// controls permanently — and the single-node capture card directly above it
+// carries no such paragraph, so the pair read inconsistently too.
+//
+// The card's other two lines must NOT follow it into hiding. The remote-target
+// warning is the same category as Upgrade's (guarded above): a conditional
+// explanation of why the control next to it is disabled, which with help off
+// would leave a greyed-out button and no reason given. The unsupported-host
+// line on the sibling card is likewise status.
+func TestMeshCaptureProseIsBehindHelpButWarningIsNot(t *testing.T) {
+	src := uiFuncSrc(t, "infoCaptureMesh")
+	i := strings.Index(src, "Starts a capture on the mesh interface")
+	if i < 0 {
+		t.Fatal("the mesh capture description is gone")
+	}
+	open := strings.LastIndex(src[:i], `class="`)
+	if open < 0 || !strings.Contains(src[open:i], "help-desc") {
+		t.Error("the mesh capture description is not .help-desc, so it shows whether or not help is on")
+	}
+	j := strings.Index(src, "This always fans out from the node you")
+	if j < 0 {
+		t.Fatal("the remote-target warning is gone")
+	}
+	o := strings.LastIndex(src[:j], `class="`)
+	if o >= 0 && strings.Contains(src[o:j], "help-desc") {
+		t.Error("the remote-target warning was reclassed as help-desc; it explains why the control is disabled, not what the card does")
+	}
+}
+
 // Every section must be able to reveal what it hides. .settings-desc and
 // .help-desc are hidden by CSS wherever they appear, so a section with hidden
 // text and no toggle would have no way to bring it back — which is why the

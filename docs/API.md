@@ -245,7 +245,7 @@ cookie, or a qualifying fleet-manager mesh session — see
 | POST | `/api/udp-gso` | UDP GSO/GRO toggle (Linux amd64/arm64 only) |
 | POST | `/api/socket-buffer` | Per-UDP-socket receive/send buffer size, in MB |
 | POST | `/api/qos` | Add/edit/remove QoS classification rules |
-| POST | `/api/bandwidth` | Set per-network bandwidth caps |
+| POST | `/api/bandwidth` | Add, remove and set per-interface bandwidth caps |
 | GET/POST | `/api/exempt` | Node-global always-allowed traffic list |
 | GET/POST | `/api/keepalive` | NAT keepalive interval |
 | GET/POST | `/api/peertimeout` | Dead-session timeout |
@@ -341,7 +341,7 @@ per-network.
 ### `GET /api/config`
 
 The stored, secret-free configuration — network addressing, seeds,
-firewall/NAT/QoS/throttle settings, key *metadata* (never key material
+firewall/NAT/QoS/shaping settings, key *metadata* (never key material
 itself; see [Keys](#keys) for how to reveal an actual key), plus node-wide
 settings. This is what every editor page loads before the operator makes
 a change; a script driving the API the same way should generally read this
@@ -366,7 +366,7 @@ first to see current values before deciding what to send.
       "redistribute_bgp_metric": 0,
       "nat": { /* config.NAT */ },
       "qos": { /* config.QoS */ },
-      "throttle": { /* config.Throttle */ },
+      "iface": "mesh0",
       "firewall": { /* config.Firewall */ },
       "hosts_advertise": [ /* config.HostRecord */ ],
       "hosts_reject": [ /* config.HostReject */ ],
@@ -768,15 +768,33 @@ unioned with the literal `proto`/`port`.
 ### `POST /api/bandwidth`
 
 ```json
-{"op": "enable", "net": "office"}
+{"op": "add", "iface": "mesh0"}
 ```
 ```json
-{"net": "office", "dir": "up", "bps": 10000000}
+{"iface": "mesh0", "dir": "up", "bps": 10000000}
 ```
 
-`op: "enable"`/`"disable"` toggles throttling for the network; any other
-call sets a directional cap (`dir` one of `"up"`/`"down"`/`"both"`, `bps`
-in bytes/sec, `0` = unlimited).
+Shaping is keyed by interface, which is what the shaper is attached to.
+`iface` is a kernel interface name — for a mesh network, its `tun_name`
+or the `mesh<N>` assigned from its position, reported as `iface` on each
+network in `GET /api/config`.
+
+| op | fields | effect |
+|---|---|---|
+| `add` | `iface` | Start shaping an interface, off and unlimited |
+| `delete` | `iface` | Stop shaping it entirely |
+| `enable` / `disable` | `iface` | Lift or reapply the cap without losing the rates |
+| *(none)* | `iface`, `dir`, `bps` | Set a directional cap (`dir` one of `"up"`/`"down"`/`"both"`, `bps` in bytes/sec, `0` = unlimited) |
+
+An interface with no entry is unshaped. Rate writes need an existing
+entry — `add` first — so a mistyped name is an error rather than a new
+row nobody meant to create.
+
+`iface` need not name an interface that exists: a rate can be written
+before the network that carries it. But gravinet shapes inside its own
+data path and programs no kernel qdisc, so an entry on an interface it
+runs no mesh network on is configured and not applied.
+`GET /api/config` reports those under `shaping_unenforced`.
 
 ## Always-allowed traffic (exempt list)
 
@@ -2165,16 +2183,20 @@ curl -sk -b cookies.txt -X POST $HOST/api/nat \
   -d '{"op":"add","net":"office","iface":"eth0"}'
 ```
 
-### Cap a network's bandwidth
+### Cap an interface's bandwidth
 
 ```bash
 curl -sk -b cookies.txt -X POST $HOST/api/bandwidth \
-  -d '{"net":"office","dir":"up","bps":10000000}'
+  -d '{"op":"add","iface":"mesh0"}'
+curl -sk -b cookies.txt -X POST $HOST/api/bandwidth \
+  -d '{"iface":"mesh0","dir":"up","bps":10000000}'
+curl -sk -b cookies.txt -X POST $HOST/api/bandwidth \
+  -d '{"op":"enable","iface":"mesh0"}'
 ```
 
 10,000,000 bytes/sec ≈ 80 Mbit/s. Use `"dir":"down"` or `"dir":"both"` for
-the other directions; `{"op":"enable"}` / `{"op":"disable"}` turns
-throttling on/off without touching the cap itself.
+the other directions; `{"op":"enable"}` / `{"op":"disable"}` lifts or
+reapplies the cap without touching the rates themselves.
 
 ### Generate a new rotation key and reveal it
 

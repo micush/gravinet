@@ -306,38 +306,63 @@ func TestQoSSectionIsNodeGlobal(t *testing.T) {
 	}
 }
 
-// The bandwidth limit is node-global from v955 — one card, no networks gate.
-func TestBandwidthSectionIsNodeGlobal(t *testing.T) {
+// Shaping is keyed by interface from v960: one card, one row per entry, and
+// no second card above it holding a node-wide default.
+func TestShapingSectionIsPerInterface(t *testing.T) {
 	sec := between(t, indexHTML, "function secBandwidth(c) {", "\n}")
 	if strings.Contains(sec, "No networks.") {
-		t.Error("the bandwidth section is gated on a mesh network existing again")
+		t.Error("the shaping section is gated on a mesh network existing again")
 	}
-	// The section does loop networks — to build the per-network override rows
-	// — so a loop is not the tell. A card per network is: that is the shape
-	// that carried the "No networks." gate with it.
 	if strings.Contains(sec, "netCardHead(cf") {
-		t.Error("the bandwidth section renders a card per mesh network again")
+		t.Error("the shaping section renders a card per mesh network again")
 	}
-	// The node default must be rendered before the networks are consulted, or
-	// a node with none has nowhere to set a rate.
-	if strings.Index(sec, "sectionCardHead('BANDWIDTH'") > strings.Index(sec, "state.cfg") {
-		t.Error("the node default is rendered after the network list, so a node with no networks cannot set a rate")
+	// The node default card is gone, and with it the two-level model. Its
+	// card head is the tell: it carried the node-wide enable toggle that
+	// switched every network's limiter at once.
+	if strings.Contains(sec, "sectionCardHead('BANDWIDTH'") {
+		t.Error("the node-default bandwidth card is back, so shaping has two levels again")
 	}
-	if !strings.Contains(sec, "sectionCardHead('BANDWIDTH'") {
-		t.Error("the bandwidth card no longer uses the node-global card head")
+	// Every row addresses an interface. A row keyed by network would mean the
+	// resolution step v960 removed had come back somewhere.
+	if !strings.Contains(sec, "tr.dataset.iface") {
+		t.Error("the rows no longer address an interface, so entries cannot be edited")
 	}
-	// A rate applies to one tunnel's shaper, so the default is that much to
-	// each network without an override, never a total. Ambiguous until said.
-	if !strings.Contains(sec, "never shared between them") {
-		t.Error("the card no longer says a rate applies to each network rather than being shared")
+	if strings.Contains(sec, "tr.dataset.net") {
+		t.Error("the rows address a network again rather than the interface being shaped")
 	}
-	// Per-network overrides have to be reachable, or a node with different
-	// rates on different links has nowhere to express them — the v955 mistake.
-	if !strings.Contains(sec, "clear-override") {
-		t.Error("a network's bandwidth override cannot be cleared back to the node default")
+	// There is no default to revert to any more, so - removes the entry.
+	if strings.Contains(sec, "clear-override") {
+		t.Error("the - button clears an override again, but nothing is inherited now")
 	}
-	if !strings.Contains(sec, "tr.dataset.net") {
-		t.Error("the per-network rows no longer address a network, so overrides cannot be set")
+	if !strings.Contains(sec, "op:'delete'") {
+		t.Error("- no longer deletes the shaping entry")
+	}
+	// With one flat list there is no total to mistake a rate for, so the
+	// caveat the old model needed must not survive as dead prose.
+	if strings.Contains(sec, "never shared between them") {
+		t.Error("the card still warns about sharing, a caveat only the old two-level model needed")
+	}
+}
+
+// + must be wired, or an interface can only ever be shaped by hand-editing
+// the config: there is no per-network row appearing on its own any more.
+func TestShapingCanAddAnInterface(t *testing.T) {
+	sec := between(t, indexHTML, "function secBandwidth(c) {", "\n}")
+	if !strings.Contains(sec, "table._rowAdd") {
+		t.Fatal("the shaping card has no + button, so no interface can be shaped")
+	}
+	add := between(t, indexHTML, "function bwAddRow(table, carries){", "\n}")
+	if !strings.Contains(add, "op:'add'") {
+		t.Error("the + row does not create a shaping entry")
+	}
+	// The picker offers this node's mesh interfaces but must not restrict to
+	// them: a rate written before its network is up names a device that is
+	// not there, and so does a typo — refusing both would refuse the first.
+	if !strings.Contains(add, "bwe-iface") {
+		t.Error("the + row has no free-text field, so only existing interfaces can be shaped")
+	}
+	if !strings.Contains(add, "carries.has(iface)") {
+		t.Error("adding an interface this node shapes nothing on no longer says so")
 	}
 }
 
@@ -394,47 +419,79 @@ func TestFirewallHandlerIsConfigFirst(t *testing.T) {
 	}
 }
 
-// The per-network bandwidth rows have to look editable.
+// The rate cells have to look editable.
 //
 // They shipped in v956 as bare <td class="bw-cell"> — a class with no styling
 // at all — while the node default above used .bw-edit, which carries the
 // dotted underline and hover colour that say "double-click me". The cells were
-// wired up and worked; they just looked like dead text, so on a node with one
-// network the whole table read as inert: every cell said unlimited/inherited
-// and nothing suggested a way in.
-func TestBandwidthPerNetworkCellsLookEditable(t *testing.T) {
+// wired up and worked; they just looked like dead text. v960 removed the node
+// default, so .bw-edit on the rows is now the only affordance on the page and
+// losing it would leave nothing at all.
+func TestShapingRateCellsLookEditable(t *testing.T) {
 	sec := between(t, indexHTML, "function secBandwidth(c) {", "\n}")
-	rows := between(t, sec, "for (const cf of state.cfg)", "const t = $(")
+	rows := between(t, sec, "for (const e of entries)", "if (!entries.length)")
 	for _, dir := range []string{`data-dir="up"`, `data-dir="down"`} {
 		i := strings.Index(rows, dir)
 		if i < 0 {
-			t.Fatalf("no %s cell in the per-network rows", dir)
+			t.Fatalf("no %s cell in the shaping rows", dir)
 		}
-		cell := rows[i:min(i+200, len(rows))]
+		cell := rows[i:min(i+220, len(rows))]
 		if !strings.Contains(cell, "bw-edit") {
 			t.Errorf("the %s cell does not carry .bw-edit, so it has no affordance and reads as dead text: %s", dir, cell)
 		}
 	}
-	// And the explanation is unconditional. Gating it on two or more networks
-	// meant the single-network node — the one where the table looks most inert
-	// — was the one told nothing.
-	if strings.Contains(sec, "if ((state.cfg||[]).length > 1)\n    oc.appendChild") {
-		t.Error("the how-to-use hint is shown only when there is more than one network")
-	}
-	if !strings.Contains(sec, "Double-click a network") {
-		t.Error("the per-network card no longer says how to give a network its own rate")
+}
+
+// An empty table must say what to do rather than render as a blank card: with
+// no node default and no rows appearing on their own, a fresh node's Shaping
+// page is empty by default and + is the only way forward.
+func TestShapingEmptyStateSaysWhatToDo(t *testing.T) {
+	sec := between(t, indexHTML, "function secBandwidth(c) {", "\n}")
+	if !strings.Contains(sec, "No interface is shaped") {
+		t.Error("an unshaped node gets a blank table with nothing telling it about +")
 	}
 }
 
-// Ticking a row with no override and pressing - used to resolve as a
-// successful no-op, which reads as a broken button.
-func TestBandwidthClearSaysWhenThereIsNothingToClear(t *testing.T) {
+// The card's how-to prose belongs behind the help toggle, like every other
+// sub-card description. The pre-v960 version ("Double-click a network's up or
+// down rate to give it its own limit...") was a plain .hint and so was always
+// on screen; v959 had even made it unconditional, which was right for a page
+// whose table looked inert but is no longer needed now the empty state and the
+// + button carry that job.
+//
+// The two other pieces of text on the card must NOT follow it into hiding.
+// Both are status rather than explanation: with help off, a card that showed a
+// bare empty table, or a row that looked enforced when it is not, would be
+// worse than the paragraph ever was.
+func TestShapingProseIsBehindHelpButStatusIsNot(t *testing.T) {
 	sec := between(t, indexHTML, "function secBandwidth(c) {", "\n}")
-	rm := between(t, sec, "table._rowRemove", "c.appendChild(oc)")
-	if strings.Contains(rm, "Promise.resolve({ok:true})") {
-		t.Error("clearing an override on a row that has none silently succeeds again")
+	i := strings.Index(sec, "Use + to shape an interface")
+	if i < 0 {
+		t.Fatal("the shaping card no longer says how to use it")
 	}
-	if !strings.Contains(rm, "noticeModal") {
-		t.Error("the clear button no longer tells the operator when there is nothing to clear")
+	open := strings.LastIndex(sec[:i], `class="`)
+	if open < 0 || !strings.Contains(sec[open:i], "help-desc") {
+		t.Error("the shaping how-to is not .help-desc, so it shows whether or not help is on")
+	}
+	for _, status := range []string{"not shaped by this node", "No interface is shaped"} {
+		j := strings.Index(sec, status)
+		if j < 0 {
+			t.Fatalf("%q is gone", status)
+		}
+		o := strings.LastIndex(sec[:j], `class="`)
+		if o >= 0 && strings.Contains(sec[o:j], "help-desc") {
+			t.Errorf("%q was hidden behind help; it is status, not an explanation", status)
+		}
+	}
+}
+
+// An entry gravinet cannot enforce has to say so on the row. gravinet shapes
+// in its own data path and programs no kernel qdisc, so a rate on an interface
+// it carries no network on is configuration that does nothing — the exact
+// shape of silent failure this page has been fixing since v959.
+func TestShapingSaysWhenItCannotEnforceAnEntry(t *testing.T) {
+	sec := between(t, indexHTML, "function secBandwidth(c) {", "\n}")
+	if !strings.Contains(sec, "not shaped by this node") {
+		t.Error("a shaping entry on an interface gravinet moves no packets on renders as if it were in force")
 	}
 }

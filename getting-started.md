@@ -80,7 +80,7 @@ Click **+**, type a name (e.g. `corp`), and click **create**. That's it — this
 
 This applies immediately — no restart, and no interruption to any other network you already have running. (An earlier version of this daemon restarted the service for every network change; that's no longer true for add/delete/enable/disable/join — only changing a network's address range still needs one, since re-addressing a live interface genuinely isn't something a hot reload can do.)
 
-You can belong to more than one network — each is a fully independent overlay with its own key, address range, and per-network settings (routes, firewall, NAT, QoS, bandwidth, DNS, hosts). Just click **+** again for another one; every per-network page then shows one card per network, so there's never any ambiguity about which one you're editing.
+You can belong to more than one network — each is a fully independent overlay with its own key, address range, and per-network settings (routes, firewall, NAT, QoS, DNS, hosts). Just click **+** again for another one; every per-network page then shows one card per network, so there's never any ambiguity about which one you're editing.
 
 ---
 
@@ -236,7 +236,11 @@ Click **+** to add a rule, double-click to edit it or toggle its state, tick row
 
 ## 14. Shaping (bandwidth)
 
-Go to **Traffic → Shaping**. A per-network rate cap, set independently for each direction: egress is shaped (queued and paced to the rate), ingress is policed (anything over the rate is dropped rather than queued). Double-click a rate to set it — type a number and pick a unit, or clear the number for unlimited. Double-click the tag above the rate to turn the cap on or off without losing the configured number, so you can lift it temporarily and reapply the same rate later.
+Go to **Traffic → Shaping**. One row per interface you want to limit, set independently for each direction: egress is shaped (queued and paced to the rate), ingress is policed (anything over the rate is dropped rather than queued).
+
+Click **+** and pick an interface — the picker offers the ones your mesh networks run on, or you can type another name. A new entry starts off and unlimited, so nothing changes until you set a rate. Double-click a rate to set it: type a number and pick a unit, or clear the number for unlimited. Double-click the state tag to turn the cap off without losing the configured number, so you can lift it temporarily and reapply the same rate later. Tick a row and use **−** to stop shaping that interface entirely; an interface with no row is unshaped.
+
+The **carries** column says which network an entry is attached to. gravinet shapes inside its own data path rather than programming the kernel, so a row on an interface it runs no mesh network on says *not shaped by this node* — the rate is saved but nothing applies it. That's expected if the network using it isn't up yet, and worth a second look otherwise.
 
 ---
 

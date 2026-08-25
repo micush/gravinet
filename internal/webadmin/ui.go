@@ -597,7 +597,7 @@ const indexHTML = `<!doctype html>
 <script>
 const $ = (h) => { const d=document.createElement('div'); d.innerHTML=h.trim(); return d.firstChild; };
 const app = document.getElementById('app');
-const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, natCfg:{enabled:false, rules:[]}, qosCfg:{enabled:false, rules:[], classes:5, default_class:3}, throttleCfg:{enabled:false}, firewallCfg:{enabled:false, rules:[]}, geoipLookup:false, enableUpnp:false, allowRemoteShell:false, loginBanMaxFailures:3, loginBanSeconds:900, tlsSource:'self-signed', tlsCommonName:'', tlsNotAfter:'', configHistoryLimit:250, configHistoryCount:0, shellSupported:true, bgpSupported:false, snmpSupported:false, ipv6raSupported:false, dhcpSupported:false, lldpSupported:false, syslogSupported:false, selfId:null, selfHostname:'', targetSeq:0, pendingBgpHighlight:null, workerThreads:0, tunQueues:0, tunQueuesSupported:true, udpGSO:false, udpGSOSupported:true, socketBufferMB:16, socketBufferMaxMB:256, perfRestartPending:false, loginBanRestartPending:false, tableView:{} };
+const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, natCfg:{enabled:false, rules:[]}, qosCfg:{enabled:false, rules:[], classes:5, default_class:3}, shaping:[], shapingUnenforced:[], firewallCfg:{enabled:false, rules:[]}, geoipLookup:false, enableUpnp:false, allowRemoteShell:false, loginBanMaxFailures:3, loginBanSeconds:900, tlsSource:'self-signed', tlsCommonName:'', tlsNotAfter:'', configHistoryLimit:250, configHistoryCount:0, shellSupported:true, bgpSupported:false, snmpSupported:false, ipv6raSupported:false, dhcpSupported:false, lldpSupported:false, syslogSupported:false, selfId:null, selfHostname:'', targetSeq:0, pendingBgpHighlight:null, workerThreads:0, tunQueues:0, tunQueuesSupported:true, udpGSO:false, udpGSOSupported:true, socketBufferMB:16, socketBufferMaxMB:256, perfRestartPending:false, loginBanRestartPending:false, tableView:{} };
 // setTarget is the only place state.target is ever assigned — bumping
 // targetSeq alongside it, once, exactly when the *selection itself* actually
 // changes. load()/startPolling()/refreshCluster() each capture targetSeq
@@ -1069,7 +1069,7 @@ const NAV_GROUPS = [
     ['nat', 'port forwarding and address translation for this node’s traffic'],
     ['qos', 'traffic prioritization and queuing order'],
     ['ipv6ra', 'IPv6 router advertisements \u2014 announce this node as a router on a LAN, with DNS'],
-    ['bandwidth', 'rate limiting per peer or network'],
+    ['bandwidth', 'rate limiting per interface'],
     ['routes', 'additional subnets redistributed across the mesh'],
     // BGP/BFD configuration — gravinet owns the config and drives the FRR
     // daemon. Present in the model unconditionally but shown only when this
@@ -1357,7 +1357,10 @@ async function load() {
   // rather than on each network. A node with no mesh networks still has one.
   state.natCfg = (c.body && c.body.nat) || {enabled:false, rules:[]};
   state.qosCfg = (c.body && c.body.qos) || {enabled:false, rules:[], classes:5, default_class:3};
-  state.throttleCfg = (c.body && c.body.throttle) || {enabled:false};
+  // Shaping is node-global and keyed by interface from v960, so it rides on
+  // the config response itself rather than on each network.
+  state.shaping = (c.body && c.body.shaping) || [];
+  state.shapingUnenforced = (c.body && c.body.shaping_unenforced) || [];
   // The firewall rulebase is node-global from v957 and comes from /api/firewall
   // (with live hit counters merged in), not from the per-network config.
   state.geoipLookup = !!(c.body && c.body.geoip_lookup);
@@ -2746,7 +2749,7 @@ function splitRate(bps){
 // startBwEdit turns an up/down rate label into an inline number field + unit
 // dropdown on double-click. Enter or focus leaving the editor commits, Escape
 // cancels. Clearing the number means unlimited for that direction.
-function startBwEdit(span, netName, dir, curBps){
+function startBwEdit(span, iface, dir, curBps){
   if (span.querySelector('input')) return;
   const cur = splitRate(curBps);
   const grp = $('<span class="bw-editing"></span>');
@@ -2765,7 +2768,7 @@ function startBwEdit(span, netName, dir, curBps){
     if (raw===''){ bps = 0; } // unlimited
     else { const n = parseFloat(raw); if (isNaN(n) || n<0){ await noticeModal('Enter a number (e.g. 50), or clear it for unlimited.'); num.focus(); return; } bps = toBps(n, unit.value); }
     done=true;
-    await edit('/api/bandwidth', { net:netName, dir, bps });
+    await edit('/api/bandwidth', { iface, dir, bps });
   };
   num.onkeydown = e => { if (e.key==='Enter'){ e.preventDefault(); commit(); } else if (e.key==='Escape'){ e.preventDefault(); restore(); } };
   unit.onkeydown = num.onkeydown;
@@ -3650,7 +3653,7 @@ const HELP = {
     },
   },
   'qos': {
-    topic: 'Quality of Service modifies traffic priority. There are 5 priority classes - 0 = highest to 4 = lowest/bulk. Unmatched traffic uses class 3 (normal). Strict priority is maintained \u2014 higher classes drain first under contention. <b>Match</b> takes a comma-separated mix of named services and raw <code>proto</code>/<code>proto/port</code> entries (e.g. <code>https, tcp/8443, udp/53</code>); leave it blank to match anything. Use + to add a rule, double-click a rule to edit it, double-click the state tag to toggle it, tick rows and use \u2212 to remove.<br><br>QoS belongs to the node, not to a mesh network \u2014 a classification rule is a statement about packets, and there is no reason to need an overlay before saying that SSH outranks backups. <b>Scope</b> narrows a rule to one network; <b>any</b> classifies on every network this node runs, which also means a rule written before any network exists starts working the moment one does. Classification still happens on each network\u2019s tunnel egress, feeding that network\u2019s shaper, so QoS only bites behind an up-rate cap \u2014 enabling it switches the up-throttle on and seeds a placeholder rate you should lower to your real uplink.',
+    topic: 'Quality of Service modifies traffic priority. There are 5 priority classes - 0 = highest to 4 = lowest/bulk. Unmatched traffic uses class 3 (normal). Strict priority is maintained \u2014 higher classes drain first under contention. <b>Match</b> takes a comma-separated mix of named services and raw <code>proto</code>/<code>proto/port</code> entries (e.g. <code>https, tcp/8443, udp/53</code>); leave it blank to match anything. Use + to add a rule, double-click a rule to edit it, double-click the state tag to toggle it, tick rows and use \u2212 to remove.<br><br>QoS belongs to the node, not to a mesh network \u2014 a classification rule is a statement about packets, and there is no reason to need an overlay before saying that SSH outranks backups. <b>Scope</b> narrows a rule to one network; <b>any</b> classifies on every network this node runs, which also means a rule written before any network exists starts working the moment one does. Classification still happens on each network\u2019s tunnel egress, feeding that network\u2019s shaper, so QoS only bites behind an up-rate cap \u2014 enabling it switches shaping on for every mesh interface and seeds a placeholder up rate you should lower to your real uplink.',
     cols: {
       'match': 'named services and raw proto or proto/port entries, comma-separated; blank matches anything',
       'class': '0 is highest, 4 is lowest; unmatched traffic uses 3. Higher classes drain first under contention.',
@@ -3666,7 +3669,7 @@ const HELP = {
     },
   },
   'bandwidth': {
-    topic: 'Limit tunnel traffic. Double-click a rate to set it \u2014 enter a number and pick the unit; clear the number for unlimited. Double-click a state tag to turn a cap on or off.<br><br>Two levels. The <b>node default</b> applies to every mesh network that has not been given its own rate, and can be set before any network exists. A network that needs a different rate takes an <b>override</b>: double-click its up or down cell. Tick a row and use \u2212 to drop the override and follow the default again.<br><br>A rate is always applied to one tunnel\u2019s shaper \u2014 one bounded queue and one drainer per tunnel, with no point at which two tunnels meet \u2014 so a rate means that much to <b>each</b> network it covers, never a total shared between them.<br><br>QoS only reorders traffic behind a rate cap, so enabling QoS switches the up-limit on and seeds a placeholder rate you should lower to your real uplink.',
+    topic: 'Limit traffic, one entry per interface. Use + to shape an interface, double-click a rate to set it \u2014 enter a number and pick the unit, or clear the number for unlimited \u2014 and double-click the state tag to lift a cap without losing the rate. Tick rows and use \u2212 to stop shaping an interface; an interface with no entry is unshaped.<br><br><b>up</b> is egress and is shaped: traffic is queued and paced to the rate. <b>down</b> is ingress and is policed: anything over the rate is dropped rather than queued, because the sender is elsewhere and there is nothing here to slow down.<br><br>gravinet shapes inside its own data path, on the tunnel devices it owns \u2014 it programs no kernel qdisc. So an entry naming an interface this node carries no mesh network on is a rate nothing applies; the <b>carries</b> column says which is which. Writing one anyway is allowed and sometimes right, since a rate can be set before the network that uses it exists.<br><br>QoS only reorders traffic behind an egress cap, so enabling QoS switches shaping on for every mesh interface and seeds a placeholder up rate you should lower to your real uplink.',
   },
   'bgp': {
     topic: 'BGP configuration for dynamic routing. For neighbors and advertised networks: use + to add a row, double-click a field to edit it (double-click BFD to toggle it), tick rows and \u2212 to remove. Click the \ud83d\udc41\ufe0f next to a neighbor\u2019s MD5 password to reveal or mask it. Click a neighbor\u2019s \u201cfilters\u201d pill to restrict which prefixes BGP itself accepts from, or advertises to, that one neighbor \u2014 blank means unfiltered (the default). This is separate from the Redistribute pickers below, which control what feeds into BGP, not what BGP exchanges with a neighbor.',
@@ -6205,7 +6208,7 @@ function secRoutes(c) {
 function buildPreferredPeers(cf){
   const sub = $('<div class="subcard"></div>');
   sub.appendChild($('<h4>Preferred peers</h4>'));
-  sub.appendChild($('<div class="hint">Pick the routes you want to choose an exit for, then drag that route\u2019s peers into the order you want them tried. The one nearest the top wins, whatever metric it advertises \u2014 and if it goes away the next one takes over on its own, so this is a preference, not a pin. Peers you have not ranked sit below the ranked ones and keep competing on metric. A more specific route always beats a less specific one, whoever advertises it. Only routes advertised by more than one peer can be picked; anything else has nothing to choose between.</div>'));
+  sub.appendChild($('<div class="hint help-desc" style="margin:0 0 12px">Pick the routes you want to choose an exit for, then drag that route\u2019s peers into the order you want them tried. The one nearest the top wins, whatever metric it advertises \u2014 and if it goes away the next one takes over on its own, so this is a preference, not a pin. Peers you have not ranked sit below the ranked ones and keep competing on metric. A more specific route always beats a less specific one, whoever advertises it. Only routes advertised by more than one peer can be picked; anything else has nothing to choose between.</div>'));
 
   const status = state.status.find(x => x.id === cf.id) || {};
   const learned = status.routes || [];
@@ -9285,98 +9288,126 @@ function startQoSEdit(tr, classes){
   };
 }
 
-// secBandwidth renders this node's default bandwidth limit and any per-network
-// overrides.
+// secBandwidth renders Traffic > Shaping: one card, one row per shaping
+// entry, keyed by the interface the entry shapes.
 //
-// Two levels, because both facts are real. A node with no mesh network still
-// needs somewhere to put a rate, which is what the default is for (v955). And
-// different links genuinely carry different rates — Tun1→Tun2 at one speed,
-// Tun1→Tun3 at another — which one node-global number cannot hold, so a
-// network can take its own (v956).
+// One level, not two. The shaper has always been per interface — one bounded
+// queue and one drainer on one device, with no point at which two devices
+// meet — and between v955 and v959 the configuration said something else: a
+// node default plus per-network overrides, resolved to an interface only when
+// a spec was built. That model needed a standing caveat on every surface that
+// showed it ("a rate means that much to each network, never a total shared
+// between them"), which is the tell that the data was shaped wrong. v960 keys
+// the rate to the interface, and the caveat has nothing left to warn about.
 //
-// A rate is always applied to one tunnel's shaper: one bounded queue and one
-// drainer per tunnel, with no point at which two tunnels meet. So the default
-// means "this much to each network that has not been given its own", never a
-// total shared between them. The card says so once there is more than one.
+// An entry may name an interface that is not present, which is deliberate:
+// a rate can be written before the network that carries it. What the card
+// will not do is let that pass unremarked — the "carries" cell says what an
+// entry is attached to, and an entry gravinet cannot enforce says so there.
 function secBandwidth(c) {
-  const d = state.throttleCfg || {};
+  const entries = state.shaping || [];
+  // iface -> network name, for the "carries" cell and the + picker. These are
+  // the interfaces gravinet moves packets on, and so the only ones a rate can
+  // actually be enforced on.
+  const carries = new Map();
+  for (const cf of (state.cfg||[])) if (cf.iface) carries.set(cf.iface, cf.name || cf.id);
+
   const card = $('<div class="card"></div>');
-  card.appendChild(sectionCardHead('BANDWIDTH', !!d.enabled, '/api/bandwidth', on => ({op:(on?'enable':'disable')})));
-  const disp = $('<div>node default \u2014 up: <span class="bw-edit" data-dir="up" title="double-click to set">'+esc(rate(d.up_bytes_per_sec))+'</span>'
-    + ' \u00b7 down: <span class="bw-edit" data-dir="down" title="double-click to set">'+esc(rate(d.down_bytes_per_sec))+'</span></div>');
-  const spans = disp.querySelectorAll('.bw-edit');
-  spans[0].ondblclick = () => startBwEdit(spans[0], '', 'up', d.up_bytes_per_sec);
-  spans[1].ondblclick = () => startBwEdit(spans[1], '', 'down', d.down_bytes_per_sec);
-  card.appendChild(disp);
-  c.appendChild(card);
+  card.appendChild($('<h3><span class="net-name">BANDWIDTH</span></h3>'));
 
-  if (!(state.cfg||[]).length) return;
-
-  // One row per network, showing what it actually gets and whether that came
-  // from the default or from its own override. Editing a rate creates the
-  // override; the state tag toggles it; \u2212 clears it back to inherited.
-  const oc = $('<div class="card"></div>');
-  oc.appendChild($('<h3><span class="net-name">PER-NETWORK</span></h3>'));
-  let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>network</th><th>state</th><th>up</th><th>down</th><th>source</th></tr>';
-  for (const cf of state.cfg) {
-    const eff = cf.throttle_effective || {};
-    const own = !!cf.throttle;
-    const on = !!eff.enabled;
-    h += '<tr class="bwrow'+(on?'':' fw-disabled')+'" data-net="'+esc(cf.name||cf.id)+'" data-enabled="'+(on?1:0)+'" data-own="'+(own?1:0)+'">'
+  let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>interface</th><th>state</th><th>up</th><th>down</th><th>carries</th></tr>';
+  for (const e of entries) {
+    const on = !!e.enabled;
+    const net = carries.get(e.iface);
+    // An entry on an interface this node runs no network on is configuration
+    // with nothing behind it: gravinet shapes in its own data path and
+    // programs no kernel qdisc, so those packets never reach the code that
+    // would pace them. Said on the row rather than in a footnote, because the
+    // row is the thing that looks like it is working.
+    const carriesCell = net
+      ? '<td>'+esc(net)+'</td>'
+      : '<td class="hint" title="gravinet moves no packets on this interface, so nothing applies this rate. Expected if the network carrying it is not up yet.">not shaped by this node</td>';
+    h += '<tr class="bwrow'+(on?'':' fw-disabled')+'" data-iface="'+esc(e.iface)+'">'
       + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
-      + '<td>'+esc(cf.name||cf.id)+'</td>'
-      + '<td class="bw-state"><span class="tag-toggle '+(on?'on':'off')+'" data-bwstate="1" title="double-click to '+(on?'disable':'enable')+' \u2014 sets an override on this network">'+(on?'enabled':'disabled')+'</span></td>'
-      + '<td data-dir="up" data-bps="'+esc(String(eff.up_bytes_per_sec||0))+'"><span class="bw-edit bw-cell" title="double-click to set a rate for this network">'+esc(rate(eff.up_bytes_per_sec))+'</span></td>'
-      + '<td data-dir="down" data-bps="'+esc(String(eff.down_bytes_per_sec||0))+'"><span class="bw-edit bw-cell" title="double-click to set a rate for this network">'+esc(rate(eff.down_bytes_per_sec))+'</span></td>'
-      + '<td class="hint">'+(own?'override':'inherited')+'</td></tr>';
+      + '<td>'+esc(e.iface)+'</td>'
+      + '<td class="bw-state"><span class="tag-toggle '+(on?'on':'off')+'" data-bwstate="1" title="double-click to '+(on?'disable':'enable')+' shaping on this interface">'+(on?'enabled':'disabled')+'</span></td>'
+      + '<td data-dir="up" data-bps="'+esc(String(e.up_bytes_per_sec||0))+'"><span class="bw-edit bw-cell" title="double-click to set this interface\u2019s egress rate">'+esc(rate(e.up_bytes_per_sec))+'</span></td>'
+      + '<td data-dir="down" data-bps="'+esc(String(e.down_bytes_per_sec||0))+'"><span class="bw-edit bw-cell" title="double-click to set this interface\u2019s ingress rate">'+esc(rate(e.down_bytes_per_sec))+'</span></td>'
+      + carriesCell + '</tr>';
   }
-  const t = $('<div></div>'); t.innerHTML = h+'</table>'; oc.appendChild(t);
+  if (!entries.length) h += '<tr><td class="empty" colspan="6">No interface is shaped. Use + to add one.</td></tr>';
+  const t = $('<div></div>'); t.innerHTML = h+'</table>'; card.appendChild(t);
   const table = t.querySelector('table');
+
   t.querySelectorAll('tr.bwrow').forEach(tr => {
     tr.querySelectorAll('.bw-cell').forEach(span => {
       // The rate the row is currently showing rides on the cell rather than
-      // being looked back up out of state.cfg: the editor opens on what is on
-      // screen, and a second lookup is a second chance to disagree with it.
+      // being looked back up out of state.shaping: the editor opens on what is
+      // on screen, and a second lookup is a second chance to disagree with it.
       const td = span.closest('td');
-      span.ondblclick = () => startBwEdit(span, tr.dataset.net, td.dataset.dir, Number(td.dataset.bps || 0));
+      span.ondblclick = () => startBwEdit(span, tr.dataset.iface, td.dataset.dir, Number(td.dataset.bps || 0));
     });
   });
   t.querySelectorAll('[data-bwstate]').forEach(tag => {
     tag.ondblclick = (e) => { e.stopPropagation();
-      toggleTagState(tag, '/api/bandwidth', on => ({op:(on?'enable':'disable'), net:tag.closest('tr').dataset.net}));
+      toggleTagState(tag, '/api/bandwidth', on => ({op:(on?'enable':'disable'), iface:tag.closest('tr').dataset.iface}));
     };
   });
   selAllWire(t);
-  // No + : a network cannot be added here, only given its own rate. \u2212
-  // clears an override rather than deleting anything — so on a row that has
-  // none it says so instead of appearing to work. A silent no-op here reads as
-  // a broken button, which is exactly how it read before.
-  table._rowRemove = async () => {
-    const sel = selCheckedRows(table);
-    if (!sel.length){ await noticeModal('tick a network to drop its own rate and follow the node default'); return; }
-    const own = sel.filter(tr => tr.dataset.own === '1');
-    if (!own.length){
-      await noticeModal(sel.length === 1
-        ? sel[0].dataset.net + ' has no rate of its own \u2014 it already follows the node default. Double-click its up or down cell to give it one.'
-        : 'none of the ticked networks has a rate of its own \u2014 they already follow the node default');
-      return;
-    }
-    for (const tr of own){
-      const r = await api('/api/bandwidth',{method:'POST',body:JSON.stringify({op:'clear-override',net:tr.dataset.net})});
-      if (r && !r.ok){ await noticeModal((r.body&&r.body.error)||'clear failed'); return; }
-    }
+
+  table._rowAdd = () => bwAddRow(table, carries);
+  // \u2212 deletes the entry outright, leaving the interface unshaped. There is no
+  // default to fall back to any more, so unlike v956-v959 this is a removal
+  // rather than a revert, and the row goes with it.
+  table._rowRemove = () => removeCheckedRows(table,
+    tr => api('/api/bandwidth',{method:'POST',body:JSON.stringify({op:'delete',iface:tr.dataset.iface})}), false);
+
+  card.appendChild($('<div class="hint help-desc" style="margin:8px 0 0">Use + to shape an interface, then double-click its up or down rate to set one \u2014 egress is shaped (queued and paced), ingress is policed (anything over is dropped). Double-click the state tag to lift a cap without losing the rate. Tick rows and use \u2212 to stop shaping an interface entirely.</div>'));
+  c.appendChild(card);
+  enhanceTable(table);
+}
+
+// bwAddRow inserts a blank editable row: pick an interface, save, then set its
+// rates on the row like any other.
+//
+// The picker offers this node's mesh interfaces and accepts a typed name for
+// anything else, rather than restricting to the list. Restricting would also
+// refuse a rate written for a network that is not up yet, and at the moment of
+// writing those two cases are the same case \u2014 both name a device that is not
+// there. The confirmation says which one it turned out to be.
+function bwAddRow(table, carries){
+  const taken = new Set((state.shaping||[]).map(e => e.iface));
+  const free = [...carries.keys()].filter(i => !taken.has(i));
+  const tr = document.createElement('tr');
+  const opts = free.map(i => '<option value="'+esc(i)+'">'+esc(i)+' \u2014 '+esc(carries.get(i))+'</option>').join('')
+    + '<option value="">other\u2026</option>';
+  tr.innerHTML = '<td class="selcol"></td>'
+    + '<td><select class="bwe-pick" style="width:auto">'+opts+'</select> '
+    + '<input class="bwe-iface" placeholder="interface" style="width:110px;display:'+(free.length?'none':'inline-block')+'"></td>'
+    + '<td class="hint">disabled</td><td class="hint">unlimited</td><td class="hint">unlimited</td>'
+    + '<td><button class="sm bwe-save">save</button> <button class="ghost sm bwe-cancel">cancel</button></td>';
+  if (!insertNewRow(table, tr)) return;
+  const pick = tr.querySelector('.bwe-pick'), free_in = tr.querySelector('.bwe-iface');
+  if (!free.length) pick.value = '';
+  pick.onchange = () => {
+    const other = pick.value === '';
+    free_in.style.display = other ? 'inline-block' : 'none';
+    if (other) free_in.focus();
+  };
+  tr.querySelector('.bwe-cancel').onclick = () => refresh();
+  tr.querySelector('.bwe-save').onclick = async () => {
+    const iface = (pick.value || free_in.value).trim();
+    if (!iface){ await noticeModal('Name the interface to shape.'); return; }
+    const r = await api('/api/bandwidth',{method:'POST',body:JSON.stringify({op:'add',iface:iface})});
+    if (!r.ok){ await noticeModal((r.body&&r.body.error)||'add failed'); return; }
+    // Added off and unlimited, so nothing changes on the wire yet. Say both
+    // what to do next and, if it applies, that it will not take effect \u2014
+    // finding that out after setting a rate and watching nothing happen is
+    // exactly the shape of failure this page has been fixing since v959.
+    if (!carries.has(iface))
+      await noticeModal(iface + ' has a shaping entry now, but this node carries no mesh network on it, so nothing will enforce a rate set here. That is expected if the network using it is not up yet.');
     await refresh();
   };
-  // Always shown, not just with two or more networks. With one network every
-  // cell reads "unlimited / inherited" and the table looks inert; the one
-  // thing an operator needs to know is that double-clicking a rate is what
-  // gives that network its own.
-  let note = 'Double-click a network\u2019s up or down rate to give it its own limit; tick it and use \u2212 to drop that and follow the node default again.';
-  if ((state.cfg||[]).length > 1)
-    note += ' A rate applies to each network separately, never shared between them.';
-  oc.appendChild($('<div class="hint" style="margin-top:8px">'+esc(note)+'</div>'));
-  c.appendChild(oc);
-  enhanceTable(table);
 }
 
 // ---- System ---------------------------------------------------------------
@@ -12150,7 +12181,7 @@ function infoCaptureMesh(c){
 
   const card = $('<div class="card"></div>');
   card.appendChild($('<h3>Capture all mesh peers</h3>'));
-  card.appendChild($('<div class="hint" style="margin:0 0 10px">Starts a capture on the mesh interface of every reachable managed peer (this node included) for the chosen window, then automatically downloads one .tgz bundling each peer\u2019s .pcap as soon as it\u2019s done \u2014 handy for lining up both ends of a single exchange (e.g. a ping that replies on one node but not the other). Ending any capture already running or shown on a touched peer\u2019s own Capture tab is a side effect of this, the same as starting a fresh single-node capture there would be.</div>'));
+  card.appendChild($('<div class="hint help-desc" style="margin:0 0 10px">Starts a capture on the mesh interface of every reachable managed peer (this node included) for the chosen window, then automatically downloads one .tgz bundling each peer\u2019s .pcap as soon as it\u2019s done \u2014 handy for lining up both ends of a single exchange (e.g. a ping that replies on one node but not the other). Ending any capture already running or shown on a touched peer\u2019s own Capture tab is a side effect of this, the same as starting a fresh single-node capture there would be.</div>'));
 
   const remote = !!state.target;
   if (remote){
@@ -12937,7 +12968,7 @@ function renderBgpEditor(host, b, installed, imported, meshRoutes, redistOpts){
   function renderNets(){
     netBody.innerHTML = '';
     let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>network prefix</th></tr>';
-    if (!networks.length) h += '<tr><td colspan="2" class="empty">No advertised networks \u2014 click + to add a prefix (e.g. 10.0.0.0/24) to originate into BGP.</td></tr>';
+    if (!networks.length) h += '<tr><td colspan="2" class="empty">No advertised networks \u2014 click + to add a prefix.</td></tr>';
     else networks.forEach((net, i) => {
       h += '<tr data-idx="'+i+'"><td class="selcol"><input type="checkbox" class="selbox"></td>'
         + '<td class="netg-cell" title="double-click to edit">'+esc(net||'')+'</td></tr>';

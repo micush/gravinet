@@ -319,10 +319,18 @@ type Config struct {
 	// reaches one overlay rather than all of them.
 	Firewall Firewall `json:"firewall,omitempty"`
 
-	// Throttle is this node's default bandwidth limit, applied to every mesh
-	// network that has no override of its own. Node-global since v955 so that
-	// a rate can be set before any network exists; per-network rates were
-	// restored as overrides in v956 (see Network.Throttle).
+	// Shaping is this node's bandwidth limits, one entry per interface.
+	// Node-global and keyed by interface name since v960 — see IfaceShaping.
+	Shaping []IfaceShaping `json:"shaping,omitempty"`
+
+	// Throttle is the pre-v960 node default bandwidth limit. Retained as a
+	// field so an existing config still parses; Config.Validate hoists it
+	// into Shaping and clears it so it is never written back out.
+	//
+	// It was introduced in v955 as a node-global rate applied to every mesh
+	// network without an override of its own (Network.Throttle, v956). v960
+	// replaced the two-level default/override model with one flat list keyed
+	// by the thing a rate is actually applied to.
 	Throttle Throttle `json:"throttle,omitempty"`
 
 	// LogFile is where the daemon mirrors its log output (in addition to the
@@ -1036,15 +1044,17 @@ type Network struct {
 	Mesh string `json:"mesh,omitempty"`
 
 	StormControl StormControl `json:"storm_control"`
-	// Throttle overrides the node default (Config.Throttle) for this network.
+	// Throttle is the pre-v960 per-network bandwidth override. Retained as a
+	// field so an existing config still parses; Config.Validate hoists it
+	// into the node-global Config.Shaping, keyed by this network's interface,
+	// and clears it so it is never written back out.
 	//
-	// A pointer, so that "no override, use the node default" and "this network
-	// is explicitly uncapped" are distinguishable — as a value they would both
-	// be the zero Throttle and one would silently become the other.
-	//
-	// v955 collapsed these into a single node-global rate, taking the largest
-	// where networks disagreed. That was wrong: different links genuinely
-	// carry different rates, and one number cannot hold two. Restored in v956.
+	// A pointer, because under the old model "no override, use the node
+	// default" and "this network is explicitly uncapped" had to be
+	// distinguishable — as a value they would both be the zero Throttle and
+	// one would silently become the other. There is no default to fall back
+	// to now, so the distinction does not survive the hoist and does not need
+	// to: an entry is a rate, and no entry is no rate.
 	Throttle *Throttle `json:"throttle,omitempty"`
 	// QoS is the pre-v954 per-network classifier. Retained as a field so an
 	// existing config still parses; Config.Validate hoists it into the
@@ -1392,24 +1402,51 @@ type StormControl struct {
 	Burst        int `json:"burst"` // bucket depth
 }
 
-// Throttle caps tunnel bandwidth. Up is the egress (shaped) rate; Down is the
+// Throttle caps bandwidth. Up is the egress (shaped) rate; Down is the
 // ingress (policed) rate. Set one for a single direction, both for "both",
 // neither for unlimited. All values are bytes per second; 0 = unlimited.
 // Throttle is a bandwidth limit: an egress rate, an ingress rate, and the
 // bucket/queue sizing around them.
 //
-// It appears twice. Config.Throttle is this node's default, settable without
-// any mesh network existing; Network.Throttle is an optional per-network
-// override. A rate is always applied to one tunnel's shaper — the shaper is
-// one bounded queue and one drainer per tunnel, with no point at which two
-// tunnels meet — so the node default means "this much to each network that has
-// not been given its own", never "this much shared between them".
+// It is the rate half of IfaceShaping, and is also still the shape of the
+// legacy Config.Throttle / Network.Throttle fields that v960 hoists.
 type Throttle struct {
 	Enabled         bool `json:"enabled"` // off by default
 	UpBytesPerSec   int  `json:"up_bytes_per_sec"`
 	DownBytesPerSec int  `json:"down_bytes_per_sec"`
 	BurstBytes      int  `json:"burst_bytes"` // token-bucket depth; 0 = default
 	QueueBytes      int  `json:"queue_bytes"` // egress queue capacity; 0 = default
+}
+
+// IfaceShaping is one bandwidth limit, bound to the interface it shapes.
+//
+// The shaper has always been per interface: one bounded queue and one drainer
+// on one tunnel device, with no point at which two devices meet. Until v960
+// the configuration said otherwise — a node default plus per-network
+// overrides, resolved to an interface only at the moment a spec was built —
+// and the model had to keep explaining that a default was "that much to each
+// network, never a total shared between them". Keying the rate to the
+// interface makes that the shape of the data rather than a caveat about it:
+// there is no total to mistake it for, because there is nothing above an
+// interface to state one on.
+//
+// Iface is a kernel interface name, matched literally. For a mesh network
+// that is its TUN device — Network.TUNName, or the mesh<N> the node assigns
+// when that is empty; see Config.IfaceForNetwork.
+//
+// An entry may name an interface that does not exist yet, which is the point
+// of being able to write one: a rate can be set before the network that
+// carries it, and survives that network being rebuilt. Nothing enforces it
+// until an interface by that name is up and gravinet is the thing moving
+// packets on it — see Config.ShapingUnenforced for the interfaces where that
+// second half does not hold, which the admin UI and CLI both report rather
+// than leaving to be discovered.
+type IfaceShaping struct {
+	Iface string `json:"iface"`
+	// Throttle is embedded, so an entry encodes flat — {"iface":"mesh0",
+	// "enabled":true,"up_bytes_per_sec":…} — and the rate fields keep the
+	// names they had under the old model.
+	Throttle
 }
 
 // FirewallRule is one entry in a network's ordered rulebase. Default policy is
@@ -3008,9 +3045,11 @@ func (c *Config) Validate() error {
 	// the node-global shape, leaving a legacy Direction to be written back out
 	// forever.
 	c.migrateNAT()
-	// QoS made the same move in v954, and the bandwidth limit in v955.
+	// QoS made the same move in v954, and the bandwidth limit in v955 —
+	// which v960 then re-keyed from networks to the interfaces the shaper
+	// actually runs on.
 	c.migrateQoS()
-	c.migrateThrottle()
+	c.migrateShaping()
 	// The firewall made the same move in v957.
 	c.migrateFirewall()
 	for j := range c.NAT.Rules {
@@ -3151,14 +3190,26 @@ func (c *Config) Validate() error {
 		}
 	}
 	// QoS is inert without an egress rate cap to create contention for the
-	// priority queue to reorder, so a node with QoS on needs the up-throttle
-	// on. Both are node-global now (v954, v955), so this is one statement
-	// rather than one per network. The placeholder is one the operator should
-	// lower to their real uplink.
+	// priority queue to reorder, so a node with QoS on needs an up-throttle
+	// on every interface the classifier runs over. QoS is node-global (v954)
+	// but shaping is per interface (v960), so this is one statement per mesh
+	// interface rather than the single one it was between v955 and v959.
+	// The placeholder is one the operator should lower to their real uplink.
+	//
+	// Only mesh interfaces. Seeding a rate onto an entry the operator wrote
+	// for something else would be turning on a cap they did not ask for, on
+	// an interface QoS does not classify anyway.
 	if c.QoS.Enabled {
-		c.Throttle.Enabled = true
-		if c.Throttle.UpBytesPerSec <= 0 {
-			c.Throttle.UpBytesPerSec = defaultQoSUpBytesPerSec
+		for _, iface := range c.MeshIfaces() {
+			s := c.ShapingFor(iface)
+			if s == nil {
+				c.Shaping = append(c.Shaping, IfaceShaping{Iface: iface})
+				s = &c.Shaping[len(c.Shaping)-1]
+			}
+			s.Enabled = true
+			if s.UpBytesPerSec <= 0 {
+				s.UpBytesPerSec = defaultQoSUpBytesPerSec
+			}
 		}
 	}
 	// QoS class geometry: 5 priority classes by default with class 3 (normal)
@@ -4210,38 +4261,176 @@ func qosScopeName(n *Network) string {
 	return n.ID
 }
 
-// migrateThrottle hoists the pre-v955 per-network bandwidth limit into the
-// node-global one.
+// autoIfaceName is the TUN device name a network gets when it has not been
+// given one. It must match buildNetSpecs' auto-naming in cmd/gravinet, which
+// is the code that actually creates the device; every other caller that needs
+// to name a network's interface goes through IfaceForNetwork rather than
+// spelling this out again.
+func autoIfaceName(idx int) string { return fmt.Sprintf("mesh%d", idx) }
+
+// IfaceForNetwork is the kernel interface name a network's tunnel runs on:
+// its configured TUNName, or the auto-assigned mesh<N> for its position in
+// the network list.
 //
-// A node whose networks all carried the same rate — the ordinary case, since
-// there was rarely a reason to differ — comes back with exactly that rate.
-//
-// Where they *did* differ there is genuine information loss: one number cannot
-// hold two, and "10 each" is what the node-global rate means. The largest of
-// each field wins, following the same rule Config.NATStateTimeout's migration
-// already uses for the same reason. Largest rather than smallest because a
-// throttle is a cap: taking the largest leaves no network newly starved, and
-// an under-throttled link is visible and one edit away, whereas silently
-// halving a working link's rate is neither.
-//
-// A config already carrying a node-global rate is left alone.
-func (c *Config) migrateThrottle() {
+// A network not in this config (or one matched by neither id nor name) falls
+// back to its own TUNName, which may be empty — the caller is asking about a
+// network this node does not have, and inventing an index for it would name
+// some *other* network's device.
+func (c *Config) IfaceForNetwork(n Network) string {
 	for i := range c.Networks {
-		if t := c.Networks[i].Throttle; t != nil && *t == (Throttle{}) {
-			// A zero override is indistinguishable from no override and would
-			// otherwise pin the network to "uncapped" forever.
-			c.Networks[i].Throttle = nil
+		if c.Networks[i].ID == n.ID && c.Networks[i].ID != "" {
+			return c.IfaceForNetworkAt(i)
 		}
 	}
+	for i := range c.Networks {
+		if c.Networks[i].Name == n.Name && c.Networks[i].Name != "" {
+			return c.IfaceForNetworkAt(i)
+		}
+	}
+	return strings.TrimSpace(n.TUNName)
 }
 
-// EffectiveThrottle is the limit actually applied to a network's shaper: its
-// own override if it has one, otherwise this node's default.
-func (c *Config) EffectiveThrottle(n Network) Throttle {
-	if n.Throttle != nil {
-		return *n.Throttle
+// IfaceForNetworkAt names the interface of the network at index i.
+func (c *Config) IfaceForNetworkAt(i int) string {
+	if i < 0 || i >= len(c.Networks) {
+		return ""
 	}
-	return c.Throttle
+	if name := strings.TrimSpace(c.Networks[i].TUNName); name != "" {
+		return name
+	}
+	return autoIfaceName(i)
+}
+
+// ShapingFor returns the entry for an interface, or nil. Interface names are
+// matched exactly: they are kernel identifiers, and mesh0 and Mesh0 are not
+// the same device on the platforms that would let you create both.
+func (c *Config) ShapingFor(iface string) *IfaceShaping {
+	iface = strings.TrimSpace(iface)
+	if iface == "" {
+		return nil
+	}
+	for i := range c.Shaping {
+		if c.Shaping[i].Iface == iface {
+			return &c.Shaping[i]
+		}
+	}
+	return nil
+}
+
+// ShapingThrottle is the limit applied to an interface's shaper. An interface
+// with no entry is unshaped, which is the zero Throttle: disabled, both
+// directions unlimited.
+func (c *Config) ShapingThrottle(iface string) Throttle {
+	if s := c.ShapingFor(iface); s != nil {
+		return s.Throttle
+	}
+	return Throttle{}
+}
+
+// ShapingForNetwork is the limit applied to a network's tunnel — the entry
+// for the interface that tunnel runs on, if there is one.
+func (c *Config) ShapingForNetwork(n Network) Throttle {
+	return c.ShapingThrottle(c.IfaceForNetwork(n))
+}
+
+// MeshIfaces lists the interface name of every network in this config, in
+// config order. These are the interfaces gravinet itself moves packets on,
+// and therefore the ones a shaping entry can actually be enforced on.
+//
+// Every network, not just the enabled ones: a disabled network's device is
+// absent right now and comes back when it is switched on, and a rate written
+// for it is waiting rather than misdirected.
+func (c *Config) MeshIfaces() []string {
+	out := make([]string, 0, len(c.Networks))
+	for i := range c.Networks {
+		if name := c.IfaceForNetworkAt(i); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// ShapingUnenforced lists the shaping entries naming an interface this node
+// does not carry a mesh network on, in config order.
+//
+// gravinet shapes in userspace, in its own data path: the queue and the token
+// bucket sit on a tunnel device it owns and drains itself. It programs no
+// kernel qdisc, so an entry naming eth0 is a rate nothing applies — the
+// packets on that interface never pass through the code that would pace them.
+//
+// Such an entry is still allowed, because refusing it would also refuse a
+// rate written for a mesh interface that is not up yet, and those are
+// indistinguishable at the moment of writing: both name a device that is not
+// there. What is not allowed is leaving the operator to find out. Both front
+// ends call this and say so.
+func (c *Config) ShapingUnenforced() []string {
+	mesh := make(map[string]bool, len(c.Networks))
+	for _, name := range c.MeshIfaces() {
+		mesh[name] = true
+	}
+	var out []string
+	for _, s := range c.Shaping {
+		if !mesh[s.Iface] {
+			out = append(out, s.Iface)
+		}
+	}
+	return out
+}
+
+// migrateShaping hoists the pre-v960 node default and per-network overrides
+// into one list keyed by interface.
+//
+// Each network contributes the rate it was actually getting — its own
+// override if it had one, otherwise the node default — under the name of the
+// device its tunnel runs on. That is the rate the shaper was already applying
+// to that interface, so a migrated node shapes exactly what it shaped before.
+// The two-level model is not preserved: an entry that came from the default
+// and one that came from an override are the same fact once they name an
+// interface, which is the whole of the change.
+//
+// A node default on a node with **no** networks has no interface to name. It
+// is hoisted to mesh0 — the device the first network would be given — rather
+// than dropped. That is a guess about which interface was meant, and it is
+// made because the alternative is worse: the rate is real configuration
+// somebody typed, discarding it silently is the v955 mistake, and a guess
+// that lands as a visible, editable row is one an operator can correct in a
+// double-click. It is only ever taken when there is nothing else to go on.
+//
+// A config already carrying a Shaping list is left alone; the legacy fields
+// are cleared either way so they are never written back out.
+func (c *Config) migrateShaping() {
+	defer func() {
+		c.Throttle = Throttle{}
+		for i := range c.Networks {
+			c.Networks[i].Throttle = nil
+		}
+	}()
+	if len(c.Shaping) > 0 {
+		return
+	}
+	set := func(iface string, t Throttle) {
+		if iface == "" || t == (Throttle{}) {
+			// Nothing configured is not a limit. An entry here would be a row
+			// saying "disabled, unlimited", which is what having no entry
+			// already means.
+			return
+		}
+		if s := c.ShapingFor(iface); s != nil {
+			s.Throttle = t
+			return
+		}
+		c.Shaping = append(c.Shaping, IfaceShaping{Iface: iface, Throttle: t})
+	}
+	for i := range c.Networks {
+		t := c.Throttle
+		if o := c.Networks[i].Throttle; o != nil {
+			t = *o
+		}
+		set(c.IfaceForNetworkAt(i), t)
+	}
+	if len(c.Networks) == 0 {
+		set(autoIfaceName(0), c.Throttle)
+	}
 }
 
 // migrateFirewall hoists the pre-v957 per-network rulebase into the
