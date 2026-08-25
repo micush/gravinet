@@ -314,6 +314,11 @@ type Config struct {
 	// overlay rather than all of them.
 	QoS QoS `json:"qos,omitempty"`
 
+	// Firewall is this node's rulebase, node-global since v957. See the
+	// Firewall type's doc comment, and FirewallRule.Scope for how a rule
+	// reaches one overlay rather than all of them.
+	Firewall Firewall `json:"firewall,omitempty"`
+
 	// Throttle is this node's default bandwidth limit, applied to every mesh
 	// network that has no override of its own. Node-global since v955 so that
 	// a rate can be set before any network exists; per-network rates were
@@ -1045,7 +1050,11 @@ type Network struct {
 	// existing config still parses; Config.Validate hoists it into the
 	// node-global Config.QoS with each rule scoped to this network, and clears
 	// it so it is never written back out.
-	QoS            QoS          `json:"qos"`
+	QoS QoS `json:"qos"`
+	// Firewall is the pre-v957 per-network rulebase. Retained as a field so an
+	// existing config still parses; Config.Validate hoists it into the
+	// node-global Config.Firewall with each rule scoped to this network, and
+	// clears it so it is never written back out.
 	Firewall       Firewall     `json:"firewall"`
 	HostsSync      HostsSync    `json:"hosts_sync"`
 	HostsAdvertise []HostRecord `json:"hosts_advertise,omitempty"`
@@ -1414,6 +1423,14 @@ type Throttle struct {
 // semantics, including the deliberate non-special-casing of negating an
 // empty/"any" field.
 type FirewallRule struct {
+	// ID is stable for the life of the rule and unique across this node's
+	// rulebase. Assigned here from Firewall.NextID rather than minted by the
+	// engine, because config is the durable record and the engine is a live
+	// working copy rebuilt on every reload: an engine-minted id could not
+	// survive a restart, and the admin UI keys selections, counter resets and
+	// reordering off it. The engine adopts this id rather than allocating its
+	// own.
+	ID             uint64   `json:"id,omitempty"`
 	Disabled       bool     `json:"disabled,omitempty"`  // true = rule is skipped; active by default
 	Action         string   `json:"action"`              // allow|deny
 	Direction      string   `json:"direction,omitempty"` // in|out|both
@@ -1430,6 +1447,15 @@ type FirewallRule struct {
 	ServicesNegate bool     `json:"services_negate,omitempty"` // match any service EXCEPT Proto/ports+Services
 	Log            bool     `json:"log,omitempty"`             // log a line whenever this rule matches
 	Notes          string   `json:"notes,omitempty"`           // free-form operator note, e.g. why the rule exists
+
+	// Scope names the mesh network this rule is enforced on, or is empty to
+	// enforce on every network this node runs.
+	//
+	// Empty means every network, as with QoSRule.Scope and for the same
+	// reason: the firewall has no kernel path, so a rule that named no network
+	// would do nothing at all. It also means a rule written before any network
+	// exists starts enforcing the moment one does.
+	Scope string `json:"scope,omitempty"`
 }
 
 // Firewall is a network's packet filter. It is off by default; when enabled with
@@ -1440,9 +1466,25 @@ type FirewallRule struct {
 // FirewallRule.Src/Dst and FirewallRule.Services) — those catalogs are node-
 // global (Config.FirewallObjects/FirewallServices, shared by every network on
 // this node), not part of this per-network struct.
+// Firewall is this node's rulebase. Node-global from v957, not per mesh
+// network: a firewall rule is a statement about packets, and a node should not
+// need an overlay before it can write one down.
+//
+// Enforcement is unchanged and still per-network — internal/mesh evaluates on
+// each tunnel's in/out path, which is the only place a firewall rule is
+// enforced at all — so a rule reaches an overlay via FirewallRule.Scope.
+//
+// Order matters: first match wins. One ordered list per node now, and each
+// network evaluates the subset in scope for it, in this list's order.
 type Firewall struct {
 	Enabled bool           `json:"enabled"`
 	Rules   []FirewallRule `json:"rules"`
+
+	// NextID is the counter for FirewallRule.ID. Kept here rather than derived
+	// from max(ID)+1 so that deleting the highest-numbered rule cannot hand
+	// its id to the next one created — an id that comes back means stale hit
+	// counters and stale UI selections bind to the wrong rule.
+	NextID uint64 `json:"next_id,omitempty"`
 }
 
 // FirewallObject is a named, reusable address object referenced by rules. kind
@@ -2969,6 +3011,8 @@ func (c *Config) Validate() error {
 	// QoS made the same move in v954, and the bandwidth limit in v955.
 	c.migrateQoS()
 	c.migrateThrottle()
+	// The firewall made the same move in v957.
+	c.migrateFirewall()
 	for j := range c.NAT.Rules {
 		{
 			r := &c.NAT.Rules[j]
@@ -4198,4 +4242,100 @@ func (c *Config) EffectiveThrottle(n Network) Throttle {
 		return *n.Throttle
 	}
 	return c.Throttle
+}
+
+// migrateFirewall hoists the pre-v957 per-network rulebase into the
+// node-global one and assigns stable ids.
+//
+// Each network's rules move up in order, scoped to the network they came from,
+// which is what they already meant: enforced on that tunnel and nowhere else.
+// Order is preserved within each network, which is what matters — first match
+// wins, and a rule only ever competes with the rules in scope alongside it.
+//
+// A network whose firewall switch was off contributes its rules disabled, the
+// same fold NAT and QoS got: the per-network gate has no equivalent now, so it
+// moves into the rules and the node enforces exactly what it enforced before.
+//
+// Ids are assigned here rather than left to the engine because config is the
+// durable record. Every rule gets one, including rules that arrive already
+// carrying an id from a previous load.
+func (c *Config) migrateFirewall() {
+	if len(c.Firewall.Rules) == 0 {
+		for i := range c.Networks {
+			n := &c.Networks[i]
+			for _, r := range n.Firewall.Rules {
+				r.Scope = fwScopeName(n)
+				if !n.Firewall.Enabled {
+					r.Disabled = true
+				}
+				c.Firewall.Rules = append(c.Firewall.Rules, r)
+			}
+			if n.Firewall.Enabled {
+				c.Firewall.Enabled = true
+			}
+		}
+	}
+	for i := range c.Networks {
+		c.Networks[i].Firewall = Firewall{}
+	}
+	c.assignFirewallIDs()
+}
+
+// assignFirewallIDs gives every rule that lacks one a fresh id, and keeps
+// NextID ahead of every id in use.
+//
+// Never reuses an id, even one freed by a delete: a returning id would bind
+// stale hit counters and stale UI selections to a different rule.
+func (c *Config) assignFirewallIDs() {
+	for _, r := range c.Firewall.Rules {
+		if r.ID >= c.Firewall.NextID {
+			c.Firewall.NextID = r.ID + 1
+		}
+	}
+	if c.Firewall.NextID == 0 {
+		c.Firewall.NextID = 1
+	}
+	for i := range c.Firewall.Rules {
+		if c.Firewall.Rules[i].ID == 0 {
+			c.Firewall.Rules[i].ID = c.Firewall.NextID
+			c.Firewall.NextID++
+		}
+	}
+}
+
+// fwScopeName is the name a rule uses to reach one network: its name, or its
+// id for a network that has none.
+func fwScopeName(n *Network) string {
+	if strings.TrimSpace(n.Name) != "" {
+		return n.Name
+	}
+	return n.ID
+}
+
+// FirewallRulesFor returns the rules enforced on a network, in order: those
+// scoped to it, plus every rule that named no network.
+func (c *Config) FirewallRulesFor(n Network) []FirewallRule {
+	var out []FirewallRule
+	for _, r := range c.Firewall.Rules {
+		scope := strings.TrimSpace(r.Scope)
+		if scope == "" || strings.EqualFold(scope, n.Name) || strings.EqualFold(scope, n.ID) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// checkFirewallScope refuses a scope naming no mesh network. Empty is always
+// valid and means every network.
+func (c *Config) checkFirewallScope(scope string) error {
+	scope = strings.TrimSpace(scope)
+	if scope == "" {
+		return nil
+	}
+	for i := range c.Networks {
+		if strings.EqualFold(c.Networks[i].Name, scope) || strings.EqualFold(c.Networks[i].ID, scope) {
+			return nil
+		}
+	}
+	return fmt.Errorf("no mesh network named %q — leave the scope blank to enforce on every network", scope)
 }

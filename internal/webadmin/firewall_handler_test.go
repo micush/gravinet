@@ -30,21 +30,28 @@ func fwPost(t *testing.T, ts *httptest.Server, cookie *http.Cookie, payload map[
 	return out
 }
 
-// TestFirewallAddSingleCallNoRestart locks in two fixes: adding a rule hits the
-// engine exactly once (the broken handler also persisted via mutateConfig which,
-// combined with the engine's synchronous persist hook, duplicated every rule),
-// and the add reports restart:false because it applies live.
-func TestFirewallAddSingleCallNoRestart(t *testing.T) {
+// Adding a rule writes to config and does NOT go to the engine.
+//
+// This inverts what the test here asserted through v956, when the engine was
+// where rules were edited and its persist hook copied them down to config. The
+// old assertion — "add reaches the engine exactly once" — was guarding against
+// a double-write in that design. Under v957 config is the source of truth and
+// the engine is reloaded from it, so an add reaching the engine at all is the
+// bug: it would be a second, competing write path, and the one that does not
+// work on a node with no mesh network.
+//
+// Still restart:false, for the same reason as before: the reload applies it.
+func TestFirewallAddWritesConfigNotTheEngine(t *testing.T) {
 	_, be, ts := newTestServer(t)
 	c := sessionFor(t, ts)
 
 	out := fwPost(t, ts, c, map[string]any{
-		"net": "1234", "op": "add", "at": -1,
+		"op": "add", "at": -1,
 		"rule": map[string]any{"action": "deny", "proto": "tcp", "dport_min": 22, "dport_max": 22},
 	})
 
-	if be.fwAddCalls != 1 {
-		t.Fatalf("add should reach the engine exactly once, got %d", be.fwAddCalls)
+	if be.fwAddCalls != 0 {
+		t.Fatalf("add went to the engine %d time(s); config is the source of truth from v957", be.fwAddCalls)
 	}
 	if r, _ := out["restart"].(bool); r {
 		t.Fatal("adding a rule applies live; restart must be false")

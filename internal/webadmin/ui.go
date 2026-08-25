@@ -597,7 +597,7 @@ const indexHTML = `<!doctype html>
 <script>
 const $ = (h) => { const d=document.createElement('div'); d.innerHTML=h.trim(); return d.firstChild; };
 const app = document.getElementById('app');
-const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, natCfg:{enabled:false, rules:[]}, qosCfg:{enabled:false, rules:[], classes:5, default_class:3}, throttleCfg:{enabled:false}, geoipLookup:false, enableUpnp:false, allowRemoteShell:false, loginBanMaxFailures:3, loginBanSeconds:900, tlsSource:'self-signed', tlsCommonName:'', tlsNotAfter:'', configHistoryLimit:250, configHistoryCount:0, shellSupported:true, bgpSupported:false, snmpSupported:false, ipv6raSupported:false, dhcpSupported:false, lldpSupported:false, syslogSupported:false, selfId:null, selfHostname:'', targetSeq:0, pendingBgpHighlight:null, workerThreads:0, tunQueues:0, tunQueuesSupported:true, udpGSO:false, udpGSOSupported:true, socketBufferMB:16, socketBufferMaxMB:256, perfRestartPending:false, loginBanRestartPending:false, tableView:{} };
+const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, natCfg:{enabled:false, rules:[]}, qosCfg:{enabled:false, rules:[], classes:5, default_class:3}, throttleCfg:{enabled:false}, firewallCfg:{enabled:false, rules:[]}, geoipLookup:false, enableUpnp:false, allowRemoteShell:false, loginBanMaxFailures:3, loginBanSeconds:900, tlsSource:'self-signed', tlsCommonName:'', tlsNotAfter:'', configHistoryLimit:250, configHistoryCount:0, shellSupported:true, bgpSupported:false, snmpSupported:false, ipv6raSupported:false, dhcpSupported:false, lldpSupported:false, syslogSupported:false, selfId:null, selfHostname:'', targetSeq:0, pendingBgpHighlight:null, workerThreads:0, tunQueues:0, tunQueuesSupported:true, udpGSO:false, udpGSOSupported:true, socketBufferMB:16, socketBufferMaxMB:256, perfRestartPending:false, loginBanRestartPending:false, tableView:{} };
 // setTarget is the only place state.target is ever assigned — bumping
 // targetSeq alongside it, once, exactly when the *selection itself* actually
 // changes. load()/startPolling()/refreshCluster() each capture targetSeq
@@ -1358,6 +1358,8 @@ async function load() {
   state.natCfg = (c.body && c.body.nat) || {enabled:false, rules:[]};
   state.qosCfg = (c.body && c.body.qos) || {enabled:false, rules:[], classes:5, default_class:3};
   state.throttleCfg = (c.body && c.body.throttle) || {enabled:false};
+  // The firewall rulebase is node-global from v957 and comes from /api/firewall
+  // (with live hit counters merged in), not from the per-network config.
   state.geoipLookup = !!(c.body && c.body.geoip_lookup);
   state.enableUpnp = !!(c.body && c.body.enable_upnp);
   state.ipForwarding = c.body ? (c.body.ip_forwarding !== false) : true;
@@ -1406,6 +1408,12 @@ async function load() {
   // above (see the server's Config.FirewallObjects doc comment), so it lives
   // at this top level rather than nested under any one entry in state.cfg.
   state.fwObjects = (c.body && c.body.firewall_objects) || [];
+  // Node-global rulebase with live hit counters merged in. Its own endpoint
+  // rather than a field on the config response, because the counters are live
+  // traffic and would otherwise go stale with the cached config.
+  const fwr = await api('/api/firewall');
+  state.firewallCfg = { enabled: !!(c.body && c.body.firewall && c.body.firewall.enabled),
+                        rules: (fwr.ok && fwr.body && fwr.body.rules) || [] };
   state.fwServices = (c.body && c.body.firewall_services) || [];
   state.fwObjectsSeeded = !!(c.body && c.body.firewall_objects_seeded);
   state.fwServicesSeeded = !!(c.body && c.body.firewall_services_seeded);
@@ -3625,8 +3633,8 @@ const HELP = {
   'firewall': {
     tab: 'firewallTab',
     topic: {
-      _: 'Stateful firewall inspection per network.',
-      rules: 'Enabled = Apply firewall filtering; Disabled = all traffic passes.<br><br>Rules are evaluated top-to-bottom, first match wins. Unmatched traffic is allowed unless specifically blocked.',
+      _: 'Stateful firewall inspection for this node\u2019s tunnel traffic.',
+      rules: 'Enabled = Apply firewall filtering; Disabled = all traffic passes.<br><br>Rules are evaluated top-to-bottom, first match wins. Unmatched traffic is allowed unless specifically blocked. Drag a row to change its position, which changes what matches first.<br><br>The rulebase belongs to the node, not to a mesh network \u2014 a rule is a statement about packets, and there is no reason to need an overlay before writing one down. <b>Scope</b> narrows a rule to one network; <b>any</b> enforces it on every network this node runs, so a rule written before any network exists starts enforcing the moment one does. Filtering itself still happens on each network\u2019s tunnel, which is the only place a firewall rule is enforced at all.',
       objects: 'Reusable address objects a rule can name in its <b>src</b>/<b>dst</b>; shared by every network, edited once. <b>kind</b>: host (literal IPs), subnet (CIDRs), range (a\u2011b), fqdn (domain names, re\u2011resolved live; supports a <b>*.domain.tld</b> wildcard, learned passively from DNS traffic), or group (a bundle of other objects, by name). Double\u2011click a cell to edit; + adds a row, tick rows and \u2212 removes. Every well\u2011known domain gravinet knows about is already a row here.',
       services: 'Reusable protocol/port bundles a rule can name in its <b>services</b> field; shared by every network, edited once. e.g. a "DNS" service carrying udp/53 and tcp/53. Write ports as <i>proto/port</i> or <i>proto/lo\u2011hi</i>, comma\u2011separated; a proto alone (like <i>icmp</i>) matches any port. Double\u2011click a cell to edit; + adds a row, tick rows and \u2212 removes. Every well\u2011known service gravinet knows about is already a row here.',
       allowlist: 'Never allow the firewall to filter these protocols, on any network. Double-click the state tag to toggle an entry.',
@@ -7102,84 +7110,104 @@ function secFirewall(c) {
   if (state.firewallTab === 'objects') { secFwObjects(c); return; }
   if (state.firewallTab === 'services') { secFwServices(c); return; }
 
-  if (!state.cfg.length) return emptyCard(c, 'No networks.');
+  // Node-global from v957: one card, one ordered list, no networks gate.
+  //
+  // Rules used to live in the live mesh engine — the page read them from it and
+  // every edit went through it — so a running engine, and therefore a mesh
+  // network, was a precondition for writing a rule down at all. Config is the
+  // source of truth now and the engine is reloaded from it, which is what lets
+  // this render and edit on a node with no overlay.
+  //
+  // Scope is how a rule reaches one overlay instead of all of them; blank means
+  // every network, as with QoS and for the same reason — the firewall has no
+  // kernel path, so a rule that named no network would do nothing at all.
+  //
+  // Order is meaningful: first match wins, and each network evaluates the
+  // subset in scope for it in this list's order. Hence the drag handles.
+  const fw = state.firewallCfg || {};
+  const en = !!fw.enabled;
+  const rules = fw.rules || [];
+  const card = $('<div class="card"></div>');
+  card.appendChild(sectionCardHead('FIREWALL', en, '/api/firewall', on => ({op:(on?'enable':'disable')})));
 
-  for (const cf of state.cfg) {
-    const fw = cf.firewall||{}; const en = !!fw.enabled;
-    const live = state.status.find(s => s.id===cf.id) || {};
-    const rules = live.firewall || fw.rules || [];
-    const card = $('<div class="card"></div>');
-    card.appendChild(netCardHead(cf, en, '/api/firewall'));
-
-    let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>source</th><th>destination</th><th>services</th><th>action</th><th>log</th><th>hits</th><th>notes</th></tr>';
-    if (!rules.length) h += '<tr><td colspan="9" class="empty">no rules — all traffic allowed (click + to add one)</td></tr>';
-    else for (let i=0;i<rules.length;i++) { const f=rules[i];
-      const enabled = !f.disabled;
-      const svcTxt = fwSvcLabel(f);
-      const stTag = '<span class="tag-toggle '+(enabled?'on':'off')+'" data-fwstate="'+esc(String(f.id))+'" title="double-click to '+(enabled?'disable':'enable')+'">'+(enabled?'enabled':'disabled')+'</span>';
-      h += '<tr draggable="true" class="fwrow'+(enabled?'':' fw-disabled')+'" data-fwid="'+esc(f.id)+'" data-idx="'+i+'" data-enabled="'+(enabled?1:0)+'" data-action="'+esc(f.action)+'" data-services="'+esc(svcTxt)+'" data-src="'+esc(f.src||'')+'" data-dst="'+esc(f.dst||'')+'" data-src-negate="'+(f.src_negate?1:0)+'" data-dst-negate="'+(f.dst_negate?1:0)+'" data-services-negate="'+(f.services_negate?1:0)+'" data-log="'+(f.log?1:0)+'" data-notes="'+esc(f.notes||'')+'">'
-        + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
-        + '<td class="fw-state">'+stTag+'</td>'
-        + '<td class="fw-src" title="'+(f.src_negate?'anything EXCEPT this':'')+'">'+(f.src_negate?'<b>!</b>':'')+esc(f.src||'any')+'</td>'
-        + '<td class="fw-dst" title="'+(f.dst_negate?'anything EXCEPT this':'')+'">'+(f.dst_negate?'<b>!</b>':'')+esc(f.dst||'any')+'</td>'
-        + '<td class="fw-services" title="'+(f.services_negate?'any service EXCEPT this':'')+'">'+(f.services_negate?'<b>!</b>':'')+esc(svcTxt||'any')+'</td>'
-        + '<td class="fw-action">'+esc(f.action)+'</td>'
-        + '<td class="fw-log">'+(f.log?'<span class="on" title="matches are logged">log</span>':'')+'</td>'
-        + '<td class="fw-hits" title="'+fmtHits(f)+'">'+esc(String(f.packets||0))+'</td>'
-        + '<td class="fw-notes">'+esc(f.notes||'')+'</td></tr>';
-    }
-    const t = $('<div></div>'); t.innerHTML = h+'</table>'; card.appendChild(t);
-    const table = t.querySelector('table');
-    t.querySelectorAll('tr.fwrow').forEach(tr => {
-      tr.ondblclick = (e) => {
-        if (e.target.closest('.fw-state')) return; // state cell has its own click handler
-        startFwEdit(tr, cf.id);
-      };
-      tr.addEventListener('dragstart', e => { e.dataTransfer.setData('text/plain', tr.dataset.fwid); e.dataTransfer.effectAllowed='move'; tr.classList.add('dragging'); });
-      tr.addEventListener('dragend', () => { tr.classList.remove('dragging'); t.querySelectorAll('.drop-target').forEach(x=>x.classList.remove('drop-target')); });
-      tr.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect='move'; tr.classList.add('drop-target'); });
-      tr.addEventListener('dragleave', () => tr.classList.remove('drop-target'));
-      tr.addEventListener('drop', async e => {
-        e.preventDefault(); tr.classList.remove('drop-target');
-        const draggedId = Number(e.dataTransfer.getData('text/plain'));
-        const toIdx = Number(tr.dataset.idx);
-        if (!draggedId || Number.isNaN(toIdx) || draggedId===Number(tr.dataset.fwid)) return;
-        const r = await api('/api/firewall',{method:'POST',body:JSON.stringify({net:cf.id,op:'move',ids:[draggedId],to:toIdx})});
-        if (!r.ok) { await noticeModal((r.body&&r.body.error)||'reorder failed'); return; }
-        await refresh();
-      });
+  let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>source</th><th>destination</th><th>services</th><th>action</th><th>scope</th><th>log</th><th>hits</th><th>notes</th></tr>';
+  if (!rules.length) h += '<tr><td colspan="10" class="empty">no rules \u2014 all traffic allowed (click + to add one)</td></tr>';
+  else for (let i=0;i<rules.length;i++) { const f=rules[i];
+    const enabled = !f.disabled;
+    const svcTxt = fwSvcLabel(f);
+    const stTag = '<span class="tag-toggle '+(enabled?'on':'off')+'" data-fwstate="'+esc(String(f.id))+'" title="double-click to '+(enabled?'disable':'enable')+'">'+(enabled?'enabled':'disabled')+'</span>';
+    h += '<tr draggable="true" class="fwrow'+(enabled?'':' fw-disabled')+'" data-fwid="'+esc(f.id)+'" data-idx="'+i+'" data-enabled="'+(enabled?1:0)+'" data-action="'+esc(f.action)+'" data-services="'+esc(svcTxt)+'" data-src="'+esc(f.src||'')+'" data-dst="'+esc(f.dst||'')+'" data-scope="'+esc(f.scope||'')+'" data-src-negate="'+(f.src_negate?1:0)+'" data-dst-negate="'+(f.dst_negate?1:0)+'" data-services-negate="'+(f.services_negate?1:0)+'" data-log="'+(f.log?1:0)+'" data-notes="'+esc(f.notes||'')+'">'
+      + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
+      + '<td class="fw-state">'+stTag+'</td>'
+      + '<td class="fw-src" title="'+(f.src_negate?'anything EXCEPT this':'')+'">'+(f.src_negate?'<b>!</b>':'')+esc(f.src||'any')+'</td>'
+      + '<td class="fw-dst" title="'+(f.dst_negate?'anything EXCEPT this':'')+'">'+(f.dst_negate?'<b>!</b>':'')+esc(f.dst||'any')+'</td>'
+      + '<td class="fw-services" title="'+(f.services_negate?'any service EXCEPT this':'')+'">'+(f.services_negate?'<b>!</b>':'')+esc(svcTxt||'any')+'</td>'
+      + '<td class="fw-action">'+esc(f.action)+'</td>'
+      + '<td class="fw-scope">'+esc(f.scope||'any')+'</td>'
+      + '<td class="fw-log">'+(f.log?'<span class="on" title="matches are logged">log</span>':'')+'</td>'
+      + '<td class="fw-hits" title="'+fmtHits(f)+'">'+esc(String(f.packets||0))+'</td>'
+      + '<td class="fw-notes">'+esc(f.notes||'')+'</td></tr>';
+  }
+  const t = $('<div></div>'); t.innerHTML = h+'</table>'; card.appendChild(t);
+  const table = t.querySelector('table');
+  t.querySelectorAll('tr.fwrow').forEach(tr => {
+    tr.ondblclick = (e) => {
+      if (e.target.closest('.fw-state')) return; // state cell has its own click handler
+      startFwEdit(tr);
+    };
+    tr.addEventListener('dragstart', e => { e.dataTransfer.setData('text/plain', tr.dataset.fwid); e.dataTransfer.effectAllowed='move'; tr.classList.add('dragging'); });
+    tr.addEventListener('dragend', () => { tr.classList.remove('dragging'); t.querySelectorAll('.drop-target').forEach(x=>x.classList.remove('drop-target')); });
+    tr.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect='move'; tr.classList.add('drop-target'); });
+    tr.addEventListener('dragleave', () => tr.classList.remove('drop-target'));
+    tr.addEventListener('drop', async e => {
+      e.preventDefault(); tr.classList.remove('drop-target');
+      const draggedId = Number(e.dataTransfer.getData('text/plain'));
+      const toIdx = Number(tr.dataset.idx);
+      if (!draggedId || Number.isNaN(toIdx) || draggedId===Number(tr.dataset.fwid)) return;
+      const r = await api('/api/firewall',{method:'POST',body:JSON.stringify({op:'move',ids:[draggedId],to:toIdx})});
+      if (!r.ok) { await noticeModal((r.body&&r.body.error)||'reorder failed'); return; }
+      await refresh();
     });
-    // Double-click the state tag to toggle the rule enabled/disabled — matching
-    // the change-state gesture used across the UI. mutateConfig already calls
-    // s.reload() so the change is live immediately — no restart. The busy flag
-    // prevents a re-entrant call before the first one returns.
-    t.querySelectorAll('[data-fwstate]').forEach(tag => {
-      tag.ondblclick = (e) => {
-        e.stopPropagation();
-        toggleTagState(tag, '/api/firewall', on => ({net:cf.id,op:(on?'rule-enable':'rule-disable'),ids:[Number(tag.closest('tr').dataset.fwid)]}));
-      };
-    });
-    selAllWire(t);
-    table._rowAdd = () => fwAddRow(table, cf.id);
-    table._rowRemove = async () => {
-      const sel=selCheckedRows(table);
-      if(!sel.length){ await noticeModal('tick one or more rows to remove'); return; }
-      for(const tr of sel){ const r=await api('/api/firewall',{method:'POST',body:JSON.stringify({net:cf.id,op:'del',ids:[Number(tr.dataset.fwid)]})}); if(r&&!r.ok){ await noticeModal((r.body&&r.body.error)||'remove failed'); return; } }
+  });
+  t.querySelectorAll('[data-fwstate]').forEach(tag => {
+    tag.ondblclick = (e) => {
+      e.stopPropagation();
+      toggleTagState(tag, '/api/firewall', on => ({op:(on?'rule-enable':'rule-disable'),ids:[Number(tag.closest('tr').dataset.fwid)]}));
+    };
+  });
+  selAllWire(t);
+  table._rowAdd = () => fwAddRow(table);
+  table._rowRemove = async () => {
+    const sel=selCheckedRows(table);
+    if(!sel.length){ await noticeModal('tick one or more rows to remove'); return; }
+    for(const tr of sel){ const r=await api('/api/firewall',{method:'POST',body:JSON.stringify({op:'del',ids:[Number(tr.dataset.fwid)]})}); if(r&&!r.ok){ await noticeModal((r.body&&r.body.error)||'remove failed'); return; } }
+    await refresh();
+  };
+  // Reset-counters zeroes every rule's hit tally. Counters are the one thing
+  // the engine still owns — live traffic rather than configuration — so this
+  // is the one control here that reaches it.
+  if (rules.length){
+    const bar = $('<div style="margin-top:8px"></div>');
+    const rc = $('<button class="ghost sm">reset counters</button>');
+    rc.onclick = async () => {
+      const r = await api('/api/firewall',{method:'POST',body:JSON.stringify({op:'reset-counters',ids:[]})});
+      if(!r.ok){ await noticeModal((r.body&&r.body.error)||'reset failed'); return; }
       await refresh();
     };
-    // Reset-counters control: zeroes every rule's hit tally on this network.
-    if (rules.length){
-      const bar = $('<div style="margin-top:8px"></div>');
-      const rc = $('<button class="ghost sm">reset counters</button>');
-      rc.onclick = async () => {
-        const r = await api('/api/firewall',{method:'POST',body:JSON.stringify({net:cf.id,op:'reset-counters',ids:[]})});
-        if(!r.ok){ await noticeModal((r.body&&r.body.error)||'reset failed'); return; }
-        await refresh();
-      };
-      bar.appendChild(rc); card.appendChild(bar);
-    }
-    c.appendChild(card);
+    bar.appendChild(rc); card.appendChild(bar);
   }
+  c.appendChild(card);
+  enhanceTable(table);
+}
+
+// fwScopeOpts renders the scope picker: "any" plus every mesh network.
+function fwScopeOpts(sel){
+  let o = '<option value=""'+(!sel?' selected':'')+'>any</option>';
+  for (const cf of (state.cfg||[])){
+    const n = cf.name || cf.id;
+    o += '<option value="'+esc(n)+'"'+(n===sel?' selected':'')+'>'+esc(n)+'</option>';
+  }
+  return o;
 }
 
 // fmtHits renders a rule's byte tally for the hits-cell tooltip.
@@ -7457,7 +7485,7 @@ function buildCidrChipEditor(selected, onChange, opts){
   };
 }
 
-function fwAddRow(table, net){
+function fwAddRow(table){
   const tr = document.createElement('tr');
   tr.innerHTML = '<td class="selcol"></td>'
     + '<td class="fw-state"><span class="on">enabled</span></td>'
@@ -7465,6 +7493,7 @@ function fwAddRow(table, net){
     + '<td><span class="fwe-field"><input class="fwe-dst" placeholder="cidr / object" style="width:150px">'+fwNegToggle('fwe-dst-negate','match anything EXCEPT this')+'</span></td>'
     + '<td><span class="fwe-field"><input class="fwe-services" placeholder="tcp/443, https" style="width:180px">'+fwNegToggle('fwe-services-negate','match any service EXCEPT this')+'</span></td>'
     + '<td><select class="fwe-action">'+fwActOpts('allow')+'</select></td>'
+    + '<td><select class="fwe-scope" title="any: enforced on every mesh network this node runs. A network name: only that one.">'+fwScopeOpts('')+'</select></td>'
     + '<td><label class="fwe-log-l" title="log matches"><input type="checkbox" class="fwe-log"> log</label></td>'
     + '<td></td>'
     + '<td><input class="fwe-notes" placeholder="notes" style="width:140px"> <button class="sm fwe-save">save</button> <button class="ghost sm fwe-cancel">cancel</button></td>';
@@ -7477,7 +7506,7 @@ function fwAddRow(table, net){
   tr.querySelector('.fwe-save').onclick = async () => {
     const rule = fwCollectRule(tr); if (!rule) return;
     if (!fwValidateNegate(rule)) return;
-    const r = await api('/api/firewall',{method:'POST',body:JSON.stringify({net:net,op:'add',at:-1,rule})});
+    const r = await api('/api/firewall',{method:'POST',body:JSON.stringify({op:'add',at:-1,rule})});
     if (!r.ok){ await noticeModal((r.body && r.body.error) || 'failed'); return; }
     await refresh();
   };
@@ -7507,6 +7536,10 @@ function fwCollectRule(scope){
     services_negate: q('.fwe-services-negate').classList.contains('active'),
     log: q('.fwe-log').checked,
     notes: q('.fwe-notes').value.trim(),
+    // Blank means every mesh network this node runs — see the section comment
+    // in secFirewall. The picker is absent only in tests that build a row by
+    // hand, hence the guard rather than a bare .value.
+    scope: (q('.fwe-scope') ? q('.fwe-scope').value : ''),
   };
 }
 
@@ -7527,7 +7560,7 @@ function fwValidateNegate(rule){
 
 // startFwEdit turns a firewall rule row into inline editors; saving deletes the
 // old rule and re-adds the edited one at the same position (order is preserved).
-function startFwEdit(tr, net){
+function startFwEdit(tr){
   if (tr.querySelector('.fwe-action')) return; // already editing
   tr.draggable = false;
   const oldId = Number(tr.dataset.fwid), oldIdx = Number(tr.dataset.idx);
@@ -7535,6 +7568,8 @@ function startFwEdit(tr, net){
         sv=tr.querySelector('.fw-services'), s=tr.querySelector('.fw-src'), d=tr.querySelector('.fw-dst'),
         lg=tr.querySelector('.fw-log'), no=tr.querySelector('.fw-notes');
   a.innerHTML = '<select class="fwe-action">'+fwActOpts(tr.dataset.action)+'</select>';
+  const sc = tr.querySelector('.fw-scope');
+  sc.innerHTML = '<select class="fwe-scope" title="any: enforced on every mesh network this node runs. A network name: only that one.">'+fwScopeOpts(tr.dataset.scope||'')+'</select>';
   sv.innerHTML = '<span class="fwe-field"><input class="fwe-services" style="width:180px" value="'+esc(tr.dataset.services||'')+'">'+fwNegToggle('fwe-services-negate','match any service EXCEPT this')+'</span>';
   s.innerHTML = '<span class="fwe-field"><input class="fwe-src" style="width:150px" value="'+esc(tr.dataset.src||'')+'">'+fwNegToggle('fwe-src-negate','match anything EXCEPT this')+'</span>';
   d.innerHTML = '<span class="fwe-field"><input class="fwe-dst" style="width:150px" value="'+esc(tr.dataset.dst||'')+'">'+fwNegToggle('fwe-dst-negate','match anything EXCEPT this')+'</span>';
@@ -7551,10 +7586,12 @@ function startFwEdit(tr, net){
   no.querySelector('.fwe-save').onclick = async () => {
     const rule = fwCollectRule(tr); if (!rule) return;
     if (!fwValidateNegate(rule)) return;
-    const dr = await api('/api/firewall',{method:'POST',body:JSON.stringify({net:net,op:'del',ids:[oldId]})});
-    if (!dr.ok){ await noticeModal((dr.body&&dr.body.error)||'edit failed'); refresh(); return; }
-    const ar = await api('/api/firewall',{method:'POST',body:JSON.stringify({net:net,op:'add',at:oldIdx,rule:rule})});
-    if (!ar.ok) { await noticeModal((ar.body&&ar.body.error)||'edit failed'); refresh(); return; }
+    // In-place update from v957. This used to delete and re-add, because the
+    // engine minted the id and there was no way to edit a rule without
+    // destroying its identity — which also lost its position and reset its hit
+    // counters. Config owns the id now, so the rule survives its own edit.
+    const r = await api('/api/firewall',{method:'POST',body:JSON.stringify({op:'update',ids:[oldId],rule})});
+    if (!r.ok){ await noticeModal((r.body&&r.body.error)||'edit failed'); refresh(); return; }
     await refresh();
   };
 }

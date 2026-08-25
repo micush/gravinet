@@ -50,7 +50,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "956"
+	version = "958"
 	commit  = "none"
 )
 
@@ -804,30 +804,24 @@ func cmdRun(args []string) {
 				}
 				cur.FirewallServices = cs
 			}
-			// Persist the engine's current rulebase. The engine holds the rules
-			// whether or not the firewall is enabled (enabled only gates enforcement),
-			// so this is safe to write in either state and won't wipe rules while the
-			// firewall is off.
-			rules, fwErr := engine.FirewallRules(networkID)
+			// The rulebase is deliberately NOT written back from here any more.
+			//
+			// Through v956 the engine was where firewall rules were edited and
+			// this hook copied them down into config, which is why rules could
+			// not be written at all without a running engine for the network.
+			// v957 inverted that: config is edited directly and the engine is
+			// reloaded from it. Copying the engine's copy back on top would put
+			// the two in a loop and, worse, would flatten a node-global rule
+			// into whichever network happened to trigger the persist.
+			//
+			// The object and service catalogs above are different and still
+			// belong here: they are genuinely node-global and the engine is
+			// still where they are edited.
 			idHex := fmt.Sprintf("%016x", networkID)
 			for i := range cur.Networks {
 				nid, _ := strconv.ParseUint(cur.Networks[i].ID, 16, 64)
 				if nid != networkID && cur.Networks[i].ID != idHex {
 					continue
-				}
-				if fwErr == nil {
-					out := make([]config.FirewallRule, 0, len(rules))
-					for _, r := range rules {
-						out = append(out, config.FirewallRule{
-							Disabled: r.Disabled, Action: r.Action, Direction: r.Direction, Proto: r.Proto,
-							Src: r.Src, Dst: r.Dst, SrcNegate: r.SrcNegate, DstNegate: r.DstNegate,
-							SrcPortMin: r.SrcPortMin, SrcPortMax: r.SrcPortMax,
-							DstPortMin: r.DstPortMin, DstPortMax: r.DstPortMax,
-							Services: r.Services, ServicesNegate: r.ServicesNegate, Log: r.Log,
-							Notes: r.Notes,
-						})
-					}
-					cur.Networks[i].Firewall.Rules = out
 				}
 				// Name and subnet a node learned from the network when joining by id.
 				if name, s4, s6, ok := engine.NetworkIdentity(networkID); ok {
@@ -1207,7 +1201,7 @@ func cmdRun(args []string) {
 					// Already up: apply the hot-reloadable runtime settings + keys.
 					var spec mesh.NetSpec
 					spec.ID = id
-					fillRuntimeSpec(&spec, n, newCfg.EffectiveFirewallExempt(), newCfg.NATStateTimeout, newCfg.FirewallServices, newCfg.BGP, newCfg.NAT, newCfg.QoS, newCfg.EffectiveThrottle(n))
+					fillRuntimeSpec(&spec, n, newCfg.EffectiveFirewallExempt(), newCfg.NATStateTimeout, newCfg.FirewallServices, newCfg.BGP, newCfg.NAT, newCfg.QoS, newCfg.EffectiveThrottle(n), newCfg.Firewall, newCfg.FirewallRulesFor(n))
 					// fillRuntimeSpec doesn't resolve seeds (only buildOneNetSpec does
 					// at startup); resolve them here so a seed added at runtime is
 					// dialed live via ReloadRuntime's seed merge, and one just
@@ -1477,7 +1471,32 @@ func cmdRun(args []string) {
 		// state.
 		upg := newUpgradeSvc(cfg, *cfgPath, engine, int(webPortOf(cfg)))
 
-		ctlSrv, err := control.Serve(sock, engine, logx.Default())
+		// Firewall rule mutations arriving on the control socket go through
+		// the config file, not straight into the live engine — config is the
+		// source of truth from v957, and the engine's rulebase is rebuilt from
+		// it on every reload. Wrapping is what keeps `gravinet fw add` from
+		// writing somewhere the next reload silently discards. See controlfw.go.
+		ctlAPI := &controlAPI{Engine: engine, edit: func(mut func(*config.Config) error) error {
+			cfgLock.Lock()
+			defer cfgLock.Unlock()
+			cur, lerr := config.Load(*cfgPath)
+			if lerr != nil {
+				return lerr
+			}
+			if merr := mut(cur); merr != nil {
+				return merr
+			}
+			if verr := cur.Validate(); verr != nil {
+				return verr
+			}
+			if serr := cur.SaveTo(*cfgPath); serr != nil {
+				return serr
+			}
+			return reloadFn()
+		}}
+		controlCfgPath = *cfgPath
+
+		ctlSrv, err := control.Serve(sock, ctlAPI, logx.Default())
 		if err != nil {
 			// This used to be a lone Warnf, which is how the original bug stayed
 			// invisible for so long: the daemon started fine, the mesh came up, and
@@ -2208,7 +2227,9 @@ func ctlResult(resp control.Response, err error) {
 // cmdFW drives the firewall rulebase: list, add, del, move, copy, cut, paste.
 func cmdFW(args []string) {
 	if len(args) == 0 {
-		fatal("usage: gravinet fw <list|add|del|move|copy|cut|paste|exempt> [...]")
+		fatal("usage: gravinet fw <list|add|del|move|copy|cut|paste|exempt> [...]\n" +
+			"  rules are node-global: -net selects whose enforced view to list, and `add -scope NAME`\n" +
+			"  limits a rule to one mesh network (default: every network).")
 	}
 	op, rest := args[0], args[1:]
 	switch op {
@@ -2218,7 +2239,11 @@ func cmdFW(args []string) {
 	case "list":
 		fs := flag.NewFlagSet("fw list", flag.ExitOnError)
 		sock := fs.String("sock", defaultControlSocket(), "control socket path")
-		netID := fs.String("net", "", "network name or hex id")
+		// -net picks whose enforced view to show, with that network's hit
+		// counters and only the rules in scope for it. Omitted, the whole
+		// node-global rulebase is listed — which is also what a node running
+		// no mesh networks gets.
+		netID := fs.String("net", "", "show what one network enforces (default: the whole rulebase)")
 		fs.Parse(rest)
 		resp, err := control.Do(*sock, control.Request{Cmd: "fw", Net: *netID, FWOp: "list"})
 		if err != nil {
@@ -2227,21 +2252,33 @@ func cmdFW(args []string) {
 		if !resp.OK {
 			fatal("%s", resp.Error)
 		}
-		fmt.Printf("Firewall rules (%d) — default policy: allow, stateful\n", len(resp.FW))
+		what := "rulebase"
+		if *netID != "" {
+			what = "enforced on " + *netID
+		}
+		fmt.Printf("Firewall rules (%d, %s) — default policy: allow, stateful\n", len(resp.FW), what)
 		for i, r := range resp.FW {
 			svcNote := ""
 			if r.ServicesNegate {
 				svcNote = " !svc"
 			}
-			fmt.Printf("  [%d] id=%d %-5s %-4s proto=%-4s src=%-18s dst=%-18s sport=%d-%d dport=%d-%d%s %s\n",
+			scope := r.Scope
+			if scope == "" {
+				scope = "any"
+			}
+			fmt.Printf("  [%d] id=%d %-5s %-4s proto=%-4s src=%-18s dst=%-18s sport=%d-%d dport=%d-%d scope=%-10s%s %s\n",
 				i, r.ID, r.Action, r.Direction, r.Proto,
 				negPrefix(r.SrcNegate)+orAny(r.Src), negPrefix(r.DstNegate)+orAny(r.Dst),
-				r.SrcPortMin, r.SrcPortMax, r.DstPortMin, r.DstPortMax, svcNote, r.Notes)
+				r.SrcPortMin, r.SrcPortMax, r.DstPortMin, r.DstPortMax, scope, svcNote, r.Notes)
 		}
 	case "add":
 		fs := flag.NewFlagSet("fw add", flag.ExitOnError)
 		sock := fs.String("sock", defaultControlSocket(), "control socket path")
-		netID := fs.String("net", "", "network name or hex id")
+		// -net is gone: the rulebase is node-global. What used to be "which
+		// network's rules am I editing" is now a property of the rule itself,
+		// so it is -scope, and blank means every network rather than "pick one
+		// for me".
+		scope := fs.String("scope", "", "mesh network this rule applies to (default: every network)")
 		at := fs.Int("at", -1, "insert position (-1 = end)")
 		action := fs.String("action", "allow", "allow|deny")
 		dir := fs.String("dir", "both", "in|out|both")
@@ -2267,9 +2304,9 @@ func cmdFW(args []string) {
 			Action: *action, Direction: *dir, Proto: *proto, Src: *src, Dst: *dst,
 			SrcNegate: *srcNegate, DstNegate: *dstNegate, ServicesNegate: *svcNegate,
 			SrcPortMin: spMin, SrcPortMax: spMax, DstPortMin: dpMin, DstPortMax: dpMax,
-			Notes: *notes,
+			Notes: *notes, Scope: *scope,
 		}
-		resp, err := control.Do(*sock, control.Request{Cmd: "fw", Net: *netID, FWOp: "add", FWAt: *at, FWRule: rule})
+		resp, err := control.Do(*sock, control.Request{Cmd: "fw", FWOp: "add", FWAt: *at, FWRule: rule})
 		if err != nil {
 			fatal("control: %v", err)
 		}
@@ -2285,12 +2322,11 @@ func cmdFW(args []string) {
 		ids, rest2 := splitIDs(rest)
 		fs := flag.NewFlagSet("fw "+op, flag.ExitOnError)
 		sock := fs.String("sock", defaultControlSocket(), "control socket path")
-		netID := fs.String("net", "", "network name or hex id")
 		fs.Parse(rest2)
 		if len(ids) == 0 {
-			fatal("usage: gravinet fw %s <id[,id,...]> [-net NAME|id]", op)
+			fatal("usage: gravinet fw %s <id[,id,...]>  (ids from `gravinet fw list`)", op)
 		}
-		ctlResult(control.Do(*sock, control.Request{Cmd: "fw", Net: *netID, FWOp: op, FWIDs: ids}))
+		ctlResult(control.Do(*sock, control.Request{Cmd: "fw", FWOp: op, FWIDs: ids}))
 	case "move":
 		// "fw move ID INDEX". The destination used to be "-to N", a flag that
 		// defaulted to 0 — so "gravinet fw move 7" with the -to forgotten
@@ -2298,10 +2334,9 @@ func cmdFW(args []string) {
 		// rulebase, which for an ordered, first-match evaluator is about the
 		// most consequential place it could have gone. There is no sensible
 		// default for where to move something, so there is no default now.
-		pos, rest2 := splitPositionals(rest, "sock", "net", "to")
+		pos, rest2 := splitPositionals(rest, "sock", "to")
 		fs := flag.NewFlagSet("fw move", flag.ExitOnError)
 		sock := fs.String("sock", defaultControlSocket(), "control socket path")
-		netID := fs.String("net", "", "network name or hex id")
 		to := fs.Int("to", -1, "deprecated: pass the target index as an argument instead")
 		fs.Parse(rest2)
 		if len(pos) == 0 {
@@ -2319,14 +2354,13 @@ func cmdFW(args []string) {
 			fatal("usage: gravinet fw move %s INDEX  (where in the rulebase to put it; positions from `gravinet fw list`)", pos[0])
 		}
 		rid := parseUint(pos[0])
-		ctlResult(control.Do(*sock, control.Request{Cmd: "fw", Net: *netID, FWOp: "move", FWIDs: []uint64{rid}, FWTo: dest}))
+		ctlResult(control.Do(*sock, control.Request{Cmd: "fw", FWOp: "move", FWIDs: []uint64{rid}, FWTo: dest}))
 	case "paste":
 		fs := flag.NewFlagSet("fw paste", flag.ExitOnError)
 		sock := fs.String("sock", defaultControlSocket(), "control socket path")
-		netID := fs.String("net", "", "network name or hex id")
 		at := fs.Int("at", -1, "insert position (-1 = end)")
 		fs.Parse(rest)
-		resp, err := control.Do(*sock, control.Request{Cmd: "fw", Net: *netID, FWOp: "paste", FWAt: *at})
+		resp, err := control.Do(*sock, control.Request{Cmd: "fw", FWOp: "paste", FWAt: *at})
 		if err != nil {
 			fatal("control: %v", err)
 		}
@@ -2762,7 +2796,7 @@ func buildOneNetSpec(n config.Network, cfg *config.Config, overlays []netip.Pref
 	spec.MulticastPPS = n.StormControl.MulticastPPS
 	spec.StormBurst = n.StormControl.Burst
 
-	fillRuntimeSpec(&spec, n, cfg.EffectiveFirewallExempt(), cfg.NATStateTimeout, cfg.FirewallServices, cfg.BGP, cfg.NAT, cfg.QoS, cfg.EffectiveThrottle(n))
+	fillRuntimeSpec(&spec, n, cfg.EffectiveFirewallExempt(), cfg.NATStateTimeout, cfg.FirewallServices, cfg.BGP, cfg.NAT, cfg.QoS, cfg.EffectiveThrottle(n), cfg.Firewall, cfg.FirewallRulesFor(n))
 	return spec, dev, nil
 }
 
@@ -2849,7 +2883,7 @@ func autoMeshRoutesFromBGP(n config.Network, bgp config.BGPConfig) []netip.Prefi
 	return out
 }
 
-func fillRuntimeSpec(spec *mesh.NetSpec, n config.Network, exempts []config.FirewallExempt, natStateTimeout int, fwServices []config.FirewallService, bgp config.BGPConfig, nat config.NAT, qos config.QoS, thr config.Throttle) {
+func fillRuntimeSpec(spec *mesh.NetSpec, n config.Network, exempts []config.FirewallExempt, natStateTimeout int, fwServices []config.FirewallService, bgp config.BGPConfig, nat config.NAT, qos config.QoS, thr config.Throttle, fw config.Firewall, fwRules []config.FirewallRule) {
 	// Redistributed routes (hot-reloadable; applied live on reload). Disabled
 	// route entries are skipped.
 	for _, rt := range n.Routes {
@@ -2979,9 +3013,18 @@ func fillRuntimeSpec(spec *mesh.NetSpec, n config.Network, exempts []config.Fire
 	// rules while disabled, and a persist firing while disabled could even wipe
 	// them from config. Keeping the rules loaded keeps them visible and safe;
 	// they simply aren't applied until the firewall is switched back on.
-	spec.FirewallEnabled = n.Firewall.Enabled
-	for _, fr := range n.Firewall.Rules {
+	//
+	// Node-global from v957: the rulebase comes from the config and each
+	// network takes the subset in scope for it — its own, plus every rule that
+	// named no network — in the node list's order, since first match wins.
+	spec.FirewallEnabled = fw.Enabled
+	spec.FirewallRules = spec.FirewallRules[:0]
+	for _, fr := range fwRules {
 		spec.FirewallRules = append(spec.FirewallRules, mesh.FirewallRule{
+			// Carried so the engine adopts config's id rather than minting
+			// one: the UI keys selections, counter resets and reordering off
+			// it, and an engine-minted id would not survive a reload.
+			ID:             fr.ID,
 			Disabled:       fr.Disabled,
 			Action:         fr.Action,
 			Direction:      fr.Direction,

@@ -234,8 +234,7 @@ func newFirewall(rules []*fwRule) *firewall {
 	f.cat = emptyCatalog()
 	f.logInterval = defaultFWLogInterval
 	for _, r := range rules {
-		f.nextID++
-		r.id = f.nextID
+		f.adoptID(r)
 		if r.cnt == nil {
 			r.cnt = newRuleCounters()
 		}
@@ -785,8 +784,7 @@ func indexOf(rules []*fwRule, id uint64) int {
 func (f *firewall) add(r *fwRule, at int) *fwRule {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.nextID++
-	r.id = f.nextID
+	f.adoptID(r)
 	f.store(insertAt(f.current(), r, at))
 	return r
 }
@@ -1050,6 +1048,12 @@ type FirewallRule struct {
 	ServicesNegate bool     `json:"services_negate,omitempty"` // match any service EXCEPT the Proto/ports+Services union
 	Log            bool     `json:"log,omitempty"`             // log a line whenever this rule matches
 	Notes          string   `json:"notes,omitempty"`
+	// Scope is carried for the admin UI only — it names the mesh network a
+	// rule is enforced on, or is empty for every network. The engine never
+	// reads it: scoping is resolved before rules reach here, by
+	// config.FirewallRulesFor, so each network's engine is handed exactly the
+	// rules that apply to it.
+	Scope string `json:"scope,omitempty"`
 	// Packets/Bytes are export-only hit counters (ignored on input). They are the
 	// running tally of traffic this rule has matched since it was created or the
 	// counters were last reset.
@@ -1356,6 +1360,9 @@ func compileRule(fr FirewallRule, cat *fwCatalog) (*fwRule, error) {
 		act = fwDeny
 	}
 	return &fwRule{
+		// Carried through so loadRules/add can adopt it rather than mint a new
+		// one — the id is config's, not the engine's.
+		id:         fr.ID,
 		spec:       fr,
 		disabled:   fr.Disabled,
 		dir:        dirFromString(fr.Direction),
@@ -1472,11 +1479,31 @@ func (f *firewall) loadRules(rules []FirewallRule) {
 			}
 			continue
 		}
-		f.nextID++
-		r.id = f.nextID
+		// The id comes from config, which is the durable record — see
+		// config.FirewallRule.ID. Minting one here instead would renumber
+		// every rule on each reload, so a counter reset or a reorder issued
+		// against the ids the UI is holding would land on the wrong rules.
+		f.adoptID(r)
 		nr = append(nr, r)
 	}
 	f.store(nr)
+}
+
+// adoptID keeps a rule's config-assigned id, falling back to a locally minted
+// one only for a rule that arrived without one — which should not happen once
+// Config.Validate has run, but a zero id would silently collide with every
+// other zero id if it did.
+//
+// Caller holds f.mu, or is constructing the firewall and has no sharers yet.
+func (f *firewall) adoptID(r *fwRule) {
+	if r.id == 0 {
+		f.nextID++
+		r.id = f.nextID
+		return
+	}
+	if r.id > f.nextID {
+		f.nextID = r.id
+	}
 }
 
 // ReloadFirewallRules replaces the live rulebase for a network from a fresh

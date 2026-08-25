@@ -28,7 +28,7 @@ func TestDisabledNATRuleNotInSpec(t *testing.T) {
 		},
 	}
 	var spec mesh.NetSpec
-	fillRuntimeSpec(&spec, n, nil, 0, nil, config.BGPConfig{}, nat, config.QoS{}, config.Throttle{})
+	fillRuntimeSpec(&spec, n, nil, 0, nil, config.BGPConfig{}, nat, config.QoS{}, config.Throttle{}, config.Firewall{}, nil)
 
 	if !spec.NATEnabled {
 		t.Fatal("NATEnabled should be true")

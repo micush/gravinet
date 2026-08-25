@@ -340,3 +340,56 @@ func TestBandwidthSectionIsNodeGlobal(t *testing.T) {
 		t.Error("the per-network rows no longer address a network, so overrides cannot be set")
 	}
 }
+
+// The firewall is node-global from v957: one card, no networks gate, and the
+// rulebase read from config rather than from the live engine.
+func TestFirewallSectionIsNodeGlobal(t *testing.T) {
+	sec := between(t, indexHTML, "function secFirewall(c) {", "\n// fwScopeOpts")
+	if strings.Contains(sec, "emptyCard(c, 'No networks.')") {
+		t.Error("the firewall rules tab is gated on a mesh network existing again")
+	}
+	if strings.Contains(sec, "netCardHead(cf") {
+		t.Error("the firewall renders a card per mesh network again")
+	}
+	if !strings.Contains(sec, "sectionCardHead('FIREWALL'") {
+		t.Error("the firewall card no longer uses the node-global card head")
+	}
+	if !strings.Contains(sec, "<th>scope</th>") {
+		t.Error("the firewall table has no scope column")
+	}
+	// Every rule op addresses the node list, never a network. A lingering
+	// net: would send the edit down the pre-v957 engine path.
+	if strings.Contains(sec, "net:cf.id") {
+		t.Error("a firewall op still addresses a single network")
+	}
+}
+
+// Editing a rule updates it in place rather than deleting and re-adding.
+// The old delete+add lost the rule's id, its position in the ordered list —
+// which decides what matches first — and its hit counters.
+func TestFirewallEditIsInPlace(t *testing.T) {
+	fn := between(t, indexHTML, "function startFwEdit(tr){", "\nfunction ")
+	if !strings.Contains(fn, "op:'update'") {
+		t.Error("the firewall row editor no longer updates in place")
+	}
+	if strings.Contains(fn, "op:'del'") {
+		t.Error("the firewall row editor deletes and re-adds again, losing the rule's id, position and counters")
+	}
+}
+
+// The handler must not send rule edits to the engine: config is the source of
+// truth from v957, and the engine path is the one that needs a mesh network.
+func TestFirewallHandlerIsConfigFirst(t *testing.T) {
+	src := mustRead("webadmin.go")
+	h := between(t, src, "func (s *Server) handleFirewall(", "\nfunc fwRuleToConfig")
+	for _, engineOp := range []string{"s.be.FirewallAdd(", "s.be.FirewallDelete(", "s.be.FirewallMove("} {
+		if strings.Contains(h, engineOp) {
+			t.Errorf("handleFirewall still calls %s; rule edits go to config from v957", engineOp)
+		}
+	}
+	// Counters are live traffic rather than configuration, so that one op does
+	// still reach the engine.
+	if !strings.Contains(h, "s.be.FirewallResetCounters(") {
+		t.Error("reset-counters no longer reaches the engine, where the tallies actually live")
+	}
+}

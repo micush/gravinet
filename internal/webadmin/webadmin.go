@@ -1081,6 +1081,10 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 // ---- API ----
 
+// allNetworkIDs is every mesh network this node currently runs, which is empty
+// on a node that runs none — the case the node-global firewall exists for.
+func (s *Server) allNetworkIDs() []uint64 { return s.be.NetworkIDs() }
+
 func (s *Server) resolveNet(hexID string) (uint64, bool) {
 	ids := s.be.NetworkIDs()
 	if hexID == "" {
@@ -1256,7 +1260,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		tlsNotAfter = s.tlsCert.NotAfter.UTC().Format(time.RFC3339)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"nets": out, "udp_ports": cfg.UDPPortList(), "tcp_ports": cfg.TCPPortList(), "nat_state_timeout": cfg.NATStateTimeout, "nat": cfg.NAT, "qos": cfg.QoS, "throttle": cfg.Throttle, "geoip_lookup": s.cfg.GeoIPEnabled(), "enable_upnp": cfg.EnableUPnP, "ip_forwarding": cfg.ForwardingEnabled(), "disable_redirects": cfg.RedirectsDisabled(), "allow_remote_shell": s.cfg.AllowRemoteShell, "login_ban_max_failures": s.cfg.LoginBan.EffectiveMaxFailures(), "login_ban_seconds": s.cfg.LoginBan.EffectiveBanSeconds(), "tls_source": tlsSource, "tls_common_name": tlsCN, "tls_not_after": tlsNotAfter, "config_history_limit": cfg.EffectiveConfigHistoryLimit(), "config_history_count": config.Count(s.configPath), "shell_supported": ptySupported, "bgp_supported": bgpSupported(), "ipv6ra_supported": ipv6RASupported(), "dhcp_supported": dhcpSupported(), "snmp_supported": snmpSupported, "lldp_supported": lldpSupported, "syslog_supported": syslogSupported, "log_level": s.be.LogLevel(), "log_max_size": cfg.LogMaxSizeString(),
+		"nets": out, "udp_ports": cfg.UDPPortList(), "tcp_ports": cfg.TCPPortList(), "nat_state_timeout": cfg.NATStateTimeout, "nat": cfg.NAT, "qos": cfg.QoS, "throttle": cfg.Throttle, "firewall": cfg.Firewall, "geoip_lookup": s.cfg.GeoIPEnabled(), "enable_upnp": cfg.EnableUPnP, "ip_forwarding": cfg.ForwardingEnabled(), "disable_redirects": cfg.RedirectsDisabled(), "allow_remote_shell": s.cfg.AllowRemoteShell, "login_ban_max_failures": s.cfg.LoginBan.EffectiveMaxFailures(), "login_ban_seconds": s.cfg.LoginBan.EffectiveBanSeconds(), "tls_source": tlsSource, "tls_common_name": tlsCN, "tls_not_after": tlsNotAfter, "config_history_limit": cfg.EffectiveConfigHistoryLimit(), "config_history_count": config.Count(s.configPath), "shell_supported": ptySupported, "bgp_supported": bgpSupported(), "ipv6ra_supported": ipv6RASupported(), "dhcp_supported": dhcpSupported(), "snmp_supported": snmpSupported, "lldp_supported": lldpSupported, "syslog_supported": syslogSupported, "log_level": s.be.LogLevel(), "log_max_size": cfg.LogMaxSizeString(),
 		"worker_threads": cfg.WorkerThreads, "tun_queues": cfg.TunQueues, "tun_queues_supported": tunMultiQueueSupported, "udp_gso": cfg.UDPGSOEnabled(), "udp_gso_supported": udpGSOSupported, "socket_buffer_mb": cfg.SocketBufferMB(), "socket_buffer_max_mb": config.SocketBufferMaxBytes >> 20,
 		// Node-global firewall object/service catalog (see Config.FirewallObjects'
 		// doc comment) — shared by every network above, not nested under any one
@@ -1411,19 +1415,28 @@ func (s *Server) handleUnban(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// handleFirewall reads and edits this node's rulebase.
+//
+// Config-first from v957, inverting how this worked through v956. The rules
+// used to live in the live mesh engine: the UI read them from it, every edit
+// went through it, and its persist hook copied them down into config
+// afterwards. That made a running engine — and therefore a mesh network — a
+// precondition for writing a firewall rule down at all, which is backwards for
+// something whose rules are a statement about packets.
+//
+// So config is the source of truth and the engine is reloaded from it. The
+// engine still owns one thing the config cannot: per-rule hit counters, which
+// are live traffic tallies rather than configuration. Those are merged in on
+// read, keyed by the stable id config now assigns (see config.FirewallRule.ID)
+// and which the engine adopts rather than minting its own.
 func (s *Server) handleFirewall(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		id, ok := s.resolveNet(r.URL.Query().Get("net"))
-		if !ok {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "specify net"})
-			return
-		}
-		rules, err := s.be.FirewallRules(id)
+		cfg, err := config.Load(s.configPath)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"rules": rules})
+		writeJSON(w, http.StatusOK, map[string]any{"rules": s.firewallRulesWithCounters(cfg)})
 		return
 	}
 	var req struct {
@@ -1441,20 +1454,12 @@ func (s *Server) handleFirewall(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "bad request"})
 		return
 	}
-	// enable/disable operate on the config by name (no engine rule id needed).
-	if req.Op == "enable" || req.Op == "disable" {
-		on := req.Op == "enable"
-		err := s.mutateConfig(r, func(cfg *config.Config) error { return cfg.FirewallSetEnabled(req.Net, on) })
-		// The reload applies the toggle to the running engine live (the firewall
-		// object always exists), so no restart is needed.
-		s.editResult(w, err, false)
-		return
-	}
+
 	// objects / services replace the node-global address-object / service
-	// catalog every network's rules resolve their src/dst/services references
-	// against — not scoped to req.Net (there's no per-network catalog left to
-	// scope to), applied live and persisted by the engine's persist hook, like
-	// rule edits.
+	// catalog every rule resolves its src/dst/services references against.
+	// Still engine-owned and still persisted by the engine's persist hook —
+	// unlike the rules, these were never per-network and so were never the
+	// thing making a mesh a precondition.
 	if req.Op == "objects" || req.Op == "services" {
 		var err error
 		if req.Op == "objects" {
@@ -1469,19 +1474,12 @@ func (s *Server) handleFirewall(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "restart": false})
 		return
 	}
+
 	// mark-objects-seeded / mark-services-seeded record that the admin UI's
 	// well-known catalog auto-populate (see ui.go's fwAutoPopulateCatalog) has
-	// already run for this node, so it never runs again — a plain config
-	// mutation like enable/disable above, not an engine op: the flag itself
-	// has no effect on packet filtering, only on whether the UI's next visit
-	// tries to add anything. Node-global, like the catalog itself — not
-	// scoped to req.Net. The client calls this right after an "objects"/
-	// "services" save that filled any gaps (or immediately, if there were
-	// none to fill) — sequenced after that save completes, so the fresh
-	// catalog it just wrote is what's on disk by the time this reads and
-	// re-saves the file, not a stale copy from before the objects/services
-	// write (both this and the engine's persist hook take the same
-	// per-config-path lock; see mutateConfig's comment).
+	// already run for this node, so it never runs again. The flag has no
+	// effect on packet filtering, only on whether the UI's next visit tries to
+	// add anything.
 	if req.Op == "mark-objects-seeded" || req.Op == "mark-services-seeded" {
 		objects := req.Op == "mark-objects-seeded"
 		err := s.mutateConfig(r, func(cfg *config.Config) error {
@@ -1493,84 +1491,118 @@ func (s *Server) handleFirewall(w http.ResponseWriter, r *http.Request) {
 		s.editResult(w, err, false)
 		return
 	}
-	// rule-enable / rule-disable toggle a single rule's enabled flag by its
-	// engine ID; we find it by matching ID in the live rulebase, then apply to config by index.
-	if req.Op == "rule-enable" || req.Op == "rule-disable" {
-		on := req.Op == "rule-enable"
+
+	// reset-counters is the one op that still goes to the engine: a hit tally
+	// is live traffic, not configuration, and there is nothing in the config
+	// file to reset. Applied to every network, since the rulebase is one list
+	// and a rule may be enforced on several.
+	if req.Op == "reset-counters" {
+		for _, id := range s.allNetworkIDs() {
+			if err := s.be.FirewallResetCounters(id, req.IDs); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+				return
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "restart": false})
+		return
+	}
+
+	// Everything else is a config edit. The reload pushes it into whichever
+	// engines are running; a node with none simply has nothing to push to,
+	// which is the whole point of the change.
+	var err error
+	switch req.Op {
+	case "enable", "disable":
+		on := req.Op == "enable"
+		err = s.mutateConfig(r, func(cfg *config.Config) error { return cfg.FirewallSetEnabled(on) })
+	case "rule-enable", "rule-disable":
 		if len(req.IDs) == 0 {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "no rule id"})
 			return
 		}
-		ruleID := req.IDs[0]
-		id, ok := s.resolveNet(req.Net)
-		if !ok {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "specify net"})
-			return
-		}
-		rules, err := s.be.FirewallRules(id)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-			return
-		}
-		idx := -1
-		for i, fr := range rules {
-			if fr.ID == ruleID {
-				idx = i
-				break
+		on := req.Op == "rule-enable"
+		err = s.mutateConfig(r, func(cfg *config.Config) error {
+			for _, id := range req.IDs {
+				if e := cfg.FirewallRuleSetEnabled(id, on); e != nil {
+					return e
+				}
 			}
-		}
-		if idx < 0 {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "rule not found"})
+			return nil
+		})
+	case "add":
+		err = s.mutateConfig(r, func(cfg *config.Config) error {
+			return cfg.FirewallRuleAdd(fwRuleToConfig(req.Rule), req.At)
+		})
+	case "update":
+		if len(req.IDs) != 1 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "update requires exactly one rule id"})
 			return
 		}
 		err = s.mutateConfig(r, func(cfg *config.Config) error {
-			return cfg.FirewallRuleSetEnabled(req.Net, idx, on)
+			return cfg.FirewallRuleUpdate(req.IDs[0], fwRuleToConfig(req.Rule))
 		})
-		s.editResult(w, err, false)
-		return
-	}
-	id, ok := s.resolveNet(req.Net)
-	if !ok {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "specify net"})
-		return
-	}
-	var err error
-	switch req.Op {
-	case "add":
-		// Apply to the engine; this is live immediately and the engine's persist
-		// hook writes it back to config (the same path the control socket uses).
-		// Persisting again here would duplicate the rule.
-		if _, err = s.be.FirewallAdd(id, req.Rule, req.At); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-			return
-		}
 	case "del":
-		if err = s.be.FirewallDelete(id, req.IDs); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-			return
-		}
+		err = s.mutateConfig(r, func(cfg *config.Config) error { return cfg.FirewallRuleDelete(req.IDs) })
 	case "move":
 		if len(req.IDs) != 1 {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "move requires exactly one rule id"})
 			return
 		}
-		if err = s.be.FirewallMove(id, req.IDs[0], req.To); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-			return
-		}
-	case "reset-counters":
-		// Empty IDs resets every rule's hit tally.
-		if err = s.be.FirewallResetCounters(id, req.IDs); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-			return
-		}
+		err = s.mutateConfig(r, func(cfg *config.Config) error { return cfg.FirewallRuleMove(req.IDs[0], req.To) })
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "unknown op"})
 		return
 	}
-	// Changes are live in the engine immediately and persisted to config by the
-	// engine's persist hook. No restart needed.
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "restart": false})
+	s.editResult(w, err, false)
+}
+
+// fwRuleToConfig converts the wire form into the config form. The id is
+// deliberately not carried: add assigns one, and update keeps the existing.
+func fwRuleToConfig(r mesh.FirewallRule) config.FirewallRule {
+	return config.FirewallRule{
+		Disabled: r.Disabled, Action: r.Action, Direction: r.Direction, Proto: r.Proto,
+		Src: r.Src, Dst: r.Dst, SrcNegate: r.SrcNegate, DstNegate: r.DstNegate,
+		SrcPortMin: r.SrcPortMin, SrcPortMax: r.SrcPortMax,
+		DstPortMin: r.DstPortMin, DstPortMax: r.DstPortMax,
+		Services: r.Services, ServicesNegate: r.ServicesNegate, Log: r.Log,
+		Notes: r.Notes, Scope: r.Scope,
+	}
+}
+
+// firewallRulesWithCounters returns the configured rules with live hit tallies
+// folded in.
+//
+// A rule enforced on several networks has a counter per network, so they are
+// summed: the operator asked one question — how much traffic has this rule
+// matched — and one number answers it. A node with no engine running gets the
+// rules with zero counters rather than an error, which is what makes the page
+// work before any mesh network exists.
+func (s *Server) firewallRulesWithCounters(cfg *config.Config) []mesh.FirewallRule {
+	pkts := map[uint64]uint64{}
+	bytes := map[uint64]uint64{}
+	for _, id := range s.allNetworkIDs() {
+		live, err := s.be.FirewallRules(id)
+		if err != nil {
+			continue
+		}
+		for _, lr := range live {
+			pkts[lr.ID] += lr.Packets
+			bytes[lr.ID] += lr.Bytes
+		}
+	}
+	out := make([]mesh.FirewallRule, 0, len(cfg.Firewall.Rules))
+	for _, r := range cfg.Firewall.Rules {
+		out = append(out, mesh.FirewallRule{
+			ID: r.ID, Disabled: r.Disabled, Action: r.Action, Direction: r.Direction, Proto: r.Proto,
+			Src: r.Src, Dst: r.Dst, SrcNegate: r.SrcNegate, DstNegate: r.DstNegate,
+			SrcPortMin: r.SrcPortMin, SrcPortMax: r.SrcPortMax,
+			DstPortMin: r.DstPortMin, DstPortMax: r.DstPortMax,
+			Services: r.Services, ServicesNegate: r.ServicesNegate, Log: r.Log,
+			Notes: r.Notes, Scope: r.Scope,
+			Packets: pkts[r.ID], Bytes: bytes[r.ID],
+		})
+	}
+	return out
 }
 
 // handleIndex serves the app shell (HTML + embedded JS). Unauthenticated —

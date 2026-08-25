@@ -840,12 +840,10 @@ func (c *Config) NATSetEnabled(on bool) error {
 
 // FirewallSetEnabled turns the packet filter on or off for a network. When off,
 // all traffic is allowed; when on with no rules, the default policy is allow.
-func (c *Config) FirewallSetEnabled(netName string, on bool) error {
-	n, err := c.PickNetwork(netName)
-	if err != nil {
-		return err
-	}
-	n.Firewall.Enabled = on
+// FirewallSetEnabled turns this node's firewall on or off. Node-global since
+// v957; the flag gates enforcement only, never whether rules are loaded.
+func (c *Config) FirewallSetEnabled(on bool) error {
+	c.Firewall.Enabled = on
 	return nil
 }
 
@@ -914,56 +912,86 @@ func (c *Config) PeerSetNotes(netName, nodeID, notes string) error {
 
 // FirewallRuleSetEnabled enables or disables a single firewall rule by its
 // position index (0-based). Disabled rules are skipped during evaluation.
-func (c *Config) FirewallRuleSetEnabled(netName string, idx int, on bool) error {
-	n, err := c.PickNetwork(netName)
-	if err != nil {
-		return err
+// FirewallRuleSetEnabled toggles one rule, addressed by its stable id rather
+// than by position: an index would silently move under a concurrent reorder.
+func (c *Config) FirewallRuleSetEnabled(id uint64, on bool) error {
+	i := c.firewallIndexOf(id)
+	if i < 0 {
+		return fmt.Errorf("no firewall rule with id %d", id)
 	}
-	if idx < 0 || idx >= len(n.Firewall.Rules) {
-		return fmt.Errorf("rule index %d out of range", idx)
-	}
-	n.Firewall.Rules[idx].Disabled = !on
+	c.Firewall.Rules[i].Disabled = !on
 	return nil
 }
 
+// firewallIndexOf locates a rule by id, or -1.
+func (c *Config) firewallIndexOf(id uint64) int {
+	for i := range c.Firewall.Rules {
+		if c.Firewall.Rules[i].ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
 // FirewallRuleAdd inserts a rule at position idx (-1 = append).
-func (c *Config) FirewallRuleAdd(netName string, r FirewallRule, at int) error {
-	n, err := c.PickNetwork(netName)
-	if err != nil {
+// FirewallRuleAdd inserts a rule at position at (-1 appends) and gives it a
+// fresh id. Order matters — first match wins — so position is meaningful.
+func (c *Config) FirewallRuleAdd(r FirewallRule, at int) error {
+	if err := c.checkFirewallScope(r.Scope); err != nil {
 		return err
 	}
-	r.Disabled = false // new rules are active by default
-	if at < 0 || at >= len(n.Firewall.Rules) {
-		n.Firewall.Rules = append(n.Firewall.Rules, r)
-	} else {
-		n.Firewall.Rules = append(n.Firewall.Rules, FirewallRule{})
-		copy(n.Firewall.Rules[at+1:], n.Firewall.Rules[at:])
-		n.Firewall.Rules[at] = r
+	c.assignFirewallIDs() // keeps NextID ahead of anything already present
+	r.ID = c.Firewall.NextID
+	c.Firewall.NextID++
+	r.Scope = strings.TrimSpace(r.Scope)
+	if at < 0 || at > len(c.Firewall.Rules) {
+		c.Firewall.Rules = append(c.Firewall.Rules, r)
+		return nil
 	}
+	c.Firewall.Rules = append(c.Firewall.Rules[:at], append([]FirewallRule{r}, c.Firewall.Rules[at:]...)...)
+	return nil
+}
+
+// FirewallRuleUpdate replaces a rule in place, keeping its id and position.
+func (c *Config) FirewallRuleUpdate(id uint64, r FirewallRule) error {
+	i := c.firewallIndexOf(id)
+	if i < 0 {
+		return fmt.Errorf("no firewall rule with id %d", id)
+	}
+	if err := c.checkFirewallScope(r.Scope); err != nil {
+		return err
+	}
+	r.ID = id
+	r.Scope = strings.TrimSpace(r.Scope)
+	c.Firewall.Rules[i] = r
 	return nil
 }
 
 // FirewallRuleDelete removes rules by their 0-based position indices.
 // Indices are processed high-to-low so earlier removals don't shift later ones.
-func (c *Config) FirewallRuleDelete(netName string, idxs []int) error {
-	n, err := c.PickNetwork(netName)
-	if err != nil {
-		return err
+// FirewallRuleDelete removes rules by id. Ids are never reused, so a delete
+// cannot hand a live rule's identity to a later one.
+func (c *Config) FirewallRuleDelete(ids []uint64) error {
+	if len(ids) == 0 {
+		return fmt.Errorf("no firewall rule ids given")
 	}
-	// sort descending so we can splice without index drift
-	for i := 0; i < len(idxs)-1; i++ {
-		for j := i + 1; j < len(idxs); j++ {
-			if idxs[j] > idxs[i] {
-				idxs[i], idxs[j] = idxs[j], idxs[i]
-			}
+	want := map[uint64]bool{}
+	for _, id := range ids {
+		want[id] = true
+	}
+	out := c.Firewall.Rules[:0]
+	n := 0
+	for _, r := range c.Firewall.Rules {
+		if want[r.ID] {
+			n++
+			continue
 		}
+		out = append(out, r)
 	}
-	for _, idx := range idxs {
-		if idx < 0 || idx >= len(n.Firewall.Rules) {
-			return fmt.Errorf("rule index %d out of range", idx)
-		}
-		n.Firewall.Rules = append(n.Firewall.Rules[:idx], n.Firewall.Rules[idx+1:]...)
+	if n == 0 {
+		return fmt.Errorf("no firewall rule with those ids")
 	}
+	c.Firewall.Rules = out
 	return nil
 }
 
@@ -1087,22 +1115,19 @@ func (c *Config) FirewallExemptSetEnabled(idx int, on bool) error {
 	return nil
 }
 
-func (c *Config) FirewallRuleMove(netName string, fromIdx, toIdx int) error {
-	n, err := c.PickNetwork(netName)
-	if err != nil {
-		return err
+// FirewallRuleMove moves a rule to a new position in the node's ordered list.
+// First match wins, so this is a change in meaning, not presentation.
+func (c *Config) FirewallRuleMove(id uint64, to int) error {
+	from := c.firewallIndexOf(id)
+	if from < 0 {
+		return fmt.Errorf("no firewall rule with id %d", id)
 	}
-	rules := n.Firewall.Rules
-	if fromIdx < 0 || fromIdx >= len(rules) || toIdx < 0 || toIdx >= len(rules) {
-		return fmt.Errorf("rule index out of range")
+	if to < 0 || to >= len(c.Firewall.Rules) {
+		return fmt.Errorf("position %d out of range (0..%d)", to, len(c.Firewall.Rules)-1)
 	}
-	r := rules[fromIdx]
-	rules = append(rules[:fromIdx], rules[fromIdx+1:]...)
-	newRules := make([]FirewallRule, 0, len(rules)+1)
-	newRules = append(newRules, rules[:toIdx]...)
-	newRules = append(newRules, r)
-	newRules = append(newRules, rules[toIdx:]...)
-	n.Firewall.Rules = newRules
+	r := c.Firewall.Rules[from]
+	rest := append(c.Firewall.Rules[:from:from], c.Firewall.Rules[from+1:]...)
+	c.Firewall.Rules = append(rest[:to:to], append([]FirewallRule{r}, rest[to:]...)...)
 	return nil
 }
 

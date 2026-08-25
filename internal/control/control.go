@@ -291,9 +291,18 @@ func (s *Server) dispatch(req Request) Response {
 		}
 		return Response{OK: true}
 	case "fw":
-		id, err := s.resolveNet(req.Net)
-		if err != nil {
-			return Response{OK: false, Error: err.Error()}
+		// The rulebase is node-global from v957, so only a read needs to name a
+		// network — and then only to pick whose enforced view to show, with its
+		// hit counters. Requiring one for a write would put the old "you must
+		// have a mesh network before you can write a firewall rule" constraint
+		// back, on the CLI this time.
+		var id uint64
+		if req.FWOp == "" || req.FWOp == "list" {
+			resolved, err := s.resolveNet(req.Net)
+			if err != nil && req.Net != "" {
+				return Response{OK: false, Error: err.Error()}
+			}
+			id = resolved // 0 when this node runs no networks: show the config
 		}
 		return s.dispatchFW(id, req)
 	default:

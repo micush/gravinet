@@ -2,6 +2,101 @@
 
 ---
 
+## v958 — 2026-08-25
+
+**Fixes a v957 regression: `gravinet fw add` silently lost the rule, and `gravinet fw del` silently undid itself.**
+
+### What v957 broke
+
+v957 made config the source of truth for the firewall rulebase and removed the engine's persist write-back, because with config upstream a write-back would loop and would flatten a node-global rule into whichever network triggered the persist. That was right for the web admin, which was converted at the same time.
+
+The control socket was not. `dispatchFW` still called `FirewallAdd`/`Delete`/`Move` straight on the live engine — a rulebase that nothing recorded any more and that the next reload rebuilds from config. So on the CLI:
+
+- **add** looked like it worked, and the rule was gone at the next restart or reload.
+- **del** looked like it worked, and the rule came back.
+- **move**, **cut** and **paste**: the same.
+
+Silent in both directions, which is the worst shape for this: the command printed `ok` and the rule id, and nothing surfaced until later.
+
+A second, quieter problem: `case "fw"` resolved a network before dispatching anything, so on a node with no mesh network every firewall command failed — reinstating the exact constraint v957 existed to remove, on the CLI instead of the page.
+
+### The fix
+
+`controlAPI` (cmd/gravinet/controlfw.go) wraps the engine for the control socket and overrides only the methods that write rules, routing them through the config file under the same lock the web admin and the persist hook use. Everything else the control surface does is untouched — that is what the embedded `*mesh.Engine` is for.
+
+Reads still go to the engine when a network is named, so a list keeps that network's hit counters and shows only the rules in scope for it. With no network named — or none to name — the rulebase comes from config.
+
+The clipboard moved out of the engine too: copy and cut fill a buffer in the wrapper, and paste inserts through config. A pasted rule gets a fresh id, since reusing the source's would give two rules one identity.
+
+### CLI surface
+
+`-net` is gone from `fw add`, `del`, `move`, `copy`, `cut` and `paste` — it named which network's rules were being edited, and there is one rulebase now. `fw add` takes `-scope NAME` instead, which is a property of the rule rather than a selector, and defaults to every network. `fw list` keeps `-net`, where it now means *whose enforced view to show*; omitted, it lists the whole rulebase. `fw list` also shows each rule's scope.
+
+### Verification
+
+`cmd/gravinet`, `internal/config`, `internal/webadmin` and `internal/control` pass uncached. `go build ./...`, `go vet` and `gofmt` clean on every package touched. (`internal/mesh`'s test build failure and six unformatted files elsewhere are pre-existing — unchanged since v948.)
+
+The tests drive `controlAPI` against a real config file on a node with **no** mesh networks, and assert on what is on disk afterwards rather than on the return value — the return value was fine in v957, which is precisely why the bug was invisible. Checked by reverting `FirewallDelete` to a no-op and confirming the guard fails.
+
+Still unexercised here, unchanged: no `nft`/`iptables` and no init in this container, so kernel NAT programming and the systemd calls from v951 have never run against real system services.
+
+---
+
+## v957 — 2026-08-25
+
+**The firewall is node-global. A node with no mesh network can now write rules — the last of the four traffic modifiers that required an overlay to exist. Config is now the source of truth for the rulebase; the engine is reloaded from it.**
+
+### Why this one was not a hoist
+
+NAT, QoS and bandwidth were config-backed already, so moving them was a model change. The firewall was not. Its rules lived in the **live mesh engine**: the page read them from `FirewallRules(networkID)`, every edit went through `FirewallAdd/Delete/Move(networkID, …)`, and the engine's persist hook copied them down into config afterwards. Ids did not exist in `config.FirewallRule` at all — the engine minted them and the UI keyed off them.
+
+So a running engine, and therefore a mesh network, was a precondition for writing a firewall rule down. The `No networks.` gate was load-bearing, not cosmetic.
+
+### The inversion
+
+Config is the source of truth. `Config.Firewall` is the node-global rulebase; `Network.Firewall` is a legacy field that only parses. Edits go to config, and the reload pushes them into whichever engines are running — a node with none simply has nothing to push to, which is the point.
+
+`config.FirewallRule.ID` is new and stable for the life of a rule, allocated from `Firewall.NextID`. **The engine adopts it rather than minting its own** (`adoptID`), because an engine-minted id cannot survive a reload while the UI keys selections, counter resets and reordering off it. Ids are never reused, even one freed by a delete — a returning id would bind stale counters and stale UI selections to a different rule.
+
+The persist hook no longer writes rules back. It still writes the object and service catalogs, which are genuinely node-global and still engine-edited. Copying the rulebase back would now put the two in a loop and flatten a node-global rule into whichever network happened to trigger the persist.
+
+### Two things that got better on the way
+
+**Editing a rule is in place.** It used to delete and re-add, because the engine owned the id and there was no way to change a rule without destroying its identity — which also lost its position in the ordered list (deciding what matches first) and reset its hit counters. Config owns the id now, so a rule survives its own edit.
+
+**Hit counters still work, and are summed.** Counters are live traffic rather than configuration, so they stay in the engine and are merged in on read, keyed by id. A rule enforced on several networks has a counter per network; the operator asked one question, so one number answers it. A node with no engine gets the rules with zero counters rather than an error.
+
+### Scope
+
+- **blank (shown as `any`)**: enforced on every mesh network this node runs. The default.
+- **a network name**: only that one.
+
+Blank means *every* network, as with QoS in v954 and for the same reason: the firewall has no kernel path, so a rule naming no network would do nothing at all. It also means a rule written before any network exists starts enforcing the moment one does.
+
+Order is one list per node. Each network evaluates the subset in scope for it, in that list's order — first match wins, so a rule only ever competes with the rules in scope alongside it.
+
+### Config format change
+
+Per-network rules hoist in order, scoped to the network they came from, and every rule gets an id. As with NAT, QoS and bandwidth, **a network whose firewall switch was off contributes its rules disabled** — the per-network gate has no equivalent now, so it folds into the rules and the node enforces exactly what it enforced before.
+
+**It does not migrate backwards.** A v957 config on a v956 binary parses, but its firewall comes back empty.
+
+### Verification
+
+`internal/config`, `internal/webadmin`, `internal/dhcrelay` and `cmd/gravinet` pass uncached. `go build ./...`, `go vet` and `gofmt` clean on every package touched.
+
+New tests cover the hoist (order within a network, the disabled fold, unique non-zero ids), a node with **no** mesh networks adding a rule, ids never being reused after a delete, scope resolution per network, and move/update keeping a rule's identity and position. Guards assert the section renders one card with a scope column, the editor updates in place, and `handleFirewall` no longer calls `FirewallAdd`/`Delete`/`Move` on the engine while `reset-counters` still does.
+
+`TestFirewallAddSingleCallNoRestart` was rewritten rather than adapted. Its assertion — "add reaches the engine exactly once" — guarded a double-write in the old design; under v957 an add reaching the engine at all is the bug. Same treatment the v955 throttle tests got: a test that passes because it agrees with a superseded design is worse than no test.
+
+### The series
+
+Firewall, NAT, QoS and bandwidth are now all node-global to author. Enforcement is unchanged throughout: NAT's kernel half was always node-wide, and the firewall, classifier and shaper still run per tunnel, which is the only place they run at all.
+
+Standing caveats: this container has no `nft`/`iptables` and no init, so kernel NAT programming and the systemd calls from v951 remain unexercised against real system services.
+
+---
+
 ## v956 — 2026-08-25
 
 **Fixes v955. Per-network bandwidth limits are back, as overrides of a node default. v955 collapsed them into one rate and took the largest where networks disagreed; that destroyed real configuration.**
