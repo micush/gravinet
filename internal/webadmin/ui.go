@@ -9326,18 +9326,19 @@ function secBandwidth(c) {
       + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
       + '<td>'+esc(cf.name||cf.id)+'</td>'
       + '<td class="bw-state"><span class="tag-toggle '+(on?'on':'off')+'" data-bwstate="1" title="double-click to '+(on?'disable':'enable')+' \u2014 sets an override on this network">'+(on?'enabled':'disabled')+'</span></td>'
-      + '<td class="bw-cell" data-dir="up" title="double-click to set an override">'+esc(rate(eff.up_bytes_per_sec))+'</td>'
-      + '<td class="bw-cell" data-dir="down" title="double-click to set an override">'+esc(rate(eff.down_bytes_per_sec))+'</td>'
+      + '<td data-dir="up" data-bps="'+esc(String(eff.up_bytes_per_sec||0))+'"><span class="bw-edit bw-cell" title="double-click to set a rate for this network">'+esc(rate(eff.up_bytes_per_sec))+'</span></td>'
+      + '<td data-dir="down" data-bps="'+esc(String(eff.down_bytes_per_sec||0))+'"><span class="bw-edit bw-cell" title="double-click to set a rate for this network">'+esc(rate(eff.down_bytes_per_sec))+'</span></td>'
       + '<td class="hint">'+(own?'override':'inherited')+'</td></tr>';
   }
   const t = $('<div></div>'); t.innerHTML = h+'</table>'; oc.appendChild(t);
   const table = t.querySelector('table');
   t.querySelectorAll('tr.bwrow').forEach(tr => {
-    tr.querySelectorAll('.bw-cell').forEach(td => {
-      td.ondblclick = () => startBwEdit(td, tr.dataset.net, td.dataset.dir,
-        Number(td.dataset.dir === 'up'
-          ? (state.cfg.find(x => (x.name||x.id) === tr.dataset.net).throttle_effective||{}).up_bytes_per_sec || 0
-          : (state.cfg.find(x => (x.name||x.id) === tr.dataset.net).throttle_effective||{}).down_bytes_per_sec || 0));
+    tr.querySelectorAll('.bw-cell').forEach(span => {
+      // The rate the row is currently showing rides on the cell rather than
+      // being looked back up out of state.cfg: the editor opens on what is on
+      // screen, and a second lookup is a second chance to disagree with it.
+      const td = span.closest('td');
+      span.ondblclick = () => startBwEdit(span, tr.dataset.net, td.dataset.dir, Number(td.dataset.bps || 0));
     });
   });
   t.querySelectorAll('[data-bwstate]').forEach(tag => {
@@ -9347,12 +9348,33 @@ function secBandwidth(c) {
   });
   selAllWire(t);
   // No + : a network cannot be added here, only given its own rate. \u2212
-  // clears an override rather than deleting anything.
-  table._rowRemove = () => removeCheckedRows(table, tr => tr.dataset.own === '1'
-    ? api('/api/bandwidth',{method:'POST',body:JSON.stringify({op:'clear-override',net:tr.dataset.net})})
-    : Promise.resolve({ok:true}));
+  // clears an override rather than deleting anything — so on a row that has
+  // none it says so instead of appearing to work. A silent no-op here reads as
+  // a broken button, which is exactly how it read before.
+  table._rowRemove = async () => {
+    const sel = selCheckedRows(table);
+    if (!sel.length){ await noticeModal('tick a network to drop its own rate and follow the node default'); return; }
+    const own = sel.filter(tr => tr.dataset.own === '1');
+    if (!own.length){
+      await noticeModal(sel.length === 1
+        ? sel[0].dataset.net + ' has no rate of its own \u2014 it already follows the node default. Double-click its up or down cell to give it one.'
+        : 'none of the ticked networks has a rate of its own \u2014 they already follow the node default');
+      return;
+    }
+    for (const tr of own){
+      const r = await api('/api/bandwidth',{method:'POST',body:JSON.stringify({op:'clear-override',net:tr.dataset.net})});
+      if (r && !r.ok){ await noticeModal((r.body&&r.body.error)||'clear failed'); return; }
+    }
+    await refresh();
+  };
+  // Always shown, not just with two or more networks. With one network every
+  // cell reads "unlimited / inherited" and the table looks inert; the one
+  // thing an operator needs to know is that double-clicking a rate is what
+  // gives that network its own.
+  let note = 'Double-click a network\u2019s up or down rate to give it its own limit; tick it and use \u2212 to drop that and follow the node default again.';
   if ((state.cfg||[]).length > 1)
-    oc.appendChild($('<div class="hint" style="margin-top:8px">a rate applies to each network separately, never shared between them \u2014 tick a row and use \u2212 to drop its override back to the node default</div>'));
+    note += ' A rate applies to each network separately, never shared between them.';
+  oc.appendChild($('<div class="hint" style="margin-top:8px">'+esc(note)+'</div>'));
   c.appendChild(oc);
   enhanceTable(table);
 }

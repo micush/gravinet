@@ -2,6 +2,34 @@
 
 ---
 
+## v959 — 2026-08-25
+
+**Traffic > Shaping's per-network table looked inert: the rates were editable but nothing said so, and the one button on it silently did nothing.**
+
+### The cells had no affordance
+
+The node default above the table renders its rates as `.bw-edit` — dotted underline, hover colour, the standing "double-click me" cue used across the console. The per-network rows shipped in v956 as bare `<td class="bw-cell">`, a class with no styling at all.
+
+The cells were wired and worked. They just looked like dead text. On a node with one network every cell reads *unlimited / inherited / disabled*, so the whole card presented as a read-only summary with no way in. Fixed by using the same `.bw-edit` span the node default uses, so the two levels look alike because they behave alike.
+
+### The − button silently no-opped
+
+`−` clears a network's own rate so it follows the node default. On a row that has no such rate there is nothing to clear, and it resolved as a successful no-op: tick a row, press the button, watch nothing happen and nothing get said. That reads as broken, and is indistinguishable from broken.
+
+It now says which it is — that the network already follows the node default, and that double-clicking a rate cell is what gives it one of its own.
+
+### The hint was shown to the wrong node
+
+The line explaining the card only appeared with two or more networks, on the grounds that "each, not shared" only matters with several. But the single-network node is exactly the one where the table looks most inert, and it was the one told nothing. The how-to-use half is now unconditional; the each-not-shared half still only appears when there is more than one network to share between.
+
+### Verification
+
+`internal/webadmin`, `internal/config`, `internal/control` and `cmd/gravinet` pass uncached. `go build ./...`, `go vet` and `gofmt` clean on every package touched.
+
+Guards assert the rate cells carry `.bw-edit`, that the hint is unconditional, and that clearing a row without an override reports rather than resolving quietly. Checked by dropping `.bw-edit` back off the cells and confirming the guard fails.
+
+---
+
 ## v958 — 2026-08-25
 
 **Fixes a v957 regression: `gravinet fw add` silently lost the rule, and `gravinet fw del` silently undid itself.**

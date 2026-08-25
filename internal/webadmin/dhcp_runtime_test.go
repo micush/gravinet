@@ -393,3 +393,48 @@ func TestFirewallHandlerIsConfigFirst(t *testing.T) {
 		t.Error("reset-counters no longer reaches the engine, where the tallies actually live")
 	}
 }
+
+// The per-network bandwidth rows have to look editable.
+//
+// They shipped in v956 as bare <td class="bw-cell"> — a class with no styling
+// at all — while the node default above used .bw-edit, which carries the
+// dotted underline and hover colour that say "double-click me". The cells were
+// wired up and worked; they just looked like dead text, so on a node with one
+// network the whole table read as inert: every cell said unlimited/inherited
+// and nothing suggested a way in.
+func TestBandwidthPerNetworkCellsLookEditable(t *testing.T) {
+	sec := between(t, indexHTML, "function secBandwidth(c) {", "\n}")
+	rows := between(t, sec, "for (const cf of state.cfg)", "const t = $(")
+	for _, dir := range []string{`data-dir="up"`, `data-dir="down"`} {
+		i := strings.Index(rows, dir)
+		if i < 0 {
+			t.Fatalf("no %s cell in the per-network rows", dir)
+		}
+		cell := rows[i:min(i+200, len(rows))]
+		if !strings.Contains(cell, "bw-edit") {
+			t.Errorf("the %s cell does not carry .bw-edit, so it has no affordance and reads as dead text: %s", dir, cell)
+		}
+	}
+	// And the explanation is unconditional. Gating it on two or more networks
+	// meant the single-network node — the one where the table looks most inert
+	// — was the one told nothing.
+	if strings.Contains(sec, "if ((state.cfg||[]).length > 1)\n    oc.appendChild") {
+		t.Error("the how-to-use hint is shown only when there is more than one network")
+	}
+	if !strings.Contains(sec, "Double-click a network") {
+		t.Error("the per-network card no longer says how to give a network its own rate")
+	}
+}
+
+// Ticking a row with no override and pressing - used to resolve as a
+// successful no-op, which reads as a broken button.
+func TestBandwidthClearSaysWhenThereIsNothingToClear(t *testing.T) {
+	sec := between(t, indexHTML, "function secBandwidth(c) {", "\n}")
+	rm := between(t, sec, "table._rowRemove", "c.appendChild(oc)")
+	if strings.Contains(rm, "Promise.resolve({ok:true})") {
+		t.Error("clearing an override on a row that has none silently succeeds again")
+	}
+	if !strings.Contains(rm, "noticeModal") {
+		t.Error("the clear button no longer tells the operator when there is nothing to clear")
+	}
+}
