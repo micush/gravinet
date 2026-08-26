@@ -355,12 +355,20 @@ func TestShapingCanAddAnInterface(t *testing.T) {
 	if !strings.Contains(add, "op:'add'") {
 		t.Error("the + row does not create a shaping entry")
 	}
-	// The picker offers this node's mesh interfaces but must not restrict to
-	// them: a rate written before its network is up names a device that is
-	// not there, and so does a typo — refusing both would refuse the first.
-	if !strings.Contains(add, "bwe-iface") {
-		t.Error("the + row has no free-text field, so only existing interfaces can be shaped")
+	// The picker is every interface on the host, from the shared inventory —
+	// not just the devices gravinet runs a network on. Restricting to those
+	// would make the picker a second place the enforcement boundary is
+	// stated, and the weaker of the two: the carries cell says it per entry,
+	// where it is actually load-bearing.
+	if !strings.Contains(add, "systemInterfaces()") {
+		t.Error("the + picker no longer reads the host interface inventory, so it cannot offer every interface")
 	}
+	// Configured mesh devices are unioned in even when absent from the host,
+	// or a network that is not up yet could never be given a rate.
+	if !strings.Contains(add, "for (const i of carries.keys()) all.add(i)") {
+		t.Error("the + picker drops mesh interfaces that are not up, so a rate cannot be set before its network exists")
+	}
+	// Offering an interface is not a promise that a rate on it will bite.
 	if !strings.Contains(add, "carries.has(iface)") {
 		t.Error("adding an interface this node shapes nothing on no longer says so")
 	}
@@ -465,7 +473,7 @@ func TestShapingEmptyStateSaysWhatToDo(t *testing.T) {
 // worse than the paragraph ever was.
 func TestShapingProseIsBehindHelpButStatusIsNot(t *testing.T) {
 	sec := between(t, indexHTML, "function secBandwidth(c) {", "\n}")
-	i := strings.Index(sec, "Use + to shape an interface")
+	i := strings.Index(sec, "Use + to shape any interface")
 	if i < 0 {
 		t.Fatal("the shaping card no longer says how to use it")
 	}
@@ -473,7 +481,7 @@ func TestShapingProseIsBehindHelpButStatusIsNot(t *testing.T) {
 	if open < 0 || !strings.Contains(sec[open:i], "help-desc") {
 		t.Error("the shaping how-to is not .help-desc, so it shows whether or not help is on")
 	}
-	for _, status := range []string{"not shaped by this node", "No interface is shaped"} {
+	for _, status := range []string{"unavailable here", "No interface is shaped"} {
 		j := strings.Index(sec, status)
 		if j < 0 {
 			t.Fatalf("%q is gone", status)
@@ -485,13 +493,20 @@ func TestShapingProseIsBehindHelpButStatusIsNot(t *testing.T) {
 	}
 }
 
-// An entry gravinet cannot enforce has to say so on the row. gravinet shapes
-// in its own data path and programs no kernel qdisc, so a rate on an interface
-// it carries no network on is configuration that does nothing — the exact
-// shape of silent failure this page has been fixing since v959.
-func TestShapingSaysWhenItCannotEnforceAnEntry(t *testing.T) {
+// The row must say which machinery enforces it, and must say when nothing
+// can. Shaping a physical NIC means programming a qdisc, which is Linux-only
+// and needs iproute2; on a host without either, the rate is saved and not
+// applied, and that is exactly the silent-success shape this page has spent
+// four releases removing.
+func TestShapingRowSaysHowItIsEnforced(t *testing.T) {
 	sec := between(t, indexHTML, "function secBandwidth(c) {", "\n}")
-	if !strings.Contains(sec, "not shaped by this node") {
-		t.Error("a shaping entry on an interface gravinet moves no packets on renders as if it were in force")
+	if !strings.Contains(sec, "state.shapingKinds") {
+		t.Error("the row no longer distinguishes tunnel-shaped from kernel-shaped entries")
+	}
+	if !strings.Contains(sec, "state.shapingKernel") {
+		t.Error("the row no longer checks whether this host can program a qdisc")
+	}
+	if !strings.Contains(sec, "unavailable here") {
+		t.Error("a kernel-shaped entry on a host that cannot program tc renders as if it were in force")
 	}
 }

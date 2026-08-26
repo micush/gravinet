@@ -41,6 +41,7 @@ import (
 	"gravinet/internal/netfilter"
 	"gravinet/internal/resolver"
 	"gravinet/internal/service"
+	"gravinet/internal/tcshape"
 	"gravinet/internal/transport"
 	"gravinet/internal/tun"
 	"gravinet/internal/upgrade"
@@ -50,7 +51,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "962"
+	version = "964"
 	commit  = "none"
 )
 
@@ -1046,6 +1047,66 @@ func cmdRun(args []string) {
 		}
 		natApplyNow(kernelNATRules(cfg)) // startup: synchronous — nothing is being served yet, same as always
 
+		// Kernel traffic shaping, for the shaping entries on interfaces
+		// gravinet carries no network on. Those cannot be shaped in the
+		// userspace path the way a mesh tunnel is — there is no gravinet code
+		// in front of a physical NIC to delay a packet — so a qdisc is
+		// programmed instead. Same lifecycle shape as kernel NAT above:
+		// lazily created so a node that shapes nothing (or only mesh
+		// interfaces) never looks for tc, re-applied on reload, cleared on
+		// shutdown.
+		var tcMu sync.Mutex
+		var tcMgr *tcshape.Manager
+		var lastShaping []tcshape.Iface
+		var tcUnavailable bool // warn once, not on every reload
+		applyKernelShaping := func(c *config.Config) {
+			want := kernelShapingIfaces(c)
+			tcMu.Lock()
+			if tcMgr != nil && slices.Equal(want, lastShaping) {
+				tcMu.Unlock()
+				return
+			}
+			if tcMgr == nil {
+				if len(want) == 0 {
+					tcMu.Unlock()
+					return
+				}
+				m, err := tcshape.New()
+				if err != nil {
+					warn := !tcUnavailable
+					tcUnavailable = true
+					tcMu.Unlock()
+					if warn {
+						// Named individually: the operator configured these
+						// interfaces on purpose, and "shaping unavailable" is
+						// far less actionable than knowing which rates are
+						// the ones not being applied.
+						var names []string
+						for _, i := range want {
+							names = append(names, i.Name)
+						}
+						logx.Warnf("kernel shaping: %v — the rate(s) on %s will not be applied (mesh interfaces are unaffected; they are shaped in gravinet's own data path)",
+							err, strings.Join(names, ", "))
+					}
+					return
+				}
+				tcMgr = m
+			}
+			mgr := tcMgr
+			tcMu.Unlock()
+			if err := mgr.Apply(want); err != nil {
+				logx.Warnf("kernel shaping: could not program tc (need root/CAP_NET_ADMIN?): %v", err)
+				return // leave lastShaping alone so the next reload retries
+			}
+			tcMu.Lock()
+			lastShaping = want
+			tcMu.Unlock()
+			if len(want) > 0 {
+				logx.Infof("kernel shaping: applied to %d interface(s) via tc", len(want))
+			}
+		}
+		applyKernelShaping(cfg)
+
 		// natApplyCh hands reload-triggered rulesets to a single background
 		// worker instead of applying them inline in applyKernelNAT. On
 		// Linux/macOS/BSD, nfMgr.Apply is a near-instant nft/iptables/pf(4)
@@ -1451,7 +1512,8 @@ func cmdRun(args []string) {
 			if logResize != nil {
 				logResize(newCfg.LogMaxBytes())
 			}
-			applyKernelNAT(newCfg) // re-program host NAT for any rule changes
+			applyKernelNAT(newCfg)     // re-program host NAT for any rule changes
+			applyKernelShaping(newCfg) // re-program qdiscs for any shaping changes
 			logx.Infof("config reloaded from %s (networks add/remove, firewall/NAT/QoS/bandwidth/keys, and the underlay port applied live)", *cfgPath)
 			return nil
 		}
@@ -1852,6 +1914,12 @@ func cmdRun(args []string) {
 			natMu.Unlock()
 			if mgr != nil {
 				mgr.Clear() // remove the gravinet NAT ruleset
+			}
+			tcMu.Lock()
+			tmgr := tcMgr
+			tcMu.Unlock()
+			if tmgr != nil {
+				tmgr.Clear() // remove the qdiscs we programmed, and only those
 			}
 			if upnpMgr != nil {
 				// Bounded well under shutdownGrace: this is one of several
@@ -3168,6 +3236,23 @@ func fillRuntimeSpec(spec *mesh.NetSpec, n config.Network, exempts []config.Fire
 // actually egresses that interface (pure overlay-to-overlay routing, say) is
 // harmless — it simply never matches anything — so every enabled rule gets a
 // kernel-side attempt here regardless of what its traffic turns out to be.
+// kernelShapingIfaces projects the shaping entries that need a qdisc into the
+// form internal/tcshape programs. Mesh interfaces are excluded by
+// Config.KernelShaping — they are shaped in gravinet's own data path, and
+// programming a qdisc on top would pace the same packets twice.
+func kernelShapingIfaces(cfg *config.Config) []tcshape.Iface {
+	var out []tcshape.Iface
+	for _, s := range cfg.KernelShaping() {
+		out = append(out, tcshape.Iface{
+			Name:            s.Iface,
+			UpBytesPerSec:   s.UpBytesPerSec,
+			DownBytesPerSec: s.DownBytesPerSec,
+			BurstBytes:      s.BurstBytes,
+		})
+	}
+	return out
+}
+
 func kernelNATRules(cfg *config.Config) []netfilter.Rule {
 	var out []netfilter.Rule
 	if cfg.NAT.Enabled {

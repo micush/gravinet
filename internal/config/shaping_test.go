@@ -165,9 +165,11 @@ func TestShapingMigrationIsIdempotent(t *testing.T) {
 	}
 }
 
-// A rate can be written for an interface that does not exist yet, and the
-// config says plainly which entries nothing will enforce.
-func TestShapingReportsWhatItCannotEnforce(t *testing.T) {
+// Every entry is enforced by something; which one is decided by the interface.
+// A mesh interface is paced in gravinet's own data path, anything else by
+// programming the kernel. This is the split that lets a physical NIC be shaped
+// at all, so it must not quietly collapse to one side.
+func TestShapingKindSplitsMeshFromEverythingElse(t *testing.T) {
 	c := Default()
 	c.Networks = []Network{{ID: "1111", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24"}}
 	for _, iface := range []string{"mesh0", "eth0"} {
@@ -175,20 +177,37 @@ func TestShapingReportsWhatItCannotEnforce(t *testing.T) {
 			t.Fatalf("add %s: %v", iface, err)
 		}
 	}
-	un := c.ShapingUnenforced()
-	if len(un) != 1 || un[0] != "eth0" {
-		t.Fatalf("unenforced = %v, want just [eth0] — gravinet moves no packets on it", un)
+	if got := c.ShapingKind("mesh0"); got != ShapeTunnel {
+		t.Errorf("mesh0 kind = %q, want %q — a qdisc cannot see an overlay packet's class", got, ShapeTunnel)
+	}
+	if got := c.ShapingKind("eth0"); got != ShapeKernel {
+		t.Errorf("eth0 kind = %q, want %q — there is no gravinet data path in front of it", got, ShapeKernel)
 	}
 }
 
-// A disabled network's device is absent right now and comes back when it is
-// switched on, so a rate written for it is waiting, not misdirected.
-func TestShapingCountsDisabledNetworksAsEnforceable(t *testing.T) {
+// KernelShaping is what actually gets programmed. A mesh interface must never
+// appear in it: it is already paced in userspace, and a qdisc on top would
+// pace the same packets twice.
+func TestKernelShapingExcludesMeshInterfaces(t *testing.T) {
 	c := Default()
-	c.Networks = []Network{{ID: "1111", Name: "lan", Enabled: false, Subnet4: "10.0.0.0/24"}}
-	c.Shaping = []IfaceShaping{{Iface: "mesh0"}}
-	if un := c.ShapingUnenforced(); len(un) != 0 {
-		t.Errorf("unenforced = %v, want none — mesh0 is this node's own device", un)
+	c.Networks = []Network{{ID: "1111", Name: "lan", Enabled: true, Subnet4: "10.0.0.0/24"}}
+	c.Shaping = []IfaceShaping{
+		{Iface: "mesh0", Throttle: Throttle{Enabled: true, UpBytesPerSec: 1_000_000}},
+		{Iface: "eth0", Throttle: Throttle{Enabled: true, UpBytesPerSec: 2_000_000}},
+	}
+	got := c.KernelShaping()
+	if len(got) != 1 || got[0].Iface != "eth0" {
+		t.Fatalf("KernelShaping() = %+v, want just eth0", got)
+	}
+}
+
+// A disabled entry is a lifted cap, not a cap at its configured rate, so it
+// must not be programmed at all.
+func TestKernelShapingSkipsDisabledEntries(t *testing.T) {
+	c := Default()
+	c.Shaping = []IfaceShaping{{Iface: "eth0", Throttle: Throttle{Enabled: false, UpBytesPerSec: 2_000_000}}}
+	if got := c.KernelShaping(); len(got) != 0 {
+		t.Errorf("a disabled entry was programmed anyway: %+v", got)
 	}
 }
 

@@ -791,10 +791,15 @@ entry — `add` first — so a mistyped name is an error rather than a new
 row nobody meant to create.
 
 `iface` need not name an interface that exists: a rate can be written
-before the network that carries it. But gravinet shapes inside its own
-data path and programs no kernel qdisc, so an entry on an interface it
-runs no mesh network on is configured and not applied.
-`GET /api/config` reports those under `shaping_unenforced`.
+before the network that carries it.
+
+Any interface can be shaped. `GET /api/config` reports how each entry is
+enforced under `shaping_kinds` (`iface` → `"tunnel"` or `"kernel"`):
+gravinet paces its own tunnel devices in its data path, and programs the
+kernel queueing discipline for everything else. `shaping_kernel` names
+the backend available on this host (`"tc"`), or is empty when none is —
+a non-Linux host, or one without iproute2 — in which case `"kernel"`
+entries are saved but not applied.
 
 ## Always-allowed traffic (exempt list)
 

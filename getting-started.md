@@ -238,9 +238,11 @@ Click **+** to add a rule, double-click to edit it or toggle its state, tick row
 
 Go to **Traffic → Shaping**. One row per interface you want to limit, set independently for each direction: egress is shaped (queued and paced to the rate), ingress is policed (anything over the rate is dropped rather than queued).
 
-Click **+** and pick an interface — the picker offers the ones your mesh networks run on, or you can type another name. A new entry starts off and unlimited, so nothing changes until you set a rate. Double-click a rate to set it: type a number and pick a unit, or clear the number for unlimited. Double-click the state tag to turn the cap off without losing the configured number, so you can lift it temporarily and reapply the same rate later. Tick a row and use **−** to stop shaping that interface entirely; an interface with no row is unshaped.
+Click **+** and pick an interface — the picker lists every interface on the host, with the network shown alongside the ones your mesh runs on. A new entry starts off and unlimited, so nothing changes until you set a rate. Double-click a rate to set it: type a number and pick a unit, or clear the number for unlimited. Double-click the state tag to turn the cap off without losing the configured number, so you can lift it temporarily and reapply the same rate later. Tick a row and use **−** to stop shaping that interface entirely; an interface with no row is unshaped.
 
-The **carries** column says which network an entry is attached to. gravinet shapes inside its own data path rather than programming the kernel, so a row on an interface it runs no mesh network on says *not shaped by this node* — the rate is saved but nothing applies it. That's expected if the network using it isn't up yet, and worth a second look otherwise.
+The **shaped by** column says how the rate is enforced, which the interface decides for you. A mesh interface reads *tunnel* — gravinet paces it inside its own data path, where it can also honour QoS priorities and never delay control traffic. Any other interface reads *kernel (tc)*: there's no gravinet code between an application and a physical NIC, so the kernel's queueing discipline is programmed instead.
+
+Two things worth knowing about the kernel half. It's Linux-only and needs iproute2 — on a host without it the row reads *kernel — unavailable here* and the rate is saved but not applied. And it **takes over that interface's root qdisc**, replacing whatever was configured there; gravinet only ever touches interfaces you've added a row for, and removes exactly those when it stops.
 
 ---
 

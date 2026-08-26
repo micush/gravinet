@@ -37,6 +37,7 @@ import (
 	"gravinet/internal/mesh"
 	"gravinet/internal/ratelimit"
 	"gravinet/internal/service"
+	"gravinet/internal/tcshape"
 )
 
 // Backend is the slice of the engine the admin UI drives.
@@ -1260,7 +1261,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		tlsNotAfter = s.tlsCert.NotAfter.UTC().Format(time.RFC3339)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"nets": out, "udp_ports": cfg.UDPPortList(), "tcp_ports": cfg.TCPPortList(), "nat_state_timeout": cfg.NATStateTimeout, "nat": cfg.NAT, "qos": cfg.QoS, "shaping": cfg.Shaping, "shaping_unenforced": cfg.ShapingUnenforced(), "firewall": cfg.Firewall, "geoip_lookup": s.cfg.GeoIPEnabled(), "enable_upnp": cfg.EnableUPnP, "ip_forwarding": cfg.ForwardingEnabled(), "disable_redirects": cfg.RedirectsDisabled(), "allow_remote_shell": s.cfg.AllowRemoteShell, "login_ban_max_failures": s.cfg.LoginBan.EffectiveMaxFailures(), "login_ban_seconds": s.cfg.LoginBan.EffectiveBanSeconds(), "tls_source": tlsSource, "tls_common_name": tlsCN, "tls_not_after": tlsNotAfter, "config_history_limit": cfg.EffectiveConfigHistoryLimit(), "config_history_count": config.Count(s.configPath), "shell_supported": ptySupported, "bgp_supported": bgpSupported(), "ipv6ra_supported": ipv6RASupported(), "dhcp_supported": dhcpSupported(), "snmp_supported": snmpSupported, "lldp_supported": lldpSupported, "syslog_supported": syslogSupported, "log_level": s.be.LogLevel(), "log_max_size": cfg.LogMaxSizeString(),
+		"nets": out, "udp_ports": cfg.UDPPortList(), "tcp_ports": cfg.TCPPortList(), "nat_state_timeout": cfg.NATStateTimeout, "nat": cfg.NAT, "qos": cfg.QoS, "shaping": cfg.Shaping, "shaping_kinds": shapingKinds(cfg), "shaping_kernel": kernelShapingBackend(), "firewall": cfg.Firewall, "geoip_lookup": s.cfg.GeoIPEnabled(), "enable_upnp": cfg.EnableUPnP, "ip_forwarding": cfg.ForwardingEnabled(), "disable_redirects": cfg.RedirectsDisabled(), "allow_remote_shell": s.cfg.AllowRemoteShell, "login_ban_max_failures": s.cfg.LoginBan.EffectiveMaxFailures(), "login_ban_seconds": s.cfg.LoginBan.EffectiveBanSeconds(), "tls_source": tlsSource, "tls_common_name": tlsCN, "tls_not_after": tlsNotAfter, "config_history_limit": cfg.EffectiveConfigHistoryLimit(), "config_history_count": config.Count(s.configPath), "shell_supported": ptySupported, "bgp_supported": bgpSupported(), "ipv6ra_supported": ipv6RASupported(), "dhcp_supported": dhcpSupported(), "snmp_supported": snmpSupported, "lldp_supported": lldpSupported, "syslog_supported": syslogSupported, "log_level": s.be.LogLevel(), "log_max_size": cfg.LogMaxSizeString(),
 		"worker_threads": cfg.WorkerThreads, "tun_queues": cfg.TunQueues, "tun_queues_supported": tunMultiQueueSupported, "udp_gso": cfg.UDPGSOEnabled(), "udp_gso_supported": udpGSOSupported, "socket_buffer_mb": cfg.SocketBufferMB(), "socket_buffer_max_mb": config.SocketBufferMaxBytes >> 20,
 		// Node-global firewall object/service catalog (see Config.FirewallObjects'
 		// doc comment) — shared by every network above, not nested under any one
@@ -1724,4 +1725,31 @@ func genSelfSignedPEM(listen string) (certPEM, keyPEM []byte, err error) {
 	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 	return certPEM, keyPEM, nil
+}
+
+// shapingKinds maps each shaping entry's interface to the mechanism that
+// enforces it ("tunnel" or "kernel"), so the Shaping page can say which
+// without re-deriving the mesh interface list in the browser.
+func shapingKinds(cfg *config.Config) map[string]string {
+	out := make(map[string]string, len(cfg.Shaping))
+	for _, s := range cfg.Shaping {
+		out[s.Iface] = cfg.ShapingKind(s.Iface)
+	}
+	return out
+}
+
+// kernelShapingBackend reports whether this host can program kernel shaping,
+// and with what. Empty means it cannot — a non-Linux host, or one without
+// iproute2 installed — which the page shows on the affected rows rather than
+// leaving a configured rate looking as though it were in force.
+//
+// Probed per request rather than cached: tc can be installed while gravinet
+// is running, and a page that kept saying "unavailable" until a restart would
+// be wrong for as long as it took someone to notice.
+func kernelShapingBackend() string {
+	m, err := tcshape.New()
+	if err != nil {
+		return ""
+	}
+	return m.Backend()
 }

@@ -4350,28 +4350,48 @@ func (c *Config) MeshIfaces() []string {
 	return out
 }
 
-// ShapingUnenforced lists the shaping entries naming an interface this node
-// does not carry a mesh network on, in config order.
+// How a shaping entry is enforced. Both are real enforcement; they differ in
+// which machinery does it, and that is decided by the interface rather than
+// by any choice the operator makes.
+const (
+	// ShapeTunnel: gravinet owns the data path on this interface, so the
+	// userspace shaper does it (internal/mesh) — a bounded queue and a
+	// drainer, which also understands QoS classes and exempts control
+	// traffic. A qdisc can see neither, so mesh interfaces stay here.
+	ShapeTunnel = "tunnel"
+	// ShapeKernel: no gravinet code sits between the application and the
+	// wire on this interface, so nothing local can delay a packet. The
+	// kernel's own queueing discipline is the only thing that can, and
+	// internal/tcshape programs it (tc; Linux only).
+	ShapeKernel = "kernel"
+)
+
+// ShapingKind reports which mechanism enforces an interface's entry.
 //
-// gravinet shapes in userspace, in its own data path: the queue and the token
-// bucket sit on a tunnel device it owns and drains itself. It programs no
-// kernel qdisc, so an entry naming eth0 is a rate nothing applies — the
-// packets on that interface never pass through the code that would pace them.
-//
-// Such an entry is still allowed, because refusing it would also refuse a
-// rate written for a mesh interface that is not up yet, and those are
-// indistinguishable at the moment of writing: both name a device that is not
-// there. What is not allowed is leaving the operator to find out. Both front
-// ends call this and say so.
-func (c *Config) ShapingUnenforced() []string {
-	mesh := make(map[string]bool, len(c.Networks))
+// Not a preference and not a fallback: an interface gravinet carries a
+// network on cannot be shaped correctly by a qdisc (the qdisc cannot see the
+// class of an encrypted overlay packet, and would pace gossip and keepalives
+// alongside payload), and an interface it carries nothing on cannot be shaped
+// in userspace at all, because there is no userspace to shape in.
+func (c *Config) ShapingKind(iface string) string {
 	for _, name := range c.MeshIfaces() {
-		mesh[name] = true
+		if name == iface {
+			return ShapeTunnel
+		}
 	}
-	var out []string
+	return ShapeKernel
+}
+
+// KernelShaping lists the entries that need a qdisc programmed: the enabled
+// ones, on interfaces gravinet does not carry a network on.
+//
+// Disabled entries are excluded rather than programmed at their configured
+// rate, which is what the switch means — lift the cap, keep the number.
+func (c *Config) KernelShaping() []IfaceShaping {
+	var out []IfaceShaping
 	for _, s := range c.Shaping {
-		if !mesh[s.Iface] {
-			out = append(out, s.Iface)
+		if s.Enabled && c.ShapingKind(s.Iface) == ShapeKernel {
+			out = append(out, s)
 		}
 	}
 	return out

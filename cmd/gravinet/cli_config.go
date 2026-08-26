@@ -15,6 +15,8 @@ import (
 	"gravinet/internal/control"
 	"gravinet/internal/mesh"
 	"gravinet/internal/service"
+
+	"gravinet/internal/tcshape"
 )
 
 // The commands in this file manage declarative settings by editing the config
@@ -1350,24 +1352,32 @@ func cmdBandwidth(args []string) {
 		for i, n := range cfg.Networks {
 			mesh[cfg.IfaceForNetworkAt(i)] = n.Name
 		}
+		kernelOK := kernelShapingAvailable()
 		for _, sh := range cfg.Shaping {
-			carries := "not a gravinet interface — nothing enforces this"
+			how := "kernel qdisc"
 			if name, ok := mesh[sh.Iface]; ok {
-				carries = "carries " + name
+				how = "tunnel shaper, " + name
+			} else if !kernelOK {
+				how = "kernel qdisc UNAVAILABLE on this host"
 			}
 			fmt.Printf("%-16s %-9s up=%s down=%s (%s)\n", sh.Iface, onOff(sh.Enabled),
-				rateStr(sh.UpBytesPerSec), rateStr(sh.DownBytesPerSec), carries)
+				rateStr(sh.UpBytesPerSec), rateStr(sh.DownBytesPerSec), how)
 		}
-		// Named once, at the end, rather than left to be inferred from the
-		// per-row note above: gravinet shapes in its own data path, so an
-		// entry on an interface it does not carry a network on is inert.
-		if un := cfg.ShapingUnenforced(); len(un) > 0 {
-			noun, poss := "this interface", "its"
-			if len(un) > 1 {
-				noun, poss = "these interfaces", "their"
+		// Said once, plainly, rather than left to be inferred from the rows:
+		// an entry needing a qdisc on a host that cannot program one is
+		// configuration that will not be applied.
+		if !kernelOK {
+			var stuck []string
+			for _, sh := range cfg.Shaping {
+				if _, isMesh := mesh[sh.Iface]; !isMesh {
+					stuck = append(stuck, sh.Iface)
+				}
 			}
-			fmt.Printf("  %s: gravinet moves no packets on %s, so %s rate is configured but not applied\n",
-				strings.Join(un, ", "), noun, poss)
+			if len(stuck) > 0 {
+				fmt.Printf("  %s: this host cannot program kernel shaping (%v), so %s rate is configured but not applied\n",
+					strings.Join(stuck, ", "), kernelShapingWhy(),
+					map[bool]string{true: "its", false: "their"}[len(stuck) == 1])
+			}
 		}
 		return
 	}
@@ -1382,9 +1392,7 @@ func cmdBandwidth(args []string) {
 			fatal("%v", err)
 		}
 		msg := fmt.Sprintf("added a shaping entry for %s, off and unlimited", iface)
-		if !cfgHasMeshIface(cfg, iface) {
-			msg += "\n  note: this node carries no mesh network on " + iface + ", so nothing will enforce a rate set here"
-		}
+		msg += shapingHowNote(cfg, iface)
 		fmt.Println(msg)
 		commitCfg(cfg, path)
 		return
@@ -1415,21 +1423,35 @@ func cmdBandwidth(args []string) {
 	if sh := cfg.ShapingFor(iface); sh != nil && !sh.Enabled {
 		msg += " (shaping is off — run 'gravinet bandwidth enable -iface " + iface + "' to apply it)"
 	}
-	if !cfgHasMeshIface(cfg, iface) {
-		msg += "\n  note: this node carries no mesh network on " + iface + ", so nothing enforces this rate"
-	}
+	msg += shapingHowNote(cfg, iface)
 	fmt.Println(msg)
 	commitCfg(cfg, path)
 }
 
-// cfgHasMeshIface reports whether one of this node's networks runs on iface.
-func cfgHasMeshIface(cfg *config.Config, iface string) bool {
-	for _, name := range cfg.MeshIfaces() {
-		if name == iface {
-			return true
-		}
+// shapingHowNote explains which mechanism will enforce an entry, and says so
+// when nothing will. gravinet shapes a mesh interface in its own data path and
+// any other interface through the kernel, so the only case with no enforcement
+// left is a non-mesh interface on a host that cannot program tc.
+func shapingHowNote(cfg *config.Config, iface string) string {
+	if cfg.ShapingKind(iface) == config.ShapeTunnel {
+		return ""
 	}
-	return false
+	if kernelShapingAvailable() {
+		return "\n  " + iface + " is not a gravinet interface, so this is enforced by programming the kernel (tc)"
+	}
+	return "\n  note: " + iface + " needs kernel shaping and this host cannot program it (" +
+		kernelShapingWhy() + "), so a rate set here will not be applied"
+}
+
+// kernelShapingAvailable / kernelShapingWhy probe the tc backend. Split so the
+// reason is only rendered when it is going to be shown.
+func kernelShapingAvailable() bool { _, err := tcshape.New(); return err == nil }
+
+func kernelShapingWhy() string {
+	if _, err := tcshape.New(); err != nil {
+		return err.Error()
+	}
+	return ""
 }
 
 // ---- list (whole config) -----------------------------------------------------

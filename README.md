@@ -45,9 +45,12 @@ control plane, relay fallback, and broadcast/multicast:
   willing third node, end-to-end encrypted (the relay sees only ciphertext).
 - **Broadcast / multicast** — overlay broadcast and multicast frames flood to
   the mesh, rate-limited by a per-class token bucket (storm control).
-- **Bandwidth shaping** — per-interface rate caps in either direction: egress
-  is shaped (queued and paced to the up-rate), ingress is policed (inbound over
-  the down-rate is dropped). Control traffic is exempt.
+- **Bandwidth shaping** — per-interface rate caps in either direction on *any*
+  interface, not just the overlay: egress is shaped (queued and paced to the
+  up-rate), ingress is policed (inbound over the down-rate is dropped). Mesh
+  interfaces are paced in gravinet's own data path, honouring QoS classes and
+  exempting control traffic; other interfaces are shaped by programming the
+  kernel queueing discipline (tc, Linux).
 - **Quality of service** — outbound traffic is classified (by protocol, port, or
   DSCP) into priority classes and scheduled strict-priority within the throttled
   link, so important traffic goes first under contention.

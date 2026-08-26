@@ -597,7 +597,7 @@ const indexHTML = `<!doctype html>
 <script>
 const $ = (h) => { const d=document.createElement('div'); d.innerHTML=h.trim(); return d.firstChild; };
 const app = document.getElementById('app');
-const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, natCfg:{enabled:false, rules:[]}, qosCfg:{enabled:false, rules:[], classes:5, default_class:3}, shaping:[], shapingUnenforced:[], firewallCfg:{enabled:false, rules:[]}, geoipLookup:false, enableUpnp:false, allowRemoteShell:false, loginBanMaxFailures:3, loginBanSeconds:900, tlsSource:'self-signed', tlsCommonName:'', tlsNotAfter:'', configHistoryLimit:250, configHistoryCount:0, shellSupported:true, bgpSupported:false, snmpSupported:false, ipv6raSupported:false, dhcpSupported:false, lldpSupported:false, syslogSupported:false, selfId:null, selfHostname:'', targetSeq:0, pendingBgpHighlight:null, workerThreads:0, tunQueues:0, tunQueuesSupported:true, udpGSO:false, udpGSOSupported:true, socketBufferMB:16, socketBufferMaxMB:256, perfRestartPending:false, loginBanRestartPending:false, tableView:{} };
+const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, natCfg:{enabled:false, rules:[]}, qosCfg:{enabled:false, rules:[], classes:5, default_class:3}, shaping:[], shapingKinds:{}, shapingKernel:'', firewallCfg:{enabled:false, rules:[]}, geoipLookup:false, enableUpnp:false, allowRemoteShell:false, loginBanMaxFailures:3, loginBanSeconds:900, tlsSource:'self-signed', tlsCommonName:'', tlsNotAfter:'', configHistoryLimit:250, configHistoryCount:0, shellSupported:true, bgpSupported:false, snmpSupported:false, ipv6raSupported:false, dhcpSupported:false, lldpSupported:false, syslogSupported:false, selfId:null, selfHostname:'', targetSeq:0, pendingBgpHighlight:null, workerThreads:0, tunQueues:0, tunQueuesSupported:true, udpGSO:false, udpGSOSupported:true, socketBufferMB:16, socketBufferMaxMB:256, perfRestartPending:false, loginBanRestartPending:false, tableView:{} };
 // setTarget is the only place state.target is ever assigned — bumping
 // targetSeq alongside it, once, exactly when the *selection itself* actually
 // changes. load()/startPolling()/refreshCluster() each capture targetSeq
@@ -1360,7 +1360,11 @@ async function load() {
   // Shaping is node-global and keyed by interface from v960, so it rides on
   // the config response itself rather than on each network.
   state.shaping = (c.body && c.body.shaping) || [];
-  state.shapingUnenforced = (c.body && c.body.shaping_unenforced) || [];
+  state.shapingKinds = (c.body && c.body.shaping_kinds) || {};
+  // '' means this host cannot program a qdisc at all — non-Linux, or no
+  // iproute2 — which the rows report per entry rather than leaving a rate
+  // looking as though it were in force.
+  state.shapingKernel = (c.body && c.body.shaping_kernel) || '';
   // The firewall rulebase is node-global from v957 and comes from /api/firewall
   // (with live hit counters merged in), not from the per-network config.
   state.geoipLookup = !!(c.body && c.body.geoip_lookup);
@@ -3669,7 +3673,7 @@ const HELP = {
     },
   },
   'bandwidth': {
-    topic: 'Limit traffic, one entry per interface. Use + to shape an interface, double-click a rate to set it \u2014 enter a number and pick the unit, or clear the number for unlimited \u2014 and double-click the state tag to lift a cap without losing the rate. Tick rows and use \u2212 to stop shaping an interface; an interface with no entry is unshaped.<br><br><b>up</b> is egress and is shaped: traffic is queued and paced to the rate. <b>down</b> is ingress and is policed: anything over the rate is dropped rather than queued, because the sender is elsewhere and there is nothing here to slow down.<br><br>gravinet shapes inside its own data path, on the tunnel devices it owns \u2014 it programs no kernel qdisc. So an entry naming an interface this node carries no mesh network on is a rate nothing applies; the <b>carries</b> column says which is which. Writing one anyway is allowed and sometimes right, since a rate can be set before the network that uses it exists.<br><br>QoS only reorders traffic behind an egress cap, so enabling QoS switches shaping on for every mesh interface and seeds a placeholder up rate you should lower to your real uplink.',
+    topic: 'Limit traffic, one entry per interface. Use + to shape an interface, double-click a rate to set it \u2014 enter a number and pick the unit, or clear the number for unlimited \u2014 and double-click the state tag to lift a cap without losing the rate. Tick rows and use \u2212 to stop shaping an interface; an interface with no entry is unshaped.<br><br><b>up</b> is egress and is shaped: traffic is queued and paced to the rate. <b>down</b> is ingress and is policed: anything over the rate is dropped rather than queued, because the sender is elsewhere and there is nothing here to slow down.<br><br>Any interface on the host can be shaped, and the <b>shaped by</b> column says how. gravinet paces its own tunnel devices inside its data path, where it can also honour QoS classes and exempt control traffic. For every other interface there is no gravinet code between the application and the wire, so nothing local can delay a packet and the kernel queueing discipline is programmed instead \u2014 <code>tc</code>, which is Linux-only and needs iproute2. Kernel shaping <b>takes over the interface\u2019s root qdisc</b>, replacing whatever was configured there; gravinet only ever touches interfaces you have added an entry for, and removes exactly those on shutdown.<br><br>QoS only reorders traffic behind an egress cap, so enabling QoS switches shaping on for every mesh interface and seeds a placeholder up rate you should lower to your real uplink.',
   },
   'bgp': {
     topic: 'BGP configuration for dynamic routing. For neighbors and advertised networks: use + to add a row, double-click a field to edit it (double-click BFD to toggle it), tick rows and \u2212 to remove. Click the \ud83d\udc41\ufe0f next to a neighbor\u2019s MD5 password to reveal or mask it. Click a neighbor\u2019s \u201cfilters\u201d pill to restrict which prefixes BGP itself accepts from, or advertises to, that one neighbor \u2014 blank means unfiltered (the default). This is separate from the Redistribute pickers below, which control what feeds into BGP, not what BGP exchanges with a neighbor.',
@@ -9315,18 +9319,25 @@ function secBandwidth(c) {
   const card = $('<div class="card"></div>');
   card.appendChild($('<h3><span class="net-name">BANDWIDTH</span></h3>'));
 
-  let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>interface</th><th>state</th><th>up</th><th>down</th><th>carries</th></tr>';
+  let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>interface</th><th>state</th><th>up</th><th>down</th><th>shaped by</th></tr>';
   for (const e of entries) {
     const on = !!e.enabled;
     const net = carries.get(e.iface);
-    // An entry on an interface this node runs no network on is configuration
-    // with nothing behind it: gravinet shapes in its own data path and
-    // programs no kernel qdisc, so those packets never reach the code that
-    // would pace them. Said on the row rather than in a footnote, because the
-    // row is the thing that looks like it is working.
-    const carriesCell = net
-      ? '<td>'+esc(net)+'</td>'
-      : '<td class="hint" title="gravinet moves no packets on this interface, so nothing applies this rate. Expected if the network carrying it is not up yet.">not shaped by this node</td>';
+    // Which machinery enforces this row, decided by the interface rather than
+    // by anything the operator picked. A mesh interface is shaped in
+    // gravinet's own data path, which also understands QoS classes and
+    // exempts control traffic. Anything else has no gravinet code in front of
+    // it, so the kernel's queueing discipline is the only thing that can pace
+    // it — and if this host cannot program one, the row says so instead of
+    // looking as though the rate were in force.
+    const kind = (state.shapingKinds||{})[e.iface] || (net ? 'tunnel' : 'kernel');
+    let carriesCell;
+    if (kind === 'tunnel')
+      carriesCell = '<td title="shaped in gravinet\u2019s own data path, on this network\u2019s tunnel">tunnel \u2014 '+esc(net||'')+'</td>';
+    else if (state.shapingKernel)
+      carriesCell = '<td title="not a gravinet interface, so the rate is enforced by programming the kernel queueing discipline">kernel ('+esc(state.shapingKernel)+')</td>';
+    else
+      carriesCell = '<td class="hint" title="this host cannot program a kernel qdisc \u2014 not Linux, or iproute2 is not installed \u2014 so this rate is saved but not applied">kernel \u2014 unavailable here</td>';
     h += '<tr class="bwrow'+(on?'':' fw-disabled')+'" data-iface="'+esc(e.iface)+'">'
       + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
       + '<td>'+esc(e.iface)+'</td>'
@@ -9362,7 +9373,7 @@ function secBandwidth(c) {
   table._rowRemove = () => removeCheckedRows(table,
     tr => api('/api/bandwidth',{method:'POST',body:JSON.stringify({op:'delete',iface:tr.dataset.iface})}), false);
 
-  card.appendChild($('<div class="hint help-desc" style="margin:8px 0 0">Use + to shape an interface, then double-click its up or down rate to set one \u2014 egress is shaped (queued and paced), ingress is policed (anything over is dropped). Double-click the state tag to lift a cap without losing the rate. Tick rows and use \u2212 to stop shaping an interface entirely.</div>'));
+  card.appendChild($('<div class="hint help-desc" style="margin:8px 0 0">Use + to shape any interface on this host, then double-click its up or down rate to set one \u2014 egress is shaped (queued and paced), ingress is policed (anything over is dropped). Double-click the state tag to lift a cap without losing the rate. Tick rows and use \u2212 to stop shaping an interface entirely.<br><br><b>Shaped by</b> is how the rate is enforced, which the interface decides. A mesh interface is paced in gravinet\u2019s own data path, which also honours QoS classes and never delays control traffic. Any other interface has no gravinet code in front of it, so the kernel queueing discipline is programmed instead (tc, Linux only) \u2014 that takes over the interface\u2019s root qdisc, replacing whatever was there.</div>'));
   c.appendChild(card);
   enhanceTable(table);
 }
@@ -9370,42 +9381,58 @@ function secBandwidth(c) {
 // bwAddRow inserts a blank editable row: pick an interface, save, then set its
 // rates on the row like any other.
 //
-// The picker offers this node's mesh interfaces and accepts a typed name for
-// anything else, rather than restricting to the list. Restricting would also
-// refuse a rate written for a network that is not up yet, and at the moment of
-// writing those two cases are the same case \u2014 both name a device that is not
-// there. The confirmation says which one it turned out to be.
+// The picker is every interface on this host, one flat list, from the same
+// /api/interfaces inventory the NAT masquerade and LLDP pickers use. It is not
+// split into "gravinet's own devices" and "everything else": that split is a
+// statement about what gets enforced, and the row's carries cell already makes
+// it, per entry, where it is actually load-bearing. Making the operator meet it
+// twice — once as a category they must choose between before they can even name
+// an interface, once as a column — only obscures the one that matters.
+//
+// Configured mesh devices are unioned in even when absent from the host, so a
+// network that is not up yet can still be given a rate. That is the case a
+// free-text field used to exist for; with those names in the list there is
+// nothing left for it to reach that a typo would not reach too.
 function bwAddRow(table, carries){
   const taken = new Set((state.shaping||[]).map(e => e.iface));
-  const free = [...carries.keys()].filter(i => !taken.has(i));
   const tr = document.createElement('tr');
-  const opts = free.map(i => '<option value="'+esc(i)+'">'+esc(i)+' \u2014 '+esc(carries.get(i))+'</option>').join('')
-    + '<option value="">other\u2026</option>';
   tr.innerHTML = '<td class="selcol"></td>'
-    + '<td><select class="bwe-pick" style="width:auto">'+opts+'</select> '
-    + '<input class="bwe-iface" placeholder="interface" style="width:110px;display:'+(free.length?'none':'inline-block')+'"></td>'
+    + '<td><select class="bwe-pick" style="width:auto"><option value="">reading interfaces\u2026</option></select></td>'
     + '<td class="hint">disabled</td><td class="hint">unlimited</td><td class="hint">unlimited</td>'
-    + '<td><button class="sm bwe-save">save</button> <button class="ghost sm bwe-cancel">cancel</button></td>';
+    + '<td><button class="sm bwe-save" disabled>save</button> <button class="ghost sm bwe-cancel">cancel</button></td>';
   if (!insertNewRow(table, tr)) return;
-  const pick = tr.querySelector('.bwe-pick'), free_in = tr.querySelector('.bwe-iface');
-  if (!free.length) pick.value = '';
-  pick.onchange = () => {
-    const other = pick.value === '';
-    free_in.style.display = other ? 'inline-block' : 'none';
-    if (other) free_in.focus();
-  };
+  const pick = tr.querySelector('.bwe-pick'), save = tr.querySelector('.bwe-save');
   tr.querySelector('.bwe-cancel').onclick = () => refresh();
-  tr.querySelector('.bwe-save').onclick = async () => {
-    const iface = (pick.value || free_in.value).trim();
-    if (!iface){ await noticeModal('Name the interface to shape.'); return; }
+
+  systemInterfaces().then(list => {
+    const all = new Set(list || []);
+    for (const i of carries.keys()) all.add(i);
+    // Already-shaped interfaces are left out rather than shown and rejected on
+    // save: ShapingAdd refuses a duplicate, and an option that only ever
+    // produces an error is an option that should not have been offered.
+    const free = [...all].filter(i => !taken.has(i)).sort();
+    if (!free.length){
+      pick.innerHTML = '<option value="">every interface already has an entry</option>';
+      return;
+    }
+    pick.innerHTML = free.map(i => '<option value="'+esc(i)+'">'+esc(i)
+      + (carries.has(i) ? ' \u2014 '+esc(carries.get(i)) : '') + '</option>').join('');
+    save.disabled = false;
+  });
+
+  save.onclick = async () => {
+    const iface = pick.value;
+    if (!iface){ await noticeModal('Pick an interface to shape.'); return; }
     const r = await api('/api/bandwidth',{method:'POST',body:JSON.stringify({op:'add',iface:iface})});
     if (!r.ok){ await noticeModal((r.body&&r.body.error)||'add failed'); return; }
-    // Added off and unlimited, so nothing changes on the wire yet. Say both
-    // what to do next and, if it applies, that it will not take effect \u2014
-    // finding that out after setting a rate and watching nothing happen is
-    // exactly the shape of failure this page has been fixing since v959.
-    if (!carries.has(iface))
-      await noticeModal(iface + ' has a shaping entry now, but this node carries no mesh network on it, so nothing will enforce a rate set here. That is expected if the network using it is not up yet.');
+    // Added off and unlimited, so nothing changes on the wire yet. An
+    // interface gravinet carries no network on is offered like any other and
+    // says so here, because the picker listing it is not a promise that a rate
+    // on it will bite.
+    if (!carries.has(iface) && !state.shapingKernel)
+      await noticeModal(iface + ' has a shaping entry now, but it is not a gravinet interface, so the rate has to be enforced by the kernel \u2014 and this host cannot program one (not Linux, or iproute2 is not installed). The entry is saved and will apply if that changes.');
+    else if (!carries.has(iface))
+      await noticeModal(iface + ' has a shaping entry now. It is not a gravinet interface, so a rate set here is enforced by programming the kernel queueing discipline on ' + iface + ', taking over its root qdisc.');
     await refresh();
   };
 }

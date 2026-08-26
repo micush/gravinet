@@ -912,10 +912,39 @@ default plus per-network overrides — and resolved to an interface only when a
 caveat that a rate was "that much to each network, never a total shared
 between them". An interface with no entry is unshaped.
 
-Shaping happens in gravinet's own data path. No kernel qdisc is programmed, so
-an entry naming an interface this node runs no mesh network on is configuration
-nothing applies; `Config.ShapingUnenforced` names those, and both the admin UI
-and the CLI report them rather than leaving it to be discovered.
+**Two mechanisms, split by interface** (v964). Which one applies is decided by
+the interface, not by a preference, because neither can do the other's job:
+
+- A **mesh interface** is shaped in gravinet's own data path (above). That path
+  sees QoS classes and exempts control traffic; a qdisc sees an encrypted
+  overlay datagram and can distinguish neither, so it would pace gossip and
+  keepalives alongside payload.
+- **Any other interface** is shaped by programming the kernel queueing
+  discipline (`internal/tcshape`, via `tc`). There is no gravinet code between
+  an application and a physical NIC, so nothing in userspace can delay those
+  packets at all — the kernel is the only thing that can.
+
+`Config.ShapingKind` reports which applies; `Config.KernelShaping` is the subset
+needing a qdisc. Mesh interfaces are excluded from the latter, since pacing the
+same packets twice would compound the two limits rather than apply either.
+
+Kernel shaping is Linux-only (`tc`, iproute2) and **takes over the interface's
+root qdisc**, replacing whatever was configured there — tc has no private
+namespace equivalent to netfilter's nft table or iptables chain, so an
+interface has one root qdisc and shaping it means being that qdisc. Only
+interfaces with an explicit shaping entry are ever touched; the manager records
+which it programmed and removes exactly those on shutdown. Where a qdisc cannot
+be programmed at all — a non-Linux host, or one without iproute2 — the entry is
+saved and reported as unapplied rather than left looking as though it were in
+force.
+
+Egress uses `tbf` (delay: we are the sender, so pacing beats dropping our own
+traffic). Ingress uses an ingress qdisc plus a `u32` policer (drop: the sender
+is remote, and for TCP the drop is itself the backoff signal). `u32` rather
+than the tidier `matchall` because `cls_matchall` is Linux 4.10+ and is
+genuinely absent on kernels that still carry `u32`; both express "match every
+packet" here, so the more portable one wins. One filter per address family, so
+a v6-only host is not left unpoliced.
 
 - **Egress is shaped.** Outbound overlay packets enter a bounded queue, and a
   single drainer goroutine releases them paced to the up-rate by a byte token

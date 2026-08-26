@@ -2,6 +2,86 @@
 
 ---
 
+## v964 — 2026-08-25
+
+**Any interface can now actually be shaped, not just listed. Entries on non-mesh interfaces are enforced by programming the kernel queueing discipline; mesh interfaces keep the userspace shaper.**
+
+v963 made the picker offer every interface on the host. It did not make them work: the row still read *not shaped by this node*, because gravinet shaped only inside its own data path. Offering something and then labelling it inert is a worse state than not offering it, so this closes the gap.
+
+### Why two mechanisms and not one
+
+The split is decided by the interface, not by preference, because neither mechanism can do the other's job.
+
+**A mesh interface stays in userspace.** That path sees QoS classes and exempts control traffic. A qdisc sees an encrypted overlay datagram and can distinguish neither, so moving mesh shaping to tc would pace gossip and keepalives alongside payload and silently break the QoS page.
+
+**Anything else has to be the kernel.** There is no gravinet code between an application and a physical NIC. Nothing in userspace can delay those packets, so no amount of work in `internal/mesh` would ever shape `eth0` — the kernel's queueing discipline is the only thing in the path.
+
+One config surface drives both. `Config.ShapingKind` reports which applies, `Config.KernelShaping` is the subset needing a qdisc, and mesh interfaces are excluded from it: pacing the same packets twice would compound the two limits rather than apply either.
+
+### internal/tcshape
+
+New package, built to the same shape as `internal/netfilter`: pure, platform-neutral plan generators that unit-test without root or tc installed, and a thin platform file that executes them. Linux only; every other platform gets a stub that fails at `New` so the caller reports it.
+
+Egress is `tbf` — delay, because we are the sender and pacing beats discarding our own traffic. Ingress is an ingress qdisc plus a policer — drop, because the sender is on the far end of the link and for TCP the drop *is* the backoff signal. Burst defaults to a quarter second of the rate, floored at one frame, for the reason the userspace policer has the same floor: a bucket around one packet shreds TCP.
+
+**`u32`, not `matchall`.** `matchall` is the tidier spelling of "every packet", but `cls_matchall` is Linux 4.10+ and is genuinely absent on kernels that still carry `u32` — the container this was developed in rejected `matchall` outright (*TC classifier not found*) while accepting `u32`. Both express the same thing here, so the one with the wider reach wins, and the older host that is most likely to want a rate cap is not the one left unpoliced. One filter per address family, so a v6-only host is not policed by nothing.
+
+The ingress qdisc is torn down and rebuilt rather than replaced, because the policer lives in a filter attached to it and filters accumulate: replacing would leave the old rate's filter beside the new one and the lower of the two would silently win — a rate lowered once and raised back would stay low with nothing on screen explaining it.
+
+### What this takes over
+
+Unlike netfilter, which owns a private nft table and can promise it never touches the operator's own rules, **tc has no namespace to hide in**. An interface has one root qdisc, and shaping it means being that qdisc. Programming an interface here replaces whatever was configured on it.
+
+Nothing is therefore implicit: an interface is only ever programmed when an entry names it, the manager records exactly which interfaces it programmed, and Clear touches only those, on shutdown and when an entry is removed. An interface nobody asked about is never opened.
+
+### Where it cannot be done
+
+A non-Linux host, or one without iproute2, cannot program a qdisc. Those entries are saved and reported as unapplied — the row reads *kernel — unavailable here*, `bandwidth list` and `bandwidth add` say so, the daemon warns once at startup naming the specific interfaces, and `/api/config` exposes `shaping_kernel` as empty. Mesh interfaces are unaffected on every platform.
+
+### Surfaces
+
+The **carries** column becomes **shaped by**: *tunnel — <network>*, *kernel (tc)*, or *kernel — unavailable here*. `/api/config` replaces `shaping_unenforced` with `shaping_kinds` (per-entry mechanism) and `shaping_kernel` (backend on this host, probed per request so installing iproute2 does not need a restart to be noticed).
+
+### Verification
+
+`internal/tcshape`, `internal/config`, `internal/webadmin` and `cmd/gravinet` pass uncached. `go build ./...`, `go vet` and `gofmt` clean on every package touched.
+
+**The generated commands were run against a real kernel.** iproute2 was installed in the container and the planner's exact output executed verbatim: the `tbf` egress half applies, shows up in `tc qdisc show` with the requested rate and burst, and tears down cleanly. That is also how the `matchall` problem was found rather than shipped — it was the first spelling written, and the kernel rejected it.
+
+The ingress half remains **unexercised**: this container cannot load `act_police` (*Failed to load TC action module*), so the policer syntax is asserted by unit test and reviewed, not run. Being honest about which half was actually proven matters more here than a clean claim, since the two directions fail differently and only one has been observed working.
+
+Guards cover: bits-not-bytes rate rendering (a factor-of-eight error that would look like a broken network rather than a unit bug), egress shaping vs ingress policing not being swapped, `u32` and both address families, an unlimited direction actively tearing down what a previous apply installed, teardown steps being tolerant so a first apply on a clean interface does not fail, and mesh interfaces never reaching `KernelShaping`.
+
+Standing caveats, unchanged: no `nft`/`iptables` and no init in this container, so kernel NAT programming and the systemd calls from v951 remain unexercised against real system services. `internal/mesh`'s test build failure is pre-existing and unchanged since v948.
+
+---
+
+## v963 — 2026-08-25
+
+**Traffic > Shaping's + picker now lists every interface on the host, in one flat list, instead of offering gravinet's own devices and an "other…" free-text box.**
+
+v960 built the picker as two categories: the interfaces this node's mesh networks run on, and an `other…` option that revealed a text field for anything else. The split was a statement about what gets enforced — and it made the operator meet that statement twice, first as a category they had to choose between before they could name an interface at all, then again as the row's **carries** cell.
+
+The cell is the better of the two, and the picker was the worse: it forced the distinction at the moment the operator knows least, and it made shaping `eth0` a two-step detour through a text box even though `eth0` is a real interface sitting right there in the inventory. One flat list of what actually exists is both simpler and more honest about what the page can address.
+
+The list comes from `/api/interfaces` — the same inventory the NAT masquerade and LLDP pickers already read — with the network name shown alongside the entries that carry one, so `mesh0 — cush1` is still distinguishable from `eth0` at a glance without that being a category boundary.
+
+**Configured mesh devices are unioned in even when absent from the host**, so a network that is not up yet can still be given a rate. That was the case the free-text field existed for; with those names in the list there is nothing left for free text to reach that a typo would not reach too, so it is gone. Interfaces that already have an entry are left out rather than shown and rejected on save, since `ShapingAdd` refuses a duplicate and an option that can only produce an error should not be offered.
+
+### What did not change
+
+Listing an interface is not a promise that a rate on it will bite. gravinet still shapes only inside its own data path and programs no kernel qdisc, so picking `eth0` still says so on creation, the row still reads **not shaped by this node**, and `/api/config` still reports `shaping_unenforced`. Offering every interface makes that labelling more load-bearing, not less — it is now the only place the boundary is stated, which is the point.
+
+### Verification
+
+`internal/webadmin` and `cmd/gravinet` pass uncached. `go build ./...`, `go vet` and `gofmt` clean on every package touched.
+
+The guard asserts the picker reads the host inventory and unions the configured mesh names in. Falsifying it exposed a flaw in an earlier check: the anchor `systemInterfaces().then(list => {` appears twice in ui.go, so a single-occurrence patch had been rewriting the NAT picker instead of this one and the guard passed against unmodified source. Repeated against all occurrences it fails as it should. Worth recording because the failure mode was silent — the falsification reported nothing rather than reporting a pass.
+
+Standing caveats, unchanged: no `nft`/`iptables` and no init in this container, so kernel NAT programming and the systemd calls from v951 remain unexercised against real system services. `internal/mesh`'s test build failure is pre-existing and unchanged since v948.
+
+---
+
 ## v962 — 2026-08-25
 
 **Monitor > Packet Capture's "Capture all mesh peers" description now sits behind the help button. The disabled-control warning beside it does not.**
