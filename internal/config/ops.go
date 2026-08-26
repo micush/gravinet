@@ -1146,7 +1146,12 @@ func (c *Config) NATAdd(iface string) error {
 			return fmt.Errorf("NAT rule for %s already exists", iface)
 		}
 	}
-	c.NAT.Enabled = true
+	// Adding a rule does not switch the feature on. The pill beside the page
+	// title is the operator's to flip, the way it is on QoS and Firewall,
+	// which never enable themselves either. Auto-enabling here meant writing
+	// a first rule silently put NAT into force node-wide — the opposite of
+	// what "add a rule, look at it, then turn it on" should do, and not
+	// something a rule editor should decide. See v968.
 	c.NAT.Rules = append(c.NAT.Rules, NATRule{
 		Translate: "masquerade",
 		Interface: iface,
@@ -1487,8 +1492,9 @@ func (c *Config) NATRuleAddNeg(source, dest, destPort, proto, translate, iface s
 	if err := applyNATNegate(&rule, srcNeg, dstNeg); err != nil {
 		return err
 	}
+	// The rule itself is enabled; the feature is not switched on for it. See
+	// NATAdd above.
 	rule.Enabled = true
-	c.NAT.Enabled = true
 	c.NAT.Rules = append(c.NAT.Rules, rule)
 	return nil
 }
@@ -2234,6 +2240,13 @@ func (c *Config) ShapingSet(iface, dir string, bps int) error {
 
 // ShapingSetEnabled turns an interface's limit on or off without changing its
 // configured rates, so a cap can be lifted temporarily and later restored.
+// ShapingSetFeature flips the node-global shaping switch, leaving every entry
+// and every rate untouched — see Config.ShapingDisabled.
+func (c *Config) ShapingSetFeature(on bool) error {
+	c.ShapingDisabled = !on
+	return nil
+}
+
 func (c *Config) ShapingSetEnabled(iface string, on bool) error {
 	s := c.ShapingFor(iface)
 	if s == nil {

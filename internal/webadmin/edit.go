@@ -1264,12 +1264,19 @@ func (s *Server) handleBandwidth(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Op, Iface, Dir string
 		Bps            int
+		Enabled        bool `json:"enabled"`
 	}
 	if !decode(w, r, &req) {
 		return
 	}
 	err := s.mutateConfig(r, func(cfg *config.Config) error {
 		switch req.Op {
+		case "feature":
+			// The node-global switch, distinct from "enable"/"disable"
+			// below which act on one interface's entry. Named "feature" to
+			// match the same op on /api/radvd rather than inventing a third
+			// word for the same idea.
+			return cfg.ShapingSetFeature(req.Enabled)
 		case "add":
 			return cfg.ShapingAdd(req.Iface)
 		case "delete":

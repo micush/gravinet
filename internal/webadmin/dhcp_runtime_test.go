@@ -266,8 +266,15 @@ func TestNATSectionIsNodeGlobal(t *testing.T) {
 	if strings.Contains(sec, "for (const cf of state.cfg)") {
 		t.Error("the NAT section renders a card per mesh network again")
 	}
-	if !strings.Contains(sec, "sectionCardHead('NAT'") {
-		t.Error("the NAT card no longer uses the node-global card head")
+	// The node-global switch moved from an <h3> inside the card to a pill
+	// beside the page's own <h2> in v968, with the redundant "NAT" card
+	// title dropped. What matters is unchanged: one switch for the node, not
+	// one per network.
+	if !strings.Contains(sec, "sectionTitlePill(c, en, '/api/nat'") {
+		t.Error("the NAT section no longer puts its node-global switch on the page title")
+	}
+	if strings.Contains(sec, "sectionCardHead(") {
+		t.Error("the NAT section still labels its card with the section name")
 	}
 	// The scope column is gone as of v966: where a rule applies is derived
 	// from the rule, so a picker beside it was a second answer to a question
@@ -290,8 +297,11 @@ func TestQoSSectionIsNodeGlobal(t *testing.T) {
 	if strings.Contains(sec, "for (const cf of state.cfg)") {
 		t.Error("the QoS section renders a card per mesh network again")
 	}
-	if !strings.Contains(sec, "sectionCardHead('QOS'") {
-		t.Error("the QoS card no longer uses the node-global card head")
+	if !strings.Contains(sec, "sectionTitlePill(c, en, '/api/qos'") {
+		t.Error("the QoS section no longer puts its node-global switch on the page title")
+	}
+	if strings.Contains(sec, "sectionCardHead(") {
+		t.Error("the QoS section still labels its card with the section name")
 	}
 	if !strings.Contains(sec, "<th>scope</th>") {
 		t.Error("the QoS table has no scope column")
@@ -388,8 +398,11 @@ func TestFirewallSectionIsNodeGlobal(t *testing.T) {
 	if strings.Contains(sec, "netCardHead(cf") {
 		t.Error("the firewall renders a card per mesh network again")
 	}
-	if !strings.Contains(sec, "sectionCardHead('FIREWALL'") {
-		t.Error("the firewall card no longer uses the node-global card head")
+	if !strings.Contains(sec, "sectionTitlePill(c, en, '/api/firewall'") {
+		t.Error("the firewall section no longer puts its node-global switch on the page title")
+	}
+	if strings.Contains(sec, "sectionCardHead(") {
+		t.Error("the firewall section still labels its card with the section name")
 	}
 	if !strings.Contains(sec, "<th>scope</th>") {
 		t.Error("the firewall table has no scope column")

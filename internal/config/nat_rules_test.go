@@ -19,8 +19,15 @@ func TestNATRuleAddFull(t *testing.T) {
 	if r.Source != "10.0.0.0/24" || r.Dest != "203.0.113.0/24" || r.Translate != "198.51.100.7" {
 		t.Fatalf("rule fields not stored: %+v", r)
 	}
-	if !c.NAT.Enabled {
-		t.Error("adding a rule should enable NAT")
+	// As of v968 adding a rule does NOT switch the feature on: the pill beside
+	// the page title is the operator's to flip, the way it already is on QoS
+	// and Firewall. Writing a first rule used to put NAT into force node-wide
+	// as a side effect.
+	if c.NAT.Enabled {
+		t.Error("adding a rule enabled NAT; the feature switch is the operator's to flip")
+	}
+	if !r.Enabled {
+		t.Error("the rule itself should be enabled — it is the feature that stays off")
 	}
 	// masquerade form
 	if err := c.NATRuleAdd("10.0.0.0/24", "", "", "", "masquerade", "eth0"); err != nil {
@@ -428,8 +435,11 @@ func TestNATWorksWithNoMeshNetworks(t *testing.T) {
 	if err := c.Validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
-	if len(c.NAT.Rules) != 1 || !c.NAT.Enabled {
-		t.Fatalf("rule not stored: enabled=%v rules=%+v", c.NAT.Enabled, c.NAT.Rules)
+	if len(c.NAT.Rules) != 1 {
+		t.Fatalf("rule not stored: %+v", c.NAT.Rules)
+	}
+	if c.NAT.Enabled {
+		t.Error("adding a rule enabled NAT; see TestNATRuleAddFull")
 	}
 	// There is no scope to get wrong any more, so there is no typo to refuse:
 	// a second rule on a node with no networks is just another ordinary rule.

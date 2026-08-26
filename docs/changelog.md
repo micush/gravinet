@@ -2,6 +2,66 @@
 
 ---
 
+## v968 — 2026-08-26
+
+**Every page in Traffic now carries its enabled/disabled switch beside the page title, and none of them restates its own name on a card heading underneath it. Adding a NAT rule no longer switches NAT on.**
+
+Reported from the UI: four of the five Traffic pages put a card heading one line under the `<h2>` already showing the section name — "Firewall" above a card labelled FIREWALL — which pushed the switch two lines below the title it qualifies and left the word above it carrying nothing. The fifth and sixth had no switch at all.
+
+### The pills
+
+| page | before | after |
+|---|---|---|
+| Firewall | `FIREWALL` card head | title pill, card head gone |
+| NAT | `NAT` card head | title pill, card head gone |
+| QoS | `QOS` card head | title pill, card head gone |
+| IPv6 RA | *no switch* | title pill |
+| Shaping | `BANDWIDTH` card head, no switch | title pill, card head gone |
+
+One shared `sectionTitlePill` rather than five copies. It matches `netCardHead`/`sectionCardHead` in flipping immediately and posting in the background, so the title pill does not behave differently from the per-row pills on the same page, and it clears any pill already on the `<h2>` before adding one — Radvd rewrites its body on every save, and would otherwise stack a new pill on the title each time.
+
+`sectionCardHead` stays. DHCP has a server card and a relay card on one page, and a single title pill could not say which half it governed; a test now pins that as deliberate rather than missed.
+
+**IPv6 RA needed no new plumbing.** `RAConfig.Enabled` and the `feature` op on `/api/radvd` both already existed — the page simply had no way to reach them.
+
+### Shaping needed a flag, and it is stored inverted
+
+Unlike the other four, `Shaping` was a bare `[]IfaceShaping` with only per-interface state and no node-global switch, so the pill required a new field.
+
+`Config.ShapingDisabled` is **inverted** — disabled rather than enabled — so the zero value keeps shaping on. Shaping predates this switch, so every config already written has entries and no flag; an `Enabled bool` would read false on all of them and silently unshape every upgraded node on first load. Same reason `DiscoveryConfig.Disabled` is spelled that way. `TestShapingDefaultsOnForAConfigThatNeverHeardOfTheSwitch` is there to catch anyone flipping it around later.
+
+Enforcement is at the two points that **consume** shaping — `ShapingThrottle` for the tunnel path and `KernelShaping` for the qdisc path — rather than in `ShapingFor`, which the editor also goes through and which has to keep working while the feature is off. Gating only one would have left half a node's traffic still paced with the pill reading "disabled", so `TestShapingOffSilencesBothEnforcementPaths` checks both.
+
+Flipping it leaves every entry and rate untouched: the "flip the flag, leave the rules alone" split NAT and QoS already use, so an operator can lift every cap for an afternoon and put them all back without retyping a rate. Per-interface state stays independent — re-enabling the feature does not resurrect an interface that was parked.
+
+### Adding a NAT rule no longer enables NAT
+
+`NATAdd` and `NATRuleAddNeg` both set `c.NAT.Enabled = true`. Writing a first rule therefore put NAT into force node-wide as a side effect, which is the opposite of what "add a rule, look at it, then turn it on" should do and not a decision a rule editor should be making. QoS and Firewall never enabled themselves; NAT now matches them.
+
+The rule itself is still created enabled — it is only the feature switch that stays off, so flipping the pill puts everything already written into force at once rather than requiring a second pass to enable each rule.
+
+### CLI
+
+`gravinet bandwidth on|off` is the CLI half of the new shaping switch, and `gravinet bandwidth list` now says so when it is off rather than printing rates that are stored but not enforced.
+
+Deliberately worded differently from the existing `enable|disable`, which act on one interface's entry: two controls that read identically but act at different scopes is exactly the confusion worth spending a different word on.
+
+### Verification
+
+6 new config tests (default-on, both enforcement paths, entries untouched by the toggle, round trip, independence from per-interface state, NAT not self-enabling through either entry point) and 7 new UI structural tests (all five pills present and pointing at the right endpoint, no section restating its name, DHCP keeping its two card heads, no pill stacking on redraw, flip-before-post, shaping defaulting on when the node is silent, RA using the existing feature op).
+
+Five existing tests asserted the old behavior. Each was updated to assert the new intent rather than deleted, so the property they were really guarding — one node-global switch, not one per network — is still enforced.
+
+`internal/config`, `internal/webadmin`, `cmd/gravinet` and every other package pass uncached. `internal/mesh` passes too, and was run rather than assumed: `ShapingForNetwork` feeds `fillRuntimeSpec`, so the shaping gate is genuinely in its blast radius. `go build ./...`, `go vet ./...` and `gofmt` clean.
+
+**Caveat.** All UI work here is verified structurally, by asserting on the rendered JS source. No browser has rendered these pills, so what is confirmed is that each is attached to the same `h2.sec` node the other pages use and posts to the right endpoint — not how it looks.
+
+### Operator note
+
+No action required and no behavior change on upgrade: shaping stays on for every existing config, and existing NAT configs keep whatever `enabled` state they already had. The one thing that changes for an operator is that a **newly added** NAT rule no longer turns NAT on by itself — after adding the first rule on a node where NAT was off, flip the pill beside the page title.
+
+---
+
 ## v967 — 2026-08-26
 
 **New: Monitor > DHCP Leases. The leases Kea has actually handed out, read back from its lease database.**

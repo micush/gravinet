@@ -323,6 +323,26 @@ type Config struct {
 	// Node-global and keyed by interface name since v960 — see IfaceShaping.
 	Shaping []IfaceShaping `json:"shaping,omitempty"`
 
+	// ShapingDisabled is the node-global off switch for shaping, the
+	// counterpart of NAT.Enabled / QoS.Enabled / Firewall.Enabled, added in
+	// v968 so Traffic > Shaping carries the same enabled/disabled pill beside
+	// its title that every other page in that group does.
+	//
+	// Inverted — disabled rather than enabled — so the zero value keeps
+	// shaping on. Shaping predates this switch, so every config already out
+	// there has entries and no flag; an Enabled bool would read false on all
+	// of them and silently unshape every upgraded node. Same reason
+	// DiscoveryConfig.Disabled is spelled that way.
+	//
+	// Flipping it leaves the entries alone: it is the "flip the flag, leave
+	// the rules alone" split NAT and QoS already use, so an operator can lift
+	// every cap for an afternoon and put them all back without retyping a
+	// rate. Enforcement is at the two points that consume shaping —
+	// ShapingThrottle for the tunnel path and KernelShaping for the qdisc
+	// path — rather than in ShapingFor, which the editor also goes through
+	// and which must keep working while the feature is off.
+	ShapingDisabled bool `json:"shaping_disabled,omitempty"`
+
 	// Throttle is the pre-v960 node default bandwidth limit. Retained as a
 	// field so an existing config still parses; Config.Validate hoists it
 	// into Shaping and clears it so it is never written back out.
@@ -4332,11 +4352,18 @@ func (c *Config) ShapingFor(iface string) *IfaceShaping {
 // with no entry is unshaped, which is the zero Throttle: disabled, both
 // directions unlimited.
 func (c *Config) ShapingThrottle(iface string) Throttle {
+	if !c.ShapingEnabled() {
+		return Throttle{}
+	}
 	if s := c.ShapingFor(iface); s != nil {
 		return s.Throttle
 	}
 	return Throttle{}
 }
+
+// ShapingEnabled reports whether shaping is switched on for this node. See
+// ShapingDisabled for why the stored field is inverted.
+func (c *Config) ShapingEnabled() bool { return !c.ShapingDisabled }
 
 // ShapingForNetwork is the limit applied to a network's tunnel — the entry
 // for the interface that tunnel runs on, if there is one.
@@ -4399,6 +4426,9 @@ func (c *Config) ShapingKind(iface string) string {
 // Disabled entries are excluded rather than programmed at their configured
 // rate, which is what the switch means — lift the cap, keep the number.
 func (c *Config) KernelShaping() []IfaceShaping {
+	if !c.ShapingEnabled() {
+		return nil
+	}
 	var out []IfaceShaping
 	for _, s := range c.Shaping {
 		if s.Enabled && c.ShapingKind(s.Iface) == ShapeKernel {

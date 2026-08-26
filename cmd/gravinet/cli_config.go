@@ -1341,13 +1341,34 @@ func qosRuleMatchLabel(r config.QoSRule) string {
 // shaper is actually attached to.
 func cmdBandwidth(args []string) {
 	if len(args) == 0 {
-		fatal("usage: gravinet bandwidth <list|add|del|enable|disable|up RATE|down RATE|both RATE> [-iface NAME]")
+		fatal("usage: gravinet bandwidth <list|on|off|add|del|enable|disable|up RATE|down RATE|both RATE> [-iface NAME]")
 	}
 	sub := args[0]
 	iface, rest := extractOpt(args[1:], "iface")
 	cfg, path, rest := openCfg(rest)
 
+	// on/off are the node-global switch — the CLI half of the pill beside the
+	// page title (v968). Deliberately worded differently from enable/disable
+	// below, which act on one interface's entry: two controls that read the
+	// same but act at different scopes is exactly the confusion worth a
+	// different word for.
+	if sub == "on" || sub == "off" {
+		if err := cfg.ShapingSetFeature(sub == "on"); err != nil {
+			fatal("%v", err)
+		}
+		if sub == "off" {
+			fmt.Println("shaping is off for this node; every interface's rate is kept and stops being enforced")
+		} else {
+			fmt.Println("shaping is on for this node; each interface's own state decides whether its rate applies")
+		}
+		commitCfg(cfg, path)
+		return
+	}
+
 	if sub == "list" {
+		if !cfg.ShapingEnabled() {
+			fmt.Println("shaping is OFF for this node — the rates below are stored but not enforced (gravinet bandwidth on)")
+		}
 		if len(cfg.Shaping) == 0 {
 			fmt.Println("no interface is shaped")
 		}

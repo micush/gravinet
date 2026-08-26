@@ -597,7 +597,7 @@ const indexHTML = `<!doctype html>
 <script>
 const $ = (h) => { const d=document.createElement('div'); d.innerHTML=h.trim(); return d.firstChild; };
 const app = document.getElementById('app');
-const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, natCfg:{enabled:false, rules:[]}, qosCfg:{enabled:false, rules:[], classes:5, default_class:3}, shaping:[], shapingKinds:{}, shapingKernel:'', firewallCfg:{enabled:false, rules:[]}, geoipLookup:false, enableUpnp:false, allowRemoteShell:false, loginBanMaxFailures:3, loginBanSeconds:900, tlsSource:'self-signed', tlsCommonName:'', tlsNotAfter:'', configHistoryLimit:250, configHistoryCount:0, shellSupported:true, bgpSupported:false, snmpSupported:false, ipv6raSupported:false, dhcpSupported:false, lldpSupported:false, syslogSupported:false, selfId:null, selfHostname:'', targetSeq:0, pendingBgpHighlight:null, workerThreads:0, tunQueues:0, tunQueuesSupported:true, udpGSO:false, udpGSOSupported:true, socketBufferMB:16, socketBufferMaxMB:256, perfRestartPending:false, loginBanRestartPending:false, tableView:{} };
+const state = { section:'networks', status:[], cfg:[], restartPending:false, statusSig:'', polling:false, target:null, cluster:[], managed:false, manager:false, natStateTimeout:0, natCfg:{enabled:false, rules:[]}, qosCfg:{enabled:false, rules:[], classes:5, default_class:3}, shaping:[], shapingEnabled:true, shapingKinds:{}, shapingKernel:'', firewallCfg:{enabled:false, rules:[]}, geoipLookup:false, enableUpnp:false, allowRemoteShell:false, loginBanMaxFailures:3, loginBanSeconds:900, tlsSource:'self-signed', tlsCommonName:'', tlsNotAfter:'', configHistoryLimit:250, configHistoryCount:0, shellSupported:true, bgpSupported:false, snmpSupported:false, ipv6raSupported:false, dhcpSupported:false, lldpSupported:false, syslogSupported:false, selfId:null, selfHostname:'', targetSeq:0, pendingBgpHighlight:null, workerThreads:0, tunQueues:0, tunQueuesSupported:true, udpGSO:false, udpGSOSupported:true, socketBufferMB:16, socketBufferMaxMB:256, perfRestartPending:false, loginBanRestartPending:false, tableView:{} };
 // setTarget is the only place state.target is ever assigned — bumping
 // targetSeq alongside it, once, exactly when the *selection itself* actually
 // changes. load()/startPolling()/refreshCluster() each capture targetSeq
@@ -735,6 +735,56 @@ function sectionCardHead(title, en, apiPath, onToggle){
   };
   h3.appendChild(tag);
   return h3;
+}
+
+// sectionTitlePill puts the feature's enabled/disabled pill next to the page's
+// own <h2> title, rather than on an <h3> inside the first card.
+//
+// The card heading it replaces (sectionCardHead) restated the section name one
+// line under the <h2> already showing it — "Firewall" above a card labelled
+// FIREWALL — so the pill was two lines below the title it qualifies and the
+// word above it carried nothing. Every page that grew a node-global switch
+// later (LLDP, and DHCP's two cards keep their own because there are two of
+// them on one page) put the pill by the title instead; this is that spot, as
+// one helper rather than a copy per section.
+//
+// The <h2> is built by renderSection before any sec* function runs, so it is
+// already in the DOM and is a sibling of the card, not part of it. Sections
+// that redraw their body on save must call this again — or leave the <h2>
+// alone when they rewrite, which is what all five callers do.
+//
+// Same flip-first-then-post behavior as netCardHead/sectionCardHead: the pill
+// moves immediately and the request goes in the background, so a slow node
+// does not make the toggle feel stuck. onToggle(on) returns the body to post,
+// exactly as sectionCardHead's does, so a caller can move between the two
+// without rewriting its payload.
+function sectionTitlePill(c, en, apiPath, onToggle){
+  const h2 = c.querySelector('h2.sec');
+  if (!h2) return null;
+  // Guard against a double-draw leaving two pills on one title: a section that
+  // reloads its body without rebuilding the heading would otherwise append a
+  // second one every time.
+  const old = h2.querySelector('.tag-toggle');
+  if (old) old.remove();
+
+  const tag = $('<span class="pill tag-toggle"></span>');
+  const paint = (on) => {
+    tag.className = 'pill tag-toggle ' + (on ? 'on' : 'off');
+    tag.textContent = on ? 'enabled' : 'disabled';
+    tag.title = 'double-click to ' + (on ? 'disable' : 'enable');
+  };
+  paint(en);
+  tag.ondblclick = () => {
+    const on = !en;
+    en = on;
+    paint(on);
+    api(apiPath, { method:'POST', body: JSON.stringify(onToggle(on)) })
+      .then(r => { if (!r.ok) console.warn(apiPath+' toggle failed:', (r.body&&r.body.error)||'failed'); })
+      .finally(refresh);
+  };
+  h2.appendChild(document.createTextNode(' '));
+  h2.appendChild(tag);
+  return tag;
 }
 
 function theme(){ return document.documentElement.getAttribute('data-theme') || 'dark'; }
@@ -1367,6 +1417,7 @@ async function load() {
   // Shaping is node-global and keyed by interface from v960, so it rides on
   // the config response itself rather than on each network.
   state.shaping = (c.body && c.body.shaping) || [];
+  state.shapingEnabled = !(c.body && c.body.shaping_enabled === false);
   state.shapingKinds = (c.body && c.body.shaping_kinds) || {};
   // '' means this host cannot program a qdisc at all — non-Linux, or no
   // iproute2 — which the rows report per entry rather than leaving a rate
@@ -7144,7 +7195,7 @@ function secFirewall(c) {
   const en = !!fw.enabled;
   const rules = fw.rules || [];
   const card = $('<div class="card"></div>');
-  card.appendChild(sectionCardHead('FIREWALL', en, '/api/firewall', on => ({op:(on?'enable':'disable')})));
+  sectionTitlePill(c, en, '/api/firewall', on => ({op:(on?'enable':'disable')}));
 
   let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>source</th><th>destination</th><th>services</th><th>action</th><th>scope</th><th>log</th><th>hits</th><th>notes</th></tr>';
   if (!rules.length) h += '<tr><td colspan="10" class="empty">no rules \u2014 all traffic allowed (click + to add one)</td></tr>';
@@ -8003,7 +8054,7 @@ function secNAT(c) {
   const nat = state.natCfg || {enabled:false, rules:[]};
   const en = !!nat.enabled;
   const card = $('<div class="card"></div>');
-  card.appendChild(sectionCardHead('NAT', en, '/api/nat', on => ({op:(on?'enable':'disable')})));
+  sectionTitlePill(c, en, '/api/nat', on => ({op:(on?'enable':'disable')}));
 
   const rules = nat.rules||[];
   let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>source</th><th>dest</th><th>translate</th></tr>';
@@ -8580,6 +8631,17 @@ function secRadvd(c){
   function render(b){
     const ra = b.ra || {};
     const list = ra.interfaces || [];
+    // The node-global switch, beside the page title like every other Traffic
+    // page. Backs RAConfig.Enabled through the "feature" op the API already
+    // had — the flag and the endpoint both predate this pill; only the way to
+    // reach it from the page was missing. Independent of the interface rows:
+    // toggling it starts or stops radvd and leaves every row alone, so a link
+    // configured to advertise stays configured while advertising is off.
+    //
+    // Re-run on every render because load() rewrites wrap wholesale on each
+    // save; sectionTitlePill drops any previous pill from the <h2> first, so
+    // repeated renders do not stack them up.
+    sectionTitlePill(c, !!ra.enabled, '/api/radvd', on => ({op:'feature', enabled:on}));
     // Why an interface cannot advertise, keyed by interface name. A row whose
     // state says "enabled" is describing the configuration, and on this page
     // that is not the same claim as "advertising" — radvd will start happily
@@ -9144,7 +9206,7 @@ function secQoS(c) {
   const en = !!q.enabled;
   const classes = q.classes||5;
   const card = $('<div class="card"></div>');
-  card.appendChild(sectionCardHead('QOS', en, '/api/qos', on => ({op:(on?'enable':'disable')})));
+  sectionTitlePill(c, en, '/api/qos', on => ({op:(on?'enable':'disable')}));
   const rules = q.rules||[];
   let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>match</th><th>class</th><th>scope</th></tr>';
   if (!rules.length) h += '<tr><td colspan="5" class="empty">no QoS rules \u2014 click + to add one</td></tr>';
@@ -9303,7 +9365,7 @@ function secBandwidth(c) {
   for (const cf of (state.cfg||[])) if (cf.iface) carries.set(cf.iface, cf.name || cf.id);
 
   const card = $('<div class="card"></div>');
-  card.appendChild($('<h3><span class="net-name">BANDWIDTH</span></h3>'));
+  sectionTitlePill(c, state.shapingEnabled !== false, '/api/bandwidth', on => ({op:'feature', enabled:on}));
 
   let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>interface</th><th>state</th><th>up</th><th>down</th><th>shaped by</th></tr>';
   for (const e of entries) {
