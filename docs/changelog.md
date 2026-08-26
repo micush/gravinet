@@ -2,6 +2,66 @@
 
 ---
 
+## v967 — 2026-08-26
+
+**New: Monitor > DHCP Leases. The leases Kea has actually handed out, read back from its lease database.**
+
+gravinet has configured Kea since v953 and never read anything back, so the answer to "who has 10.1.1.47?" was to SSH to the node and read a CSV. This is the observe half of Network > DHCP, the way Monitor > BGP Peers is the observe half of Traffic > BGP and Monitor > L2 Peers is the observe half of System > LLDP — an unfilled slot in a pattern this app already had twice.
+
+It also makes an existing warning actionable. `dhcp_preflight.go` already says *a Kea DHCP server is still running on this host — it is handing out leases this page does not manage*, which described leases nobody could look at. With DHCP off but Kea running, this page now shows exactly those leases.
+
+### Built against a real server, not the documentation
+
+Kea 2.4.1 was installed and driven with real DISCOVER/REQUEST/RELEASE/DECLINE exchanges, against a config produced by gravinet's own `renderKea`. Three things came out of that which the docs do not make obvious, and two of them change what the UI can honestly display:
+
+- **A declined lease has its `hwaddr`, `client_id` and `hostname` blanked by Kea.** There is no way to report who declined an address. The page shows the address and the state and dashes, because reporting a client recovered from an earlier row would be inventing one. `currentLeases` blanks these fields explicitly rather than passing through whatever was in the row, so no future caller is tempted.
+- **A declined lease's `valid_lifetime` is the decline probation period (86400), not the subnet's lifetime.** Rendered in the same column as a real expiry it reads as a client holding an address for a day, so that cell says *back to pool* instead.
+- **A release writes two rows**: the lease with lifetime 0 and an expiry in the past, then a second row in state 2 with the hostname cleared.
+
+Confirmed state values: 0 default, 1 declined, 2 expired-reclaimed.
+
+### Agreeing with lease file cleanup
+
+The file is a journal — every event appends a row, one address appears many times, the last row wins. Kea compacts it hourly (LFC).
+
+`kea-lfc` was run over a real 9-row journal and the result diffed: it keeps the later of two rows for a renewed address, **drops** the released/reclaimed address entirely, and **keeps** the declined one. Those are exactly the rules `currentLeases` applies, which is the property worth having — the page renders identically whether it reads a journal or its compaction, so it does not appear to change contents at the top of the hour because LFC happened to run. `TestJournalAndCompactedFileAgree` pins this by reading both fixtures and comparing.
+
+LFC works by renaming the live file aside and writing a fresh one, so a read can land in a window where the main path does not exist. `readKeaLeases` falls back to the `.2` copy Kea leaves behind: one compaction stale beats telling an operator their fully-leased LAN is empty.
+
+### Why the CSV and not the control agent
+
+Kea answers `lease4-get-all` over its control agent with clean JSON and no parsing rules. It also needs `kea-ctrl-agent` installed and a control socket configured, neither of which gravinet sets up — a package and a listening socket added to every DHCP server node in order to render a read-only table. The memfile CSV is already there because `renderKea` points Kea at it. That path is now the `keaLeasePath` constant used by both the writer and the reader, so the two cannot drift.
+
+### Three ways a table can be empty
+
+They must not render identically; an operator on a relay seeing a blank table would reasonably conclude their DHCP was broken. The API carries the mode and a hint:
+
+- **Server, nobody leased yet** — the plain empty case.
+- **Relay** — its clients are leased by the upstream server and recorded there. No local file, and an empty table is the complete answer rather than a missing one.
+- **Off** — says so; but if Kea is running anyway, the leases are read and shown, because those are the ones the preflight warning is about.
+
+### Read-only, enforced
+
+The endpoint opens a file and touches nothing else. `TestLeasesEndpointNeverWrites` asserts the source calls no `installKea`, `keaStopAndDisable`, `renderKea`, `os.WriteFile`, `os.Rename` or `exec.Command` — a monitoring page causing a package install as a side effect of being opened is the trap `installKea`'s own doc comment warns about, and this keeps it shut. The check skips comment lines so a doc comment naming a function it deliberately does not call does not trip it.
+
+### Verification
+
+Two fixtures in `internal/webadmin/testdata` are the real server's output, not hand-written: `kea-leases4-journal.csv` (the live memfile after that run) and `kea-leases4-compacted.csv` (the same file after `kea-lfc`). 13 reader tests and 3 handler tests cover renewal collapsing to one row, released addresses disappearing, declined rows keeping the address and losing the identity, expiry taking effect with no file change, a missing file, the LFC fallback, a torn trailing row, header-driven column resolution (`pool_id` was added mid-file in Kea 2.3, so fixed positions would shift), a non-lease file erroring, a header-only file being empty, and stable row order across reads.
+
+The reader was also pointed at the live server's file directly: it returned one lease — the declined one — because the 600-second leases had lapsed by then and the declined address's probation had not, which is `TestExpiredLeasesDropOutWithoutAFileChange` confirmed outside the fixtures.
+
+`internal/webadmin` passes in full; `go build ./...`, `go vet ./...` and `gofmt` clean.
+
+**A caveat that stands.** Kea receives and allocates correctly in this container but cannot *send* replies — broadcast over `lo` returns `Permission denied` — so the lease data was produced by transactions Kea committed before failing to answer. The lease file is genuinely Kea's, and the reader has been run against it live, but no end-to-end client ever received an address here. The UI section itself is exercised only by the existing structural tests (`TestHelpColumnKeysMatchRealColumns` and friends), not by a browser.
+
+Also new since v965's caveats: `renderKea`'s output has now been validated by `kea-dhcp4 -t` against the real binary — config accepted, subnet created, pool parsed. That part of the v965/v966 "Kea unexercised" caveat is retired. Kernel NAT programming and the v951 systemd calls remain unexercised.
+
+### Operator note
+
+The section appears under Monitor wherever gravinet can drive a DHCP server (Linux), gated on the same `dhcpSupported` as the editor. It is read-only and safe to open on any node; it will not install, start, or stop anything.
+
+---
+
 ## v966 — 2026-08-26
 
 **The NAT scope selector is gone. Which overlay a rule applies to is derived from the rule, because the rule already said it.**

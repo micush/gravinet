@@ -43,6 +43,12 @@ import (
 
 const keaConfPath = "/etc/kea/kea-dhcp4.conf"
 
+// keaLeasePath is the memfile lease database renderKea points Kea at, and the
+// file readKeaLeases reads back. One constant for both directions on purpose:
+// the reader is only correct for a Kea that gravinet itself configured, so if
+// this moves, the page that displays it has to move with it.
+const keaLeasePath = "/var/lib/kea/kea-leases4.csv"
+
 // keaMarker is the key gravinet writes to claim the file. It lives in Dhcp4's
 // user-context, which is Kea's own mechanism for carrying data the server does
 // not interpret; a key beside Dhcp4 is a parse error, not an ignored field.
@@ -128,7 +134,7 @@ func renderKea(c config.DHCPConfig) ([]byte, error) {
 			// importantly off the mesh devices, where answering would hand
 			// overlay peers a lease.
 			InterfacesConfig: keaIfaces{Interfaces: []string{}},
-			LeaseDatabase:    keaLeaseDB{Type: "memfile", Name: "/var/lib/kea/kea-leases4.csv"},
+			LeaseDatabase:    keaLeaseDB{Type: "memfile", Name: keaLeasePath},
 			ValidLifetime:    defaultLease,
 			Subnet4:          []keaSubnet{},
 			Loggers: []keaLogger{{

@@ -1098,6 +1098,11 @@ const NAV_GROUPS = [
     // System > LLDP. Gated on lldpd like that editor (sectionVisible),
     // so it's hidden on hosts without lldpd.
     ['l2-peers', 'live LLDP/CDP neighbors seen on this host\u2019s interfaces (shown only when lldpd is present on this host)'],
+    // Live DHCP lease table read back from Kea's memfile database — the
+    // observe half of Network > DHCP, the way bgp-peers and l2-peers are the
+    // observe halves of their own editors. Gated on the same dhcpSupported as
+    // the editor (sectionVisible).
+    ['dhcp-leases', 'current DHCP leases this node has handed out (shown only where gravinet can drive a DHCP server)'],
     ['hosts-file', 'the live contents of this host\u2019s hosts file'],
     ['dns-state', 'what\u2019s actually registered with this host\u2019s OS resolver right now'],
     ['logs', 'the daemon\u2019s recent log output'],
@@ -1161,6 +1166,7 @@ function label(s){
   if (s==='bgp-peers') return 'BGP Peers';
   if (s==='config-history') return 'Config History';
   if (s==='l2-peers') return 'L2 Peers';
+  if (s==='dhcp-leases') return 'DHCP Leases';
   if (s==='getting-started') return 'Getting Started';
   if (s==='capture') return 'Packet Capture';
   // Rail label only. The page keeps the full "IPv6 Router Advertisements"
@@ -1195,6 +1201,7 @@ function sectionVisible(sec){
   if (sec === 'dhcp') return !!state.dhcpSupported;
   if (sec === 'snmp') return !!state.snmpSupported;
   if (sec === 'lldp' || sec === 'l2-peers') return !!state.lldpSupported;
+  if (sec === 'dhcp-leases') return !!state.dhcpSupported;
   if (sec === 'syslog') return !!state.syslogSupported;
   return true;
 }
@@ -3503,7 +3510,7 @@ function renderSection() {
        firewall:secFirewall, nat:secNAT, qos:secQoS, ipv6ra:secRadvd, bandwidth:secBandwidth, bgp:secBgp, seeds:secSeeds, hosts:secHosts, dns:secDNS,
        upgrade:secUpgrade,
        metrics:infoMetrics, 'mesh-peers':infoMeshPeers, capture:infoCapture, speedtest:infoSpeedtest, latency:infoLatency,
-       'route-table':infoRoutes, 'bgp-peers':secBgpPeers, 'l2-peers':secL2Peers, 'hosts-file':infoHosts, 'dns-state':infoDNS,
+       'route-table':infoRoutes, 'bgp-peers':secBgpPeers, 'l2-peers':secL2Peers, 'dhcp-leases':secDHCPLeases, 'hosts-file':infoHosts, 'dns-state':infoDNS,
        resolver:secResolver, time:secTime, dhcp:secDHCP, snmp:secSNMP, lldp:secLLDP, syslog:secSyslog, users:secUsers, power:secPower,
        logs:secLogs, interfaces:secInterfaces, 'config-history':secConfigHistory, readme:secReadme, 'getting-started':secGettingStarted, api:secAPIDoc, license:secLicense, about:infoAbout }[state.section])(c, nets);
   }
@@ -3745,6 +3752,9 @@ const HELP = {
   },
   'l2-peers': {
     topic: 'Live LLDP/CDP neighbor table as reported by lldpd on this host. Read-only \u2014 pick which interfaces run LLDP/CDP under System \u203a LLDP.',
+  },
+  'dhcp-leases': {
+    topic: 'The leases this node\u2019s DHCP server has actually handed out, read live from Kea\u2019s lease database. Read-only \u2014 pools, subnets and the server/relay role are set under Network \u203a DHCP.<br><br>Only leases <i>this</i> node issued appear here. A node set to <b>relay</b> holds none: its clients are leased by the upstream server and recorded there, so an empty table on a relay is the complete answer rather than a missing one.<br><br>A <b>declined</b> row is an address a client refused, usually because it answered an ARP probe and looked already taken \u2014 often a device with a static address inside the pool. Kea holds it out of the pool for a probation period and <i>records no client for it</i>, so those rows show no hostname or MAC; that is the server\u2019s own data, not something missing here. The time on a declined row is when the address returns to the pool, not when a lease runs out.',
   },
   'hosts-file': {
     topic: 'This host\'s hosts file, including the gravinet-managed block (peer hostnames and advertised records). Read live from disk.',
@@ -12580,6 +12590,76 @@ async function l2PeersLiveStatus(body){
   body.innerHTML = h+'</table>';
   const t = body.querySelector('table');
   enhanceTable(t);
+}
+
+// secDHCPLeases is the Monitor > DHCP Leases view: the leases Kea has actually
+// handed out, read back from its memfile database. The observe half of Network
+// > DHCP, the way secL2Peers is the observe half of System > LLDP. Read-only
+// throughout — it opens a file and never touches Kea, the config, or the
+// service, so opening this page cannot install or start anything.
+function secDHCPLeases(c){
+  const card = $('<div class="card"></div>');
+  const body = $('<div></div>'); card.appendChild(body);
+  c.appendChild(card);
+  dhcpLeasesLiveStatus(body);
+}
+
+// dhcpLeasesLiveStatus fills the lease card (GET /api/dhcp-leases).
+//
+// An empty table means three different things and the page must not render
+// them identically: a server nobody has leased from yet, a relay (whose
+// clients' leases live on the upstream server and are not this node's to
+// show), and DHCP switched off. The API sends a hint for the cases that are
+// not simply "no leases yet", and it is rendered above the table rather than
+// instead of it, so the shape of the page does not change with the answer.
+async function dhcpLeasesLiveStatus(body){
+  const r = await api('/api/dhcp-leases');
+  const d = (r.body) || {};
+  const rows = d.leases || [];
+  let h = '';
+  if (d.error) h += '<div class="warn">'+esc(d.error)+'</div>';
+  else if (d.hint) h += '<div class="hint">'+esc(d.hint)+'</div>';
+  h += '<table><tr><th>address</th><th>hostname</th><th>MAC</th><th>state</th><th>expires</th></tr>';
+  if (!rows.length){
+    h += '<tr><td colspan="5" class="empty">'+(d.hint ? 'no leases held here' : 'no leases yet')+'</td></tr>';
+  }
+  for (const l of rows){
+    // A declined lease carries no client: Kea blanks hwaddr, client_id and
+    // hostname on it. Those cells are dashes rather than stale values from an
+    // earlier row, and the expiry column says what the time actually means —
+    // when the address returns to the pool, not when a lease runs out. Its
+    // lifetime is the decline probation period (a day by default), so showing
+    // it beside real lease expiries without saying so reads as a client
+    // holding an address for a day.
+    const declined = !!l.declined;
+    const state = declined
+      ? '<span class="pill" title="a client refused this address \u2014 Kea holds it out of the pool for a probation period, and records no client for it">declined</span>'
+      : '<span class="pill on">leased</span>';
+    const when = declined
+      ? esc(relTime(l.expire))+' <span class="muted">(back to pool)</span>'
+      : esc(relTime(l.expire));
+    h += '<tr><td>'+esc(l.address||'\u2013')+'</td>'
+      + '<td>'+esc(l.hostname||'\u2013')+'</td>'
+      + '<td>'+esc(l.hwaddr||'\u2013')+'</td>'
+      + '<td>'+state+'</td>'
+      + '<td>'+when+'</td></tr>';
+  }
+  body.innerHTML = h+'</table>';
+  enhanceTable(body.querySelector('table'));
+}
+
+// relTime renders a unix expiry as a short relative time. Past times read as
+// "expired" rather than a negative duration; the reader already drops lapsed
+// leases, so this only shows up for a row that expired between the read and
+// the render.
+function relTime(unix){
+  if (!unix) return '\u2013';
+  let secs = unix - Math.floor(Date.now()/1000);
+  if (secs <= 0) return 'expired';
+  if (secs < 60) return secs+'s';
+  if (secs < 3600) return Math.floor(secs/60)+'m';
+  if (secs < 86400) return Math.floor(secs/3600)+'h '+Math.floor((secs%3600)/60)+'m';
+  return Math.floor(secs/86400)+'d '+Math.floor((secs%86400)/3600)+'h';
 }
 
 // renderBgpEditor builds the editable BGP/BFD form into host from the stored

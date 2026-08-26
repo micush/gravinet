@@ -51,7 +51,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "966"
+	version = "967"
 	commit  = "none"
 )
 
@@ -196,7 +196,7 @@ one group per NAV_GROUPS entry, one section per page, in the rail's order:
   traffic    firewall, nat, qos, shaping, routes, bgp
   naming     dns, hosts
   monitor    metrics, mesh-peers, capture, speedtest, latency, route-table,
-             bgp-peers, l2-peers, hosts-file, dns-state, logs
+             bgp-peers, l2-peers, dhcp-leases, hosts-file, dns-state, logs
   system     upgrade, resolver, time, snmp, lldp, syslog, users,
              config-history, power
   info       readme, getting-started, api, license, about

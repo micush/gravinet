@@ -569,6 +569,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/system/snmp", s.authed(s.handleSystemSNMP))         // SNMPv2c agent (System > SNMP)
 	mux.HandleFunc("/api/system/lldp", s.authed(s.handleSystemLLDP))         // LLDP/CDP agent (System > LLDP)
 	mux.HandleFunc("/api/l2neighbors", s.authed(s.handleL2Neighbors))        // read-only LLDP/CDP neighbor table (Monitor > L2 Peers)
+	mux.HandleFunc("/api/dhcp-leases", s.authed(s.handleDHCPLeases))         // read-only Kea lease table (Monitor > DHCP)
 	mux.HandleFunc("/api/system/syslog", s.authed(s.handleSystemSyslog))     // remote syslog forwarding (System > Syslog)
 	mux.HandleFunc("/api/cluster", s.authed(s.handleCluster))
 	mux.HandleFunc("/api/loglevel", s.authed(s.handleLogLevel))
