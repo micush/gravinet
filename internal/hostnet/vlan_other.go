@@ -17,4 +17,18 @@ func EnsureVLAN(parent, name string, id int) (bool, error) { return false, errNo
 
 func DeleteVLAN(name string) error { return errNoVLAN }
 
-func VLANInfo(name string) (string, int, bool) { return "", 0, false }
+// VLANDevice mirrors the Linux type so callers compile everywhere. See
+// vlan_linux.go for what the fields mean.
+type VLANDevice struct {
+	Parent   string
+	ID       int
+	QinQ     bool
+	Protocol uint16
+}
+
+// VLANDevices reports nothing, because nothing here creates a tagged
+// interface. A nil map reads the same way an empty one does, so a caller
+// looking a device up gets a miss rather than a special case — and every such
+// caller is already behind a VLANSupported check, because "gravinet did not
+// make this" and "gravinet cannot make this" are different things to say.
+func VLANDevices() map[string]VLANDevice { return nil }

@@ -131,11 +131,13 @@ func TestDHCPValidatesTheInactiveHalfToo(t *testing.T) {
 	if err := (DHCPConfig{Mode: DHCPServer, Relay: DHCPRelayConfig{Links: []DHCPRelayLink{{Iface: "eth1", Servers: []string{"nope"}}}}}).Validate(); err == nil {
 		t.Error("a broken relay server saved cleanly because the node was in server mode")
 	}
-	// Two pools on one interface is not a second scope, it is two answers to
-	// the same question.
+	// Two *attached* pools on one interface is not a second scope, it is two
+	// answers to the same question. Narrowed to attached subnets in v969 —
+	// the relayed case is its own test below, and the rule it obeys instead
+	// is uniqueness of the relay address.
 	dup := DHCPConfig{Mode: DHCPServer, Subnets: []DHCPSubnet{goodSubnet(), goodSubnet()}}
-	if err := dup.Validate(); err == nil || !strings.Contains(err.Error(), "more than one subnet") {
-		t.Errorf("two subnets on one interface accepted: %v", err)
+	if err := dup.Validate(); err == nil || !strings.Contains(err.Error(), "more than one directly attached subnet") {
+		t.Errorf("two attached subnets on one interface accepted: %v", err)
 	}
 }
 
@@ -230,5 +232,141 @@ func TestDHCPRelayMigrationLeavesNewConfigsAlone(t *testing.T) {
 	}
 	if len(c.DHCP.Relay.Links) != 1 || c.DHCP.Relay.Links[0].Iface != "eth9" {
 		t.Errorf("the migration overwrote a config that already had links: %v", c.DHCP.Relay.Links)
+	}
+}
+
+// --- relayed subnets (v969) --------------------------------------------
+//
+// Serving a network this node is not attached to. The rules below are the
+// ones that make it possible at all: an interface may carry any number of
+// relayed subnets, because what tells them apart is the giaddr rather than
+// the link.
+
+func relayedSubnet(prefix, giaddr string) DHCPSubnet {
+	return DHCPSubnet{
+		Iface: "eth0", Subnet: prefix + ".0/24", Relays: []string{giaddr},
+		PoolStart: prefix + ".100", PoolEnd: prefix + ".200", Router: prefix + ".1",
+	}
+}
+
+// The headline: one uplink, several branch LANs behind relays. Before v969
+// this was refused on the second row, which capped a node at a single remote
+// network for no reason that applied to it.
+func TestDHCPManyRelayedSubnetsShareOneInterface(t *testing.T) {
+	c := DHCPConfig{Mode: DHCPServer, Subnets: []DHCPSubnet{
+		relayedSubnet("10.9.1", "10.9.1.1"),
+		relayedSubnet("10.9.2", "10.9.2.1"),
+		relayedSubnet("10.9.3", "10.9.3.1"),
+	}}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("three relayed subnets on one interface were refused: %v", err)
+	}
+	if n := len(c.EnabledSubnets()); n != 3 {
+		t.Errorf("EnabledSubnets = %d, want all three in service", n)
+	}
+}
+
+// A node with a LAN of its own and remote ones behind the same interface is
+// an ordinary configuration and needs no extra setting to express.
+func TestDHCPAttachedAndRelayedSubnetsCoexistOnOneInterface(t *testing.T) {
+	local := goodSubnet()
+	local.Iface = "eth0"
+	remote := relayedSubnet("10.9.1", "10.9.1.1")
+	if err := (DHCPConfig{Mode: DHCPServer, Subnets: []DHCPSubnet{local, remote}}).Validate(); err != nil {
+		t.Fatalf("an attached subnet and a relayed one on one interface were refused: %v", err)
+	}
+	// The attached rule still bites for a genuine second attached subnet on
+	// that link, which the relaxation must not have taken with it.
+	second := goodSubnet()
+	second.Iface, second.Subnet = "eth0", "10.4.4.0/24"
+	second.PoolStart, second.PoolEnd, second.Router = "10.4.4.100", "10.4.4.200", "10.4.4.1"
+	second.DNS = nil
+	if err := (DHCPConfig{Mode: DHCPServer, Subnets: []DHCPSubnet{local, second}}).Validate(); err == nil {
+		t.Error("relaxing the rule for relayed subnets also relaxed it for attached ones")
+	}
+}
+
+// The replacement rule. Kea selects a relayed scope by matching giaddr, so an
+// address on two subnets is two answers to one question — and a quiet one,
+// since both scopes are valid and one LAN simply gets the other's addresses.
+func TestDHCPRelayAddressIsUniqueAcrossSubnets(t *testing.T) {
+	a := relayedSubnet("10.9.1", "192.168.50.1")
+	b := relayedSubnet("10.9.2", "192.168.50.1")
+	err := (DHCPConfig{Mode: DHCPServer, Subnets: []DHCPSubnet{a, b}}).Validate()
+	if err == nil || !strings.Contains(err.Error(), "listed on both") {
+		t.Fatalf("one relay address on two subnets accepted: %v", err)
+	}
+	// Both prefixes named, so the operator does not have to go and find
+	// which other row they collided with.
+	for _, want := range []string{"10.9.1.0/24", "10.9.2.0/24", "192.168.50.1"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not name %s: %v", want, err)
+		}
+	}
+}
+
+// Two relays on one segment — a VRRP pair being the ordinary case — forward
+// under their own addresses, and both have to land in the same scope or a
+// client's answer depends on which router was master when it asked.
+func TestDHCPSubnetTakesSeveralRelayAddresses(t *testing.T) {
+	s := relayedSubnet("10.9.1", "10.9.1.2")
+	s.Relays = []string{"10.9.1.2", "10.9.1.3"}
+	if err := s.Validate(); err != nil {
+		t.Fatalf("a subnet behind a redundant relay pair was refused: %v", err)
+	}
+	if got := len(s.RelayAddrs()); got != 2 {
+		t.Errorf("RelayAddrs = %d, want 2", got)
+	}
+}
+
+func TestDHCPRelayAddressValidation(t *testing.T) {
+	for name, addr := range map[string]string{
+		"broadcast":   "255.255.255.255",
+		"unspecified": "0.0.0.0",
+		"multicast":   "224.0.0.1",
+		"not an ip":   "the-router",
+		"v6":          "2001:db8::1",
+	} {
+		s := relayedSubnet("10.9.1", addr)
+		if err := s.Validate(); err == nil {
+			t.Errorf("%s accepted as a relay address: a scope selected by it can never be reached", name)
+		}
+	}
+}
+
+// A relay agent usually forwards under its own address on the client link,
+// but it is only usually: sourcing from a loopback or management address is
+// permitted by RFC 1542 and happens in the field. Refusing it would refuse a
+// working network, so the giaddr is deliberately not checked against Subnet.
+func TestDHCPRelayAddressNeedNotBeInsideTheSubnetItSelects(t *testing.T) {
+	s := relayedSubnet("10.9.1", "172.16.0.9")
+	if err := s.Validate(); err != nil {
+		t.Fatalf("a relay sourcing from off-segment was refused: %v", err)
+	}
+}
+
+// Relayed() is what the renderer, the preflight and both duplicate rules
+// branch on, so whitespace deciding it differently in one of them would be a
+// scope rendered one way and judged another.
+func TestDHCPRelayedIgnoresBlankEntries(t *testing.T) {
+	s := goodSubnet()
+	s.Relays = []string{"", "   "}
+	if s.Relayed() {
+		t.Error("a row with nothing but blanks in the relay column counts as relayed")
+	}
+	s.Relays = []string{" 10.9.1.1 "}
+	if !s.Relayed() || s.RelayAddrs()[0] != "10.9.1.1" {
+		t.Errorf("a padded relay address did not survive trimming: %v", s.RelayAddrs())
+	}
+}
+
+// The interface is still required on a relayed subnet, and for a reason that
+// is easy to talk oneself out of: the subnet is not on it, but Kea only
+// listens where it is told, so it is what gets the forwarded unicast received.
+func TestDHCPRelayedSubnetStillNeedsAnInterface(t *testing.T) {
+	s := relayedSubnet("10.9.1", "10.9.1.1")
+	s.Iface = ""
+	if err := s.Validate(); err == nil {
+		t.Error("a relayed subnet saved with no interface, so nothing would listen for it")
 	}
 }

@@ -3545,10 +3545,22 @@ type HostVLAN struct {
 	// because a trunk that tags VLAN 1 is a real configuration, but it is
 	// the one an operator most often means to have typed differently.
 	ID int `json:"id"`
-	// Name is the device name. Empty means the conventional parent.id form,
-	// which is what an operator reading `ip link` expects to find, and what
-	// VLANName returns. Set explicitly when a site names its links something
-	// else, or when parent.id would exceed the kernel's 15-character limit.
+	// Name is the device name, and is not set by the interfaces page: a
+	// tagged interface is named for the parent it rides on and the tag it
+	// carries, parent.id, which is what VLANName returns for an empty field
+	// and what an operator reading `ip link` expects to find. There is
+	// nothing for a name box to decide that the two fields above have not
+	// already decided.
+	//
+	// The field stays, and stays honoured, for two cases that have no other
+	// answer. A configuration written before names were derived carries one,
+	// and its device is referenced by name from the addressing records, the
+	// DHCP subnets and the firewall — re-deriving it would rename a live
+	// interface out from under all of them. And parent.id does not always
+	// fit: IFNAMSIZ leaves 15 characters, which a predictable name like
+	// enp0s20f0u3u1 exhausts before the tag is appended. Such a host can set
+	// this by hand and is the reason Validate's length message points at the
+	// configuration file rather than at a field on the page.
 	Name string `json:"name,omitempty"`
 	// Disabled parks the definition without deleting it. A disabled VLAN is
 	// not created, and is torn down if it currently exists, which is the
@@ -3580,8 +3592,16 @@ func (v HostVLAN) Validate() error {
 	// IFNAMSIZ is 16 including the terminator, so 15 usable. A longer name is
 	// refused by the kernel at creation time; refusing it on save means the
 	// operator finds out while the field is still in front of them.
+	//
+	// The name is derived, so there is no box on the page to shorten — the
+	// parent's own name is what does not fit. The message says where the
+	// override lives rather than leaving a host with a long predictable
+	// interface name unable to carry a tag at all.
 	if len(name) > 15 {
-		return fmt.Errorf("vlan name %q is %d characters: the kernel allows 15, so set a shorter name explicitly", name, len(name))
+		if strings.TrimSpace(v.Name) == "" {
+			return fmt.Errorf("%s.%d is %d characters and the kernel allows 15: %s is too long a parent for a derived name, so set \"name\" for this vlan in the configuration file", parent, v.ID, len(name), parent)
+		}
+		return fmt.Errorf("vlan name %q is %d characters: the kernel allows 15", name, len(name))
 	}
 	// The characters a device name may not contain. A name with a slash or a
 	// space in it is refused by the kernel, and one with a colon collides
@@ -3896,11 +3916,39 @@ type DHCPConfig struct {
 
 // DHCPSubnet is one served pool.
 type DHCPSubnet struct {
-	// Iface is the interface this subnet is reachable on. Kea works out
-	// which subnet a request belongs to from the interface address, but
-	// naming it here is what lets gravinet check the pairing before Kea has
-	// to, and what the interface picker writes.
+	// Iface is the interface this subnet is served over, and it means
+	// something slightly different depending on Relays.
+	//
+	// Directly attached (Relays empty): the link the clients are on. Kea
+	// works out which subnet a request belongs to from the receiving
+	// interface's address, but naming it here is what lets gravinet check
+	// the pairing before Kea has to, and what the interface picker writes.
+	//
+	// Relayed (Relays set): the link the *relay agent* reaches this host
+	// over, which is not the client's link and is usually not addressed
+	// inside Subnet at all. Kea only listens on interfaces it is named, so
+	// this is still required — it is what puts the interface into
+	// interfaces-config so the forwarded unicast is received at all.
 	Iface string `json:"iface"`
+	// Relays are the relay agent addresses (giaddr) that reach this subnet,
+	// and their presence is what makes a subnet remote rather than local.
+	//
+	// A DHCP server is not limited to the links it sits on: a relay agent on
+	// a distant segment forwards its clients' broadcasts here as unicast,
+	// stamping its own address on each one, and the server answers on behalf
+	// of a LAN it has no interface on. Kea selects the scope for such a
+	// request by matching that stamp against these addresses, so a remote
+	// subnet is identified by who forwarded it rather than by where it
+	// arrived — which is exactly why the interface rules below relax for
+	// one, and why nothing here is checked against the interface's address.
+	//
+	// Usually one address per subnet: the relay's own address on the client
+	// link, since that is what an RFC 1542 agent puts in giaddr. More than
+	// one is for a segment with two relays on it, a pair of routers running
+	// VRRP being the ordinary case — each forwards under its own address,
+	// and both have to land in the same scope or a client gets a different
+	// answer depending on which router was master when it asked.
+	Relays []string `json:"relays,omitempty"`
 	// Subnet is the CIDR being served, e.g. 10.1.1.0/24.
 	Subnet string `json:"subnet"`
 	// PoolStart and PoolEnd bound the range of addresses handed out. Both
@@ -3963,6 +4011,19 @@ type DHCPRelayLink struct {
 	// other table here uses.
 	Disabled bool `json:"disabled,omitempty"`
 }
+
+// Relayed reports whether this subnet is reached through a relay agent rather
+// than being on one of this host's own links.
+//
+// One predicate rather than each caller testing the slice, because it is the
+// question the renderer, the preflight and the duplicate rules all branch on,
+// and they have to branch the same way. A subnet that renders as relayed but
+// is preflighted as attached gets a red row under a scope that works.
+func (s DHCPSubnet) Relayed() bool { return len(trimStrings(s.Relays)) > 0 }
+
+// RelayAddrs is the relay agent addresses with the blanks and whitespace taken
+// out — what to render and compare, as against what was typed.
+func (s DHCPSubnet) RelayAddrs() []string { return trimStrings(s.Relays) }
 
 // EnabledSubnets returns the served subnets actually in service. Empty unless
 // the mode is server, so every caller gets the mutual exclusion for free
@@ -4029,17 +4090,50 @@ func (c DHCPConfig) Validate() error {
 		return err
 	}
 	seen := map[string]bool{}
+	giaddr := map[string]string{}
 	for _, s := range c.Subnets {
 		if err := s.Validate(); err != nil {
 			return err
 		}
-		// Two pools on one interface is not a second scope, it is two
-		// answers to the same question. Kea would take one.
-		k := strings.ToLower(strings.TrimSpace(s.Iface))
-		if seen[k] {
-			return fmt.Errorf("interface %s has more than one subnet configured", s.Iface)
+		// Two attached pools on one interface is not a second scope, it is
+		// two answers to the same question. Kea matches an attached request
+		// to a scope by the receiving interface's address, so both rows
+		// claim every request that arrives there and it would take one.
+		//
+		// Relayed subnets are deliberately outside this rule, and that is
+		// the whole of what makes serving a non-attached network possible.
+		// Every relayed subnet on a node arrives over whichever link the
+		// relays reach it on — commonly one uplink for all of them — so
+		// one-per-interface would cap a node at a single remote LAN. What
+		// disambiguates them is not the interface, it is the giaddr, which
+		// is what the second rule below keeps unique.
+		if !s.Relayed() {
+			k := strings.ToLower(strings.TrimSpace(s.Iface))
+			if seen[k] {
+				return fmt.Errorf("interface %s has more than one directly attached subnet configured", s.Iface)
+			}
+			seen[k] = true
 		}
-		seen[k] = true
+		// The relayed equivalent of that rule, one field over. Kea picks the
+		// scope for a forwarded request by matching giaddr, so an address
+		// listed on two subnets is two answers to one question again — and a
+		// worse one to diagnose, because both scopes are valid and the
+		// clients of one remote LAN quietly get the other's addresses.
+		//
+		// Kea does not refuse this: 2.4.1 loads such a file without comment
+		// and picks one of the two. That is the argument for catching it
+		// here rather than leaving it to the parser the way the duplicate
+		// interface in interfaces-config is left to it — nothing downstream
+		// will ever mention it, and the symptom is addresses from the wrong
+		// branch appearing on a LAN whose own configuration looks right.
+		for _, a := range s.RelayAddrs() {
+			k := strings.ToLower(a)
+			if prev, dup := giaddr[k]; dup {
+				return fmt.Errorf("relay address %s is listed on both %s and %s: a request forwarded from it could be answered from either subnet",
+					a, prev, strings.TrimSpace(s.Subnet))
+			}
+			giaddr[k] = strings.TrimSpace(s.Subnet)
+		}
 	}
 	return c.Relay.Validate()
 }
@@ -4097,6 +4191,27 @@ func (s DHCPSubnet) Validate() error {
 	for _, d := range s.DNS {
 		if a, err := netip.ParseAddr(strings.TrimSpace(d)); err != nil || !a.Is4() {
 			return fmt.Errorf("dns %q: must be an IPv4 address", d)
+		}
+	}
+	// A relay agent address is a single host — the address the forwarding
+	// router puts in giaddr — so it is checked the way the relay half checks
+	// where it forwards to, and for the same reason. Kea compares giaddr for
+	// equality; a broadcast or multicast address here matches nothing that
+	// can ever arrive, which is a scope that is never selected rather than a
+	// scope that is wrong, and silence is the hardest fault to find.
+	//
+	// Not checked against Subnet, deliberately. A relay's giaddr is usually
+	// its own address on the client link and so usually inside the subnet,
+	// but it is only *usually*: an agent may be configured to source from a
+	// loopback or a management address, and RFC 1542 does not require
+	// otherwise. Refusing that would refuse a working network.
+	for _, r := range s.RelayAddrs() {
+		a, err := netip.ParseAddr(r)
+		if err != nil || !a.Is4() {
+			return fmt.Errorf("relay address %q: must be an IPv4 address", r)
+		}
+		if a.IsMulticast() || a.IsUnspecified() || a == netip.AddrFrom4([4]byte{255, 255, 255, 255}) {
+			return fmt.Errorf("relay address %q: must be the unicast address a relay agent forwards under", r)
 		}
 	}
 	if s.LeaseSeconds < 0 || s.LeaseSeconds > 315360000 {

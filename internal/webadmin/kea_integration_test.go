@@ -1,6 +1,7 @@
 package webadmin
 
 import (
+	"encoding/json"
 	"net"
 	"os"
 	"os/exec"
@@ -178,5 +179,118 @@ func TestServableSubnetsKeepsDownInterfaces(t *testing.T) {
 	}
 	if len(served.EnabledSubnets()) != 1 {
 		t.Error("the subnet on a down interface was removed")
+	}
+}
+
+// --- relayed subnets (v969), against the real parser ---------------------
+
+// The core of the feature, checked where it counts. A scope with a relay
+// clause and no interface is the shape gravinet renders for a network this
+// node is not attached to, and the only thing that makes it worth rendering
+// is that Kea takes it.
+func TestRealKeaAcceptsRelayedSubnet(t *testing.T) {
+	keaBin(t)
+	iface := realIface(t)
+	b, err := renderKea(config.DHCPConfig{Mode: config.DHCPServer, Subnets: []config.DHCPSubnet{{
+		Iface: iface, Subnet: "10.9.1.0/24", Relays: []string{"10.9.1.1"},
+		PoolStart: "10.9.1.100", PoolEnd: "10.9.1.200", Router: "10.9.1.1",
+	}}})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	// The subnet is nowhere near whatever this host's interface is really
+	// addressed in, which is the whole point of a relayed scope.
+	if why, ok := keaTestConf(writeTemp(t, b)); !ok {
+		t.Errorf("Kea rejected a relayed scope: %s\n%s", why, b)
+	}
+}
+
+// The shape the feature exists for: several branch LANs, all reached over
+// one uplink, which one-subnet-per-interface used to make unrepresentable.
+func TestRealKeaAcceptsManyRelayedSubnetsOnOneInterface(t *testing.T) {
+	keaBin(t)
+	iface := realIface(t)
+	var subs []config.DHCPSubnet
+	for _, n := range []string{"1", "2", "3"} {
+		subs = append(subs, config.DHCPSubnet{
+			Iface: iface, Subnet: "10.9." + n + ".0/24", Relays: []string{"10.9." + n + ".1"},
+			PoolStart: "10.9." + n + ".100", PoolEnd: "10.9." + n + ".200",
+		})
+	}
+	b, err := renderKea(config.DHCPConfig{Mode: config.DHCPServer, Subnets: subs})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if why, ok := keaTestConf(writeTemp(t, b)); !ok {
+		t.Errorf("Kea rejected three relayed scopes sharing an interface: %s\n%s", why, b)
+	}
+}
+
+// Why interfaces-config is deduplicated, pinned against the parser. Kea
+// refuses the whole file for a repeated interface — not the repeat, the file
+// — so without the dedup a node's second remote LAN behind an uplink it
+// already served one behind would have stopped DHCP for every scope on it.
+func TestRealKeaRefusesARepeatedListenInterface(t *testing.T) {
+	keaBin(t)
+	iface := realIface(t)
+	b, err := renderKea(config.DHCPConfig{Mode: config.DHCPServer, Subnets: []config.DHCPSubnet{
+		{Iface: iface, Subnet: "10.9.1.0/24", Relays: []string{"10.9.1.1"}, PoolStart: "10.9.1.100", PoolEnd: "10.9.1.200"},
+		{Iface: iface, Subnet: "10.9.2.0/24", Relays: []string{"10.9.2.1"}, PoolStart: "10.9.2.100", PoolEnd: "10.9.2.200"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// What gravinet renders is accepted...
+	if why, ok := keaTestConf(writeTemp(t, b)); !ok {
+		t.Fatalf("the deduplicated config was rejected: %s\n%s", why, b)
+	}
+	// ...and the undeduplicated version it would have rendered before v969
+	// is the failure being defended against. Rebuilt through the parser
+	// rather than by patching the text, so indentation cannot make this
+	// silently stop testing anything.
+	var doc map[string]any
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatal(err)
+	}
+	ic := doc["Dhcp4"].(map[string]any)["interfaces-config"].(map[string]any)
+	names := ic["interfaces"].([]any)
+	if len(names) != 1 {
+		t.Fatalf("interfaces = %v, want the shared uplink exactly once", names)
+	}
+	ic["interfaces"] = append(names, names[0])
+	dup, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	why, ok := keaTestConf(writeTemp(t, dup))
+	if ok {
+		t.Skip("this Kea tolerates a repeated listen interface; 2.4.1 does not")
+	}
+	if !strings.Contains(why, "already been specified") {
+		t.Errorf("rejected for an unexpected reason, so this test is not pinning what it claims: %s", why)
+	}
+}
+
+// Kea accepts two subnets claiming one relay address and silently serves one
+// of them, which is why gravinet refuses the pair on save rather than leaving
+// it to the parser the way it leaves the duplicate interface. If a future Kea
+// starts refusing it, this test says so and the config rule can be revisited.
+func TestRealKeaDoesNotCatchAGiaddrCollision(t *testing.T) {
+	keaBin(t)
+	iface := realIface(t)
+	c := config.DHCPConfig{Mode: config.DHCPServer, Subnets: []config.DHCPSubnet{
+		{Iface: iface, Subnet: "10.9.1.0/24", Relays: []string{"10.9.1.1"}, PoolStart: "10.9.1.100", PoolEnd: "10.9.1.200"},
+		{Iface: iface, Subnet: "10.9.2.0/24", Relays: []string{"10.9.1.1"}, PoolStart: "10.9.2.100", PoolEnd: "10.9.2.200"},
+	}}
+	// gravinet's own rule catches it first, which is the point.
+	if err := c.Validate(); err == nil {
+		t.Fatal("gravinet accepted two subnets claiming one relay address")
+	}
+	b, err := renderKea(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := keaTestConf(writeTemp(t, b)); !ok {
+		t.Log("this Kea now refuses a giaddr collision too; gravinet's rule is no longer the only guard")
 	}
 }

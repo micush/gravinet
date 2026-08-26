@@ -97,6 +97,14 @@ func dhcpProblems(c config.DHCPConfig) map[string]string {
 	case config.DHCPServer:
 		for _, s := range c.EnabledSubnets() {
 			iface := strings.TrimSpace(s.Iface)
+			// First reason wins. Several subnets legitimately share one
+			// interface now that relayed scopes exist, and a map keyed by
+			// interface can hold one reason for it — last-write-wins would
+			// make which of two faults an operator sees depend on the order
+			// the rows happen to be stored in.
+			if _, have := out[iface]; have {
+				continue
+			}
 			if p := dhcpServerProblem(s, iface); p != "" {
 				out[iface] = p
 			}
@@ -118,6 +126,23 @@ func dhcpServerProblem(s config.DHCPSubnet, iface string) string {
 		return fmt.Sprintf("%s: %v, so nothing is served on it", iface, err)
 	}
 	if addrs == nil {
+		return ""
+	}
+	// A relayed subnet is checked against a different condition, because the
+	// condition below is one it is *supposed* to fail. Kea does not match a
+	// forwarded request by the receiving interface's address, so a remote
+	// LAN's scope has no business being addressed on the link its relay
+	// reaches us over — running the attached check here would put a red row
+	// under every correctly configured remote subnet on the node.
+	//
+	// What still has to hold is that the interface can receive the forwarded
+	// unicast at all, which needs an IPv4 address on it — any address, not
+	// one inside the subnet being served.
+	if s.Relayed() {
+		if len(addrs) == 0 {
+			return fmt.Sprintf("%s has no IPv4 address, so relayed requests for %s have nowhere to arrive — a relay forwards to an address on this host, not to a broadcast",
+				iface, strings.TrimSpace(s.Subnet))
+		}
 		return ""
 	}
 	want, perr := netip.ParsePrefix(strings.TrimSpace(s.Subnet))

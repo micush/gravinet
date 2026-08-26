@@ -5,8 +5,6 @@ package hostnet
 import (
 	"fmt"
 	"net"
-	"os"
-	"strings"
 
 	"gravinet/internal/tun"
 )
@@ -31,7 +29,7 @@ const VLANSupported = true
 func EnsureVLAN(parent, name string, id int) (created bool, err error) {
 	if existing, err := net.InterfaceByName(name); err == nil {
 		// Already there. Whether it is the right device is checked by the
-		// caller against the host's own view (see VLANInfo): a name that
+		// caller against the host's own view (see VLANDevices): a name that
 		// belongs to something else is a collision to report, not something
 		// to delete and recreate underneath whoever is using it.
 		_ = existing
@@ -67,50 +65,46 @@ func DeleteVLAN(name string) error {
 	return nil
 }
 
-// VLANInfo reports what the host thinks a device is: its parent and tag if it
-// is a VLAN, and ok=false if it is not one or does not exist.
+// VLANDevice is what the host says one tagged interface is: the device it
+// rides on, the tag it carries, and whether that tag is the ordinary 802.1Q
+// kind gravinet creates.
 //
-// Read from sysfs rather than from netlink. Getting this back over rtnetlink
-// means a link dump and unpicking the same nested IFLA_LINKINFO that
-// AddVLAN builds, and the only consumer is a page that wants to say "this row
-// is vlan 100 on eth0". /sys/class/net/<dev>/ is a stable interface, and
-// being unable to read it costs a label rather than a failed operation.
-func VLANInfo(name string) (parent string, id int, ok bool) {
-	// A VLAN device's lower link is exposed as a lower_<parent> symlink, and
-	// its tag through the 8021q directory.
-	var tag int
-	if _, err := fmt.Sscanf(readSysNet(name, "8021q/vlan_id"), "%d", &tag); err != nil || tag <= 0 {
-		return "", 0, false
-	}
-	entries, err := net.Interfaces()
-	if err != nil {
-		return "", tag, true
-	}
-	// iflink is the parent's ifindex; mapping it back to a name avoids
-	// globbing for the lower_* symlink.
-	var idx int
-	if _, err := fmt.Sscanf(readSysNet(name, "iflink"), "%d", &idx); err != nil {
-		return "", tag, true
-	}
-	for _, e := range entries {
-		if e.Index == idx {
-			return e.Name, tag, true
-		}
-	}
-	return "", tag, true
+// Parent is empty when the lower link is in another network namespace and its
+// ifindex resolves to nothing here. That is "not knowable", not "wrong", and a
+// caller comparing it against a definition must not read it as a mismatch.
+type VLANDevice struct {
+	Parent   string
+	ID       int
+	QinQ     bool
+	Protocol uint16
 }
 
-func readSysNet(iface, rel string) string {
-	// The name comes from the kernel's own device list rather than from
-	// operator input, but it is checked anyway: one path separator is all it
-	// would take to read somewhere else entirely, and the check costs nothing
-	// next to the syscall it guards.
-	if iface == "" || strings.ContainsAny(iface, "/\x00") {
-		return ""
-	}
-	b, err := os.ReadFile("/sys/class/net/" + iface + "/" + rel)
+// VLANDevices reports every tagged interface on this host, keyed by device
+// name. A name that is absent either does not exist or is not a VLAN — the
+// caller distinguishes those with an interface lookup, because the difference
+// only matters when a definition claims the name.
+//
+// Asked once for the whole set rather than per device: the callers are a page
+// listing definitions against the host and the parent picker beside it, both
+// of which want every device, and one dump means every row is answered from a
+// single snapshot rather than from a host that may change between questions.
+//
+// A dump that fails yields no devices. Being unable to ask costs a label,
+// which is what it cost before; what it must not do is fail the operation the
+// caller was in the middle of.
+func VLANDevices() map[string]VLANDevice {
+	links, err := tun.VLANLinks()
 	if err != nil {
-		return ""
+		return nil
 	}
-	return strings.TrimSpace(string(b))
+	out := make(map[string]VLANDevice, len(links))
+	for name, l := range links {
+		out[name] = VLANDevice{
+			Parent:   l.Parent,
+			ID:       l.ID,
+			QinQ:     l.Protocol == tun.EthPrt8021AD,
+			Protocol: l.Protocol,
+		}
+	}
+	return out
 }

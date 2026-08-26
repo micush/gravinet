@@ -83,6 +83,11 @@ point of a mesh.
   mesh.
 - **Names, not just numbers.** Hostnames sync into each machine's hosts file
   automatically.
+- **DHCP, serving or relaying** — hand out leases on your LANs through Kea, or
+  forward requests to a server elsewhere. A serving node is not limited to the
+  links it sits on: point a remote segment's relay agent (an `ip helper-address`
+  on most gear) at it and that segment gets its addresses from here too, any
+  number of them over one interface.
 - **BGP and BFD** for anyone running dynamic routing (through FRR), including a
   live view of BGP peer sessions, selective redistribution in and out of the
   mesh, and per-neighbor inbound/outbound route filtering.

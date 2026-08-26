@@ -237,6 +237,7 @@ func (s *Server) handleDHCP(w http.ResponseWriter, r *http.Request) {
 		PoolStart    string   `json:"pool_start"`
 		PoolEnd      string   `json:"pool_end"`
 		Router       string   `json:"router"`
+		Relays       []string `json:"relays"`
 		DNS          []string `json:"dns"`
 		Search       []string `json:"search"`
 		LeaseSeconds int      `json:"lease_seconds"`
@@ -310,8 +311,9 @@ func (s *Server) handleDHCP(w http.ResponseWriter, r *http.Request) {
 			e := config.DHCPSubnet{
 				Iface: strings.TrimSpace(req.Iface), Subnet: strings.TrimSpace(req.Subnet),
 				PoolStart: strings.TrimSpace(req.PoolStart), PoolEnd: strings.TrimSpace(req.PoolEnd),
-				Router: strings.TrimSpace(req.Router),
-				DNS:    trimAll(req.DNS), Search: trimAll(req.Search),
+				Router: strings.TrimSpace(req.Router), Relays: trimAll(req.Relays),
+				DNS:          trimAll(req.DNS),
+				Search:       trimAll(req.Search),
 				LeaseSeconds: req.LeaseSeconds,
 			}
 			if err := e.Validate(); err != nil {
@@ -323,9 +325,23 @@ func (s *Server) handleDHCP(w http.ResponseWriter, r *http.Request) {
 				return err
 			}
 			if req.Op == "add" {
+				// Attached subnets only. Two of those on one link are two
+				// answers to the same question — but a relayed subnet is
+				// selected by giaddr, so any number of them share the link
+				// their relays arrive over, and that sharing is the feature.
+				// See DHCPConfig.Validate, which holds the same line for a
+				// config arriving by any other route than this handler.
+				//
+				// The wording matters as much as the rule. Until v969 this
+				// said only that the interface was taken, which is what an
+				// operator hit while trying to add the second of several
+				// remote LANs behind one uplink — a true sentence about a
+				// restriction that no longer applies to what they were doing,
+				// and no hint that the relay column was the answer.
 				for _, x := range d.Subnets {
-					if strings.EqualFold(x.Iface, e.Iface) {
-						return fmt.Errorf("interface %s already has a subnet configured", e.Iface)
+					if !e.Relayed() && !x.Relayed() && strings.EqualFold(x.Iface, e.Iface) {
+						return fmt.Errorf("interface %s already has a directly attached subnet (%s) — a second subnet on one interface is only served if it is behind a relay, in which case fill in the relay address it forwards under",
+							e.Iface, strings.TrimSpace(x.Subnet))
 					}
 				}
 				d.Subnets = append(d.Subnets, e)

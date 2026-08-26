@@ -84,12 +84,37 @@ type keaLeaseDB struct {
 }
 
 type keaSubnet struct {
-	ID         int         `json:"id"`
-	Subnet     string      `json:"subnet"`
-	Interface  string      `json:"interface"`
+	ID     int    `json:"id"`
+	Subnet string `json:"subnet"`
+	// Interface is omitted on a relayed scope. Not because Kea refuses the
+	// pair — 2.4.1 accepts a scope carrying both keys, and still selects it
+	// by giaddr for a forwarded request, which was checked against the
+	// parser and against a running server rather than assumed. It is omitted
+	// because "interface" is an assertion about topology that would be
+	// false: it tells Kea the subnet is *on* that link, and a relayed subnet
+	// is by definition not on the link its relay reaches us over.
+	//
+	// What that buys is a scope with exactly one way in. A subnet naming an
+	// interface is a candidate for the clients Kea considers directly
+	// connected there, quite apart from the relay path — so a scope for a
+	// branch office, tagged with the uplink, is a scope the uplink's own
+	// broadcasts can reach. Whether a given Kea would actually hand a local
+	// client a branch address that way was not established here and depends
+	// on selection order; the point is that omitting the key means the
+	// question never arises, and the cost of omitting it is nothing.
+	Interface  string      `json:"interface,omitempty"`
+	Relay      *keaRelay   `json:"relay,omitempty"`
 	Pools      []keaPool   `json:"pools"`
 	OptionData []keaOption `json:"option-data,omitempty"`
 	ValidLife  int         `json:"valid-lifetime,omitempty"`
+}
+
+// keaRelay is Kea's per-subnet relay clause: the giaddr values that select
+// this scope. A pointer on keaSubnet so an attached scope emits no relay key
+// at all — an empty ip-addresses list is not the same thing to Kea, and would
+// be a scope reachable by no relay and no interface either.
+type keaRelay struct {
+	IPAddresses []string `json:"ip-addresses"`
 }
 
 type keaPool struct {
@@ -148,6 +173,7 @@ func renderKea(c config.DHCPConfig) ([]byte, error) {
 	// which is what keeps leases attached to the scope they were issued from
 	// across an apply. They are 1-based because Kea reserves 0.
 	id := 0
+	listening := map[string]bool{}
 	for _, s := range c.EnabledSubnets() {
 		if err := s.Validate(); err != nil {
 			// Already checked on save, so reaching here means a config edited
@@ -160,9 +186,16 @@ func renderKea(c config.DHCPConfig) ([]byte, error) {
 		sub := keaSubnet{
 			ID:        id,
 			Subnet:    net.String(),
-			Interface: strings.TrimSpace(s.Iface),
 			Pools:     []keaPool{{Pool: strings.TrimSpace(s.PoolStart) + " - " + strings.TrimSpace(s.PoolEnd)}},
 			ValidLife: s.LeaseSeconds,
+		}
+		// Exactly one of the two ways a scope can be selected, never both:
+		// see keaSubnet.Interface for what naming a link Kea can see is not
+		// addressed inside does to the file.
+		if s.Relayed() {
+			sub.Relay = &keaRelay{IPAddresses: s.RelayAddrs()}
+		} else {
+			sub.Interface = strings.TrimSpace(s.Iface)
 		}
 		if r := strings.TrimSpace(s.Router); r != "" {
 			sub.OptionData = append(sub.OptionData, keaOption{Name: "routers", Data: r})
@@ -176,7 +209,24 @@ func renderKea(c config.DHCPConfig) ([]byte, error) {
 			sub.OptionData = append(sub.OptionData, keaOption{Name: "domain-search", Data: strings.Join(search, ", ")})
 		}
 		conf.Dhcp4.Subnet4 = append(conf.Dhcp4.Subnet4, sub)
-		conf.Dhcp4.InterfacesConfig.Interfaces = append(conf.Dhcp4.InterfacesConfig.Interfaces, sub.Interface)
+		// Taken from the row rather than from sub.Interface, which is empty
+		// on a relayed scope — a relayed subnet still has to be listened for
+		// somewhere, and where is the link the relay reaches this host over.
+		//
+		// Deduplicated because relayed scopes share that link by design, and
+		// a repeat is not tolerated: Kea refuses the entire configuration
+		// for it, not the extra entry —
+		//
+		//	Failed to select interface: interface 'eth0' has already been
+		//	specified
+		//
+		// so a node serving a second remote LAN behind an uplink it already
+		// serves one behind would have stopped DHCP for every scope in the
+		// file. Verified against the parser, not inferred.
+		if name := strings.TrimSpace(s.Iface); name != "" && !listening[name] {
+			listening[name] = true
+			conf.Dhcp4.InterfacesConfig.Interfaces = append(conf.Dhcp4.InterfacesConfig.Interfaces, name)
+		}
 	}
 	b, err := json.MarshalIndent(conf, "", "  ")
 	if err != nil {

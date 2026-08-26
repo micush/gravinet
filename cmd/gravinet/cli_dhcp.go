@@ -41,8 +41,14 @@ func cmdSystemDHCP(args []string) {
 			fmt.Println("    (none)")
 		}
 		for _, s := range d.Subnets {
-			fmt.Printf("    %-10s %-8s %-18s pool=%s-%s router=%s dns=%s lease=%s\n",
-				s.Iface, onOff(!s.Disabled), s.Subnet, s.PoolStart, s.PoolEnd,
+			// The relay column is printed for every row rather than only the
+			// relayed ones. A dash saying "this subnet is on that interface"
+			// is the answer to a question an operator reading a mixed list
+			// has to ask about each line, and a column that appears only
+			// sometimes is one they have to notice is missing.
+			fmt.Printf("    %-10s %-8s %-18s via=%s pool=%s-%s router=%s dns=%s lease=%s\n",
+				s.Iface, onOff(!s.Disabled), s.Subnet, orDash(joinComma(s.RelayAddrs())),
+				s.PoolStart, s.PoolEnd,
 				orDash(s.Router), orDash(joinComma(s.DNS)), orDash(leaseLabel(s.LeaseSeconds)))
 		}
 		fmt.Println("  relay links:")

@@ -10,10 +10,12 @@ const indexHTML = `<!doctype html>
   :root {
     --bg:#0f1419; --panel:#1a2129; --line:#2a3441; --fg:#e6edf3; --mut:#8b98a5;
     --acc:#4493f8; --danger:#f85149; --ok:#3fb950; --sidebar:#141b22; --hover:#202a35;
+    --warn:#d29922;
   }
   :root[data-theme="light"] {
     --bg:#f6f8fa; --panel:#ffffff; --line:#d8dee4; --fg:#1f2328; --mut:#656d76;
     --acc:#0969da; --danger:#cf222e; --ok:#1a7f37; --sidebar:#eceff2; --hover:#e2e7ee;
+    --warn:#bf8700;
   }
   * { box-sizing:border-box; }
   html, body { height:100%; }
@@ -162,10 +164,63 @@ const indexHTML = `<!doctype html>
   .sw input:disabled + .sw-slider { cursor:not-allowed; }
   .content { flex:1; padding:22px; overflow:auto; min-height:0; border:2px solid transparent; }
   .content > h2.sec { margin:0 0 16px; font-size:15px; letter-spacing:.5px; }
+  /* Toolbar and row buttons say what they will do by colour, and every card's
+     bar is read the same way:
+
+       blue   (default)  an ordinary action                Generate, Import, Start,
+                                                           Refresh, Download, tshoot
+       green  .ok        turns something on                Enable, Unban
+       amber  .warn      turns something off, takes a      Disable, Reveal, Copy,
+                         secret out of hiding, or drops    Clear (capture buffer)
+                         something that can be got again
+       red    .danger    throws something away for good    Delete, Clear (log file), Stop
+
+     Only amber is new. The config-history toolbar had already answered the
+     question these three cards were still asking — its buttons were ghosts
+     once too, and they were filled in with the plain accent, keeping .danger
+     for the one that changes what is running (TestConfigHistoryToolbar still
+     pins that). Following that rather than inventing a second scheme is why
+     Refresh, Download and tshoot are simply blue: a Download that was one
+     colour in Logs and another in Config History would be worse than either.
+
+     What the accent could not express is the row above it. Disable, Reveal
+     and Copy are not ordinary actions and were not destructive enough to be
+     red, which is most of why they stayed ghosts — there was no colour for
+     them. Amber is that colour.
+
+     .ghost — transparent, bordered — is not a fifth meaning. It is for the
+     buttons that decline: cancel, close, dismiss. Those are quiet on purpose
+     and stay quiet, which is why filling in the toolbars did not touch them.
+
+     Two Clear buttons land in different colours, and that is the point rather
+     than an oversight: the packet buffer can be captured again, the log file
+     cannot be got back, and only the second asks for confirmation.
+
+     The +/- pair (.tbar-btn) is the one thing here that does not follow the
+     table above: - removes ticked rows, which is red's meaning, and it is
+     still the accent. Left alone knowingly. The pair reads as one control
+     rather than two, it sits on nearly every table in the app, and turning
+     half of it red everywhere is a bigger change than colouring in three
+     toolbars — worth doing deliberately, not as a side effect of this. */
   button { background:var(--acc); color:#fff; border:0; border-radius:6px; padding:7px 12px; cursor:pointer; font:inherit; }
   button.ghost { background:transparent; border:1px solid var(--line); color:var(--fg); }
   button.danger { background:var(--danger); }
   button.ok { background:var(--ok); color:#fff; }
+  /* Dark ink rather than the #fff its siblings use. Amber is a light hue at
+     the saturation a button needs — white on it is unreadable in a way white
+     on blue, red or green is not, in both themes. Measured, so the choice is
+     not a matter of taste: dark ink gives 7.3:1 on the dark theme's amber and
+     5.9:1 on the light theme's, where white gives 2.5:1 and 3.1:1.
+
+     That makes this the best-contrasting button in the app, which is a little
+     odd next to #fff on the dark theme's green at 2.5:1. The existing three
+     are left alone: they are the established look of this UI, they are not
+     what was reported, and changing them is a decision about the whole
+     palette rather than about one new colour fitting into it.
+
+     The value is the dark theme's own --bg, so it is a colour already in the
+     palette rather than a new one introduced for one rule. */
+  button.warn { background:var(--warn); color:#0f1419; }
   button.sm { padding:3px 8px; font-size:12px; }
   /* Ban/Unban/Delete share the .sm row-button recipe but, unlike .tbar-btn,
      never got their own sizing — matching height via line-height (ratio or
@@ -175,8 +230,13 @@ const indexHTML = `<!doctype html>
      entirely — it centers the actual content box, not a font-metric-derived
      line box — so it's used here instead. .tbar-btn (below) gets the same
      treatment so every row button, icon or text label, lines up identically
-     regardless of its own font-size. */
-  button.sm.danger, button.sm.ok { height:25px; padding:0 10px; display:inline-flex; align-items:center; justify-content:center; }
+     regardless of its own font-size.
+
+     .warn and .info are in the list for the same reason and not as an
+     afterthought: they sit shoulder to shoulder with .ok and .danger in the
+     Keys and Logs bars, and a colour that opted out of the sizing would be
+     the one button in the row standing a pixel taller than its neighbours. */
+  button.sm.danger, button.sm.ok, button.sm.warn { height:25px; padding:0 10px; display:inline-flex; align-items:center; justify-content:center; }
   input,select { background:var(--bg); border:1px solid var(--line); color:var(--fg); border-radius:6px; padding:7px 9px; font:inherit; }
   /* Upgrade page's file picker(s) — widened from the default input size so
      a full filename (source tarball, signed manifest) is readable without
@@ -3823,17 +3883,18 @@ const HELP = {
     topic: 'This host\u2019s clock, timezone, and time synchronization. [gravinet] refuses handshakes whose timestamp is too far from local time, so a node whose clock has drifted stops forming sessions rather than degrading \u2014 this is where to check that and fix it. Acts on the node you\u2019re currently managing.',
   },
   'dhcp': {
-    topic: 'What this node does about DHCP on the LANs it is attached to. Acts on the node you\u2019re currently managing.<br><br>Two cards, each with the same enabled/disabled pill every other card here carries: <b>server</b> hands out leases itself (through Kea), <b>relay</b> forwards requests to a DHCP server somewhere else. <b>Enabling one disables the other</b> \u2014 a node is never both at once, because a relay that also answered locally would shadow the central server for the subnets it relays and clients would take whichever reply arrived first. Leaving both disabled leaves this host alone entirely; one already running its own DHCP server is untouched until you enable something here.<br><br>Both cards stay on the page and stay editable whichever is on, so a configuration you are not currently using is still there to look at and change \u2014 running the relay for an afternoon does not cost you your pools. Adding a row does not enable a card; the pill does that.<br><br>Beside each pill is what that half is <i>actually</i> doing, which is not always the same thing \u2014 a card can be enabled before it has anything to run, and a server with no enabled subnet is stopped rather than left to crash-loop. When the two disagree the reason underneath says which to fix.<br><br><b>Server.</b> One row per subnet served. Use + to add one, double-click a field to edit it, double-click the state tag to park a subnet without deleting it, tick rows and \u2212 to remove. Choosing an <b>interface</b> fills in the rest of the row from that interface\u2019s own address \u2014 the subnet it sits on, a pool inside it, itself as the gateway, and this host\u2019s own resolvers \u2014 and every one of those fields stays editable. The suggested pool keeps a handful of addresses clear at each end and either side of the gateway, so there is room for a printer or a second router later without shrinking a live pool.<br><br><b>Relay.</b> One row per client-facing link, edited exactly like the server table: + to add, double-click a field to edit, double-click the state tag to park a link, tick and \u2212 to remove. Each link has its own upstream servers and its own hop limit, so one LAN can relay somewhere different from another \u2014 the relay binds a socket per link regardless, and the address on that link is what it stamps on the requests it forwards. Every server on a row gets a copy of each request and the client takes whichever reply arrives first, which is how a relay does redundancy \u2014 there is no failover to configure. Do not relay from the link the upstream server is on: its replies would be relayed straight back at it. Relaying is Linux-only: it needs the arrival interface of a broadcast, which the other platforms do not offer the same way, and a relay that guessed would hand clients addresses from the wrong LAN\u2019s subnet.<br><br>Serve or relay on a LAN interface, never a mesh device \u2014 they are left out of the pickers, and refused on save even if one reaches them another way. An interface that cannot do its job says so in red under its own row: Kea matches a request to a subnet by the receiving interface\u2019s address, so an interface addressed outside the subnet it serves runs, logs nothing unusual and never answers, and an interface with no IPv4 address at all has no relay address to stamp on what it forwards.',
+    topic: 'What this node does about DHCP on the LANs it is attached to, and on networks it is not. Acts on the node you\u2019re currently managing.<br><br>Two cards, each with the same enabled/disabled pill every other card here carries: <b>server</b> hands out leases itself (through Kea), <b>relay</b> forwards requests to a DHCP server somewhere else. <b>Enabling one disables the other</b> \u2014 a node is never both at once, because a relay that also answered locally would shadow the central server for the subnets it relays and clients would take whichever reply arrived first. Leaving both disabled leaves this host alone entirely; one already running its own DHCP server is untouched until you enable something here.<br><br>Both cards stay on the page and stay editable whichever is on, so a configuration you are not currently using is still there to look at and change \u2014 running the relay for an afternoon does not cost you your pools. Adding a row does not enable a card; the pill does that.<br><br>Beside each pill is what that half is <i>actually</i> doing, which is not always the same thing \u2014 a card can be enabled before it has anything to run, and a server with no enabled subnet is stopped rather than left to crash-loop. When the two disagree the reason underneath says which to fix.<br><br><b>Server.</b> One row per subnet served. Use + to add one, double-click a field to edit it, double-click the state tag to park a subnet without deleting it, tick rows and \u2212 to remove. Choosing an <b>interface</b> fills in the rest of the row from that interface\u2019s own address \u2014 the subnet it sits on, a pool inside it, itself as the gateway, and this host\u2019s own resolvers \u2014 and every one of those fields stays editable. The suggested pool keeps a handful of addresses clear at each end and either side of the gateway, so there is room for a printer or a second router later without shrinking a live pool.<br><br><b>Serving a network this node is not on.</b> A DHCP server is not limited to its own links. A relay agent on a distant segment \u2014 usually the router the clients use as their gateway \u2014 catches their broadcasts and forwards them here as ordinary unicast, stamping its own address on each one; this node answers with addresses from that far segment and the relay puts the reply back on the wire there. To set one up, fill in the <b>relay</b> column with the address the agent forwards under \u2014 its <code>giaddr</code>, in the language of RFC 1542 and of most router documentation \u2014 pick the interface that traffic arrives on, and give the subnet, pool and gateway <i>of the remote network</i>. Nothing is prefilled for such a row, because none of it has anything to do with the interface it arrives on. Any number of remote subnets can share one interface, which is the usual shape: every branch relays to the same uplink here. The far end needs configuring too \u2014 on Cisco-style gear that is an <code>ip helper-address</code> pointing at this node, and its source address is what belongs in the relay column. Serving both a LAN of your own and remote ones from the same node is fine and needs no extra setting; each row says which it is.<br><br><b>Relay.</b> One row per client-facing link, edited exactly like the server table: + to add, double-click a field to edit, double-click the state tag to park a link, tick and \u2212 to remove. Each link has its own upstream servers and its own hop limit, so one LAN can relay somewhere different from another \u2014 the relay binds a socket per link regardless, and the address on that link is what it stamps on the requests it forwards. Every server on a row gets a copy of each request and the client takes whichever reply arrives first, which is how a relay does redundancy \u2014 there is no failover to configure. Do not relay from the link the upstream server is on: its replies would be relayed straight back at it. Relaying is Linux-only: it needs the arrival interface of a broadcast, which the other platforms do not offer the same way, and a relay that guessed would hand clients addresses from the wrong LAN\u2019s subnet.<br><br>Serve or relay on a LAN interface, never a mesh device \u2014 they are left out of the pickers, and refused on save even if one reaches them another way. An interface that cannot do its job says so in red under its own row: for a directly attached subnet Kea matches a request to it by the receiving interface\u2019s address, so an interface addressed outside the subnet it serves runs, logs nothing unusual and never answers; a relayed subnet is matched by the relay\u2019s address instead and so is held to the weaker condition that the interface have some IPv4 address for the relay to forward to at all; and a link with no IPv4 address has no relay address to stamp on what it forwards.',
     cols: {
       // Server and relay are separate tables, but they are never on screen
       // together (role is one setting), and helpAnnotate matches notes to
       // headers by name across the whole section \u2014 so the two shared
       // columns are worded to hold for either.
       'state': 'a disabled row keeps its settings but is not in service \u2014 the subnet is not served, or the link is not relayed from',
-      'interface': 'the LAN interface this row applies to, never a mesh device \u2014 on a served subnet, choosing one also fills in the rest of the row from its own address',
+      'interface': 'the LAN interface this row applies to, never a mesh device \u2014 on a directly attached subnet, choosing one also fills in the rest of the row from its own address; on a relayed one it is only where the forwarded requests arrive, and nothing is prefilled from it',
+      'relay': 'blank means the subnet is on this interface. An address here means it is somewhere else, reached through a relay agent forwarding under that address \u2014 Kea picks the scope by matching it, so it is what the far LAN is identified by. List more than one where two routers relay the same segment. Any number of relayed subnets can share one interface.',
       'servers': 'the upstream DHCP servers requests from this link are forwarded to; each gets a copy and the client takes whichever reply arrives first',
       'max hops': 'how many relays a request may already have crossed before this link drops it; blank uses the default of 4',
-      'subnet': 'the CIDR served here; Kea matches a request to it by the receiving interface\u2019s address, so the interface has to be addressed inside it',
+      'subnet': 'the CIDR served here. On an attached subnet Kea matches a request to it by the receiving interface\u2019s address, so the interface has to be addressed inside it; on a relayed one it is the far segment and the interface has nothing to do with it',
       'pool': 'the range actually handed out \u2014 kept clear of the network and broadcast addresses and of the router, leaving room for static addresses later',
       'router': 'the default gateway offered to clients \u2014 inside the subnet and outside the pool, or blank to offer none',
       'dns': 'the resolvers offered to clients, prefilled from whatever this host itself resolves through',
@@ -3859,7 +3920,7 @@ const HELP = {
     topic: 'Restart or shut down this host \u2014 the whole machine [gravinet] runs on, not just the service. This acts on the node you\u2019re currently managing.',
   },
   'interfaces': {
-    topic: 'Every network interface on this host, with its addresses and the default gateway in use. Double-click to edit \u2014 changes are applied to the running system straight away with no confirmation, so changing the address you are connected over will drop your session. Under anything but static the address and default route come from the network, so there is nothing to type. Changes are recorded in gravinet\u2019s own configuration \u2014 so they are included in backups and come back on restore \u2014 and written to this host\u2019s network configuration so they survive a reboot.<br><br><b>Tagged interfaces</b> (802.1Q VLANs) are created in the second card, and are the one kind of interface gravinet makes rather than merely addresses. Pick a parent and a tag between 1 and 4094; the device is named <code>parent.tag</code> unless you name it something else. Once it exists it appears in the table above like any other interface and takes its address there \u2014 there is no separate addressing for it. A parent has to be a real interface on this host and never a mesh device: a VLAN tag inside the overlay\u2019s own encapsulation addresses nothing. Stacking a VLAN on another VLAN is refused.<br><br>Unlike addressing, a tagged interface is <i>not</i> written into this host\u2019s network configuration. gravinet recreates it at every start, before addressing is applied to it, which is how it survives a reboot \u2014 and means it exists only while gravinet does. Writing VLAN stanzas into netplan or NetworkManager would mean co-owning the file that decides whether this host comes back with any networking at all, which is the one thing gravinet does not do to a host. Deleting a row removes the device and its addressing record together. Linux only.',
+    topic: 'Every network interface on this host, with its addresses and the default gateway in use. Double-click to edit \u2014 changes are applied to the running system straight away with no confirmation, so changing the address you are connected over will drop your session. Under anything but static the address and default route come from the network, so there is nothing to type. Changes are recorded in gravinet\u2019s own configuration \u2014 so they are included in backups and come back on restore \u2014 and written to this host\u2019s network configuration so they survive a reboot.<br><br><b>Tagged interfaces</b> (802.1Q VLANs) are created in the second card, and are the one kind of interface gravinet makes rather than merely addresses. Pick a parent and a tag between 1 and 4094; the device is named <code>parent.tag</code>, derived from the two \u2014 there is nothing else to decide, and the name is shown in the row before you save it. Once it exists it appears in the table above like any other interface and takes its address there \u2014 there is no separate addressing for it. A parent has to be a real interface on this host and never a mesh device: a VLAN tag inside the overlay\u2019s own encapsulation addresses nothing. Stacking a VLAN on another VLAN is refused.<br><br>Unlike addressing, a tagged interface is <i>not</i> written into this host\u2019s network configuration. gravinet recreates it at every start, before addressing is applied to it, which is how it survives a reboot \u2014 and means it exists only while gravinet does. Writing VLAN stanzas into netplan or NetworkManager would mean co-owning the file that decides whether this host comes back with any networking at all, which is the one thing gravinet does not do to a host. Deleting a row removes the device and its addressing record together. Linux only.',
     cols: {
       'interface': 'link name; a mesh device also names its network',
       'state': 'kernel link state, and whether it has carrier',
@@ -5103,10 +5164,13 @@ function secKeys(c) {
     t.querySelector('table')._rowButtons = [
       { label:'Generate', title:'generate a key into each ticked empty slot', onclick: genFn },
       { label:'Import',   title:'import a key into a ticked empty slot',     onclick: importFn },
-      { label:'Enable',  cls:'ghost', title:'enable ticked keys',  onclick: enableFn },
-      { label:'Disable', cls:'ghost', title:'disable ticked keys', onclick: disableFn },
-      { label:'Reveal',  cls:'ghost', title:'reveal ticked keys',  onclick: revealFn },
-      { label:'Copy',    cls:'ghost', title:'copy ticked keys',    onclick: copyFn },
+      { label:'Enable',  cls:'ok',   title:'enable ticked keys',  onclick: enableFn },
+      { label:'Disable', cls:'warn', title:'disable ticked keys', onclick: disableFn },
+      // Reveal and Copy are the two ways a key leaves its hiding place — one
+      // onto the screen, one into the clipboard, where it outlives the page.
+      // They share a colour because they share that consequence.
+      { label:'Reveal',  cls:'warn', title:'reveal ticked keys',  onclick: revealFn },
+      { label:'Copy',    cls:'warn', title:'copy ticked keys',    onclick: copyFn },
       { label:'Delete',  cls:'danger', title:'delete ticked keys', onclick: deleteFn },
     ];
     c.appendChild(card);
@@ -8420,21 +8484,38 @@ function secInterfaces(c){
       const tr = document.createElement('tr');
       let o = parents.length ? '<option value="" selected>choose\u2026</option>' : '<option value="">(no interfaces found)</option>';
       for (const n of parents) o += '<option value="'+esc(n)+'">'+esc(n)+'</option>';
+      // The name is derived, so the cell shows what will be created rather
+      // than asking. Shown rather than left blank because it is the thing the
+      // operator will look for in the table above afterwards, and because a
+      // parent whose name is too long to carry a tag is visible here before
+      // the save that would refuse it.
       tr.innerHTML = '<td class="selcol"></td><td class="vl-state"><span class="on">enabled</span></td>'
-        + '<td><input class="vle-name" placeholder="(parent.vlan)" style="width:110px"></td>'
+        + '<td><span class="vle-nm hint">\u2014</span></td>'
         + '<td><select class="vle-parent" style="width:110px">'+o+'</select></td>'
         + '<td><input class="vle-id" placeholder="100" style="width:60px">'
         + ' <button class="sm vle-save">save</button> <button class="sm vle-cancel">cancel</button></td>';
       if (!insertNewRow(table, tr)) return;
+      const pSel = tr.querySelector('.vle-parent'), idIn = tr.querySelector('.vle-id'), nm = tr.querySelector('.vle-nm');
+      const preview = () => {
+        const p = pSel.value.trim(), id = parseInt(idIn.value, 10);
+        if (!p || isNaN(id) || id < 1 || id > 4094){ nm.textContent = '\u2014'; nm.className = 'vle-nm hint'; return; }
+        const n = p+'.'+id;
+        nm.textContent = n;
+        // 15 is IFNAMSIZ minus the terminator. Flagged rather than silently
+        // shown, since the save will refuse it and the only fix is in the
+        // configuration file.
+        nm.className = n.length > 15 ? 'vle-nm err' : 'vle-nm';
+      };
+      pSel.onchange = preview; idIn.oninput = preview;
       tr.querySelector('.vle-cancel').onclick = () => { say(''); renderSection(); };
       tr.querySelector('.vle-save').onclick = () => {
-        const parent = tr.querySelector('.vle-parent').value.trim();
-        const id = parseInt(tr.querySelector('.vle-id').value, 10);
+        const parent = pSel.value.trim();
+        const id = parseInt(idIn.value, 10);
         // The editor stays open on a rejection, so the row is fixed in front
         // of the operator rather than lost and retyped.
         if (!parent){ say('choose a parent interface', true); return; }
         if (isNaN(id)){ say('enter a vlan id between 1 and 4094', true); return; }
-        post({op:'add', parent:parent, id:id, name:tr.querySelector('.vle-name').value.trim()});
+        post({op:'add', parent:parent, id:id});
       };
     };
     table._rowRemove = () => removeCheckedRows(table, tr =>
@@ -8901,18 +8982,25 @@ function secDHCP(c){
     dhWhy(card, 'server', en, run);
     if (en && !b.installed && !run.why)
       card.appendChild($('<div class="err" style="margin:0 0 8px;font-size:12px">the Kea DHCPv4 server is not installed on this host \u2014 saving a subnet will install it</div>'));
-    let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>interface</th><th>subnet</th><th>pool</th><th>router</th><th>dns</th><th>lease</th></tr>';
-    if (!list.length) h += '<tr><td colspan="8" class="empty">no subnets \u2014 click + to serve one</td></tr>';
+    // The relay column is what says whether a row is a LAN this node sits on
+    // or one it serves at a distance. Attached rows show a dash there, which
+    // is also the answer to "why has this table got a column about relaying
+    // on the server card" \u2014 a server behind a relay is still the server.
+    let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>interface</th><th>relay</th><th>subnet</th><th>pool</th><th>router</th><th>dns</th><th>lease</th></tr>';
+    if (!list.length) h += '<tr><td colspan="9" class="empty">no subnets \u2014 click + to serve one</td></tr>';
     else list.forEach((e,i) => {
       const on = !e.disabled;
+      const relays = (e.relays||[]).join(', ');
       h += '<tr class="dhrow'+(on?'':' fw-disabled')+'" data-idx="'+i+'" data-enabled="'+(on?1:0)+'"'
         + ' data-iface="'+esc(e.iface||'')+'" data-subnet="'+esc(e.subnet||'')+'"'
         + ' data-pool_start="'+esc(e.pool_start||'')+'" data-pool_end="'+esc(e.pool_end||'')+'"'
-        + ' data-router="'+esc(e.router||'')+'" data-dns="'+esc((e.dns||[]).join(', '))+'"'
+        + ' data-router="'+esc(e.router||'')+'" data-relays="'+esc(relays)+'"'
+        + ' data-dns="'+esc((e.dns||[]).join(', '))+'"'
         + ' data-search="'+esc((e.search||[]).join(', '))+'" data-lease="'+esc(e.lease_seconds||0)+'">'
         + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
         + '<td class="dh-state"><span class="tag-toggle '+(on?'on':'off')+'" data-dhstate="1" title="double-click to '+(on?'disable':'enable')+'">'+(on?'enabled':'disabled')+'</span></td>'
         + '<td class="dh-field">'+esc(e.iface||'')+'</td>'
+        + '<td class="dh-field" title="'+(relays?'reached through a relay agent \u2014 not a link on this host':'directly attached to this interface')+'">'+esc(relays||'\u2014')+'</td>'
         + '<td class="dh-field">'+esc(e.subnet||'')+'</td>'
         + '<td class="dh-field">'+esc((e.pool_start||'')+' \u2013 '+(e.pool_end||''))+'</td>'
         + '<td class="dh-field">'+esc(e.router||'\u2014')+'</td>'
@@ -8922,7 +9010,7 @@ function secDHCP(c){
       // it is never sorted away from the row it explains or hidden by a
       // filter its prose does not match.
       const why = on ? probs[e.iface] : '';
-      if (why) h += '<tr class="dh-problem"><td colspan="8" class="err" style="font-size:12px">'+esc(why)+'</td></tr>';
+      if (why) h += '<tr class="dh-problem"><td colspan="9" class="err" style="font-size:12px">'+esc(why)+'</td></tr>';
     });
     const t = $('<div></div>'); t.innerHTML = h+'</table>'; card.appendChild(t);
     const table = t.querySelector('table');
@@ -8938,7 +9026,7 @@ function secDHCP(c){
     });
     selAllWire(t);
     table._rowAdd = () => dhAddRow(table);
-    card.appendChild($('<div class="hint help-desc" style="margin:8px 0 0">Choosing an interface fills the rest of the row in from that interface\'s own address \u2014 the subnet it sits on, a pool inside it, itself as the gateway, and this host\'s resolvers. All of it is a starting point, and all of it is editable.</div>'));
+    card.appendChild($('<div class="hint help-desc" style="margin:8px 0 0">Choosing an interface fills the rest of the row in from that interface\'s own address \u2014 the subnet it sits on, a pool inside it, itself as the gateway, and this host\'s resolvers. All of it is a starting point, and all of it is editable.<br>To serve a network this node is <i>not</i> attached to, put the forwarding relay\'s address in <b>relay</b> and pick the interface its traffic arrives on. Nothing is prefilled for those \u2014 the subnet, pool and gateway all belong to the far end \u2014 and any number of them can share one interface.</div>'));
     table._rowRemove = () => removeCheckedRows(table, tr => api('/api/dhcp',{method:'POST',body:JSON.stringify({op:'delete',index:parseInt(tr.dataset.idx,10)})}));
     wrap.appendChild(card);
     enhanceTable(table);
@@ -8948,6 +9036,7 @@ function secDHCP(c){
     e = e || {};
     return '<td class="selcol"></td><td class="dh-state"><span class="on">enabled</span></td>'
       + '<td><select class="dhe-iface" style="width:100px">'+dhIfaceOpts(e.iface||'')+'</select></td>'
+      + '<td><input class="dhe-relays" placeholder="none \u2014 attached" title="leave empty for a LAN on this interface; fill in the relay agent\u2019s address (giaddr) to serve a network somewhere else" style="width:110px" value="'+esc(e.relays||'')+'"></td>'
       + '<td><input class="dhe-subnet" placeholder="10.1.1.0/24" style="width:120px" value="'+esc(e.subnet||'')+'"></td>'
       + '<td><input class="dhe-start" placeholder="10.1.1.100" style="width:95px" value="'+esc(e.pool_start||'')+'">'
       + ' <input class="dhe-end" placeholder="10.1.1.200" style="width:95px" value="'+esc(e.pool_end||'')+'"></td>'
@@ -9016,6 +9105,14 @@ function secDHCP(c){
   }
 
   function dhPrefill(tr, name){
+    // A relayed row describes a network this interface is not on, so the
+    // interface's own address has nothing to say about it. Prefilling anyway
+    // would overwrite a remote subnet with the uplink's, and the operator's
+    // first sight of it is a pool that belongs to the wrong LAN — the exact
+    // failure the prefill's own "does it still hold here?" rule was written
+    // to avoid, one level up.
+    const rel = tr.querySelector('.dhe-relays');
+    if (rel && (rel.value||'').trim()) return;
     const next = dhSuggestFor(name);
     if (!next) return;
     let prev = {};
@@ -9045,6 +9142,13 @@ function secDHCP(c){
   function dhWire(tr){
     const sel = tr.querySelector('.dhe-iface');
     if (sel) sel.onchange = () => dhPrefill(tr, sel.value);
+    // Typing a relay address makes the row remote, and what is already in it
+    // was suggested for a link it is no longer about. Forgetting the recorded
+    // suggestion is enough: those fields are now the operator's to fill in,
+    // and dropping the record is what stops a later interface change from
+    // treating them as its own to overwrite.
+    const rel = tr.querySelector('.dhe-relays');
+    if (rel) rel.onchange = () => { if ((rel.value||'').trim()) delete tr.dataset.dhsuggest; };
   }
 
   function dhRead(tr){
@@ -9056,6 +9160,7 @@ function secDHCP(c){
       pool_start: tr.querySelector('.dhe-start').value.trim(),
       pool_end: tr.querySelector('.dhe-end').value.trim(),
       router: tr.querySelector('.dhe-router').value.trim(),
+      relays: csv('.dhe-relays'),
       dns: csv('.dhe-dns'),
       lease_seconds: isNaN(lease) ? 0 : lease
     };
@@ -9080,7 +9185,8 @@ function secDHCP(c){
     if (tr.querySelector('.dhe-iface')) return;
     const idx = parseInt(tr.dataset.idx,10);
     const cur = {iface:tr.dataset.iface, subnet:tr.dataset.subnet, pool_start:tr.dataset.pool_start,
-      pool_end:tr.dataset.pool_end, router:tr.dataset.router, dns:tr.dataset.dns, lease:tr.dataset.lease};
+      pool_end:tr.dataset.pool_end, router:tr.dataset.router, relays:tr.dataset.relays,
+      dns:tr.dataset.dns, lease:tr.dataset.lease};
     tr.innerHTML = dhFields(cur);
     // The row starts with no recorded suggestion, so an interface change here
     // keeps whatever still works on the new link and replaces only what
@@ -12147,8 +12253,11 @@ function infoCapture(c){
   const sel = $('<select style="padding:5px 9px;font-size:12px;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px"></select>');
   const filt = $('<input class="tfilter" type="text" spellcheck="false" placeholder="filter packets…" title="'+esc(filterTitle)+'">');
   const startBtn = $('<button class="sm">Start</button>');
-  const clearBtn = $('<button class="ghost sm">Clear</button>');
-  const dlBtn = $('<button class="ghost sm">Download</button>');
+  // Amber, not the red the log file's Clear gets: this drops a buffer that
+  // can simply be captured again, and unlike that one it asks for no
+  // confirmation before doing it.
+  const clearBtn = $('<button class="warn sm">Clear</button>');
+  const dlBtn = $('<button class="sm">Download</button>');
   bar.appendChild(sel); bar.appendChild(filt); bar.appendChild(startBtn); bar.appendChild(clearBtn); bar.appendChild(dlBtn);
   card.appendChild(bar);
   const pre = $('<pre class="mono-block" style="max-height:58vh;overflow:auto;margin:0"></pre>');
@@ -14268,8 +14377,8 @@ function secLogs(c){
   t.innerHTML = '<table><tr><th>time</th><th>level</th><th>message</th></tr></table>';
   const table = t.querySelector('table');
   table._rowButtons = [
-    { label:'Refresh', cls:'ghost', title:'reload the log', onclick: () => renderSection() },
-    { label:'Download', cls:'ghost', title:'download the log file', onclick: async () => {
+    { label:'Refresh', cls:'', title:'reload the log', onclick: () => renderSection() },
+    { label:'Download', cls:'', title:'download the log file', onclick: async () => {
         const r = await api('/api/logs?download=1');
         if (!r.ok || !r.body) { await noticeModal((r.body && r.body.error) || 'could not fetch log'); return; }
         const text = (r.body.text != null) ? r.body.text : (r.body.lines||[]).join('\n');
@@ -14278,8 +14387,8 @@ function secLogs(c){
         const a = document.createElement('a'); a.href = url; a.download = 'gravinet.log'; a.click();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
       } },
-    { label:'tshoot', cls:'ghost', title:'download a troubleshooting bundle: every peer on every network with reach, relay, session age, path MTU, fragment and drop counters; routes; bans; disabled peers; firewall rules and exemptions; NAT status; interfaces; the config with secrets redacted; and the tail of the log. Asks whether to collect just the current node or every reachable mesh peer at once \u2014 collecting from both ends of any peer problem is often the diagnosis.', onclick: () => openTshootModal() },
-    { label:'Clear', cls:'ghost', title:'clear the log file', onclick: async () => {
+    { label:'tshoot', cls:'', title:'download a troubleshooting bundle: every peer on every network with reach, relay, session age, path MTU, fragment and drop counters; routes; bans; disabled peers; firewall rules and exemptions; NAT status; interfaces; the config with secrets redacted; and the tail of the log. Asks whether to collect just the current node or every reachable mesh peer at once \u2014 collecting from both ends of any peer problem is often the diagnosis.', onclick: () => openTshootModal() },
+    { label:'Clear', cls:'danger', title:'clear the log file', onclick: async () => {
         if (!await confirmModal('Clear the log file? This cannot be undone.')) return;
         const r = await api('/api/logs/clear', { method:'POST' });
         if (!r.ok) { await noticeModal((r.body && r.body.error) || 'could not clear log'); return; }

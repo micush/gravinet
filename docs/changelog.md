@@ -2,6 +2,243 @@
 
 ---
 
+## v971 — 2026-08-26
+
+**Keys, Packet Capture and Logs had toolbar buttons with no colour on them — the transparent, bordered styling the rest of the app uses for *cancel*. They are filled in, and the four that needed something the palette could not say get a new amber.**
+
+Reported from three screenshots: `Enable`, `Disable`, `Reveal`, `Copy` on Keys; `Clear` and `Download` on Packet Capture; `Refresh`, `Download`, `tshoot` and `Clear` on Logs. All `.ghost` — transparent with a 1px border. Beside them, `Generate`, `Import` and `Start` in accent blue and `Delete` in red.
+
+`.ghost` is not a neutral styling in this UI. It is what every editor's `cancel` uses, and what `close` and `dismiss` use. Ten buttons that *do* something were wearing the styling of the buttons that decline.
+
+### The question had already been answered once
+
+Config History had the same problem and was fixed before this: its toolbar was ghosts, and they were filled in with the plain accent, keeping `.danger` for `Restore` alone. `TestConfigHistoryToolbar` still pins it, including an assertion that no button there is ghost-styled any more.
+
+So most of this is not a new decision, it is applying that one to the three cards it had not reached. `Refresh`, `Download` and `tshoot` are simply blue. That matters most for `Download`, which exists in both Logs and Config History: a second colour scheme would have made one label two colours in two cards, which is worse than either scheme applied consistently.
+
+### What the accent could not say
+
+Four buttons are not ordinary actions and are not destructive enough to be red, and that gap is most of why they stayed ghosts — there was no colour for them:
+
+- **`Disable`** turns a key off. `.on`/`.off` in the table below it are green and muted, so green was taken and grey means "already off" rather than "turn it off".
+- **`Reveal`** and **`Copy`** take key material out of hiding — one onto the screen, one into the clipboard, where it outlives the page. They share a colour because they share that consequence.
+- **`Clear`** on Packet Capture drops the captured buffer.
+
+`--warn` (amber) is added for these. `Enable` takes `.ok`, matching the green `.on` already means one line below it, and following `Unban`, which has been `cls:'ok'` for as long as it has existed.
+
+### The two Clear buttons are deliberately different colours
+
+Logs' `Clear` is red; Packet Capture's is amber. The packets can be captured again and clearing them asks nothing. The log file cannot be got back, and clearing it opens a confirmation that says so. Colouring both red would have said the wrong thing about one of them, and colouring both amber the wrong thing about the other.
+
+`TestTheTwoClearButtonsDiffer` pins the pair *and* the confirmation, because "make the two Clears match" is exactly the tidy-looking change that would quietly erase the distinction.
+
+### Amber takes dark ink
+
+Every other filled button in this UI is `color:#fff`. Amber is not: it is a light hue at the saturation a button needs, and white on it is unreadable. Measured rather than eyeballed — dark ink gives **7.3:1** on the dark theme's amber and **5.9:1** on the light theme's, where white gives **2.5:1** and **3.1:1**.
+
+The ink is `#0f1419`, the dark theme's own `--bg`, so it is a colour already in the palette rather than one introduced for a single rule.
+
+That does leave the new button as the best-contrasting one in the app, sitting next to `#fff` on the dark theme's green at 2.5:1. The existing three are left alone: they are the established look of this UI, they are not what was reported, and restriking them is a decision about the whole palette rather than about one new colour fitting into it.
+
+### The colour vocabulary, written down
+
+The rules were implicit and are now a comment above the button rules, because the reason ten buttons ended up ghosts is that nothing said what a toolbar button's colour was supposed to mean:
+
+| | | |
+|---|---|---|
+| blue (default) | an ordinary action | Generate, Import, Start, Refresh, Download, tshoot |
+| green `.ok` | turns something on | Enable, Unban |
+| amber `.warn` | turns something off, takes a secret out of hiding, or drops something that can be got again | Disable, Reveal, Copy, Clear (capture buffer) |
+| red `.danger` | throws something away for good | Delete, Clear (log file), Stop |
+
+`.ghost` is not a fifth meaning. It stays exactly where it was — cancel, close, dismiss — and `TestGhostSurvivesForDecliningButtons` pins that filling in the toolbars did not sweep the editors' cancel buttons up with them.
+
+### Two things left alone, knowingly
+
+**The `+`/`−` pair.** `−` removes ticked rows without confirmation, which is red's meaning by the table above, and it is still the accent. The pair reads as one control rather than two, and it sits on nearly every table in the app — turning half of it red everywhere is a larger change than colouring in three toolbars, and worth doing deliberately rather than as a side effect of this.
+
+**The two CSV download icons** in the chart toolbars, and `Download` in the snapshot modal's footer. Icon-only affordances and modal footer pairs are a different control class from a card's toolbar, and both carry inline sizing that the `.sm` colour rules would fight.
+
+### Sizing
+
+`button.sm.warn` joins `.danger` and `.ok` in the explicit-height rule. Those three sit shoulder to shoulder in the Keys bar, and a colour that opted out of the sizing would be the one button in the row standing a pixel taller than its neighbours.
+
+---
+
+## v970 — 2026-08-26
+
+**System > Interfaces reported every working tagged interface as a name collision, because the check behind that message read a sysfs file the kernel has never created. Tagged interfaces are also now named for their parent and tag rather than asking.**
+
+Reported from the UI: a VLAN present, up, on the right parent and carrying the right tag, with an error under it saying it was something else.
+
+```
+vlan22 exists but is not a tagged interface — something else on this host owns that name
+```
+
+That message is the last branch of `vlanRows`, and it is the right message for the case it was written for — a definition whose device name has been taken by something unrelated looks healthy in every other column while its traffic goes somewhere else. It was firing on every healthy row on every host.
+
+### The path that does not exist
+
+`hostnet.VLANInfo` answered "is this device a VLAN, and if so which one" by reading:
+
+```
+/sys/class/net/<dev>/8021q/vlan_id
+```
+
+There is no such file. The 8021q driver registers no sysfs attributes at all — `net/8021q/` contains no `DEVICE_ATTR`, no `attribute_group`, no `sysfs_create_*`, and `net/core/net-sysfs.c` has nothing vlan-specific either. Its entire sysfs trace is one line in `vlan_setup()`:
+
+```c
+SET_NETDEV_DEVTYPE(dev, &vlan_type);
+```
+
+which puts `DEVTYPE=vlan` in the device's `uevent`. That names the driver and stops there; the tag is not in sysfs in any form. The tag is available from netlink, and from `/proc/net/vlan/<dev>` which the driver does publish.
+
+So the read failed on every host, every time. `VLANInfo` returned `ok=false` for every device, and the caller had no way to tell "this is not a VLAN" from "I could not find out" — the two came back identical. Every tagged interface gravinet had successfully created was then reported as somebody else's.
+
+The doc comment on the old function argued for sysfs over netlink on the grounds that `/sys/class/net/<dev>/` is a stable interface and that being unable to read it costs a label rather than an operation. Both claims are true. Neither applies to a path that is never there.
+
+### A second symptom from the same call
+
+`vlanParents` — the parent dropdown — filters out devices that are already VLANs, because stacking is refused in the model. It filtered on the same lookup, so it filtered nothing: every tagged interface on the host was offered as a parent. The picker was inviting exactly the configuration `ValidateHostVLANs` then refuses on save. Nobody reported this one; it came out of the same fix.
+
+### `tun.VLANLinks`
+
+One `RTM_GETLINK` dump, reading back the `IFLA_LINKINFO` nest that `AddVLAN` writes: `IFLA_INFO_KIND` naming the driver, `IFLA_INFO_DATA` holding `IFLA_VLAN_ID` and `IFLA_VLAN_PROTOCOL`. `netlinkDump` and `forEachAttr` already existed for the route code, so the whole of it is the parse.
+
+Two details that are easy to get wrong and are pinned by tests:
+
+- **The two attributes next to each other in the same nest have different byte orders.** The kernel writes the tag with `nla_put_u16` and the ethertype beside it with `nla_put_be16`. Reading the ethertype in host order on a little-endian machine turns `0x8100` into `0x0081` and makes every ordinary VLAN look exotic.
+- **`IFLA_INFO_KIND` and `IFLA_INFO_DATA` are siblings, and the kernel is not obliged to order them.** Parsing the data only after having seen the kind would depend on something not guaranteed, so the data is parsed unconditionally and the kind decides whether the result is kept.
+
+Parent resolution is a second pass over the dump. `IFLA_LINK` gives the parent's ifindex, and the message naming that index may arrive after the message referring to it — resolving inline drops the parent of any VLAN the kernel happens to dump first.
+
+`procfs` would also have answered. It is not used because `/proc/net/vlan/<dev>` is a text file the kernel documents as human-readable, is mode 0600, and is absent without `CONFIG_PROC_FS`. Netlink is where this is defined to live.
+
+### An empty parent is not a mismatch
+
+A VLAN can be moved into another network namespace away from its lower link. It keeps the ifindex, which then resolves to nothing, so `Parent` comes back empty. That is "not knowable from here", and the row check treats it as such — reporting it as "on the wrong parent" would name a device the operator would then go looking for and not find.
+
+### What the host is asked, and when
+
+`vlanRows` took a slice of definitions and interrogated the host inside its own loop, once per row, through `net.InterfaceByName` and the sysfs read. It now takes a `hostView` gathered once by the caller, which also feeds the parent picker in the same response.
+
+Two things follow. The listing can no longer contradict itself — a device appearing or going away halfway down the table used to produce a table where the top and bottom halves disagreed about the host. And the cases worth checking became writable as tests: while the host was the only thing that could answer, "a healthy tagged interface reports no problem" was not a statement this suite could make, which is most of why a function broken on every host shipped and stayed. `TestVLANRowsHealthyTaggedInterfaceReportsNoProblem` and `TestVLANRowsRealNameCollisionIsStillReported` differ only in whether the device is in the host's VLAN set, and the old code could not tell those two hosts apart — so it necessarily fails one of them.
+
+`hostnet.VLANDevices` replaces `VLANInfo` and returns the whole set rather than answering per device. On a platform that cannot introspect VLANs it returns nil, and `vlanRows` stops before the comparison branches rather than reading a lookup that always misses as a table full of faults.
+
+### 802.1ad
+
+Recognised, not created. `AddVLAN` sends no `IFLA_VLAN_PROTOCOL`, so what gravinet makes is always 802.1Q — the kernel's default. A device found under a gravinet definition carrying `0x88a8` was made by something else and will not carry the traffic the row implies, so it is named rather than passed as healthy.
+
+### Names are derived
+
+The add row had a name box, defaulting to `parent.id` if left empty. It is gone: the name is derived from the parent and the tag, and the row shows what will be created as the two fields are filled in, including turning red when the result will not fit. There was nothing for the box to decide that the two fields beside it had not already decided.
+
+`HostVLAN.Name` stays in the model, and stays honoured, for two cases with no other answer:
+
+- **A configuration written before this.** The device is referenced by name from the addressing records, from DHCP subnets, and from firewall rules. Re-deriving it would rename a live interface out from under all of them, so an existing name is kept and never rewritten. The `vlan22` in the report above stays `vlan22`.
+- **A parent too long to carry a derived name.** IFNAMSIZ leaves 15 characters, which a predictable name like `enp0s20f0u3u1` exhausts before the tag is appended. Such a host sets the field by hand. `Validate`'s message for this case now names the parent that does not fit and points at the configuration file, since it can no longer point at a field on the page.
+
+### Re-adding a definition for a device that already exists
+
+The add path refused any name already present on the host. With derived names this is reachable in an ordinary way: gravinet's devices outlive the process that created them — the kernel keeps a link until something removes it — so a node whose configuration was restored from a backup, or whose row was deleted and re-added, meets its own handiwork.
+
+`refuseVLANNameInUse` now refuses only what is genuinely in the way: a device that is not a tagged interface, or is one carrying a different tag, a different parent, or a different ethertype. A device that is already exactly the VLAN being described is adopted, which is what `EnsureVLAN` has always done with one it finds already present. The messages say which of those it is, because with the name derived an operator can no longer sidestep a clash by typing a different one, and a bare "already exists" would be a dead end.
+
+---
+
+## v969 — 2026-08-26
+
+**Network > DHCP can now serve networks this node is not attached to. Put the forwarding relay's address in the new `relay` column and the subnet no longer has to be on one of this host's own links — any number of remote LANs can share the interface their relays arrive over.**
+
+Reported from the UI: adding a second subnet on `eth1` was refused with *interface eth1 already has a subnet configured*. That rule was written for attached LANs, where it is right — two scopes on one link are two answers to the same question, and Kea would take one. It was being applied to a case it has nothing to say about.
+
+### What was actually missing
+
+A DHCP server is not limited to the links it sits on. A relay agent on a distant segment catches its clients' broadcasts and forwards them as ordinary unicast, stamping its own address into `giaddr`; the server answers with addresses from the far segment and the agent puts the reply back on the wire there. Kea supports this through a per-subnet `relay` clause and selects the scope by matching that stamp.
+
+gravinet rendered no such clause, so there was no way to express a remote subnet at all — and the one-per-interface rule meant that even if there had been, a node could have served exactly one, since every relayed subnet on a host arrives over whichever link the relays reach it on. Commonly that is a single uplink for all of them.
+
+### `DHCPSubnet.Relays`
+
+One new field, and its presence is what makes a subnet remote. `Iface` now means slightly different things either side of it, which is written on the field rather than left to be inferred:
+
+| | attached (`Relays` empty) | relayed (`Relays` set) |
+|---|---|---|
+| `Iface` | the link the clients are on | the link the *relay* reaches this host over |
+| selected by | receiving interface's address | `giaddr` |
+| renders as | `"interface": "eth1"` | `"relay": {"ip-addresses": [...]}` |
+| one per interface | yes | no — any number |
+
+The interface stays **required** on a relayed subnet, which is easy to talk oneself out of given the subnet is not on it: Kea listens only on interfaces it is named, so it is what puts the link into `interfaces-config` and gets the forwarded unicast received at all.
+
+### Omitting `"interface"`, and what Kea actually does
+
+`keaSubnet.Interface` became `omitempty`, and exactly one of the two selectors is now written per scope. The reason is narrower than it first appeared, and the difference was found by installing Kea 2.4.1 and asking it rather than by reading the manual:
+
+- **Kea does *not* refuse a scope whose `interface` names a link addressed outside it.** It loads the file and starts. This contradicts an earlier draft of this entry, which quoted a rejection message that no version here produces. gravinet's own preflight has always described this case correctly — a server that starts, logs nothing unusual and never answers — and that remains the only thing that catches it.
+- **Kea also accepts `interface` and `relay` on the same scope**, and still selects it by giaddr for a forwarded request. Driven with a real DHCPDISCOVER carrying `giaddr`, both shapes reached `DHCP4_SUBNET_SELECTED` and advertised from the remote pool.
+
+So the omission is not what makes the feature work. It is there because `interface` is an assertion about topology that would be false, and because it leaves the scope with exactly one way in: a subnet tagged with the uplink is a candidate for whatever Kea considers directly connected there, quite apart from the relay path. Whether a particular Kea would hand a local client a branch address that way was **not** established — the lab could not produce a clean directly-connected client against a server bound the way this one was — so the claim made here is only that omitting the key means the question never arises, at no cost.
+
+### One thing that *is* load bearing: deduplicating `interfaces-config`
+
+Relayed scopes share their link by design, and a repeat is refused outright:
+
+```
+Failed to select interface: interface 'eth0' has already been specified
+```
+
+That is the entire configuration rejected, not the extra entry. Without the dedup, a node's *second* remote LAN behind an uplink it already served one behind would have stopped DHCP for every scope in the file — the exact class of failure `servableSubnets` exists to prevent, reintroduced by the feature that made sharing a link normal. `TestRealKeaRefusesARepeatedListenInterface` renders the config, adds the duplicate back through the JSON parser, and pins both halves.
+
+### The rule that replaces one-per-interface
+
+Uniqueness moved rather than being dropped. Relayed subnets are kept unique **by relay address**: Kea picks the scope for a forwarded request by matching `giaddr`, so an address listed on two subnets is two answers to one question again — and a worse one to diagnose than the attached case, because both scopes are valid and one branch's clients quietly get the other branch's addresses. The error names both prefixes so the colliding row does not have to be hunted for.
+
+Kea does not catch this: 2.4.1 loads such a file without comment and serves one of the two. That is the argument for refusing it on save rather than leaving it to the parser the way the duplicate interface is left to it — nothing downstream will ever mention it, and the symptom is addresses from the wrong branch turning up on a LAN whose own configuration reads correctly.
+
+The attached rule is otherwise untouched, and `TestDHCPAttachedAndRelayedSubnetsCoexistOnOneInterface` pins that the relaxation did not take it along: a second *attached* subnet on a link is still refused, and a node serving its own LAN alongside remote ones needs no extra setting to say so.
+
+A relay address is validated as IPv4 unicast, and deliberately **not** checked against the subnet it selects. An agent usually sources from its own address on the client link, but only usually — a loopback or management address is permitted by RFC 1542 and happens in the field, and refusing it would refuse a working network.
+
+### Preflight had to stop reporting the working case as broken
+
+`dhcpServerProblem` checks that an interface is addressed inside the subnet it serves, because Kea matches an attached request that way and an interface outside it produces a server that starts, logs nothing unusual and never answers. A relayed subnet is *supposed* to fail that check — running it unchanged would have put a red row under every correctly configured remote network on the node. Relayed rows are held to the weaker condition that actually applies: the interface needs some IPv4 address, any address, for the relay to have somewhere to forward to.
+
+`dhcpProblems` is keyed by interface and several subnets now legitimately share one, so it keeps the first reason rather than the last — otherwise which of two faults an operator sees depends on the order rows happen to be stored in.
+
+### The page
+
+A `relay` column on the server table, between `interface` and `subnet`, showing a dash on attached rows — the dash is the answer to a question a mixed table otherwise raises on every line. The refusal that started this now fires only attached-vs-attached, and says what to do instead; the v968 wording named the restriction and not the way past it.
+
+The interface prefill is suppressed on relayed rows. It fills a row in from the chosen interface's own address, which on a remote subnet describes the wrong network entirely — left alone it would overwrite a branch's pool with the uplink's, and the operator's first sight of that is the validator refusing to save.
+
+`gravinet system dhcp list` prints a `via=` field on every subnet, dashed when attached. A column that appears only sometimes is one an operator has to notice is missing.
+
+### Verification
+
+11 new config tests (several relayed subnets sharing an interface, attached and relayed coexisting, the attached rule still biting, relay-address uniqueness naming both prefixes, redundant relay pairs, address validation, off-segment `giaddr` accepted, blank handling, interface still required) and 10 new webadmin tests (relayed scope renders `relay` and no `interface`, attached scope unchanged, shared link named once with distinct ids, mixed rendering, preflight not applying the attached rule, preflight still wanting an address, stable problem reporting, plus structural checks on the column, its round trip, the prefill guard and the help text).
+
+One existing assertion changed: `TestDHCPValidatesTheInactiveHalfToo` now expects *more than one directly attached subnet*. Updated to assert the narrowed intent rather than deleted — the property it guards, that two attached scopes on one link are refused, still holds.
+
+### Driven against a real server
+
+Kea 2.4.1 was installed and this was checked against it rather than against the documentation — the practice v967 established, and the reason the two claims corrected above did not ship. Four new integration tests join the three already in `kea_integration_test.go`, all skipping where no `kea-dhcp4` binary is present rather than becoming a build dependency: a relayed scope is accepted; three of them sharing one interface are accepted; a repeated listen interface is refused, for the reason quoted above; and a giaddr collision is accepted, which is why gravinet refuses it itself.
+
+Beyond the parser, a running server was driven with a DHCPDISCOVER forwarded the way a relay agent forwards one — `giaddr` set, sent unicast — against a scope with no interface of its own. Kea logged `DHCP4_SUBNET_SELECTED` for the remote subnet and `DHCP4_LEASE_ADVERT` for `10.9.1.100`, an address from a pool on a network the host has no interface on. That is the feature working end to end.
+
+`internal/config`, `internal/webadmin`, `cmd/gravinet` and `internal/mesh` pass uncached — mesh needs `-timeout 60m` on a slow single-core box and takes about thirteen minutes, which is not a regression but does exceed Go's default. `go build ./...` and `go vet ./...` clean; `gofmt` clean on every file touched.
+
+One preflight test was hardened along the way. It assumed loopback carries no address DHCP can use, which is true until somebody puts a global address on `lo` — as this lab did while building the relay fixture, whereupon the test failed on a host fact rather than on the code. It now looks for an interface in that state and skips if there is none.
+
+**Caveat.** The UI work is verified structurally, by asserting on the rendered JS source, as all UI work in this project is — no browser has rendered the new column. And while the server side was driven with real forwarded packets, it was driven with a *synthetic* relay: no actual relay agent on an actual remote segment was involved, and the reply path back through one is therefore unexercised.
+
+### Operator note
+
+Nothing changes for an existing configuration: a subnet with no relay address is rendered exactly as before, and the interface rule it lives under is unchanged. To serve a network this node is not on, add a row, fill in `relay` with the address the far-end agent forwards under, pick the interface that traffic arrives on, and give the subnet, pool and gateway of the remote network. On Cisco-style gear the far end is an `ip helper-address` pointing at this node, and the address it sources from is what belongs in the relay column.
+
+---
+
 ## v968 — 2026-08-26
 
 **Every page in Traffic now carries its enabled/disabled switch beside the page title, and none of them restates its own name on a card heading underneath it. Adding a NAT rule no longer switches NAT on.**
