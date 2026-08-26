@@ -845,6 +845,51 @@ func (ns *netState) meshRouteCovers(addr netip.Addr) bool {
 	return false
 }
 
+// routedByOrigin reports whether addr falls inside a redistributed prefix
+// that node itself originated — i.e. whether node is telling this host "I am
+// the way to that address".
+//
+// This is the discriminator meshRouteCovers cannot make on its own, and the
+// two are used together (see syncSeedBypassRoutes). meshRouteCovers answers
+// "is a mesh route capturing traffic to this address", which was the whole
+// question while full-tunnel was the only trigger: under an accepted /0
+// every underlay address is genuinely reachable out the physical gateway,
+// so capture always means hijack and a bypass always restores the true
+// path. Once v552 extended the trigger to ordinary redistributed prefixes
+// that stopped holding. A narrower prefix covering an address can mean two
+// opposite things, and which one it is depends on who advertised what:
+//
+//   - Different nodes. Peer A's real underlay endpoint happens to sit inside
+//     a prefix peer B redistributes. B's route has nothing to do with how
+//     this host reaches A — it is capturing traffic that belongs on the
+//     physical path, and the /32 bypass is exactly right.
+//
+//   - Same node. The address is inside a prefix its own owner routes for us,
+//     which is the ordinary shape of a peer advertising its LAN and offering
+//     one of that LAN's addresses as a host candidate. Here the mesh route
+//     is not hijacking a physical path, it *is* the path, and pinning the
+//     address to the physical gateway does not undo a loop — it creates a
+//     blackhole, because the gateway has no route back into the peer's LAN.
+//
+// Consulted only for addresses that are still unproven guesses. A live
+// session's endpoint has already carried a handshake, which is direct proof
+// a physical path exists no matter which prefix covers it, so
+// syncPeerBypassRoute never asks — see its doc comment.
+func (ns *netState) routedByOrigin(addr netip.Addr, node string) bool {
+	if !addr.IsValid() || node == "" {
+		return false
+	}
+	a := addr.Unmap()
+	ns.mu.RLock()
+	defer ns.mu.RUnlock()
+	for _, r := range ns.redist {
+		if r.origin == node && r.prefix.Contains(a) {
+			return true
+		}
+	}
+	return false
+}
+
 // isDefaultRoute reports whether p is a default route in either address
 // family (0.0.0.0/0 or ::/0) — the only prefixes syncRoute ever redirects to
 // syncFullTunnelRoute instead of installing directly.

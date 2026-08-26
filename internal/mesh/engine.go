@@ -1069,10 +1069,17 @@ type netState struct {
 	// what *it* is responsible for releasing.
 	seedBypassMu   sync.Mutex
 	seedBypassHeld map[netip.Addr]bool
-	lastHostsSig   string // debounce hosts-file rewrites
-	lastDNSSig     string // debounce OS resolver (conditional-forwarding) rewrites
-	lastDNSErr     string // last DNS-sync failure, so an unchanged one isn't re-shouted every tick
-	lastPeerSig    string // debounce peer-cache persistence
+	// seedBypassDeclined dedups the log line for a seed address whose
+	// bypass syncSeedBypassRoutes declined to acquire (see its owner-routed
+	// filter). Guarded by seedBypassMu, alongside seedBypassHeld. It exists
+	// only so the message is emitted on the transition rather than on every
+	// initLoop tick — the reconcile runs about once a second and the
+	// condition, once true, ordinarily stays true for the life of the route.
+	seedBypassDeclined map[netip.Addr]bool
+	lastHostsSig       string // debounce hosts-file rewrites
+	lastDNSSig         string // debounce OS resolver (conditional-forwarding) rewrites
+	lastDNSErr         string // last DNS-sync failure, so an unchanged one isn't re-shouted every tick
+	lastPeerSig        string // debounce peer-cache persistence
 
 	// Hot-reloadable route redistribution. advRoutes is the set this node floods
 	// to the mesh; advReject is the set of advertised routes to ignore. Both swap

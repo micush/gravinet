@@ -269,10 +269,14 @@ func TestNATSectionIsNodeGlobal(t *testing.T) {
 	if !strings.Contains(sec, "sectionCardHead('NAT'") {
 		t.Error("the NAT card no longer uses the node-global card head")
 	}
-	// Scope is what carries a rule to an overlay; without the column there is
-	// no way to author one from the page.
-	if !strings.Contains(sec, "<th>scope</th>") {
-		t.Error("the NAT table has no scope column")
+	// The scope column is gone as of v966: where a rule applies is derived
+	// from the rule, so a picker beside it was a second answer to a question
+	// the rule already answers, and one that could contradict it.
+	if strings.Contains(sec, "<th>scope</th>") {
+		t.Error("the NAT table still renders a scope column")
+	}
+	if strings.Contains(sec, "nate-scope") || strings.Contains(sec, "natScopeOpts") {
+		t.Error("the NAT editor still wires a scope picker")
 	}
 }
 

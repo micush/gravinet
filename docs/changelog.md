@@ -2,6 +2,149 @@
 
 ---
 
+## v966 — 2026-08-26
+
+**The NAT scope selector is gone. Which overlay a rule applies to is derived from the rule, because the rule already said it.**
+
+Reported bluntly and correctly: a NAT rule should not require choosing between "mesh" and "host" on the side. The definition is the answer.
+
+### What scope was doing
+
+`NATRule.Scope` named the mesh network whose overlay traffic a rule *also* applied to, picked from a dropdown next to the rule. Every rule went into the kernel regardless; scope decided only whether the rule additionally entered a network's userspace overlay table.
+
+It was a second answer to a question the rule already answers, in coarser terms, maintained independently — so the two could disagree, and nothing reconciled them.
+
+`Interface` is the field that already carried it. It is a hard match constraint everywhere it is enforced: `kernelNATRules` renders it as `OutIface` for masquerade/SNAT and `InIface` for DNAT. A rule naming `eth0` is by construction a statement about traffic crossing eth0, and overlay traffic crosses no physical interface. No scope value could change that — it could only disagree with it.
+
+The reporting config is the clean demonstration. The rule was:
+
+```
+masquerade  source 10.0.0.0/8  dest !10.0.0.0/8  out eth0   scope: mesh
+```
+
+Ordinary internet-sharing. The scope said "mesh"; the negated dest meant the rule could never match overlay↔overlay traffic in the first place. The selector changed nothing about the rule and there was no way to see that from the page. The failure mode in the other direction is worse: a scope naming a network whose address space the rule's prefixes could never touch produced a rule that was silently inert, with a UI cell confidently naming a network it would never affect.
+
+### The derivation
+
+`natRuleAppliesToOverlay(rule, netIface)` in `cmd/gravinet`:
+
+- **Names a physical interface** — about that interface's traffic. Not the overlay.
+- **Names this network's tunnel device** — about this overlay. In, and masquerading reads the address off that device.
+- **Names another network's device** — that network's business, not this one's.
+- **Names nothing** — constrained by nothing but its own prefixes, which is precisely the case where the address predicates are the whole definition. In, and the per-packet matcher in `internal/mesh/nat.go` decides on Source/Dest/DestPort/Proto exactly as the kernel does for the same rule.
+
+The interface means different things on the two paths, and that is not a conflict: the kernel matches on it, while the overlay engine only reads an address off it when masquerading (`NATRuleSpec.Interface`). A rule naming this network's own device wants both.
+
+That last bullet is the case the selector was arguably there to serve — cross-site SNAT for overlapping LANs, whose Translate is a literal address and which therefore names no interface. Under the old scheme it reached the overlay only if the operator remembered to pick the network by hand; forget, and the rule did nothing. It now arrives on its own.
+
+**Why interface and not prefix overlap.** The obvious alternative is to ask whether the rule's prefixes intersect a network's overlay subnet. It is wrong: traffic from a local `10.1.1.0/24` to a peer's redistributed `10.2.2.0/24` crosses the mesh without touching the overlay subnet at all, so an overlap test would exclude exactly the rules that most need to be there. Interface is already a real match constraint; overlap is a guess about routing that the routing table answers better.
+
+### Surfaces
+
+Gone: the admin UI's scope column and picker (`natScopeOpts` and its editor wiring), its help annotation, the search-index scope tag, the CLI `scope` keyword, and the scope parameter on `NATAdd`, `NATRuleAdd`, `NATRuleAddNeg`, `NATRuleUpdateAt` and `NATRuleUpdateAtNeg`. `checkNATScope` is deleted. `NATAdd`'s duplicate check is now on interface alone, since a scope that changed nothing about a rule could not distinguish two rules either.
+
+`NATRule.Scope` is retained parsed-and-ignored and cleared on load, the same treatment `Direction`, `DestNetwork` and `NAT.StateTimeout` already get. A pre-v966 config parses unchanged, and clearing it on load stops a dead field being written back out for an operator to edit to no effect. The v953 per-network migration no longer stamps it — there is nothing to migrate to, because the rule already carries it.
+
+Two deliberate asymmetries at the edges. A stale `scope NAME` on the **command line is an error**, not a silent no-op: a script carrying one was expressing an intent that no longer parses that way, and it should be told rather than have its rule quietly mean something else. A stale `scope` in an **API body is accepted and ignored**, because that is a browser tab left open across an upgrade, and rejecting it would turn a cosmetic staleness into a failed save.
+
+### Verification
+
+New `cmd/gravinet/natscopederived_test.go`, 10 tests. The derivation table covers physical interface, own device, another network's device, no interface, port-forward, case-insensitive device match, and a blank network device not matching a named interface (blank-matches-blank would swallow every interface-bound rule).
+
+Three go further than the predicate. `TestInternetSharingRuleStaysKernelOnly` is built on the reported rule and asserts both halves — out of the overlay *and* still programmed into the kernel, because dropping it from one must not drop it from the node. `TestOverlaySNATReachesOverlayWithoutAScope` covers the interface-less cross-site rule arriving unaided. `TestStaleScopeInConfigIsIgnored` feeds a pre-v966 rule whose scope contradicts its interface — the exact contradiction the two-field scheme allowed — and asserts the interface wins and the field is cleared.
+
+Two existing tests asserted the column existed. They are inverted rather than deleted, so the page is now guarded against the picker coming back. One of them, `internal/webadmin`'s `TestHelpColumnKeysMatchRealColumns`, earned its keep by catching a help annotation for the removed column that would otherwise have shipped.
+
+`cmd/gravinet`, `internal/config`, `internal/webadmin`, `internal/netfilter` and every other package pass uncached; `go build ./...`, `go vet ./...` and `gofmt` clean. `internal/mesh` is unaffected by this change — `NATRuleSpec` is unchanged and only rule *selection* moved — and passes.
+
+Standing caveats unchanged from v965: no `nft`/`iptables` and no init in this container, so kernel NAT programming and the v951 systemd calls remain unexercised against real system services.
+
+### Operator note
+
+No action required. Existing rules keep translating exactly what they translated before: every rule is still programmed into the kernel with the same match, and the only rules whose overlay membership changes are ones whose scope disagreed with their own interface — which were inert or wrong in the direction the scope claimed. If a rule should reach an overlay, give it that network's interface or leave the interface blank.
+
+---
+
+## v965 — 2026-08-26
+
+**A peer's own LAN gateway address was being pinned to the physical gateway and blackholed. The bypass-route machinery could not tell "a mesh route is hijacking a real underlay path" from "the mesh route *is* the path", and installed a /32 for both.**
+
+Reported from a four-node mesh where every node's route table held a host route for every *other* node's eth1 address, pointed at the underlay default gateway:
+
+```
+10.2.2.0/24 dev mesh0 scope link metric 9000
+10.2.2.1 via 192.168.122.1 dev eth0
+```
+
+`10.2.2.1` is grav2's LAN-side interface. It is reachable only over the mesh, and the `/32` beats the `/24` on longest-prefix-match, so every packet to it went to a router with no route back into grav2's LAN. Not just the mesh's own dials — the address was dark for everything on the host.
+
+### Where it came from
+
+Not from FRR. BGP held `RIB entries 0` and no static routes on any node; these were gravinet's own `AddGatewayRoute` calls at `bypassMetric`.
+
+The mechanism is the full-tunnel peer-bypass route (`internal/mesh/fulltunnel.go`). Its original trigger was `ns.fullTunnel`, and under an accepted `0.0.0.0/0` its reasoning is airtight: every underlay address is genuinely reachable out the physical gateway, so a mesh route covering one is always a hijack, and a `/32` escape hatch always restores the true path.
+
+v552 widened the trigger to `meshRouteCovers` — any mesh-installed prefix covering the address, not just a default. That inverted the premise without anyone noticing, because a *narrow* prefix covering an address can mean two opposite things:
+
+- **Different nodes.** Peer A's real endpoint happens to sit inside a prefix peer B redistributes. B's route has nothing to do with how this host reaches A. Genuine hijack; the bypass is right. This is the case v552 was written for, and the field report behind it — five peers unreachable, each with an underlay address inside a redistributed prefix.
+- **Same node.** The address is inside a prefix its *own owner* routes for us. This is the ordinary shape of a peer advertising its LAN and offering one of that LAN's addresses as a host candidate. Here the mesh route is not hijacking a physical path, it is the only path, and the `/32` does not undo a loop — it creates the blackhole.
+
+`meshRouteCovers` answers "is something capturing this address", which cannot distinguish the two. Nothing else on the seed path could either: `addSeed` rejects only this node's own overlay subnets and its own addresses, and a *peer's* far-side LAN address passes both.
+
+The full chain, all of it visible in the reporter's log: `advertising 3 host candidate(s) to peers: [10.1.1.1:65432 192.168.122.26:65432 [fd01::1]:65432]` → `learned host candidate 10.2.2.1:65432 for peer "f79f6fa752e931db"` → `addSeed` accepts → `syncSeedBypassRoutes` acquires → pin. Then `giving up on seed 10.2.2.1:65432 — never connected within 1h0m0s`: the bypass never bought anything, because the address was never a reachable endpoint in the first place.
+
+### The discriminator
+
+New `netState.routedByOrigin(addr, node)` (`routes.go`): does `addr` fall inside a redistributed prefix that `node` itself originated — is that node telling us "I am the way to that address"? Both halves were already on hand, the candidate's owner in `ns.seedOwner` and the prefix's origin in `ns.redist`; nothing was consulting them together.
+
+`syncSeedBypassRoutes` now carries each seed's owner and drops owner-routed addresses from the want-set before acquiring.
+
+**Scoped to seeds on purpose.** A seed is an unproven guess — nothing has handshaked against it — so acquiring a bypass for one is speculation, and wrong speculation installs a blackholing `/32` over a working route. A live session's endpoint is different in kind: it has already carried a handshake, which is direct proof a physical path exists no matter which prefix covers it. `syncPeerBypassRoute` therefore does not consult this and is unchanged. Declining there would tear down working peers, which is why the filter is not simply applied in `acquireBypassRoute` where both paths would inherit it.
+
+**Full-tunnel does not override the decline.** It would be easy to let an accepted `/0` short-circuit the filter on the grounds that it covers everything. It must not: the blackhole is just as fatal with a `/0` in the table, and a `/0` is not evidence that this *particular* address is reachable off-mesh.
+
+**Declining is not the last line of defence.** If a real loop forms anyway, the dataplane reads its own datagram back off the tunnel and `noteUnderlayLoop` installs the bypass on proof rather than inference — and `isUnderlayLoop` scans `ns.seeds`, so seed addresses are covered by that path too. Speculating costs an outage; declining costs at most a few looped datagrams before the proven path corrects it. That asymmetry is the whole argument for which way to fail.
+
+### Cleaning up what is already out there
+
+Fixing the cause is not enough on its own, and this is the part that would otherwise have shipped as a silent non-fix.
+
+`Engine.Stop` tears down loops and devices but deliberately releases no bypass routes, and the mesh route these compete with lives on the tun device. So restarting takes the `/24` out of the table and leaves the blackholing `/32` sitting there pointed at the physical gateway. A node upgrading into this change would stop *creating* the problem while keeping every instance already installed — the same outage, from the operator's side, with a version number that claims otherwise.
+
+`clearStaleBypassRoute` sweeps them, once per address on the decline transition. Guarded on `bypassRefs`: if any tracker in this process legitimately holds a route to that address — a live session whose proven endpoint sits there — it is current and not ours to remove. Only a completely unreferenced address can be a leftover. A delete matching nothing is the ordinary case on a clean node and logs at debug.
+
+`Stop`'s leak-on-shutdown behavior is *unchanged*. Working around it was in scope; changing shutdown semantics for every bypass route was not.
+
+### internal/mesh tests build again
+
+The standing caveat carried since v948 — "`internal/mesh`'s test build failure is pre-existing" — was four files: `fallback_test.go`, `fallback_extraports_test.go`, `fallbackdial_backoff_test.go`, `fallbackbackoff_test.go`. They are an abandoned tcp→fallback rename, duplicating the `tcp*_test.go` family byte-for-byte apart from comments, and calling `ensureFallback`, `noteFallbackFailure`, `fallbackInBackoff` and `clearFallbackBackoff` — none of which exist in production code. They redeclared `waitFor`, `assertNoDuplicateDials` and three `Test` functions against their live counterparts, which is what took the whole package's test build down. They have never compiled and are deleted.
+
+This is a scope expansion, and it was load-bearing: without it nothing in this package could be verified, including the fix above.
+
+### Verification
+
+New `internal/mesh/ownerroutedbypass_test.go`, 11 tests.
+
+**The four bug-specific tests were run against the unfixed behavior first.** With only the filter reverted and everything else in place, `TestSeedBypassDeclinedForOwnerRoutedAddress`, `TestSeedBypassDeclineIsScopedToTheCoveringPrefix`, `TestFullTunnelDoesNotOverrideTheOwnerRoutedDecline` and `TestSeedBypassReleasedWhenOwnerStartsRoutingIt` all fail — the first reporting the literal `10.2.2.1/32 via 192.0.2.1` pin from the report. They catch the bug rather than passing vacuously.
+
+The rest guard the boundaries the fix must not cross: a foreign-origin covering prefix still acquires (v552's case must not regress), a proven session endpoint is never filtered, the stale sweep skips an address with a live reference and removes an unreferenced one. `TestRoutedByOrigin` covers wrong-origin, outside-prefix, empty-attribution and unknown-node; `TestRoutedByOriginV6` covers the `fd02::/64` shape, which the report showed only in v4 because that host had no IPv6 default route for `physicalGateway` to resolve.
+
+`internal/mesh` passes uncached in full (256s). The four `testing.Short()`-gated tests skip under `-short`, so they were run explicitly rather than left under a green tick: `TestDeadSeedWithTCPDoesNotDegrade` (91s), `TestDeadSeedRetryDoesNotDegradeOtherPeers` (181s), `TestSelfSeedDoesNotDegradeOtherPeers` (181s), `TestRelayedSessionSurvivesLossOnTheRelayLeg` (80s); `TestRelayRehandshakeDoesNotBreakRelayedPeers` skips itself, unchanged. All 20 other packages pass. `go build ./...`, `go vet` and `gofmt` clean.
+
+**Not exercised: the kernel.** These tests run against `withFakeGateway`, so no `AddGatewayRoute`/`DelGatewayRoute` in this change was executed against a real routing table. The route *contents* are asserted; the netlink calls carrying them are the same ones v552 already shipped. Standing caveats otherwise unchanged: no `nft`/`iptables` and no init in this container, so kernel NAT programming and the v951 systemd calls remain unexercised.
+
+### Operator note
+
+Existing pins are removed automatically on upgrade by the sweep above. To clear them without upgrading, delete the host routes directly — on the reporting mesh, grav1 held `10.2.2.1`, `10.3.3.1` and `10.4.4.1`:
+
+```
+ip route del 10.2.2.1/32 via 192.168.122.1 dev eth0
+```
+
+Without the fix they return within about a second of the next candidate gossip.
+
+---
+
 ## v964 — 2026-08-25
 
 **Any interface can now actually be shaped, not just listed. Entries on non-mesh interfaces are enforced by programming the kernel queueing discipline; mesh interfaces keep the userspace shaper.**

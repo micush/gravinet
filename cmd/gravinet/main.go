@@ -51,7 +51,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "964"
+	version = "966"
 	commit  = "none"
 )
 
@@ -1262,7 +1262,7 @@ func cmdRun(args []string) {
 					// Already up: apply the hot-reloadable runtime settings + keys.
 					var spec mesh.NetSpec
 					spec.ID = id
-					fillRuntimeSpec(&spec, n, newCfg.EffectiveFirewallExempt(), newCfg.NATStateTimeout, newCfg.FirewallServices, newCfg.BGP, newCfg.NAT, newCfg.QoS, newCfg.ShapingForNetwork(n), newCfg.Firewall, newCfg.FirewallRulesFor(n))
+					fillRuntimeSpec(&spec, n, newCfg.IfaceForNetwork(n), newCfg.EffectiveFirewallExempt(), newCfg.NATStateTimeout, newCfg.FirewallServices, newCfg.BGP, newCfg.NAT, newCfg.QoS, newCfg.ShapingForNetwork(n), newCfg.Firewall, newCfg.FirewallRulesFor(n))
 					// fillRuntimeSpec doesn't resolve seeds (only buildOneNetSpec does
 					// at startup); resolve them here so a seed added at runtime is
 					// dialed live via ReloadRuntime's seed merge, and one just
@@ -2864,7 +2864,7 @@ func buildOneNetSpec(n config.Network, cfg *config.Config, overlays []netip.Pref
 	spec.MulticastPPS = n.StormControl.MulticastPPS
 	spec.StormBurst = n.StormControl.Burst
 
-	fillRuntimeSpec(&spec, n, cfg.EffectiveFirewallExempt(), cfg.NATStateTimeout, cfg.FirewallServices, cfg.BGP, cfg.NAT, cfg.QoS, cfg.ShapingForNetwork(n), cfg.Firewall, cfg.FirewallRulesFor(n))
+	fillRuntimeSpec(&spec, n, cfg.IfaceForNetwork(n), cfg.EffectiveFirewallExempt(), cfg.NATStateTimeout, cfg.FirewallServices, cfg.BGP, cfg.NAT, cfg.QoS, cfg.ShapingForNetwork(n), cfg.Firewall, cfg.FirewallRulesFor(n))
 	return spec, dev, nil
 }
 
@@ -2951,7 +2951,7 @@ func autoMeshRoutesFromBGP(n config.Network, bgp config.BGPConfig) []netip.Prefi
 	return out
 }
 
-func fillRuntimeSpec(spec *mesh.NetSpec, n config.Network, exempts []config.FirewallExempt, natStateTimeout int, fwServices []config.FirewallService, bgp config.BGPConfig, nat config.NAT, qos config.QoS, thr config.Throttle, fw config.Firewall, fwRules []config.FirewallRule) {
+func fillRuntimeSpec(spec *mesh.NetSpec, n config.Network, netIface string, exempts []config.FirewallExempt, natStateTimeout int, fwServices []config.FirewallService, bgp config.BGPConfig, nat config.NAT, qos config.QoS, thr config.Throttle, fw config.Firewall, fwRules []config.FirewallRule) {
 	// Redistributed routes (hot-reloadable; applied live on reload). Disabled
 	// route entries are skipped.
 	for _, rt := range n.Routes {
@@ -3203,14 +3203,13 @@ func fillRuntimeSpec(spec *mesh.NetSpec, n config.Network, exempts []config.Fire
 		}
 		spec.SearchDomains = append(spec.SearchDomains, d.Domain)
 	}
-	// The overlay half of NAT: the node-global rules that name this network in
-	// their Scope. A rule with an empty Scope is about traffic crossing a
-	// physical interface and is enforced in the kernel only (see
-	// kernelNATRules), so it contributes nothing here.
+	// The overlay half of NAT. Which rules land here is derived from the rule
+	// itself — its egress interface — not from a separate operator-chosen
+	// selector; see natRuleAppliesToOverlay.
 	spec.NAT = spec.NAT[:0]
 	if nat.Enabled {
 		for _, nr := range nat.Rules {
-			if !nr.Enabled || !natRuleInScope(nr, n) {
+			if !nr.Enabled || !natRuleAppliesToOverlay(nr, netIface) {
 				continue
 			}
 			spec.NAT = append(spec.NAT, mesh.NATRuleSpec{
@@ -4155,20 +4154,40 @@ func overlayAddrChanged(engine *mesh.Engine, id uint64, n config.Network) bool {
 	return false
 }
 
-// natRuleInScope reports whether a node-global NAT rule also applies to this
-// mesh network's overlay traffic.
+// natRuleAppliesToOverlay reports whether a node-global NAT rule also applies
+// to the overlay traffic of the network whose tunnel device is netIface.
 //
-// A rule names its network by Name, falling back to ID for a network that has
-// no name — the same pair the migration writes, and the same pair the web
-// admin's scope picker offers. An empty Scope is a rule about traffic crossing
-// a physical interface: it is programmed into the kernel and belongs to no
-// overlay table.
-func natRuleInScope(r config.NATRule, n config.Network) bool {
-	scope := strings.TrimSpace(r.Scope)
-	if scope == "" {
-		return false
+// Derived from the rule, not declared alongside it. Through v965 this was a
+// separate NATRule.Scope the operator picked in the UI, which asked them to
+// answer a second time — in coarser terms, and in a form that could contradict
+// itself — a question the rule's own fields already answer. See the v966
+// changelog entry.
+//
+// The rule's egress interface is what carries the answer, because it is
+// already a hard match constraint everywhere else: kernelNATRules turns it
+// into OutIface for masquerade/SNAT and InIface for DNAT, so a rule naming
+// eth0 is by construction a statement about traffic crossing eth0. Overlay
+// traffic crosses no physical interface, so such a rule cannot describe it.
+//
+//   - Names this network's tunnel device (mesh0): about this overlay. In.
+//   - Names some other interface: about that interface's traffic, physical or
+//     another network's overlay. Out.
+//   - Blank: constrained by nothing but its own prefixes, which is exactly the
+//     case where the address predicates are the whole definition. In — and the
+//     per-packet matcher in internal/mesh/nat.go then decides on Source/Dest/
+//     DestPort/Proto, the same way the kernel does for the same rule.
+//
+// Note the interface means different things on the two paths and that is not
+// a conflict: the kernel matches on it, while the overlay engine only reads an
+// address off it when masquerading (see NATRuleSpec.Interface). A rule naming
+// this network's own device wants both — match here, and masquerade to this
+// node's overlay address.
+func natRuleAppliesToOverlay(r config.NATRule, netIface string) bool {
+	iface := strings.TrimSpace(r.Interface)
+	if iface == "" {
+		return true
 	}
-	return strings.EqualFold(scope, n.Name) || strings.EqualFold(scope, n.ID)
+	return strings.EqualFold(iface, strings.TrimSpace(netIface))
 }
 
 // qosRuleInScope reports whether a node-global QoS rule classifies traffic on

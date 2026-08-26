@@ -306,7 +306,7 @@ type Config struct {
 
 	// NAT is this node's address translation, node-global since v953. See the
 	// NAT type's doc comment for why it is not per mesh network, and
-	// NATRule.Scope for how a rule still reaches one when it needs to.
+	// natRuleAppliesToOverlay for how a rule reaches one when it needs to.
 	NAT NAT `json:"nat,omitempty"`
 
 	// QoS is this node's traffic classifier, node-global since v954. See the
@@ -2403,20 +2403,24 @@ type NATRule struct {
 	Interface string `json:"interface,omitempty"` // egress interface for masquerade
 	Enabled   bool   `json:"enabled"`
 
-	// Scope names the mesh network whose overlay traffic this rule also
-	// applies to, or is empty for a rule that is only ever about traffic
-	// crossing this host's physical interfaces.
+	// Scope is deprecated and ignored as of v966. It named the mesh network
+	// whose overlay traffic a rule also applied to, chosen separately from
+	// the rule itself in the admin UI and CLI.
 	//
-	// Every rule is programmed into the kernel regardless of Scope: a
-	// masquerade or SNAT rule is bound to a specific OutIface, so one whose
-	// traffic never egresses that interface simply never matches (see
-	// kernelNATRules). Scope decides only the *second* place a rule can be
-	// enforced — the userspace overlay↔overlay path in internal/mesh, which
-	// has to know which network's table to go in.
+	// It asked the operator to answer a second time, in coarser terms, a
+	// question the rule's own fields already answer: Interface is a hard
+	// match constraint in the kernel path (OutIface for masquerade/SNAT,
+	// InIface for DNAT), so a rule naming a physical interface is by
+	// construction about traffic crossing it and cannot describe overlay
+	// traffic. Because the two were maintained independently they could
+	// disagree, and a rule whose Scope named a network its own prefixes
+	// could never match was silently inert — with nothing on screen saying
+	// so. natRuleAppliesToOverlay now derives the answer.
 	//
-	// So an empty Scope is the ordinary router case, and is what a node with
-	// no mesh networks writes. A named one is what every pre-v953 rule
-	// migrates to, since each was already filed under exactly one network.
+	// Retained only so configs written before v966 still parse, the same way
+	// Direction and DestNetwork below are. It is cleared on load (see
+	// Config.Validate) rather than migrated, because there is nothing to
+	// migrate to: the rule already carries the information.
 	Scope string `json:"scope,omitempty"`
 
 	// Direction and DestNetwork are deprecated. An earlier version had a
@@ -2449,8 +2453,9 @@ type NATRule struct {
 // history, and its only real effect was to make NAT unreachable on a node
 // running gravinet as a plain LAN router.
 //
-// What the overlay half still needs is a network, which is what NATRule.Scope
-// carries. See its doc comment.
+// Which rules the overlay half also enforces is derived from the rules
+// themselves — see natRuleAppliesToOverlay in cmd/gravinet and NATRule.Scope's
+// doc comment for the selector it replaced.
 type NAT struct {
 	Enabled bool      `json:"enabled"`
 	Rules   []NATRule `json:"rules"`
@@ -3068,6 +3073,12 @@ func (c *Config) Validate() error {
 				// rather than guessing at an address.
 			}
 			r.Direction = ""
+			// Scope is dropped, not migrated: the rule already carries
+			// what it encoded (see NATRule.Scope). Clearing it on load
+			// keeps a pre-v966 config from writing a field back out that
+			// nothing reads any more, which would leave an operator
+			// editing a selector with no effect.
+			r.Scope = ""
 		}
 	}
 	if !c.EnableIPv4 && !c.EnableIPv6 {
@@ -4182,10 +4193,10 @@ func (c *Config) migrateNAT() {
 		for i := range c.Networks {
 			n := &c.Networks[i]
 			for _, r := range n.NAT.Rules {
-				r.Scope = n.Name
-				if r.Scope == "" {
-					r.Scope = n.ID
-				}
+				// No Scope is written: as of v966 the overlay half is
+				// derived from the rule (natRuleAppliesToOverlay), and a
+				// per-network rule being hoisted already names the
+				// interface it was about.
 				if !n.NAT.Enabled {
 					r.Enabled = false
 				}

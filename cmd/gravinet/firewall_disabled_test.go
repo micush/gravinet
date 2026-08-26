@@ -23,7 +23,7 @@ func TestDisabledFirewallKeepsRules(t *testing.T) {
 		{ID: 2, Action: "allow", Direction: "in", Proto: "udp", DstPortMin: 53, DstPortMax: 53},
 	}
 	var spec mesh.NetSpec
-	fillRuntimeSpec(&spec, n, nil, 0, nil, config.BGPConfig{}, config.NAT{}, config.QoS{}, config.Throttle{}, fw, rules)
+	fillRuntimeSpec(&spec, n, "mesh0", nil, 0, nil, config.BGPConfig{}, config.NAT{}, config.QoS{}, config.Throttle{}, fw, rules)
 	if spec.FirewallEnabled {
 		t.Fatal("FirewallEnabled should be false")
 	}

@@ -1601,7 +1601,7 @@ function buildSearchIndex(){
   ((state.natCfg||{}).rules||[]).forEach((r,i) => {
     const tgt = r.interface ? (r.translate||'masquerade')+' ('+r.interface+')' : (r.translate||'masquerade');
     const label = (r.source||'any')+' \u2192 '+(r.dest||'any')+' \u21d2 '+tgt;
-    add(label, 'NAT rule \u00b7 '+(r.scope||'host'), 'nat', null, {kind:'nat', idx:i}, r.scope||'');
+    add(label, 'NAT rule', 'nat', null, {kind:'nat', idx:i}, '');
   });
   return idx;
 }
@@ -3648,12 +3648,11 @@ const HELP = {
     },
   },
   'nat': {
-    topic: 'Network address translation rewrites addresses as traffic crosses this node. IPv4 and IPv6 are both supported \u2014 write one rule per family. Use \u00d8 next to <b>source</b> or <b>dest</b> to match everything EXCEPT that prefix.<br><br>NAT belongs to the node, not to a mesh network: a rule is a statement about packets, and a masquerade out a physical interface is an ordinary router rule that needs no overlay at all. <b>Scope</b> is what decides whether a rule <i>also</i> applies to an overlay \u2014 <b>host</b> for traffic crossing this host\u2019s own interfaces, or a mesh network by name to add that network\u2019s overlay traffic as well. Every rule is programmed into the kernel either way; a rule bound to an interface its traffic never leaves simply never matches.',
+    topic: 'Network address translation rewrites addresses as traffic crosses this node. IPv4 and IPv6 are both supported \u2014 write one rule per family. Use \u00d8 next to <b>source</b> or <b>dest</b> to match everything EXCEPT that prefix.<br><br>NAT belongs to the node, not to a mesh network: a rule is a statement about packets, and a masquerade out a physical interface is an ordinary router rule that needs no overlay at all. There is nothing extra to pick \u2014 the rule says where it applies. Every rule is programmed into the kernel, where its interface is a match constraint, so one bound to an interface its traffic never leaves simply never matches. A rule that names a mesh interface, or names none at all, is <i>also</i> applied to overlay traffic, where its source and dest decide the rest.',
     cols: {
       'source': '\u00d8 matches everything EXCEPT this prefix',
       'dest': '\u00d8 matches everything EXCEPT this prefix',
       'translate': 'the address traffic is rewritten to as it crosses this node',
-      'scope': 'host for traffic crossing this host\u2019s own interfaces; a mesh network name to also apply the rule to that network\u2019s overlay traffic',
     },
   },
   'qos': {
@@ -7997,8 +7996,8 @@ function secNAT(c) {
   card.appendChild(sectionCardHead('NAT', en, '/api/nat', on => ({op:(on?'enable':'disable')})));
 
   const rules = nat.rules||[];
-  let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>source</th><th>dest</th><th>translate</th><th>scope</th></tr>';
-  if (!rules.length) h += '<tr><td colspan="6" class="empty">no NAT rules \u2014 click + to add one</td></tr>';
+  let h = '<table><tr><th class="selcol"><input type="checkbox" class="selall"></th><th>state</th><th>source</th><th>dest</th><th>translate</th></tr>';
+  if (!rules.length) h += '<tr><td colspan="5" class="empty">no NAT rules \u2014 click + to add one</td></tr>';
   else rules.forEach((r, i) => {
     const tgt = r.interface ? (esc(r.translate||'masquerade')+' ('+esc(r.interface)+')') : esc(r.translate||'');
     const enabled = r.enabled!==false;
@@ -8006,18 +8005,13 @@ function secNAT(c) {
     const sNeg = !!r.source_negate, dNeg = !!r.dest_negate;
     const srcShown = (sNeg?'<b>!</b>':'') + esc(r.source||'any');
     const dstShown = (dNeg?'<b>!</b>':'') + esc(r.dest||'any') + (r.dest_port ? ':'+esc(r.dest_port)+'/'+esc(r.proto||'') : '');
-    // A blank scope reads as "host" rather than as an empty cell: empty would
-    // look like a field somebody forgot to fill in, when it is the ordinary
-    // and most common answer.
-    const scopeShown = r.scope ? esc(r.scope) : 'host';
     h += '<tr class="natrow'+(enabled?'':' fw-disabled')+'" data-idx="'+i+'" data-enabled="'+(enabled?1:0)+'"'
-      + ' data-source="'+esc(r.source||'')+'" data-dest="'+esc(r.dest||'')+'" data-dest-port="'+esc(r.dest_port||'')+'" data-proto="'+esc(r.proto||'')+'" data-translate="'+esc(r.translate||'')+'" data-iface="'+esc(r.interface||'')+'" data-scope="'+esc(r.scope||'')+'" data-source-negate="'+(sNeg?1:0)+'" data-dest-negate="'+(dNeg?1:0)+'">'
+      + ' data-source="'+esc(r.source||'')+'" data-dest="'+esc(r.dest||'')+'" data-dest-port="'+esc(r.dest_port||'')+'" data-proto="'+esc(r.proto||'')+'" data-translate="'+esc(r.translate||'')+'" data-iface="'+esc(r.interface||'')+'" data-source-negate="'+(sNeg?1:0)+'" data-dest-negate="'+(dNeg?1:0)+'">'
       + '<td class="selcol"><input type="checkbox" class="selbox"></td>'
       + '<td class="nat-state">'+stTag+'</td>'
       + '<td class="nat-field nat-src-cell"'+(sNeg?' title="anything EXCEPT this"':'')+'>'+srcShown+'</td>'
       + '<td class="nat-field nat-dst-cell"'+(dNeg?' title="anything EXCEPT this"':'')+'>'+dstShown+'</td>'
-      + '<td class="nat-field nat-tr-cell">'+tgt+'</td>'
-      + '<td class="nat-field nat-scope-cell">'+scopeShown+'</td></tr>';
+      + '<td class="nat-field nat-tr-cell">'+tgt+'</td></tr>';
   });
   const t = $('<div></div>'); t.innerHTML = h+'</table>'; card.appendChild(t);
   const table = t.querySelector('table');
@@ -8038,19 +8032,6 @@ function secNAT(c) {
   table._rowRemove = () => removeCheckedRows(table, tr => api('/api/nat',{method:'POST',body:JSON.stringify({op:'delete',index:parseInt(tr.dataset.idx,10)})}));
   c.appendChild(card);
   enhanceTable(table);
-}
-
-// natScopeOpts renders the scope picker: every mesh network this node has,
-// plus "host" for a rule that belongs to no overlay. "host" is first and is
-// the default, because it is what a rule about physical traffic wants and
-// because a node with no networks has nothing else to pick.
-function natScopeOpts(sel){
-  let o = '<option value=""'+(!sel?' selected':'')+'>host</option>';
-  for (const cf of (state.cfg||[])){
-    const n = cf.name || cf.id;
-    o += '<option value="'+esc(n)+'"'+(n===sel?' selected':'')+'>'+esc(n)+'</option>';
-  }
-  return o;
 }
 
 // natParseTranslate reads a stored translate string back into
@@ -8137,8 +8118,7 @@ function natAddRow(table){
     + '<td class="nat-state"><span class="on">enabled</span></td>'
     + '<td><span class="fwe-field"><input class="nate-src" placeholder="any or CIDR" style="width:120px">'+fwNegToggle('nate-src-negate','match anything EXCEPT this')+'</span></td>'
     + '<td><span class="fwe-field"><input class="nate-dst" placeholder="any or CIDR" style="width:110px">'+fwNegToggle('nate-dst-negate','match anything EXCEPT this')+'</span> <input class="nate-dport" placeholder="port(s)" title="dest-port: a single port or a range like 8000-8010 \u2014 port-forward rules only" style="width:70px"> <select class="nate-proto" title="required when dest-port is set"><option value="">any</option><option value="tcp">tcp</option><option value="udp">udp</option></select></td>'
-    + '<td class="nate-tr-cell-new">' + natTranslateCellHTML({mode:'masquerade'}) + '</td>'
-    + '<td><select class="nate-scope" title="host: a rule about traffic crossing this host\'s own interfaces. A mesh network: also applied to that network\'s overlay traffic.">'+natScopeOpts('')+'</select></td>';
+    + '<td class="nate-tr-cell-new">' + natTranslateCellHTML({mode:'masquerade'}) + '</td>';
   if (!insertNewRow(table, tr)) return;
   const trCell = tr.querySelector('.nate-tr-cell-new');
   natWireTranslateFields(trCell, '');
@@ -8155,7 +8135,6 @@ function natAddRow(table){
     if (dNeg && !dstV){ noticeModal('dest \u00d8 is on but dest is empty (any): that would match nothing; set dest or turn its \u00d8 off'); return; }
     edit('/api/nat', {
       op:'add',
-      scope: tr.querySelector('.nate-scope').value,
       source: srcV, dest: dstV,
       source_negate: sNeg, dest_negate: dNeg,
       dest_port: tr.querySelector('.nate-dport').value.trim(),
@@ -8191,8 +8170,6 @@ function startNATEdit(tr){
     + '<option value="udp"'+(curProto==='udp'?' selected':'')+'>udp</option></select>';
   trCell.innerHTML = natTranslateCellHTML(natParseTranslate(tr.dataset.translate));
   natWireTranslateFields(trCell, tr.dataset.iface || '');
-  const scopeCell = tr.querySelector('.nat-scope-cell');
-  scopeCell.innerHTML = '<select class="nate-scope" title="host: a rule about traffic crossing this host\'s own interfaces. A mesh network: also applied to that network\'s overlay traffic.">'+natScopeOpts(tr.dataset.scope||'')+'</select>';
   // Same Ø control the firewall editor uses, including its click behavior.
   fwWireNegToggles(tr);
   if (tr.dataset.sourceNegate === '1') srcCell.querySelector('.nate-src-negate').classList.add('active');
@@ -8209,7 +8186,6 @@ function startNATEdit(tr){
     if (dNeg && !dstV){ await noticeModal('dest \u00d8 is on but dest is empty (any): that would match nothing; set dest or turn its \u00d8 off'); return; }
     const r = await api('/api/nat', { method:'POST', body: JSON.stringify({
       op:'update', index:idx,
-      scope: scopeCell.querySelector('.nate-scope').value,
       source: srcV, dest: dstV,
       source_negate: sNeg, dest_negate: dNeg,
       dest_port: dstCell.querySelector('.nate-dport').value.trim(),

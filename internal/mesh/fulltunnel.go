@@ -288,21 +288,82 @@ func (e *Engine) resyncAllBypassRoutes(ns *netState) {
 func (e *Engine) syncSeedBypassRoutes(ns *netState) {
 	ns.mu.RLock()
 	want := make(map[netip.Addr]bool, len(ns.seeds)+len(ns.tcpSeeds))
-	for _, s := range ns.seeds {
-		if s.Addr().IsValid() {
-			want[s.Addr()] = true
+	owner := make(map[netip.Addr]string, len(ns.seeds)+len(ns.tcpSeeds))
+	note := func(s netip.AddrPort) {
+		if !s.Addr().IsValid() {
+			return
 		}
+		a := s.Addr().Unmap()
+		want[a] = true
+		// Attribution is per address, but seedOwner is keyed by address
+		// *and* port, so two ports of one host can disagree. Keep the first
+		// non-empty answer rather than letting a later unattributed entry
+		// blank it out: the filter below is a decline, and declining needs
+		// positive evidence.
+		if owner[a] == "" {
+			owner[a] = ns.seedOwner[s]
+		}
+	}
+	for _, s := range ns.seeds {
+		note(s)
 	}
 	for _, s := range ns.tcpSeeds {
-		if s.Addr().IsValid() {
-			want[s.Addr()] = true
-		}
+		note(s)
 	}
 	ns.mu.RUnlock()
+
+	// A seed is an unproven guess — nothing has completed a handshake against
+	// it — so acquiring a bypass for one is speculation, and speculation that
+	// is wrong installs a blackholing /32 over a working mesh route. Decline
+	// for any address whose own advertising node also redistributes a prefix
+	// covering it: there the mesh route is the path to that address, not a
+	// hijack of one (see routedByOrigin for the full case split).
+	//
+	// The common shape is a peer offering its LAN-side interface address as a
+	// host candidate while redistributing that same LAN — grav2 advertising
+	// 10.2.2.1 alongside 10.2.2.0/24. Pinning 10.2.2.1 to the physical
+	// gateway wins longest-prefix-match over the /24 and hands the packet to
+	// a router with no way back into the peer's LAN, so the peer's own
+	// gateway address goes dark for everything on this host, not just for the
+	// dial that prompted it.
+	//
+	// Declining is safe even in the case this reasoning gets wrong, because
+	// it is not the last line of defence: if a real underlay loop forms
+	// anyway, the dataplane sees its own datagram come back off the tunnel
+	// and noteUnderlayLoop installs the bypass on proof instead of on
+	// inference. isUnderlayLoop scans ns.seeds, so seed addresses are covered
+	// by that path too. Speculating costs an outage; declining costs at most
+	// a few looped datagrams before the proven path fixes it.
+	declined := map[netip.Addr]bool{}
+	for a := range want {
+		if ns.routedByOrigin(a, owner[a]) {
+			delete(want, a)
+			declined[a] = true
+		}
+	}
 
 	ns.seedBypassMu.Lock()
 	if ns.seedBypassHeld == nil {
 		ns.seedBypassHeld = map[netip.Addr]bool{}
+	}
+	if ns.seedBypassDeclined == nil {
+		ns.seedBypassDeclined = map[netip.Addr]bool{}
+	}
+	// Reconcile the decline set the same way the held set is reconciled just
+	// below, so the log line lands on the transition and an address that
+	// stops being declined — its seed dropped, or the covering route
+	// withdrawn — is reported again if it ever comes back.
+	var toLog []netip.Addr
+	for a := range declined {
+		if !ns.seedBypassDeclined[a] {
+			ns.seedBypassDeclined[a] = true
+			toLog = append(toLog, a)
+		}
+	}
+	for a := range ns.seedBypassDeclined {
+		if !declined[a] {
+			delete(ns.seedBypassDeclined, a)
+		}
 	}
 	var toAcquire, toRelease []netip.Addr
 	for a := range want {
@@ -323,12 +384,59 @@ func (e *Engine) syncSeedBypassRoutes(ns *netState) {
 	}
 	ns.seedBypassMu.Unlock()
 
+	for _, a := range toLog {
+		e.log.Infof("mesh: not pinning %s to the physical gateway on net %x — %q both advertises that address and routes the prefix covering it, so the mesh is the path to it; a bypass here would blackhole it", a, ns.spec.ID, owner[a])
+		// Same transition, so this runs once per address rather than every
+		// tick: clear the pin an older build may have left for it.
+		e.clearStaleBypassRoute(ns, a)
+	}
 	for _, a := range toAcquire {
 		e.acquireBypassRoute(ns, a)
 	}
 	for _, a := range toRelease {
 		e.releaseBypassRoute(a)
 	}
+}
+
+// clearStaleBypassRoute deletes a bypass host route for addr that this
+// process did not install and would not install now — the one left behind by
+// an older build that pinned owner-routed seed addresses (see
+// syncSeedBypassRoutes' filter, and changelog v965).
+//
+// This is needed because nothing else would ever remove it. Engine.Stop
+// tears down loops and devices but deliberately releases no bypass routes,
+// and the mesh route it competes with lives on the tun device, so restarting
+// the daemon takes the /24 out of the table and leaves the blackholing /32
+// sitting there pointed at the physical gateway. A node that upgraded into
+// the fix would stop *creating* the problem while keeping every instance of
+// it already on disk, which is the same outage from the operator's side.
+//
+// Guarded on bypassRefs: if any tracker in this process legitimately holds a
+// route to the same address — a live peer session whose proven endpoint sits
+// there — that route is current and not ours to remove. Only an address with
+// no reference at all can be a leftover. A delete that matches nothing is
+// the ordinary case on a clean node and is logged at debug, not warned.
+func (e *Engine) clearStaleBypassRoute(ns *netState, addr netip.Addr) {
+	if !addr.IsValid() || !gatewaySupported {
+		return
+	}
+	e.bypassMu.Lock()
+	_, held := e.bypassRefs[addr]
+	e.bypassMu.Unlock()
+	if held {
+		return
+	}
+	gw, ifIndex, err := e.physicalGateway(ns, addr)
+	if err != nil {
+		e.log.Debugf("mesh: stale bypass sweep for %s on net %x: %v", addr, ns.spec.ID, err)
+		return
+	}
+	p := netip.PrefixFrom(addr, addr.BitLen())
+	if err := delGatewayRouteFn(p, gw, ifIndex, bypassMetric); err != nil {
+		e.log.Debugf("mesh: no stale bypass route %s via %s to remove on net %x: %v", p, gw, ns.spec.ID, err)
+		return
+	}
+	e.log.Infof("mesh: removed stale bypass route %s via %s on net %x — left by a build that pinned this address before the owner-routed check existed", p, gw, ns.spec.ID)
 }
 
 // physicalGWCache is what physicalGateway caches per address family once

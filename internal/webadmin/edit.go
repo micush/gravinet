@@ -1160,13 +1160,15 @@ func (s *Server) handleTCPPort(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleNAT(w http.ResponseWriter, r *http.Request) {
-	// Net is gone from every op: NAT is node-global from v953. Scope replaces
-	// it and means something different — not "which network owns this rule"
-	// but "which network's overlay traffic does it also apply to", empty for
-	// the ordinary router rule that only ever touches physical interfaces.
+	// Net is gone from every op: NAT is node-global from v953. Scope is gone
+	// too as of v966 — which overlay a rule also applies to is derived from
+	// the rule (see natRuleAppliesToOverlay in cmd/gravinet), not chosen
+	// beside it. A "scope" field in the body is accepted and ignored so a
+	// stale browser tab posting the old shape gets its rule saved rather
+	// than a decode error.
 	var req struct {
 		Op                             string
-		Scope                          string
+		Scope                          string `json:"scope"` // accepted, ignored; see above
 		Iface, Source, Dest, Translate string
 		DestPort                       string `json:"dest_port"`
 		Proto                          string
@@ -1183,11 +1185,11 @@ func (s *Server) handleNAT(w http.ResponseWriter, r *http.Request) {
 			// Full rule when any rule field is set; otherwise the masquerade
 			// shorthand (interface only).
 			if req.Source != "" || req.Dest != "" || req.DestPort != "" || req.Translate != "" {
-				return cfg.NATRuleAddNeg(req.Source, req.Dest, req.DestPort, req.Proto, req.Translate, req.Iface, req.Scope, req.SourceNegate, req.DestNegate)
+				return cfg.NATRuleAddNeg(req.Source, req.Dest, req.DestPort, req.Proto, req.Translate, req.Iface, req.SourceNegate, req.DestNegate)
 			}
-			return cfg.NATAdd(req.Iface, req.Scope)
+			return cfg.NATAdd(req.Iface)
 		case "update":
-			return cfg.NATRuleUpdateAtNeg(req.Index, req.Source, req.Dest, req.DestPort, req.Proto, req.Translate, req.Iface, req.Scope, req.SourceNegate, req.DestNegate)
+			return cfg.NATRuleUpdateAtNeg(req.Index, req.Source, req.Dest, req.DestPort, req.Proto, req.Translate, req.Iface, req.SourceNegate, req.DestNegate)
 		case "delete", "del", "remove":
 			if req.Iface != "" {
 				return cfg.NATDelete(req.Iface)

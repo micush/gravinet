@@ -1131,43 +1131,28 @@ func (c *Config) FirewallRuleMove(id uint64, to int) error {
 	return nil
 }
 
-// NATAdd adds a masquerade (overlay→underlay) rule out the given interface.
-func (c *Config) NATAdd(iface, scope string) error {
+// NATAdd adds a masquerade rule out the given interface.
+//
+// The scope argument is gone as of v966 — with it, two rules could share an
+// interface and be told apart only by a selector that did not change what
+// either rule matched, so the duplicate check below is now on the interface
+// alone. See NATRule.Scope.
+func (c *Config) NATAdd(iface string) error {
 	if iface == "" {
 		return fmt.Errorf("NAT rule needs an interface")
 	}
 	for _, r := range c.NAT.Rules {
-		if r.Interface == iface && strings.EqualFold(r.Scope, scope) {
+		if r.Interface == iface {
 			return fmt.Errorf("NAT rule for %s already exists", iface)
 		}
-	}
-	if err := c.checkNATScope(scope); err != nil {
-		return err
 	}
 	c.NAT.Enabled = true
 	c.NAT.Rules = append(c.NAT.Rules, NATRule{
 		Translate: "masquerade",
 		Interface: iface,
-		Scope:     scope,
 		Enabled:   true,
 	})
 	return nil
-}
-
-// checkNATScope refuses a scope that names no mesh network. Empty is always
-// valid — that is the ordinary router rule, enforced in the kernel only, and
-// is what a node with no mesh networks writes.
-func (c *Config) checkNATScope(scope string) error {
-	scope = strings.TrimSpace(scope)
-	if scope == "" {
-		return nil
-	}
-	for i := range c.Networks {
-		if strings.EqualFold(c.Networks[i].Name, scope) || strings.EqualFold(c.Networks[i].ID, scope) {
-			return nil
-		}
-	}
-	return fmt.Errorf("no mesh network named %q — leave the scope blank for a rule about traffic crossing this host's own interfaces", scope)
 }
 
 func (c *Config) NATDelete(iface string) error {
@@ -1487,14 +1472,14 @@ func applyNATNegate(r *NATRule, srcNeg, dstNeg bool) error {
 	return nil
 }
 
-func (c *Config) NATRuleAdd(source, dest, destPort, proto, translate, iface, scope string) error {
-	return c.NATRuleAddNeg(source, dest, destPort, proto, translate, iface, scope, false, false)
+func (c *Config) NATRuleAdd(source, dest, destPort, proto, translate, iface string) error {
+	return c.NATRuleAddNeg(source, dest, destPort, proto, translate, iface, false, false)
 }
 
 // NATRuleAddNeg is NATRuleAdd with the source/dest negation flags. Kept as a
 // separate entry point so the six-argument form stays valid for every existing
 // caller and test.
-func (c *Config) NATRuleAddNeg(source, dest, destPort, proto, translate, iface, scope string, srcNeg, dstNeg bool) error {
+func (c *Config) NATRuleAddNeg(source, dest, destPort, proto, translate, iface string, srcNeg, dstNeg bool) error {
 	rule, err := buildNATRule(source, dest, destPort, proto, translate, iface)
 	if err != nil {
 		return err
@@ -1502,10 +1487,6 @@ func (c *Config) NATRuleAddNeg(source, dest, destPort, proto, translate, iface, 
 	if err := applyNATNegate(&rule, srcNeg, dstNeg); err != nil {
 		return err
 	}
-	if err := c.checkNATScope(scope); err != nil {
-		return err
-	}
-	rule.Scope = strings.TrimSpace(scope)
 	rule.Enabled = true
 	c.NAT.Enabled = true
 	c.NAT.Rules = append(c.NAT.Rules, rule)
@@ -1515,12 +1496,12 @@ func (c *Config) NATRuleAddNeg(source, dest, destPort, proto, translate, iface, 
 // NATRuleUpdateAt replaces the rule at index idx (as shown by NAT list / the UI)
 // in place, preserving its enabled/disabled state and its position. It backs the
 // click-to-edit rule fields in the UI. Validation matches NATRuleAdd.
-func (c *Config) NATRuleUpdateAt(idx int, source, dest, destPort, proto, translate, iface, scope string) error {
-	return c.NATRuleUpdateAtNeg(idx, source, dest, destPort, proto, translate, iface, scope, false, false)
+func (c *Config) NATRuleUpdateAt(idx int, source, dest, destPort, proto, translate, iface string) error {
+	return c.NATRuleUpdateAtNeg(idx, source, dest, destPort, proto, translate, iface, false, false)
 }
 
 // NATRuleUpdateAtNeg is NATRuleUpdateAt with the negation flags.
-func (c *Config) NATRuleUpdateAtNeg(idx int, source, dest, destPort, proto, translate, iface, scope string, srcNeg, dstNeg bool) error {
+func (c *Config) NATRuleUpdateAtNeg(idx int, source, dest, destPort, proto, translate, iface string, srcNeg, dstNeg bool) error {
 	if idx < 0 || idx >= len(c.NAT.Rules) {
 		return fmt.Errorf("no NAT rule at index %d (have %d)", idx, len(c.NAT.Rules))
 	}
@@ -1531,10 +1512,6 @@ func (c *Config) NATRuleUpdateAtNeg(idx int, source, dest, destPort, proto, tran
 	if err := applyNATNegate(&rule, srcNeg, dstNeg); err != nil {
 		return err
 	}
-	if err := c.checkNATScope(scope); err != nil {
-		return err
-	}
-	rule.Scope = strings.TrimSpace(scope)
 	rule.Enabled = c.NAT.Rules[idx].Enabled // preserve current state
 	c.NAT.Rules[idx] = rule
 	return nil

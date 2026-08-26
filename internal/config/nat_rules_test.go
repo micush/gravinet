@@ -12,7 +12,7 @@ func natTestCfg() *Config {
 func TestNATRuleAddFull(t *testing.T) {
 	c := natTestCfg()
 	// SNAT a source subnet toward a dest, translating to a literal address.
-	if err := c.NATRuleAdd("10.0.0.0/24", "203.0.113.0/24", "", "", "198.51.100.7", "", ""); err != nil {
+	if err := c.NATRuleAdd("10.0.0.0/24", "203.0.113.0/24", "", "", "198.51.100.7", ""); err != nil {
 		t.Fatalf("full rule: %v", err)
 	}
 	r := c.NAT.Rules[0]
@@ -23,7 +23,7 @@ func TestNATRuleAddFull(t *testing.T) {
 		t.Error("adding a rule should enable NAT")
 	}
 	// masquerade form
-	if err := c.NATRuleAdd("10.0.0.0/24", "", "", "", "masquerade", "eth0", ""); err != nil {
+	if err := c.NATRuleAdd("10.0.0.0/24", "", "", "", "masquerade", "eth0"); err != nil {
 		t.Fatalf("masquerade: %v", err)
 	}
 	m := c.NAT.Rules[1]
@@ -32,7 +32,7 @@ func TestNATRuleAddFull(t *testing.T) {
 	}
 	// port-forward form: DNAT, no interface — the mode and the target both
 	// live in Translate now, there's no separate direction field.
-	if err := c.NATRuleAdd("", "203.0.113.5", "", "", "port-forward:10.0.0.9", "", ""); err != nil {
+	if err := c.NATRuleAdd("", "203.0.113.5", "", "", "port-forward:10.0.0.9", ""); err != nil {
 		t.Fatalf("port-forward: %v", err)
 	}
 	pf := c.NAT.Rules[2]
@@ -62,7 +62,7 @@ func TestNATRuleAddRejectsBadInput(t *testing.T) {
 	}
 	for i, tc := range cases {
 		c := natTestCfg()
-		if err := c.NATRuleAdd(tc.src, tc.dst, tc.destPort, tc.proto, tc.tr, tc.iface, ""); err == nil {
+		if err := c.NATRuleAdd(tc.src, tc.dst, tc.destPort, tc.proto, tc.tr, tc.iface); err == nil {
 			t.Errorf("case %d (%+v): expected error, got none", i, tc)
 		}
 	}
@@ -76,7 +76,7 @@ func TestNATRuleAddRejectsBadInput(t *testing.T) {
 // protocol's port space.
 func TestNATRuleProtoOnlyWithoutDestPortIsValid(t *testing.T) {
 	c := natTestCfg()
-	if err := c.NATRuleAdd("", "203.0.113.5", "", "tcp", "port-forward:10.0.0.9", "", ""); err != nil {
+	if err := c.NATRuleAdd("", "203.0.113.5", "", "tcp", "port-forward:10.0.0.9", ""); err != nil {
 		t.Fatalf("proto with no dest-port should be accepted: %v", err)
 	}
 	if r := c.NAT.Rules[0]; r.Proto != "tcp" || r.DestPort != "" {
@@ -90,7 +90,7 @@ func TestNATRuleProtoOnlyWithoutDestPortIsValid(t *testing.T) {
 // migrated from something else.
 func TestNATRulePortForwardPrefixCaseInsensitive(t *testing.T) {
 	c := natTestCfg()
-	if err := c.NATRuleAdd("", "", "", "", "Port-FORWARD:10.0.0.9", "", ""); err != nil {
+	if err := c.NATRuleAdd("", "", "", "", "Port-FORWARD:10.0.0.9", ""); err != nil {
 		t.Fatalf("mixed-case port-forward prefix should be accepted: %v", err)
 	}
 	r := c.NAT.Rules[0]
@@ -104,7 +104,7 @@ func TestNATRulePortForwardPrefixCaseInsensitive(t *testing.T) {
 // optionally remap the port on a single-port match.
 func TestNATRuleDestPortAndProto(t *testing.T) {
 	c := natTestCfg()
-	if err := c.NATRuleAdd("", "203.0.113.5", "32400", "tcp", "port-forward:10.0.0.5", "", ""); err != nil {
+	if err := c.NATRuleAdd("", "203.0.113.5", "32400", "tcp", "port-forward:10.0.0.5", ""); err != nil {
 		t.Fatalf("single port: %v", err)
 	}
 	r := c.NAT.Rules[0]
@@ -112,7 +112,7 @@ func TestNATRuleDestPortAndProto(t *testing.T) {
 		t.Fatalf("single-port rule wrong: %+v", r)
 	}
 
-	if err := c.NATRuleAdd("", "203.0.113.5", "8000-8010", "udp", "port-forward:10.0.0.6", "", ""); err != nil {
+	if err := c.NATRuleAdd("", "203.0.113.5", "8000-8010", "udp", "port-forward:10.0.0.6", ""); err != nil {
 		t.Fatalf("range: %v", err)
 	}
 	rng := c.NAT.Rules[1]
@@ -121,7 +121,7 @@ func TestNATRuleDestPortAndProto(t *testing.T) {
 	}
 
 	// Remap: a single dest-port with an explicit target port in Translate.
-	if err := c.NATRuleAdd("", "203.0.113.5", "8443", "tcp", "port-forward:10.0.0.7:443", "", ""); err != nil {
+	if err := c.NATRuleAdd("", "203.0.113.5", "8443", "tcp", "port-forward:10.0.0.7:443", ""); err != nil {
 		t.Fatalf("remap: %v", err)
 	}
 	remap := c.NAT.Rules[2]
@@ -130,7 +130,7 @@ func TestNATRuleDestPortAndProto(t *testing.T) {
 	}
 
 	// Proto is normalized to lowercase.
-	if err := c.NATRuleAdd("", "203.0.113.5", "53", "UDP", "port-forward:10.0.0.8", "", ""); err != nil {
+	if err := c.NATRuleAdd("", "203.0.113.5", "53", "UDP", "port-forward:10.0.0.8", ""); err != nil {
 		t.Fatalf("uppercase proto: %v", err)
 	}
 	if got := c.NAT.Rules[3].Proto; got != "udp" {
@@ -140,8 +140,8 @@ func TestNATRuleDestPortAndProto(t *testing.T) {
 
 func TestNATRuleDeleteAt(t *testing.T) {
 	c := natTestCfg()
-	c.NATRuleAdd("10.0.0.0/24", "", "", "", "masquerade", "eth0", "")
-	c.NATRuleAdd("10.0.0.5/32", "", "", "", "198.51.100.9", "", "")
+	c.NATRuleAdd("10.0.0.0/24", "", "", "", "masquerade", "eth0")
+	c.NATRuleAdd("10.0.0.5/32", "", "", "", "198.51.100.9", "")
 	if err := c.NATRuleDeleteAt(0); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -225,7 +225,7 @@ func TestNATRuleDirectionMigration(t *testing.T) {
 
 func TestNATRuleSetEnabled(t *testing.T) {
 	c := natTestCfg()
-	if err := c.NATRuleAdd("10.0.0.0/24", "", "", "", "masquerade", "eth0", ""); err != nil {
+	if err := c.NATRuleAdd("10.0.0.0/24", "", "", "", "masquerade", "eth0"); err != nil {
 		t.Fatal(err)
 	}
 	// New NAT rules are enabled by default.
@@ -261,10 +261,10 @@ func TestNATRuleSetEnabled(t *testing.T) {
 
 func TestNATRuleUpdateAt(t *testing.T) {
 	c := natTestCfg()
-	if err := c.NATRuleAdd("10.0.0.0/24", "", "", "", "masquerade", "eth0", ""); err != nil {
+	if err := c.NATRuleAdd("10.0.0.0/24", "", "", "", "masquerade", "eth0"); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.NATRuleAdd("10.0.1.0/24", "", "", "", "198.51.100.7", "", ""); err != nil {
+	if err := c.NATRuleAdd("10.0.1.0/24", "", "", "", "198.51.100.7", ""); err != nil {
 		t.Fatal(err)
 	}
 	// Disable rule 0 so we can confirm the edit preserves state and position.
@@ -273,7 +273,7 @@ func TestNATRuleUpdateAt(t *testing.T) {
 	}
 
 	// Edit rule 0: switch from masquerade to port-forward (iface should clear).
-	if err := c.NATRuleUpdateAt(0, "10.0.0.0/24", "203.0.113.0/24", "", "", "port-forward:192.0.2.5", "eth0", ""); err != nil {
+	if err := c.NATRuleUpdateAt(0, "10.0.0.0/24", "203.0.113.0/24", "", "", "port-forward:192.0.2.5", "eth0"); err != nil {
 		t.Fatal(err)
 	}
 	r := c.NAT.Rules[0]
@@ -292,7 +292,7 @@ func TestNATRuleUpdateAt(t *testing.T) {
 	}
 
 	// Add dest-port/proto on the edit.
-	if err := c.NATRuleUpdateAt(0, "10.0.0.0/24", "203.0.113.0/24", "32400", "tcp", "port-forward:192.0.2.5", "", ""); err != nil {
+	if err := c.NATRuleUpdateAt(0, "10.0.0.0/24", "203.0.113.0/24", "32400", "tcp", "port-forward:192.0.2.5", ""); err != nil {
 		t.Fatal(err)
 	}
 	if r := c.NAT.Rules[0]; r.DestPort != "32400" || r.Proto != "tcp" {
@@ -300,7 +300,7 @@ func TestNATRuleUpdateAt(t *testing.T) {
 	}
 
 	// Edit back to masquerade preserving the (still disabled) state.
-	if err := c.NATRuleUpdateAt(0, "10.0.0.0/24", "", "", "", "masquerade", "eth1", ""); err != nil {
+	if err := c.NATRuleUpdateAt(0, "10.0.0.0/24", "", "", "", "masquerade", "eth1"); err != nil {
 		t.Fatal(err)
 	}
 	if r := c.NAT.Rules[0]; r.Translate != "masquerade" || r.Interface != "eth1" || r.Enabled {
@@ -308,15 +308,15 @@ func TestNATRuleUpdateAt(t *testing.T) {
 	}
 
 	// Masquerade without an interface is rejected (shared validation with add).
-	if err := c.NATRuleUpdateAt(0, "", "", "", "", "masquerade", "", ""); err == nil {
+	if err := c.NATRuleUpdateAt(0, "", "", "", "", "masquerade", ""); err == nil {
 		t.Error("masquerade without iface should error")
 	}
 	// Bad port-forward target rejected.
-	if err := c.NATRuleUpdateAt(0, "", "", "", "", "port-forward:not-an-ip", "", ""); err == nil {
+	if err := c.NATRuleUpdateAt(0, "", "", "", "", "port-forward:not-an-ip", ""); err == nil {
 		t.Error("bad port-forward target should error")
 	}
 	// Out-of-range index rejected.
-	if err := c.NATRuleUpdateAt(9, "", "", "", "", "masquerade", "eth0", ""); err == nil {
+	if err := c.NATRuleUpdateAt(9, "", "", "", "", "masquerade", "eth0"); err == nil {
 		t.Error("out-of-range index should error")
 	}
 }
@@ -369,11 +369,17 @@ func TestNATMigratesFromPerNetwork(t *testing.T) {
 	if len(c.NAT.Rules) != 3 {
 		t.Fatalf("want all three rules hoisted, got %d: %+v", len(c.NAT.Rules), c.NAT.Rules)
 	}
-	// Each rule keeps the network it came from as its scope, which is exactly
-	// what it already meant: kernel-wide, plus that network's overlay table.
-	for i, want := range []string{"lan", "lan", "dmz"} {
-		if c.NAT.Rules[i].Scope != want {
-			t.Errorf("rule %d: scope %q, want %q", i, c.NAT.Rules[i].Scope, want)
+	// No rule carries a scope: as of v966 the selector is gone and the field
+	// is cleared on load (see NATRule.Scope). What decides where a rule
+	// applies is the rule, so what must survive the hoist is its interface.
+	for i := range c.NAT.Rules {
+		if c.NAT.Rules[i].Scope != "" {
+			t.Errorf("rule %d: scope %q survived the load; it should be cleared", i, c.NAT.Rules[i].Scope)
+		}
+	}
+	for i, want := range []string{"eth0", "", "eth1"} {
+		if c.NAT.Rules[i].Interface != want {
+			t.Errorf("rule %d: interface %q, want %q — the hoist lost what now decides where the rule applies", i, c.NAT.Rules[i].Interface, want)
 		}
 	}
 	// Enabled state: rule 0 was on, rule 1 was off, rule 2 was on but its
@@ -416,7 +422,7 @@ func TestNATMigrationLeavesNewConfigsAlone(t *testing.T) {
 func TestNATWorksWithNoMeshNetworks(t *testing.T) {
 	c := Default()
 	c.Networks = nil
-	if err := c.NATRuleAdd("192.168.1.0/24", "", "", "", "masquerade", "eth0", ""); err != nil {
+	if err := c.NATRuleAdd("192.168.1.0/24", "", "", "", "masquerade", "eth0"); err != nil {
 		t.Fatalf("a node with no mesh networks could not add a NAT rule: %v", err)
 	}
 	if err := c.Validate(); err != nil {
@@ -425,9 +431,9 @@ func TestNATWorksWithNoMeshNetworks(t *testing.T) {
 	if len(c.NAT.Rules) != 1 || !c.NAT.Enabled {
 		t.Fatalf("rule not stored: enabled=%v rules=%+v", c.NAT.Enabled, c.NAT.Rules)
 	}
-	// A scope naming a network that does not exist is refused, so a typo does
-	// not silently produce a rule that reaches no overlay table.
-	if err := c.NATRuleAdd("10.0.0.0/24", "", "", "", "masquerade", "eth0", "nope"); err == nil {
-		t.Error("a scope naming no mesh network was accepted")
+	// There is no scope to get wrong any more, so there is no typo to refuse:
+	// a second rule on a node with no networks is just another ordinary rule.
+	if err := c.NATRuleAdd("10.0.0.0/24", "", "", "", "masquerade", "eth1"); err != nil {
+		t.Errorf("a second rule on a network-less node was refused: %v", err)
 	}
 }

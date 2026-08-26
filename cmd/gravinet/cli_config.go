@@ -1034,13 +1034,14 @@ func cmdHost(args []string) {
 
 func cmdNAT(args []string) {
 	if len(args) == 0 {
-		fatal("usage: gravinet nat <add IFACE|delete IFACE|enable-rule INDEX|disable-rule INDEX|enable|disable|list> [scope NAME]")
+		fatal("usage: gravinet nat <add IFACE|delete IFACE|enable-rule INDEX|disable-rule INDEX|enable|disable|list>")
 	}
 	sub := args[0]
-	// -net is gone: NAT is node-global from v953. A rule's optional "scope"
-	// keyword names a mesh network whose overlay traffic it also applies to,
-	// which is a property of the rule rather than a selector for which
-	// network's table to edit.
+	// -net is gone: NAT is node-global from v953, and the "scope" keyword is
+	// gone as of v966 — which overlay a rule also applies to is derived from
+	// the rule itself (see natRuleAppliesToOverlay). A stale "scope NAME" on
+	// the command line is rejected below rather than silently ignored, so a
+	// script carrying one is told its rule no longer means what it said.
 	cfg, path, rest := openCfg(args[1:])
 
 	sub = expandVerb(sub, v("list"), v("enable", "disable"), v("enable-rule", "disable-rule"), v("state"), v("add"), v("delete", "del", "remove"))
@@ -1128,14 +1129,16 @@ func cmdNAT(args []string) {
 		proto := kw(rest, "proto")
 		translate := kw(rest, "translate")
 		iface := kw(rest, "iface")
-		scope := kw(rest, "scope")
+		if kw(rest, "scope") != "" {
+			fatal("`scope` is gone as of v966: whether a rule also applies to an overlay is derived from the rule itself (its interface and prefixes). Drop the keyword — the rule is unchanged without it.")
+		}
 		if src == "" && dst == "" && destPort == "" && proto == "" && translate == "" && iface == "" {
 			if len(rest) == 0 {
 				fatal("usage: gravinet nat add IFACE  |  nat add [source CIDR] [dest CIDR] [dest-port N|N-M] [proto tcp|udp] (translate ADDR|masquerade|port-forward:ADDR[:PORT] | iface IFACE)")
 			}
 			iface = rest[0] // bare-interface masquerade shorthand
 		}
-		if err := cfg.NATRuleAdd(src, dst, destPort, proto, translate, iface, scope); err != nil {
+		if err := cfg.NATRuleAdd(src, dst, destPort, proto, translate, iface); err != nil {
 			fatal("%v", err)
 		}
 		fmt.Println("added NAT rule")
