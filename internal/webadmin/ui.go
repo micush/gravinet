@@ -95,6 +95,17 @@ const indexHTML = `<!doctype html>
   .global-search .ss-opt { cursor:pointer; }
   .search-hit { animation: search-hit-flash 2s ease-out; }
   @keyframes search-hit-flash { 0% { background:var(--acc); } 100% { background:transparent; } }
+  /* The same flash for a search hit that landed on a button rather than a row.
+     A row is transparent, so fading a background from --acc down to
+     transparent reads as a highlight. A button is not: an ordinary one is
+     already --acc (see the colour table above), so that animation would run
+     it from its own colour to no colour and read as the button fading out —
+     the opposite of "look here". A ring leaves the fill alone and works
+     whatever colour the button underneath it is, red and amber included.
+     --fg rather than --acc so it stays visible against an accent button, and
+     because it is legible in both themes. */
+  .search-hit-ring { animation: search-hit-ring-flash 2s ease-out; }
+  @keyframes search-hit-ring-flash { 0% { box-shadow:0 0 0 3px var(--fg); } 100% { box-shadow:0 0 0 3px transparent; } }
   .peer-link { cursor:pointer; }
   .peer-link:hover { text-decoration:underline; }
   .lat-trend { cursor:pointer; display:inline-block; }
@@ -589,7 +600,10 @@ const indexHTML = `<!doctype html>
   .tbar-gap { margin-left:28px; } /* one button's width of extra separation from the +/- group */
   /* Starts a right-aligned group: everything after it is pushed to the far
      end of the bar. Used to separate buttons that act on the ticked rows
-     from those that act on the table as a whole. */
+     from those that act on the table as a whole, and to set a single
+     trailing button apart from the rest of the strip (Logs' tshoot, which
+     is not a log control at all). A group of one is the common case, so the
+     marked button should be last in _rowButtons as well. */
   .tbar-right { margin-left:auto; }
   .modal-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; z-index:1000; padding:24px; }
   .modal-panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; max-width:720px; width:100%; max-height:86vh; display:flex; flex-direction:column; box-shadow:0 12px 40px rgba(0,0,0,.5); }
@@ -1653,6 +1667,25 @@ function buildSearchIndex(){
   add('Rules', 'Section \u00b7 Firewall', 'firewall', null, {kind:'section', section:'firewall', tab:'rules'});
   add('Allow List', 'Section \u00b7 Firewall', 'firewall', null, {kind:'section', section:'firewall', tab:'allowlist'}, 'allowlist allow-list');
 
+  // The one control in the app that is worth finding by name without already
+  // knowing where it lives. Everything else this index holds is either a
+  // place in the nav or a config entity someone typed in themselves, and in
+  // both cases the name being searched for is on screen somewhere. tshoot is
+  // neither: it is a button on the Logs page, which is not where anyone would
+  // think to look for it — nothing about "logs" says "collect a diagnostic
+  // bundle from every peer in the mesh", and v984 moved the button to the far
+  // end of that toolbar precisely because it is not a log control. Someone
+  // who has been told to send a tshoot bundle has a word and no page.
+  //
+  // 'troubleshoot' is in the haystack because that is the word people
+  // actually know; 'tshoot' does not appear inside it, so matching one would
+  // otherwise not match the other. The rest are what someone reaching for
+  // this would plausibly type instead, none of which appear anywhere else in
+  // the index — so this stays a single unambiguous hit rather than one of a
+  // dozen results.
+  add('tshoot', 'Button \u00b7 Logs', 'logs', null, {kind:'action', btn:'tshoot'},
+    'troubleshoot troubleshooting bundle diagnostic diagnostics support bundle debug');
+
   // The global firewall allow list (Firewall → Allow List tab, moved out of
   // Settings in v330) is the one entity in this whole index that doesn't
   // live in state.cfg or state.status — it's fetched separately, on demand,
@@ -1809,6 +1842,22 @@ async function navigateToSearchResult(r){
     return;
   }
 
+  // A toolbar button (see enhanceTable's spec.key). The button is rendered by
+  // renderSection's own blanket enhanceTable pass, which refresh() above has
+  // already run and waited on, so it is in the DOM by now — no deferred
+  // handoff like secBgp's pendingBgpHighlight, whose card is built by a load()
+  // that refresh() kicks off without awaiting.
+  //
+  // Flashed, not clicked. Every other hit in this index puts the operator in
+  // front of the thing and stops, and a search box that fires actions would
+  // be a different and more alarming control than one that navigates —
+  // tshoot's own button opens a modal asking what to collect, which is a
+  // question worth being asked deliberately.
+  if (r.match.kind === 'action') {
+    flashAndScroll(document.querySelector('#content [data-tbar-btn="'+CSS.escape(r.match.btn)+'"]'));
+    return;
+  }
+
   // Networks is one shared table across every network (see secNetworks),
   // not one card per network like every other section here — its row is
   // findable directly by data-netid, without first locating "the" card the
@@ -1834,11 +1883,18 @@ async function navigateToSearchResult(r){
 
 // flashAndScroll scrolls target into view and gives it a brief highlight
 // flash (the search-hit CSS animation), if target was found at all.
+//
+// Buttons get the ring variant. search-hit fades a background from --acc to
+// transparent, which is a highlight on a table row and a fade-out on a button
+// that is already --acc — see .search-hit-ring. Decided from the element
+// rather than passed in by the caller, because it is a fact about what the
+// target is, and every call site would otherwise have to know the rule.
 function flashAndScroll(target){
   if (!target) return;
   target.scrollIntoView({ behavior:'smooth', block:'center' });
-  target.classList.add('search-hit');
-  setTimeout(() => target.classList.remove('search-hit'), 2000);
+  const cls = target.tagName === 'BUTTON' ? 'search-hit-ring' : 'search-hit';
+  target.classList.add(cls);
+  setTimeout(() => target.classList.remove(cls), 2000);
 }
 
 // gotoMeshPeer switches to Monitor > mesh peers, ticks one peer's row (and
@@ -1932,7 +1988,7 @@ function applyPendingBgpHighlight(card){
 // the interaction the .ss-opt.sel styling was already built for.
 function buildGlobalSearch(){
   const wrap = $('<div class="search-select global-search"></div>');
-  const inp = $('<input class="ss-input" type="text" autocomplete="off" spellcheck="false" placeholder="Search\u2026" title="search networks, routes, hosts, DNS, firewall/NAT/QoS rules, keys, and seeds">');
+  const inp = $('<input class="ss-input" type="text" autocomplete="off" spellcheck="false" placeholder="Search\u2026" title="search networks, routes, hosts, DNS, firewall/NAT/QoS rules, keys, and seeds; also section and setting names, and \u2018tshoot\u2019 for the troubleshooting bundle">');
   const list = $('<div class="ss-list"></div>');
   wrap.appendChild(inp);
   wrap.appendChild(list);
@@ -3542,8 +3598,16 @@ function enhanceTable(table){
   if (filt) bar.appendChild(filt);
   if (table._rowAdd){ const b=$('<button class="sm tbar-btn" title="add a row">+</button>'); b.onclick=table._rowAdd; bar.appendChild(b); }
   if (table._rowRemove){ const b=$('<button class="sm tbar-btn" title="remove selected rows">\u2212</button>'); b.onclick=table._rowRemove; bar.appendChild(b); }
+  // spec.key, if given, is written out as data-tbar-btn so something outside
+  // this function can find the rendered button again — the global search
+  // needs that to land on Logs' tshoot. A data attribute rather than an id
+  // because the rest of this bar is built from per-table state and a table
+  // like Peers' renders once per network card; ids would collide the moment a
+  // keyed button were put on one of those, and a selector querying
+  // [data-tbar-btn] inside the right card still works when they do. Optional,
+  // so every toolbar that has no reason to be addressable stays as it was.
   if (table._rowButtons) table._rowButtons.forEach(spec => {
-    const b=$('<button class="sm '+(spec.cls||'')+(spec.gap?' tbar-gap':'')+(spec.right?' tbar-right':'')+'" title="'+esc(spec.title||'')+'">'+esc(spec.label)+'</button>'); b.onclick=spec.onclick; bar.appendChild(b);
+    const b=$('<button class="sm '+(spec.cls||'')+(spec.gap?' tbar-gap':'')+(spec.right?' tbar-right':'')+'"'+(spec.key?' data-tbar-btn="'+esc(spec.key)+'"':'')+' title="'+esc(spec.title||'')+'">'+esc(spec.label)+'</button>'); b.onclick=spec.onclick; bar.appendChild(b);
   });
   if (bar.children.length) table.parentNode.insertBefore(bar, table);
   const applyFilter = () => {
@@ -14484,13 +14548,24 @@ function secLogs(c){
         const a = document.createElement('a'); a.href = url; a.download = 'gravinet.log'; a.click();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
       } },
-    { label:'tshoot', cls:'', title:'download a troubleshooting bundle: every peer on every network with reach, relay, session age, path MTU, fragment and drop counters; routes; bans; disabled peers; firewall rules and exemptions; NAT status; interfaces; DHCP state, including the Kea config on disk and whether it still matches this node\'s own; the config with secrets redacted; and the tail of the log. Asks whether to collect just the current node or every reachable mesh peer at once \u2014 collecting from both ends of any peer problem is often the diagnosis.', onclick: () => openTshootModal() },
     { label:'Clear', cls:'danger', title:'clear the log file', onclick: async () => {
         if (!await confirmModal('Clear the log file? This cannot be undone.')) return;
         const r = await api('/api/logs/clear', { method:'POST' });
         if (!r.ok) { await noticeModal((r.body && r.body.error) || 'could not clear log'); return; }
         renderSection();
-      } }
+      } },
+    // Set apart from the three above and pushed to the far end of the bar.
+    // Refresh, Download and Clear all act on this node's log file; tshoot
+    // collects a whole diagnostic bundle and may fan out across every
+    // reachable mesh peer, which is a different kind of thing to be doing
+    // and should not sit in a row of log controls as though it were a
+    // fourth one. right:true gives it margin-left:auto, so it is last in
+    // the array as well as last on the bar — see .tbar-right.
+    //
+    // key:'tshoot' is what the header search box lands on: it renders as
+    // data-tbar-btn, which is the only handle anything outside enhanceTable
+    // has on a toolbar button. See buildSearchIndex's entry for it.
+    { label:'tshoot', cls:'', right:true, key:'tshoot', title:'download a troubleshooting bundle: every peer on every network with reach, relay, session age, path MTU, fragment and drop counters; routes; bans; disabled peers; firewall rules and exemptions; NAT status; interfaces; DHCP state, including the Kea config on disk and whether it still matches this node\'s own; the config with secrets redacted; and the tail of the log. Asks whether to collect just the current node or every reachable mesh peer at once \u2014 collecting from both ends of any peer problem is often the diagnosis.', onclick: () => openTshootModal() }
   ];
   card.appendChild(t);
   c.appendChild(card);

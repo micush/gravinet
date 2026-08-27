@@ -2,6 +2,66 @@
 
 ---
 
+## v985 — 2026-08-27
+
+**Typing `tshoot` or `troubleshoot` in the header search box now lands on the tshoot button.**
+
+The button is on Logs, which is not where anyone looks for a mesh-wide diagnostic bundle. v984 moved it to the far end of that toolbar for precisely that reason — it is not a log control and should not read as one — but moving it within a page nobody would think to open only goes so far. Someone told to send a tshoot bundle has a word, not a page. Search is how a word becomes a page.
+
+Neither word found anything before this. The index covers config entities and section names; the one thing it did not cover was controls.
+
+### Both words, because neither reaches the other
+
+`searchIndexQuery` is a substring test. "troubleshoot" does not contain "tshoot" and "tshoot" does not contain "troubleshoot" — matching one is no help in matching the other, so both are written into the haystack, along with `bundle`, `diagnostic(s)`, `support bundle` and `debug`. None of those appear anywhere else in the index, so this stays a single unambiguous hit rather than one of a dozen.
+
+### The button had no handle on it
+
+`_rowButtons` entries rendered as anonymous `<button>` nodes — no id, no attribute, nothing a selector could name. There was nothing for a result to land on even in principle.
+
+`spec.key` is new and optional: `enhanceTable` writes it out as `data-tbar-btn`. A data attribute rather than an id because tables like Peers' render once per network card, and ids would collide the moment a keyed button landed on one of those; a selector scoped inside the right card still works when they do. Every toolbar with no reason to be addressable is untouched.
+
+The new `{kind:'action'}` branch in `navigateToSearchResult` needs no deferred handoff — unlike `pendingBgpHighlight`, whose card is built by a `load()` that `refresh()` starts without awaiting, the toolbar comes from `renderSection`'s own blanket `enhanceTable` pass, which `refresh()` does await. The button is there by the time the branch runs.
+
+It flashes rather than clicks. Every other hit in this index puts the operator in front of the thing and stops, and a search box that fires actions is a different and more alarming control than one that navigates. tshoot's own button asks what to collect, which is a question worth being asked deliberately.
+
+### A button cannot use the row flash
+
+`.search-hit` fades a background from `--acc` to transparent. On a table row — transparent to begin with — that reads as a highlight. An ordinary button is *already* `--acc` (see the toolbar colour table), so the same animation runs it from its own colour to no colour: landing on tshoot would have animated the button away rather than pointed at it.
+
+`.search-hit-ring` pulses a `--fg` ring and leaves the fill alone, so it works whatever colour the button underneath is, red and amber included, and reads in both themes. `flashAndScroll` picks it from `target.tagName` rather than taking it from the caller, since it is a fact about what the target is and every call site would otherwise have to know the rule.
+
+### Tests
+
+Four links, no visible symptom when any one breaks — a search that finds nothing, or one that finds the entry and lands on the page pointing at nothing, which looks enough like working to go unnoticed.
+
+- `TestSearchIndexHasTshootAction` reconstructs `label + ' ' + extraHay` from the source and asks it the same substring question the search box would, for both words.
+- `TestTshootSearchTargetMatchesButtonKey` — the `btn` the index asks for against the `key` the toolbar renders. They are ~13,000 lines apart, both bare strings, and nothing brings them together until a result tries to find a button that is not there.
+- `TestToolbarButtonKeyIsRenderedAsDataAttribute` names `data-tbar-btn` in all three places that must agree. Two out of three is a no-op.
+- `TestButtonSearchHitUsesRingFlash` pins the tagName check and the CSS it depends on.
+
+The search box's tooltip enumerated what was searchable and had already gone stale on sections and settings. It now covers those and names tshoot.
+
+---
+
+## v984 — 2026-08-27
+
+**Logs' tshoot button sat fourth in a row of four, reading as another log control. It is now set apart at the far end of the bar.**
+
+Refresh, Download and Clear all act on this node's log file. tshoot collects a whole diagnostic bundle — every peer on every network, routes, firewall, NAT, DHCP, the config, the log tail — and may fan out across every reachable mesh peer. It is a different kind of thing to be doing, and putting it between Download and Clear invited it to be read as a third way of getting the log.
+
+No new mechanism: `_rowButtons` has carried a `right` flag since the config-history toolbar needed one, and `.tbar-right` is `margin-left:auto`. The button takes that flag and moves to the end of the array.
+
+Both halves matter, which is the part worth pinning. `.tbar-right` starts a right-aligned *group* — anything after it in `_rowButtons` travels with it — so had tshoot kept its old position and merely gained the flag, Clear would have been pushed to the far end alongside it. Being last in the array is what makes the group a group of one.
+
+- `TestLogsTshootIsSetApartAtTheEnd` — the flag is present, and Refresh, Download and Clear all precede tshoot. The second assertion is the one that catches a reorder, which is otherwise a silent layout change.
+- `TestLogsHasExactlyOneRightAlignedButton` — two auto margins in one flex row split the free space between them, which reads as a bug rather than a choice.
+
+Both are checked against the array with its comment lines stripped, since the comments discuss `right:true` by name and would otherwise be counted as uses of it.
+
+The `.tbar-right` CSS comment described only the ticked-rows case it was written for. It now also describes this one, and records that a marked button should be last in `_rowButtons`.
+
+---
+
 ## v983 — 2026-08-27
 
 **A restored DHCP configuration never reached Kea, and nothing anywhere said so. Both halves of that are fixed: daemon startup now reconciles the file, and the troubleshooting bundle now reports it.**
