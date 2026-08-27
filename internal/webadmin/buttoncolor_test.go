@@ -46,8 +46,6 @@ func TestGhostSurvivesForDecliningButtons(t *testing.T) {
 // amber is the one added for them.
 func TestKeysToolbarColours(t *testing.T) {
 	for _, c := range []struct{ label, cls string }{
-		{"Enable", "ok"},
-		{"Disable", "warn"},
 		{"Reveal", "warn"},
 		{"Copy", "warn"},
 		{"Delete", "danger"},
@@ -62,6 +60,24 @@ func TestKeysToolbarColours(t *testing.T) {
 		if !strings.Contains(spec, "cls:'"+c.cls+"'") {
 			t.Errorf("%s is not %s-coloured: %s", c.label, c.cls, spec)
 		}
+	}
+}
+
+// Enablement belongs to the state cell, which is how every other table in the
+// app does it — double-click the state to flip one row. Keys was the only one
+// that also had buttons for it, so it was the only table offering two ways to
+// do the same thing.
+//
+// The state cell itself is unchanged and still carries the toggle; what went
+// away is the second route to it.
+func TestKeysHasNoEnableDisableButtons(t *testing.T) {
+	for _, label := range []string{"Enable", "Disable"} {
+		if strings.Contains(indexHTML, "{ label:'"+label+"',") {
+			t.Errorf("the Keys toolbar has a %s button again; enablement is the state cell's job", label)
+		}
+	}
+	if !strings.Contains(indexHTML, `<td class="kstate" data-slot="'+k.slot+'" data-en="'+(k.enabled?1:0)+'" title="double-click to toggle">`) {
+		t.Error("the key state cell no longer toggles, and nothing else enables a key now")
 	}
 }
 

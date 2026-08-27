@@ -2,6 +2,20 @@
 
 ---
 
+## v974 — 2026-08-26
+
+**Keys had Enable and Disable buttons for something its own state column already did.** Every other table in the app enables a row by double-clicking its state; Keys was the only one that also offered buttons, so it was the only one with two ways to do the same thing.
+
+The state cell is untouched — it already carried the toggle and still does. What went away is the second route to it: the two `_rowButtons` entries and the `enableFn`/`disableFn` handlers behind them, which are dead once the buttons are gone.
+
+The toolbar keeps what it is actually for. Generate and Import act on empty slots, Reveal and Copy take a key out of hiding, Delete removes it — none of which a row can do to itself.
+
+The Keys help still told operators to *select filled slots for Enable/Disable/Reveal/Copy/Delete*, so it now names the three that remain and says that double-clicking the state is what enables a key, in the same breath as the other double-click edits it already described.
+
+`TestKeysToolbarColours` asserted a colour for each of the seven buttons and fails with two of them gone; the two entries are dropped rather than the test. `TestKeysHasNoEnableDisableButtons` replaces them, and pins both halves: no button comes back, and the state cell still carries `double-click to toggle` — because removing the buttons would be a regression rather than a cleanup if the cell ever stopped being the way to do it.
+
+---
+
 ## v973 — 2026-08-26
 
 **Filling in the toolbars left them at two different heights. Every small button with a colour was 25px; every one without kept an auto height about two pixels shorter, and v971 stood them next to each other for the first time.**

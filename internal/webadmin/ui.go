@@ -3747,7 +3747,7 @@ const HELP = {
       + '<br><br>Replace it with an address the <i>other</i> node can actually reach this one at, in <i>host:port</i> form, then press Enter (or click away) to re-mint the token with it. Include the port: a bare host falls back to the joining node\u2019s own default ports, which may not be the ports this node listens on.',
   },
   'keys': {
-    topic: 'Manage network keys. Select an empty slot and use Generate or Import to fill it; select filled slots for Enable/Disable/Reveal/Copy/Delete. Double-click a label, state, or key to change it in place. All enabled keys authenticate joiners.<br><br>To rotate keys, generate a new key, tick <b>distributed</b> to push it to every connected peer (no copy/paste needed), then disable the old one once it\'s reached everyone. Untick <b>distributed</b> to retract it from every peer that has it. Renaming a distributed key\'s label, or changing its expiry, pushes the update automatically. Set a date and time to enable key expiry.',
+    topic: 'Manage network keys. Select an empty slot and use Generate or Import to fill it; select filled slots for Reveal/Copy/Delete. Double-click a label, state, or key to change it in place \u2014 double-clicking the state is how a key is enabled or disabled, the same as every other table here. All enabled keys authenticate joiners.<br><br>To rotate keys, generate a new key, tick <b>distributed</b> to push it to every connected peer (no copy/paste needed), then disable the old one once it\'s reached everyone. Untick <b>distributed</b> to retract it from every peer that has it. Renaming a distributed key\'s label, or changing its expiry, pushes the update automatically. Set a date and time to enable key expiry.',
     cols: {
       'slot': 'fill an empty slot with Generate or Import; select a filled one to enable, disable, reveal, copy or delete it',
       'distributed': 'tick to push this key to every connected peer, untick to retract it from every peer that has it',
@@ -5139,12 +5139,6 @@ function secKeys(c) {
       selection.keys.clear();
       edit('/api/key', { op:'set', net:cf.name, slot:empties[0], key:key.trim() });
     };
-    const enableFn = async () => { const s=needSet(); if(!s) return;
-      for (const slot of s) await api('/api/key',{method:'POST',body:JSON.stringify({op:'enable',net:cf.name,slot})});
-      selection.keys.clear(); refresh(); };
-    const disableFn = async () => { const s=needSet(); if(!s) return;
-      for (const slot of s) await api('/api/key',{method:'POST',body:JSON.stringify({op:'disable',net:cf.name,slot})});
-      selection.keys.clear(); refresh(); };
     const deleteFn = async () => { const s=needSet(); if(!s) return;
       const anyDist = s.some(slot => bySlot[slot] && bySlot[slot].distributed);
       const msg = 'Delete '+s.length+' key'+(s.length>1?'s':'')+' on "'+cf.name+'"?'
@@ -5170,8 +5164,11 @@ function secKeys(c) {
     t.querySelector('table')._rowButtons = [
       { label:'Generate', title:'generate a key into each ticked empty slot', onclick: genFn },
       { label:'Import',   title:'import a key into a ticked empty slot',     onclick: importFn },
-      { label:'Enable',  cls:'ok',   title:'enable ticked keys',  onclick: enableFn },
-      { label:'Disable', cls:'warn', title:'disable ticked keys', onclick: disableFn },
+      // No Enable/Disable here. Enablement is the state cell's job, the way
+      // it is on peers, routes, seeds, hosts, DNS, firewall rules and
+      // networks: double-click the state to flip it. Buttons for it made
+      // this the one table with two ways to do the same thing.
+      //
       // Reveal and Copy are the two ways a key leaves its hiding place — one
       // onto the screen, one into the clipboard, where it outlives the page.
       // They share a colour because they share that consequence.
