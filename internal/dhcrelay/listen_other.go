@@ -16,6 +16,12 @@ import (
 // again, and a relay that guessed the arrival link would stamp the wrong giaddr
 // — which does not fail, it hands clients addresses from another LAN's subnet.
 // Refusing to start says so; guessing would not.
-func listen(ifName string, _ netip.Addr) (net.PacketConn, error) {
+func listenClient(ifName string) (net.PacketConn, error) {
+	return nil, fmt.Errorf("the DHCP relay is implemented on Linux only")
+}
+
+// Unreachable in practice, since listenClient is called first and refuses, but
+// present so this file matches the interface the Linux build provides.
+func listenServer(_ netip.Addr) (net.PacketConn, error) {
 	return nil, fmt.Errorf("the DHCP relay is implemented on Linux only")
 }

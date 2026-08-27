@@ -1,8 +1,11 @@
 package dhcrelay
 
 import (
+	"io"
+	"net"
 	"net/netip"
 	"testing"
+	"time"
 )
 
 // pkt builds a minimal well-formed DHCP datagram.
@@ -193,4 +196,144 @@ func TestStopIsSafeOnNilAndTwice(t *testing.T) {
 	r2 := &Relay{done: make(chan struct{})}
 	r2.Stop()
 	r2.Stop()
+}
+
+// A DHCPOFFER is the case that matters and the case the tests above missed.
+// The client is in SELECTING, so ciaddr is zero and the address being offered
+// is in yiaddr. A relay that reads only ciaddr has nothing to unicast at
+// exactly when it matters, and falls back to broadcasting every reply.
+func TestReplyTargetUnicastsOfferToYiaddr(t *testing.T) {
+	yiaddr := netip.MustParseAddr("10.4.4.37")
+	ciaddr := netip.MustParseAddr("10.4.4.37")
+
+	// Offer: yiaddr set, ciaddr zero, B flag clear.
+	b := pkt(opReply)
+	setAddr(b, offGiaddr, self.String())
+	setAddr(b, offYiaddr, yiaddr.String())
+	m, _ := parse(b)
+	to, err := replyTarget(m, self)
+	if err != nil {
+		t.Fatalf("offer refused: %v", err)
+	}
+	if to != yiaddr {
+		t.Errorf("offer went to %s, want a unicast to %s", to, yiaddr)
+	}
+
+	// An offer to a client that set the B flag is still broadcast.
+	b = pkt(opReply)
+	setAddr(b, offGiaddr, self.String())
+	setAddr(b, offYiaddr, yiaddr.String())
+	b[offFlags] = 0x80
+	m, _ = parse(b)
+	if to, err = replyTarget(m, self); err != nil || to != netip.MustParseAddr("255.255.255.255") {
+		t.Errorf("B flag set: got %s (%v), want a broadcast", to, err)
+	}
+
+	// Renewing: both are set to the same address, and either answer is the
+	// same wire result. Pinned so the precedence is not accidental.
+	b = pkt(opReply)
+	setAddr(b, offGiaddr, self.String())
+	setAddr(b, offYiaddr, yiaddr.String())
+	setAddr(b, offCiaddr, ciaddr.String())
+	m, _ = parse(b)
+	if to, err = replyTarget(m, self); err != nil || to != yiaddr {
+		t.Errorf("renewal: got %s (%v), want %s", to, err, yiaddr)
+	}
+}
+
+// recorder is a net.PacketConn that keeps what was written to it, so the
+// direction a datagram left by can be asserted without binding anything.
+type recorder struct {
+	name string
+	sent []net.Addr
+}
+
+func (c *recorder) WriteTo(b []byte, a net.Addr) (int, error) {
+	c.sent = append(c.sent, a)
+	return len(b), nil
+}
+func (c *recorder) ReadFrom([]byte) (int, net.Addr, error) { return 0, nil, io.EOF }
+func (c *recorder) Close() error                           { return nil }
+func (c *recorder) LocalAddr() net.Addr                    { return nil }
+func (c *recorder) SetDeadline(time.Time) error            { return nil }
+func (c *recorder) SetReadDeadline(time.Time) error        { return nil }
+func (c *recorder) SetWriteDeadline(time.Time) error       { return nil }
+
+// The socket a datagram leaves by is the whole fix. A request read on the LAN
+// must go out the server-facing socket, and the reply must come back in on
+// that same socket and leave by the client-facing one. Sending either from the
+// socket it arrived on is what made this relay work only when the server was
+// already on the client's link — the one topology needing no relay at all.
+func TestHandleForwardsOnTheOppositeSocket(t *testing.T) {
+	server := netip.MustParseAddr("10.1.1.1")
+	newLink := func() (*link, *recorder, *recorder) {
+		cl, sv := &recorder{name: "client"}, &recorder{name: "server"}
+		return &link{
+			cfg:    Link{Iface: "eth1", Servers: []netip.Addr{server}},
+			self:   self,
+			client: cl,
+			server: sv,
+		}, cl, sv
+	}
+	r := &Relay{log: func(string, ...any) {}}
+
+	// A client's request leaves by the server-facing socket, aimed at the
+	// upstream server on port 67.
+	lk, cl, sv := newLink()
+	r.handle(lk, fromClient, pkt(opRequest))
+	if len(cl.sent) != 0 {
+		t.Errorf("request went back out the client-facing socket, to %v", cl.sent)
+	}
+	if len(sv.sent) != 1 {
+		t.Fatalf("request out the server-facing socket: %d datagrams, want 1", len(sv.sent))
+	}
+	if got, want := sv.sent[0].String(), "10.1.1.1:67"; got != want {
+		t.Errorf("request went to %s, want %s", got, want)
+	}
+
+	// The server's reply arrives on the server-facing socket and leaves by
+	// the client-facing one, aimed at the client's port.
+	lk, cl, sv = newLink()
+	b := pkt(opReply)
+	setAddr(b, offGiaddr, self.String())
+	setAddr(b, offYiaddr, "10.4.4.37")
+	r.handle(lk, fromServer, b)
+	if len(sv.sent) != 0 {
+		t.Errorf("reply went back out the server-facing socket, to %v", sv.sent)
+	}
+	if len(cl.sent) != 1 {
+		t.Fatalf("reply out the client-facing socket: %d datagrams, want 1", len(cl.sent))
+	}
+	if got, want := cl.sent[0].String(), "10.4.4.37:68"; got != want {
+		t.Errorf("reply went to %s, want %s", got, want)
+	}
+}
+
+// Traffic arriving on the wrong socket for its op code is not this relay's
+// business. A reply on the LAN is another server answering the client
+// directly; a request on the server-facing socket is somebody else's relay
+// pointed at this address. Forwarding either makes this a reflector.
+func TestHandleIgnoresWrongDirection(t *testing.T) {
+	r := &Relay{log: func(string, ...any) {}}
+	for name, tc := range map[string]struct {
+		s side
+		b []byte
+	}{
+		"reply on the client-facing socket":   {fromClient, pkt(opReply)},
+		"request on the server-facing socket": {fromServer, pkt(opRequest)},
+	} {
+		cl, sv := &recorder{}, &recorder{}
+		lk := &link{
+			cfg:    Link{Iface: "eth1", Servers: []netip.Addr{netip.MustParseAddr("10.1.1.1")}},
+			self:   self,
+			client: cl,
+			server: sv,
+		}
+		b := tc.b
+		setAddr(b, offGiaddr, self.String())
+		r.handle(lk, tc.s, b)
+		if len(cl.sent)+len(sv.sent) != 0 {
+			t.Errorf("%s: forwarded %v / %v", name, cl.sent, sv.sent)
+		}
+	}
 }

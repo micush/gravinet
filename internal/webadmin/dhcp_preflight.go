@@ -180,10 +180,66 @@ func dhcpRelayProblem(iface string) string {
 // is nothing wrong. Sorted, so a note assembled from a map does not reorder
 // itself between two saves that changed nothing. The trailing separator is
 // noteworthy's convention.
+// dhcpMixedScopeWarning reports a node configured with both attached and
+// relayed scopes, which Kea cannot serve at once.
+//
+// Kea's dhcp-socket-type is one global setting, and the two kinds of scope
+// need opposite values: an attached client broadcasts and is only heard on a
+// raw socket, a relayed request is a unicast arriving on some other interface
+// and is only heard on a udp one. renderKea resolves the conflict in favour of
+// the relayed scopes, because a relayed scope is unservable without udp while
+// an attached one at least has somewhere else to go — but the attached clients
+// on this node stop getting leases, and nothing else on the page would say so.
+//
+// A warning rather than a refusal. The configuration is legitimate and an
+// operator may well have meant it — the attached LAN may be served by another
+// node, or its hosts may be static. Refusing to apply would be refusing a
+// working setup on suspicion.
+func dhcpMixedScopeWarning(c config.DHCPConfig) string {
+	if c.Mode != config.DHCPServer {
+		return ""
+	}
+	var attached, relayed []string
+	for _, s := range c.EnabledSubnets() {
+		name := strings.TrimSpace(s.Iface)
+		if name == "" {
+			continue
+		}
+		if s.Relayed() {
+			relayed = append(relayed, name)
+		} else {
+			attached = append(attached, name)
+		}
+	}
+	if len(attached) == 0 || len(relayed) == 0 {
+		return ""
+	}
+	sort.Strings(attached)
+	return fmt.Sprintf("this node serves both relayed and directly attached scopes, "+
+		"which Kea cannot do at once: it is being configured for the relayed ones "+
+		"(dhcp-socket-type udp), so clients attached to %s will not be answered here",
+		strings.Join(dedupe(attached), ", "))
+}
+
+// dedupe removes repeats from a sorted slice, in place.
+func dedupe(in []string) []string {
+	out := in[:0]
+	for i, s := range in {
+		if i == 0 || s != in[i-1] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 func dhcpProblemNote(c config.DHCPConfig) string {
 	probs := dhcpProblems(c)
-	if len(probs) == 0 {
+	mixed := dhcpMixedScopeWarning(c)
+	if len(probs) == 0 && mixed == "" {
 		return ""
+	}
+	if mixed != "" {
+		mixed += "; "
 	}
 	names := make([]string, 0, len(probs))
 	for n := range probs {
@@ -191,6 +247,7 @@ func dhcpProblemNote(c config.DHCPConfig) string {
 	}
 	sort.Strings(names)
 	var b strings.Builder
+	b.WriteString(mixed)
 	for _, n := range names {
 		b.WriteString(probs[n])
 		b.WriteString("; ")

@@ -97,12 +97,23 @@ func TestWarnIsThemedAndTakesDarkInk(t *testing.T) {
 	}
 }
 
-// A .warn button sits shoulder to shoulder with .ok and .danger in the Keys
-// bar, which are sized explicitly. Left out of that rule it would be the one
-// button in the row standing a pixel taller.
+// A .warn button sits shoulder to shoulder with .ok, .danger and — in the
+// Packet Capture and Logs bars — with buttons carrying no colour at all. It
+// must be the same height as every one of them.
+//
+// v971 arranged that by naming .warn in a rule alongside .danger and .ok.
+// That covered the coloured neighbours and missed the plain ones, which is
+// what left Clear standing two pixels taller than Start and Download. The
+// height now comes from .sm, so what this checks is the other half of it:
+// that .warn contributes colour and nothing else, and so cannot drift from
+// its neighbours whatever they are wearing.
 func TestWarnSharesTheRowButtonSizing(t *testing.T) {
-	if !strings.Contains(indexHTML, "button.sm.danger, button.sm.ok, button.sm.warn {") {
-		t.Error("warn is not in the row-button sizing rule")
+	css := stripCSSComments(indexHTML)
+	if !strings.Contains(css, "button.warn { background:var(--warn); color:#0f1419; }") {
+		t.Error("the warn rule is no longer colour-only; it may now size itself")
+	}
+	if !strings.Contains(css, "button.sm { height:25px;") {
+		t.Error("small buttons no longer share one height, so warn cannot inherit it")
 	}
 }
 
@@ -119,5 +130,76 @@ func TestDownloadKeepsTheAccentEverywhere(t *testing.T) {
 	}
 	if !strings.Contains(indexHTML, `class="sm">Download<`) {
 		t.Error("packet capture's Download is not accent-coloured")
+	}
+}
+
+// One height for every small button, whichever colour it wears or does not.
+//
+// The sizing used to hang off button.sm.danger, .ok and .warn, so a small
+// button with no colour class kept an auto height about two pixels shorter.
+// That was invisible while coloured buttons only appeared in table row bars,
+// where every sibling has a colour. Filling in the Keys, Packet Capture and
+// Logs toolbars put them next to plain ones — Start and Download flanking an
+// amber Clear — and three toolbars ended up with buttons at two heights.
+//
+// Pinned as the absence of the per-colour rule rather than only the presence
+// of the shared one, because the way this comes back is somebody adding a
+// fourth colour and giving it its own sizing beside the others.
+func TestEverySmallButtonIsOneHeight(t *testing.T) {
+	css := stripCSSComments(indexHTML)
+	if !strings.Contains(css, "button.sm { height:25px;") {
+		t.Error("button.sm does not set its own height; small buttons will size to their content")
+	}
+	// Comments are stripped first because the rules being forbidden here are
+	// also named in the prose above them, explaining why they went away.
+	for _, sel := range []string{
+		"button.sm.danger", "button.sm.ok", "button.sm.warn", "button.sm.info",
+	} {
+		if strings.Contains(css, sel) {
+			t.Errorf("%s sizes itself separately: a small button without a colour class "+
+				"will not match its coloured neighbours", sel)
+		}
+	}
+}
+
+// stripCSSComments removes /* ... */ blocks so a test can assert on the rules
+// this stylesheet actually has rather than on what its comments talk about.
+func stripCSSComments(s string) string {
+	var b strings.Builder
+	for {
+		i := strings.Index(s, "/*")
+		if i < 0 {
+			b.WriteString(s)
+			return b.String()
+		}
+		b.WriteString(s[:i])
+		j := strings.Index(s[i:], "*/")
+		if j < 0 {
+			return b.String()
+		}
+		s = s[i+j+2:]
+	}
+}
+
+// The toolbars where the mismatch actually showed. Each mixes buttons that
+// carry a colour with buttons that do not, which is the arrangement the old
+// per-colour sizing could not handle — and the arrangement that any future
+// toolbar is most likely to reach for.
+func TestToolbarsMixColouredAndPlainButtons(t *testing.T) {
+	// Packet Capture builds its bar by hand: Start and Download plain,
+	// Clear amber, all three .sm.
+	for _, s := range []string{
+		`class="sm">Start<`, `class="warn sm">Clear<`, `class="sm">Download<`,
+	} {
+		if !strings.Contains(indexHTML, s) {
+			t.Errorf("the packet capture toolbar no longer has %s", s)
+		}
+	}
+	// Logs goes through _rowButtons: three plain, one red.
+	if !strings.Contains(indexHTML, "{ label:'Clear', cls:'danger'") {
+		t.Error("the logs Clear button is no longer red")
+	}
+	if !strings.Contains(indexHTML, "{ label:'Refresh', cls:''") {
+		t.Error("the logs Refresh button is no longer plain")
 	}
 }

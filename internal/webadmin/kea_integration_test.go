@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"gravinet/internal/config"
 )
@@ -293,4 +294,201 @@ func TestRealKeaDoesNotCatchAGiaddrCollision(t *testing.T) {
 	if _, ok := keaTestConf(writeTemp(t, b)); !ok {
 		t.Log("this Kea now refuses a giaddr collision too; gravinet's rule is no longer the only guard")
 	}
+}
+
+// The socket type is what decides whether a relayed scope is servable at all,
+// and it is not visible anywhere on the page, so it is pinned here.
+//
+// Kea's raw sockets watch a named interface's wire. A relayed request is a
+// unicast to this host's address that arrives over whatever path reaches the
+// relay, which is almost never that wire, so under raw it is never seen. Only
+// udp binds the address itself and is delivered it regardless of arrival
+// interface. Checked against kea-dhcp4 2.4.1: the same relayed DISCOVER
+// produced DHCP4_SUBNET_SELECTED and DHCP4_LEASE_ADVERT under udp and no log
+// line at all under raw.
+func TestKeaSocketTypeFollowsTheScopes(t *testing.T) {
+	attached := config.DHCPSubnet{
+		Iface: "eth1", Subnet: "10.1.1.0/24",
+		PoolStart: "10.1.1.10", PoolEnd: "10.1.1.245", Router: "10.1.1.1",
+	}
+	relayed := config.DHCPSubnet{
+		Iface: "eth1", Subnet: "10.4.4.0/24", Relays: []string{"10.4.4.1"},
+		PoolStart: "10.4.4.10", PoolEnd: "10.4.4.245", Router: "10.4.4.1",
+	}
+
+	for name, tc := range map[string]struct {
+		subnets []config.DHCPSubnet
+		want    string
+	}{
+		"attached only":          {[]config.DHCPSubnet{attached}, "raw"},
+		"relayed only":           {[]config.DHCPSubnet{relayed}, "udp"},
+		"both, relayed decides":  {[]config.DHCPSubnet{attached, relayed}, "udp"},
+		"both, order irrelevant": {[]config.DHCPSubnet{relayed, attached}, "udp"},
+	} {
+		b, err := renderKea(config.DHCPConfig{Mode: config.DHCPServer, Subnets: tc.subnets})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		var got struct {
+			Dhcp4 struct {
+				InterfacesConfig struct {
+					SocketType string `json:"dhcp-socket-type"`
+				} `json:"interfaces-config"`
+			} `json:"Dhcp4"`
+		}
+		if err := json.Unmarshal(b, &got); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got.Dhcp4.InterfacesConfig.SocketType != tc.want {
+			t.Errorf("%s: dhcp-socket-type = %q, want %q",
+				name, got.Dhcp4.InterfacesConfig.SocketType, tc.want)
+		}
+	}
+}
+
+// A node with both kinds of scope loses its attached clients, because Kea's
+// socket type is global and renderKea resolves the conflict towards the
+// relayed ones. That is the right resolution and it must not be silent.
+func TestMixedScopesAreReported(t *testing.T) {
+	attached := config.DHCPSubnet{
+		Iface: "eth1", Subnet: "10.1.1.0/24",
+		PoolStart: "10.1.1.10", PoolEnd: "10.1.1.245",
+	}
+	relayed := config.DHCPSubnet{
+		Iface: "eth1", Subnet: "10.4.4.0/24", Relays: []string{"10.4.4.1"},
+		PoolStart: "10.4.4.10", PoolEnd: "10.4.4.245",
+	}
+
+	mixed := config.DHCPConfig{Mode: config.DHCPServer, Subnets: []config.DHCPSubnet{attached, relayed}}
+	w := dhcpMixedScopeWarning(mixed)
+	if w == "" {
+		t.Fatal("a node serving both attached and relayed scopes was not warned about")
+	}
+	if !strings.Contains(w, "eth1") {
+		t.Errorf("the warning does not name the link that stops being served: %q", w)
+	}
+	// And it reaches the note the apply actually shows.
+	if note := dhcpProblemNote(mixed); !strings.Contains(note, "attached") {
+		t.Errorf("the warning did not reach the apply note: %q", note)
+	}
+
+	// Neither kind alone is a problem.
+	for name, c := range map[string]config.DHCPConfig{
+		"attached only": {Mode: config.DHCPServer, Subnets: []config.DHCPSubnet{attached}},
+		"relayed only":  {Mode: config.DHCPServer, Subnets: []config.DHCPSubnet{relayed}},
+		"relay mode":    {Mode: config.DHCPRelay, Subnets: []config.DHCPSubnet{attached, relayed}},
+	} {
+		if got := dhcpMixedScopeWarning(c); got != "" {
+			t.Errorf("%s: warned unnecessarily: %q", name, got)
+		}
+	}
+}
+
+// The end-to-end check the relayed-scope work was missing: render a relayed
+// scope, start the real kea-dhcp4 on it, and put a forwarded DISCOVER through
+// it from an interface Kea is not listening on. That last part is the whole
+// point — it is what a relay across an overlay, a tunnel or an uplink looks
+// like from the server's side, and it is what the rendered socket type decides.
+//
+// Skipped without kea-dhcp4, and without the privilege to hold port 67.
+func TestRealKeaAnswersARelayedDiscover(t *testing.T) {
+	bin := keaBin(t)
+	iface, self := addressedIface(t)
+
+	b, err := renderKea(config.DHCPConfig{
+		Mode: config.DHCPServer,
+		Subnets: []config.DHCPSubnet{{
+			Iface: iface, Subnet: "10.4.4.0/24", Relays: []string{"10.4.4.1"},
+			PoolStart: "10.4.4.10", PoolEnd: "10.4.4.245", Router: "10.4.4.1",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	dir := t.TempDir()
+	confPath := filepath.Join(dir, "kea-dhcp4.conf")
+	logPath := filepath.Join(dir, "kea.log")
+	// Point the logger at a file this test can read, and give the lease file
+	// somewhere writable, without disturbing what renderKea produced above.
+	b = []byte(strings.Replace(string(b), `"output": "syslog"`,
+		`"output": "`+logPath+`"`, 1))
+	b = []byte(strings.Replace(string(b), keaLeasePath, filepath.Join(dir, "leases.csv"), 1))
+	if err := os.WriteFile(confPath, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(bin, "-c", confPath)
+	if err := cmd.Start(); err != nil {
+		t.Skipf("cannot start kea-dhcp4: %v", err)
+	}
+	defer func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() }()
+
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		if s, err := os.ReadFile(logPath); err == nil && strings.Contains(string(s), "DHCP4_STARTED") {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if s, _ := os.ReadFile(logPath); !strings.Contains(string(s), "DHCP4_STARTED") {
+		t.Skip("kea-dhcp4 did not start here (port 67 likely unavailable)")
+	}
+	if s, _ := os.ReadFile(logPath); strings.Contains(string(s), "OPEN_SOCKET_FAIL") {
+		t.Fatalf("kea started but could not open its socket:\n%s", s)
+	}
+
+	// A DISCOVER as a relay would forward it: hops set, giaddr stamped with
+	// the far relay's address, sent as a unicast to this host. It leaves from
+	// loopback, so it arrives on an interface Kea was never told about.
+	if err := sendRelayedDiscover("10.4.4.1", self); err != nil {
+		t.Skipf("cannot send a raw packet here: %v", err)
+	}
+	time.Sleep(1500 * time.Millisecond)
+
+	log, _ := os.ReadFile(logPath)
+	// DHCP4_LEASE_ADVERT rather than DHCP4_SUBNET_SELECTED, which says more
+	// but is logged at DEBUG and renderKea configures INFO. Asserting on a
+	// line the rendered config cannot produce would be a test that only ever
+	// passed against a hand-edited file.
+	if !strings.Contains(string(log), "DHCP4_LEASE_ADVERT") {
+		t.Errorf("the relayed request was not served:\n%s", log)
+	}
+	// And the lease came from the relayed scope, chosen by giaddr — not from
+	// some default that would have answered any request at all.
+	if !strings.Contains(string(log), "10.4.4.") {
+		t.Errorf("a lease was advertised but not from the relayed scope:\n%s", log)
+	}
+	// The socket type is what made it reachable. Pinned here too, because
+	// this test passing under "raw" would mean the packet took a path this
+	// test did not intend.
+	if !strings.Contains(string(log), "using socket type udp") {
+		t.Errorf("kea did not select the udp socket type:\n%s", log)
+	}
+}
+
+// addressedIface returns an interface that is up and carries a usable IPv4
+// address, with that address. Not realIface, which takes the first
+// non-loopback NIC and so can land on a dummy or an ifb with no address —
+// fine for a fixture that only needs a name Kea will accept, useless here,
+// where the address is what the server binds and what the request is aimed at.
+func addressedIface(t *testing.T) (string, string) {
+	t.Helper()
+	ifis, err := net.Interfaces()
+	if err != nil {
+		t.Skip("cannot enumerate interfaces")
+	}
+	for _, i := range ifis {
+		if i.Flags&net.FlagLoopback != 0 || i.Flags&net.FlagUp == 0 {
+			continue
+		}
+		addrs, err := i.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, p := range v4Prefixes(addrs) {
+			return i.Name, p.Addr().String()
+		}
+	}
+	t.Skip("no up, addressed, non-loopback interface to serve from")
+	return "", ""
 }

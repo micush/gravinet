@@ -76,6 +76,56 @@ type keaDhcp4 struct {
 
 type keaIfaces struct {
 	Interfaces []string `json:"interfaces"`
+	// SocketType is Kea's dhcp-socket-type. See socketTypeFor for why this
+	// is rendered at all and why it is not a constant.
+	SocketType string `json:"dhcp-socket-type,omitempty"`
+}
+
+// Kea's two socket types receive different traffic, and a relayed scope needs
+// the one that is not the default.
+//
+//   - raw (Kea's default) is an AF_PACKET socket on each named interface. It
+//     receives everything on that link, broadcast included, which is what a
+//     directly attached client sends. It receives nothing that arrives on any
+//     other interface.
+//   - udp binds <iface-addr>:67. It receives a unicast to that address no
+//     matter which interface carries it, and no broadcasts at all.
+//
+// A relayed request is a unicast to this host's address that arrives over
+// whatever path reaches the relay — an uplink, a tunnel, an overlay — and
+// almost never over the link whose address it is addressed to. Under raw that
+// packet is invisible: Kea is watching the wrong wire. Under udp it is
+// delivered, and giaddr selects the subnet exactly as the relay clause below
+// intends.
+//
+// Verified against kea-dhcp4 2.4.1 rather than inferred, because raw mode
+// binds <iface-addr>:67 as well and looks from the outside as though it would
+// receive there. It does not — that socket is outbound only. The same relayed
+// DISCOVER, arriving on an interface Kea was not listening on, produced
+// DHCP4_SUBNET_SELECTED and DHCP4_LEASE_ADVERT under udp and no log line at
+// all under raw.
+const (
+	keaSocketRaw = "raw"
+	keaSocketUDP = "udp"
+)
+
+// socketTypeFor picks the socket type a set of scopes needs.
+//
+// udp as soon as any scope is relayed, because a relayed scope is unservable
+// without it, while raw otherwise, because raw is what serves attached
+// clients and is the type this project rendered — by omission — until now.
+//
+// The two are a single global setting in Kea, not per-subnet, so a node with
+// both kinds of scope cannot have both. That case is reported by
+// dhcpMixedScopeWarning rather than resolved here; silently choosing either
+// one breaks the other kind of client with nothing on the page to say so.
+func socketTypeFor(subnets []config.DHCPSubnet) string {
+	for _, s := range subnets {
+		if s.Relayed() {
+			return keaSocketUDP
+		}
+	}
+	return keaSocketRaw
 }
 
 type keaLeaseDB struct {
@@ -158,10 +208,13 @@ func renderKea(c config.DHCPConfig) ([]byte, error) {
 			// keeps a DHCP server off every other link on the host — most
 			// importantly off the mesh devices, where answering would hand
 			// overlay peers a lease.
-			InterfacesConfig: keaIfaces{Interfaces: []string{}},
-			LeaseDatabase:    keaLeaseDB{Type: "memfile", Name: keaLeasePath},
-			ValidLifetime:    defaultLease,
-			Subnet4:          []keaSubnet{},
+			InterfacesConfig: keaIfaces{
+				Interfaces: []string{},
+				SocketType: socketTypeFor(c.EnabledSubnets()),
+			},
+			LeaseDatabase: keaLeaseDB{Type: "memfile", Name: keaLeasePath},
+			ValidLifetime: defaultLease,
+			Subnet4:       []keaSubnet{},
 			Loggers: []keaLogger{{
 				Name:       "kea-dhcp4",
 				Severity:   "INFO",

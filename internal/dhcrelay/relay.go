@@ -50,6 +50,17 @@ type Relay struct {
 	wg   sync.WaitGroup
 }
 
+// link is one link's running state: the two sockets it needs and the config
+// they serve. Paired in a struct because the two are useless apart — a request
+// read on client is forwarded from server, and the reply read on server is
+// returned from client.
+type link struct {
+	cfg    Link
+	self   netip.Addr
+	client net.PacketConn // wildcard, confined to cfg.Iface: hears clients
+	server net.PacketConn // bound to self: talks to the upstream servers
+}
+
 // Listening reports the links this relay actually bound, which is not always
 // the links it was configured with: an interface that cannot be bound is
 // logged and skipped so one bad NIC does not take the other LANs down with it.
@@ -67,20 +78,19 @@ func (r *Relay) Listening() []string {
 	return append([]string(nil), r.live...)
 }
 
-// Start binds a listener on each configured interface and begins forwarding.
+// Start binds each configured interface's sockets and begins forwarding.
 //
-// One socket per interface, bound to that interface's own address, rather than
-// a single wildcard socket. Two reasons, and the second is the one that
-// matters: the address bound is the giaddr this relay stamps on requests from
-// that link, so the server picks the right subnet to lease from and addresses
-// its reply somewhere this node can hear it. A wildcard socket would have to
-// guess which link a broadcast arrived on and which of this host's addresses
-// to claim, and it would guess wrong on any node with more than one LAN —
-// which is every node worth putting a relay on.
+// Two sockets per interface rather than one, for reasons set out at length in
+// listen_linux.go: the client-facing side must hear broadcasts and know which
+// link they came from, the server-facing side must reach a server that is by
+// definition elsewhere, and no single socket does both.
 //
 // An interface that cannot be bound is logged and skipped rather than failing
 // the whole relay. A node relaying for three LANs should not lose all three
-// because one NIC has no address yet.
+// because one NIC has no address yet. Both of a link's sockets must bind for
+// the link to count: a link with only one is not half-working, it is a link
+// that accepts requests and silently never answers them, which is worse than
+// one that is plainly absent from Listening.
 func Start(cfg Config, log Logf) (*Relay, error) {
 	if log == nil {
 		log = func(string, ...any) {}
@@ -103,20 +113,30 @@ func Start(cfg Config, log Logf) (*Relay, error) {
 			log("dhcp relay: %s: %v", l.Iface, err)
 			continue
 		}
-		pc, err := listen(l.Iface, self)
+		client, err := listenClient(l.Iface)
 		if err != nil {
 			log("dhcp relay: %s: %v", l.Iface, err)
 			continue
 		}
+		server, err := listenServer(self)
+		if err != nil {
+			// Half a link is not a working link, so give the first socket
+			// back rather than leaving it bound and deaf.
+			_ = client.Close()
+			log("dhcp relay: %s: %v", l.Iface, err)
+			continue
+		}
+		lk := &link{cfg: l, self: self, client: client, server: server}
 		r.mu.Lock()
-		r.pcs = append(r.pcs, pc)
+		r.pcs = append(r.pcs, client, server)
 		r.live = append(r.live, l.Iface)
 		r.mu.Unlock()
-		r.wg.Add(1)
-		go r.serve(pc, l, self)
+		r.wg.Add(2)
+		go r.serve(lk, client, fromClient)
+		go r.serve(lk, server, fromServer)
 	}
 	r.mu.Lock()
-	n := len(r.pcs)
+	n := len(r.live)
 	r.mu.Unlock()
 	if n == 0 {
 		close(r.done)
@@ -125,6 +145,17 @@ func Start(cfg Config, log Logf) (*Relay, error) {
 	log("dhcp relay: listening on %d interface(s)", n)
 	return r, nil
 }
+
+// side says which of a link's two sockets a datagram was read on. Direction is
+// decided by this rather than by the op code alone: a reply read on the
+// client-facing socket is another server answering on the client's LAN, and
+// forwarding it is not this relay's job.
+type side int
+
+const (
+	fromClient side = iota
+	fromServer
+)
 
 // Stop closes every listener and waits for the readers to finish. Safe to call
 // twice, because a reload that changes nothing still asks for a stop.
@@ -147,64 +178,72 @@ func (r *Relay) Stop() {
 	r.wg.Wait()
 }
 
-// serve reads one interface's socket until it is closed.
+// serve reads one of a link's sockets until it is closed.
 //
 // The link travels with the socket rather than being looked up per packet:
 // which servers a request goes to and how many hops it may already have
 // crossed are properties of the link it arrived on, and this is the one place
 // that pairing is known for certain.
-func (r *Relay) serve(pc net.PacketConn, l Link, self netip.Addr) {
+func (r *Relay) serve(lk *link, pc net.PacketConn, s side) {
 	defer r.wg.Done()
 	buf := make([]byte, maxLen)
 	for {
-		n, from, err := pc.ReadFrom(buf)
+		n, _, err := pc.ReadFrom(buf)
 		if err != nil {
 			select {
 			case <-r.done:
 			default:
-				r.log("dhcp relay: %s: read: %v", l.Iface, err)
+				r.log("dhcp relay: %s: read: %v", lk.cfg.Iface, err)
 			}
 			return
 		}
 		// The buffer is reused, so everything downstream either acts on it
 		// before the next read or copies. handle does the former.
-		r.handle(pc, l, self, buf[:n], from)
+		r.handle(lk, s, buf[:n])
 	}
 }
 
-// handle relays one datagram in whichever direction its op code says.
+// handle relays one datagram across a link, in the direction its arrival
+// socket implies.
 //
-// Every rejection is silent past the debug log. This socket receives every
+// Every rejection is silent past the debug log. These sockets receive every
 // broadcast on the link, so malformed and irrelevant traffic is the normal
 // case rather than an error worth reporting to an operator — a relay that
 // logged a line per stray packet would bury the one line that mattered.
-func (r *Relay) handle(pc net.PacketConn, l Link, self netip.Addr, b []byte, from net.Addr) {
+func (r *Relay) handle(lk *link, s side, b []byte) {
 	m, err := parse(b)
 	if err != nil {
 		return
 	}
-	switch m.op() {
-	case opRequest:
-		if err := prepareRequest(m, self, l.MaxHops); err != nil {
+	switch {
+	case s == fromClient && m.op() == opRequest:
+		// A client's request, read on the LAN. Stamp it and send it out the
+		// server-facing socket, whose source address is the giaddr just
+		// stamped — which is how the reply finds its way back here.
+		if err := prepareRequest(m, lk.self, lk.cfg.MaxHops); err != nil {
 			return
 		}
-		for _, srv := range l.Servers {
-			if err := sendTo(pc, b, netip.AddrPortFrom(srv, ServerPort)); err != nil {
-				r.log("dhcp relay: %s -> %s: %v", l.Iface, srv, err)
+		for _, srv := range lk.cfg.Servers {
+			if err := sendTo(lk.server, b, netip.AddrPortFrom(srv, ServerPort)); err != nil {
+				r.log("dhcp relay: %s -> %s: %v", lk.cfg.Iface, srv, err)
 			}
 		}
-	case opReply:
-		// A reply arriving on the client-facing socket is the server's answer
-		// coming back — the relay sent the request from this socket, so this
-		// is where the response lands.
-		to, err := replyTarget(m, self)
+	case s == fromServer && m.op() == opReply:
+		// The server's answer, addressed to this link's giaddr and delivered
+		// regardless of which interface it arrived on. It goes back out the
+		// client-facing socket, because that is the one confined to the LAN
+		// the client is on.
+		to, err := replyTarget(m, lk.self)
 		if err != nil {
 			return
 		}
-		if err := sendTo(pc, b, netip.AddrPortFrom(to, ClientPort)); err != nil {
-			r.log("dhcp relay: %s: returning reply to %s: %v", l.Iface, to, err)
+		if err := sendTo(lk.client, b, netip.AddrPortFrom(to, ClientPort)); err != nil {
+			r.log("dhcp relay: %s: returning reply to %s: %v", lk.cfg.Iface, to, err)
 		}
 	}
+	// Anything else is traffic this relay has no part in: a reply on the LAN
+	// is another server answering the client directly, and a request on the
+	// server-facing socket is somebody else's relay pointed at this address.
 }
 
 // ifaceAddr4 returns the interface's own IPv4 address, which becomes the

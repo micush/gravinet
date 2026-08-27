@@ -67,6 +67,7 @@ const (
 	offHops   = 3
 	offFlags  = 10
 	offCiaddr = 12
+	offYiaddr = 16
 	offGiaddr = 24
 )
 
@@ -111,13 +112,23 @@ func (m msg) hops() byte { return m.b[offHops] }
 
 func (m msg) flags() uint16 { return binary.BigEndian.Uint16(m.b[offFlags:]) }
 
-// broadcastWanted reports whether a reply must go to the broadcast address:
-// either the client asked for it, or it has no address yet to unicast to.
+// broadcastWanted reports whether the client asked for a broadcast reply.
+//
+// Only the B flag, deliberately. An earlier version also returned true when
+// ciaddr was zero, which is true of every DHCPOFFER — a client in SELECTING
+// has no address yet, so ciaddr is zero by definition. That made this return
+// true for the entire initial exchange and reduced the relay to broadcasting
+// every reply. The address such a client should be unicast at is in yiaddr,
+// which is what replyTarget now reads.
 func (m msg) broadcastWanted() bool {
-	return m.flags()&flagBroadcast != 0 || m.ciaddr() == netip.AddrFrom4([4]byte{})
+	return m.flags()&flagBroadcast != 0
 }
 
 func (m msg) ciaddr() netip.Addr { return addr4(m.b[offCiaddr:]) }
+
+// yiaddr is the address the server is handing the client. Zero on anything
+// that is not an offer or an acknowledgement.
+func (m msg) yiaddr() netip.Addr { return addr4(m.b[offYiaddr:]) }
 func (m msg) giaddr() netip.Addr { return addr4(m.b[offGiaddr:]) }
 
 func addr4(b []byte) netip.Addr {
@@ -171,8 +182,20 @@ func prepareRequest(m msg, self netip.Addr, maxHops int) error {
 // reports whether this relay should deliver it at all.
 //
 // Returns the address to send to; the caller sends from ServerPort to
-// ClientPort. A broadcast reply goes to the limited broadcast address rather
-// than the subnet broadcast: the client has no address and no netmask yet, so
+// ClientPort. RFC 1542 §4.1.2 sets the order: honour the B flag first, then
+// unicast to yiaddr if the server assigned one, then ciaddr for a client that
+// already had an address, and broadcast only when there is nothing else to
+// aim at.
+//
+// yiaddr before ciaddr is the part worth stating. Through the whole initial
+// exchange the client has no address, so ciaddr is zero and yiaddr holds the
+// address being offered; a relay that consults only ciaddr has nothing to
+// unicast at exactly when it matters. ciaddr still comes second because a
+// client RENEWING already holds its address and puts it there, leaving yiaddr
+// as a confirmation of the same value.
+//
+// A broadcast reply goes to the limited broadcast address rather than the
+// subnet broadcast: the client has no address and no netmask yet, so
 // 255.255.255.255 is the only one it is listening for.
 func replyTarget(m msg, self netip.Addr) (netip.Addr, error) {
 	if m.op() != opReply {
@@ -184,7 +207,16 @@ func replyTarget(m msg, self netip.Addr) (netip.Addr, error) {
 		return netip.Addr{}, fmt.Errorf("reply is for relay %s, not %s", m.giaddr(), self)
 	}
 	if m.broadcastWanted() {
-		return netip.AddrFrom4([4]byte{255, 255, 255, 255}), nil
+		return bcast, nil
 	}
-	return m.ciaddr(), nil
+	if y := m.yiaddr(); y != netip.AddrFrom4([4]byte{}) {
+		return y, nil
+	}
+	if c := m.ciaddr(); c != netip.AddrFrom4([4]byte{}) {
+		return c, nil
+	}
+	return bcast, nil
 }
+
+// bcast is the limited broadcast address, 255.255.255.255.
+var bcast = netip.AddrFrom4([4]byte{255, 255, 255, 255})

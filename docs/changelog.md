@@ -2,6 +2,132 @@
 
 ---
 
+## v973 — 2026-08-26
+
+**Filling in the toolbars left them at two different heights. Every small button with a colour was 25px; every one without kept an auto height about two pixels shorter, and v971 stood them next to each other for the first time.**
+
+Reported from a screenshot of Packet Capture. Measured off it rather than argued about: `Start` and `Download` are 28 device pixels tall, `Clear` is 30, and there are no border pixels on either, so it is a real difference and not a border. `Start` and `Clear` are both five characters in the same monospace font and come out 64 and 69 pixels wide, which is padding rather than text.
+
+### The size belonged to the colours
+
+```css
+button.sm { padding:3px 8px; font-size:12px; }
+button.sm.danger, button.sm.ok, button.sm.warn { height:25px; padding:0 10px; ... }
+```
+
+All three capture buttons are `.sm`. Only `Clear` is `warn sm`, so only `Clear` matched the second rule — an explicit height and 10px of side padding, where its neighbours got auto height and 8px. At the screenshot's ~1.2× device pixel ratio that is exactly the 25-versus-23 and the four-versus-five pixels measured.
+
+That rule came from table row bars, where every button carries `.danger` or `.ok` or `.warn` and they therefore all agree. Nothing was next to a plain one until v971 filled in Keys, Packet Capture and Logs, so this is that change's own regression: it put coloured buttons beside uncoloured ones for the first time.
+
+### It was in all three bars, not just the one reported
+
+- **Packet Capture** — `Start` and `Download` plain, `Clear` amber.
+- **Logs** — `Refresh`, `Download` and `tshoot` at `cls:''`, `Clear` at `cls:'danger'`. One tall button among three short.
+- **Keys** — `Generate` and `Import` plain against `Enable`, `Disable`, `Reveal`, `Copy` and `Delete`. Two short among seven.
+
+`cls:''` appears seven times across the `_rowButtons` specs, which is the size of the blast radius.
+
+### The size now belongs to `.sm`
+
+The height, padding and flex centering move onto `button.sm` itself, and the per-colour rule is deleted rather than extended. Adding a fourth selector for the uncoloured case would have fixed the three bars and left the trap armed for the next plain `.sm` button somebody adds; there is nothing to keep in step if the size is a property of being small rather than of being red.
+
+The flexbox centering is kept and so is the reason for it: matching heights via `line-height` still misaligned the text vertically, because line-height-based centering depends on font metrics that vary by engine, while flex centers the actual content box. `.tbar-btn` already worked this way, which is why the `+`/`−` pair was never part of the problem.
+
+The old comment worried about a colour opting *out* of the sizing and being the one button standing a pixel taller. It had the direction backwards. The colours were the only things that had ever opted in.
+
+### Editor cancels come along, and should
+
+Every `ghost sm` in the app is a `cancel` sitting beside a plain `sm` `save`, so both were short before and both are 25px now — the pairs still match each other, and they now match the toolbars too.
+
+`.ghost` carries a 1px border where the filled buttons have none, which would normally make it 2px taller for the same declared height. `* { box-sizing:border-box; }` at the top of the sheet puts the border inside the 25px, so it does not. Checked rather than assumed, because this fix introducing the exact bug it removes would have been a quiet way to lose.
+
+### Pinned
+
+`TestEverySmallButtonIsOneHeight` asserts the shared rule exists *and* that no `button.sm.<colour>` rule sizes itself separately, since the way this returns is a fifth colour arriving with its own sizing beside the others. It strips CSS comments before matching, because the forbidden selectors are also named in the prose explaining their removal — the first version of the test failed on its own documentation.
+
+`TestToolbarsMixColouredAndPlainButtons` pins the arrangement that exposed it: a bar containing both a coloured button and a plain one, in the two toolbars that build their bars differently. Neither test would have caught anything before v971, because before v971 that arrangement did not exist.
+
+`TestWarnSharesTheRowButtonSizing` fails against this change, and is rewritten rather than deleted. Its concern is exactly right — a `.warn` button must be the height of whatever it sits beside — but it checked that by asserting `.warn` appears in a rule alongside `.danger` and `.ok`, which is the mechanism that had the hole in it. It now asserts the other half: that `button.warn` contributes colour and nothing else, so it cannot drift from its neighbours whatever they are wearing. A test that names a rule rather than a property fails when the rule is the thing that was wrong.
+
+---
+
+## v972 — 2026-08-26
+
+**A relayed scope has never worked. The relay could not reach a server that was not on the client's own LAN, and Kea could not hear it if it had — two independent faults, either one enough to make a remote client wait out its DISCOVER forever.**
+
+Reported from a four-node lab: `grav1` serving `10.1.1.0/24` attached and `10.4.4.0/24` relayed, `grav4` relaying `eth1` to `10.1.1.1`, the two joined over the mesh. Both pages showed exactly what the manual describes. `fed4` had no IPv4 address at all.
+
+Neither end was misconfigured. Both ends were broken.
+
+### The relay could not talk to the server
+
+`internal/dhcrelay` opened one socket per link, bound wildcard and confined to the client-facing interface with `SO_BINDTODEVICE`, and used it for both directions. The confinement is right for hearing clients — it is what makes the giaddr stamp trustworthy, since everything the socket receives is known to have come from that link. It is exactly wrong for talking to the server.
+
+`SO_BINDTODEVICE` constrains egress and delivery both. `grav4`'s route to `10.1.1.0/24` is `dev mesh0`, so the forwarded request was pushed at an interface the server is not on, and the reply — a unicast to giaddr `10.4.4.1`, arriving on `mesh0` — was dropped by the kernel before the socket saw it. The comment above that branch said *the relay sent the request from this socket, so this is where the response lands*, which is true on exactly one topology: the one where the server is already on the client's LAN and no relay is needed.
+
+So: two sockets per link. The client-facing one is unchanged in job and confinement. The server-facing one binds the link's own address and is deliberately *not* confined — that address is the giaddr the server replies to, and an address-bound socket is delivered its traffic whichever interface carries it. Direction is now decided by which socket a datagram arrived on rather than by the op code alone, which also closes a reflector: a reply on the LAN is another server answering the client directly, and a request on the server-facing socket is somebody else's relay pointed at this address. Both are dropped.
+
+If only one of a link's two sockets binds, the link is skipped and the other is given back. Half a link is not half-working — it accepts requests and silently never answers them, which is worse than being plainly absent from `Listening()`.
+
+### The server could not hear the relay
+
+Fixing the relay alone still yields no lease, and this is the half that took a real Kea to establish rather than a reading of the manual.
+
+`renderKea` never emitted `dhcp-socket-type`, so Kea took its default of `raw`: an `AF_PACKET` socket on each named interface, which sees that wire and nothing else. A relayed request is a unicast to this host's address arriving over whatever path reaches the relay — here `mesh0`, never `eth1`, whose address it is addressed to. Kea was watching the wrong wire.
+
+What made this hard to see from the outside is that **raw mode binds `<iface-addr>:67` as well**, so `ss` shows a UDP socket on exactly the address the relay is targeting. It does not receive there; that socket is outbound only. Driven against kea-dhcp4 2.4.1 with an identical forwarded DISCOVER arriving on an interface Kea was not listening on: `udp` produced `DHCP4_SUBNET_SELECTED` and `DHCP4_LEASE_ADVERT`, `raw` produced no log line at all. Reproduced both ways.
+
+`socketTypeFor` now renders `udp` as soon as any scope is relayed and `raw` otherwise. Nothing else changes: giaddr selects the subnet through the `relay` clause already rendered, with no option 82, no RFC 3527 link-selection, and no mention of the interconnect anywhere in the file.
+
+**`refuseMeshIface` is untouched, and that is the point.** A udp socket matches on the address, not the arrival interface, so a scope naming `eth1` is served correctly by a request that came over the mesh. The overlay device never has to be nameable, and the rule that keeps a DHCP server off the mesh devices stays exactly as strict as it was.
+
+### The relay's client socket moves off the wildcard
+
+Kea takes `<iface-addr>:67` under *both* socket types and sets no `SO_REUSEADDR`, so a wildcard `0.0.0.0:67` bind beside it fails outright with `EADDRINUSE` — first to start wins, and the loser is whichever one systemd happened to order second. The exclusivity in `DHCPMode` turns out to be enforced by the kernel, not only by the argument written above it.
+
+The relay does not need the wildcard. It needs to hear `255.255.255.255`, which RFC 2131 §4.1 is where a client with no address sends. Binding the limited broadcast address is a different tuple, so the collision does not arise, and the socket still receives every client broadcast on the link. Nothing is given up: a client that already holds a lease unicasts its renewal to the server itself, routed, with no relay in the path.
+
+This does not make server-and-relay-on-one-node representable — `DHCPMode` is still one field — but it removes the reason it could not be.
+
+### Both scope kinds on one node, reported
+
+`dhcp-socket-type` is one global setting in Kea, and the two kinds of scope want opposite values. A node with an attached scope and a relayed one cannot serve both, and `renderKea` resolves that toward the relayed scopes: a relayed scope is unservable without `udp`, while an attached one at least has somewhere else to go.
+
+That is the right resolution and it must not be silent, so `dhcpMixedScopeWarning` names the links that stop being answered in the apply note. A warning rather than a refusal — the configuration is legitimate, the attached LAN may be served by another node or be entirely static, and refusing to apply would be refusing a working setup on suspicion. The lab above trips it, correctly: `grav1` gets `fed4` working and `fed1` stops being served there.
+
+### `replyTarget` was reading the wrong field
+
+`broadcastWanted` returned true whenever ciaddr was zero, which is true of every DHCPOFFER by definition — a client in SELECTING has no address yet. The relay therefore broadcast every reply of the initial exchange and never once took its unicast branch. The address such a client should be unicast at is in **yiaddr**, an offset the package did not have.
+
+Order is now RFC 1542 §4.1.2's: the B flag, then yiaddr, then ciaddr, then broadcast when there is nothing to aim at. ciaddr stays second because a client RENEWING holds its address and puts it there.
+
+### The tests could not have caught any of this
+
+`relay_test.go` exercised `parse`, `prepareRequest` and `replyTarget` as pure functions; `Start` was tested only in its refusal paths. No packet had ever crossed a socket, which is what v969's own note admitted when it said the reply path back through a relay was unexercised.
+
+`TestReplyTarget` is the sharper lesson: it passed against both the broken and the fixed code, because it never set yiaddr and so never described a DHCPOFFER. A test can cover a function and still not cover the case the function exists for.
+
+What is pinned now:
+
+- `TestReplyTargetUnicastsOfferToYiaddr` — the offer case, which is the case that matters.
+- `TestHandleForwardsOnTheOppositeSocket` — a request leaves by the server-facing socket, a reply by the client-facing one.
+- `TestHandleIgnoresWrongDirection` — traffic on the wrong socket for its op code is not forwarded.
+- `TestKeaSocketTypeFollowsTheScopes` and `TestMixedScopesAreReported`.
+- `TestRealKeaAnswersARelayedDiscover` — renders a relayed scope, starts the real `kea-dhcp4` on it, and puts a raw-socket DISCOVER through it with `hops=1`, giaddr stamped, sourced from the relay's address and arriving on an interface Kea was never told about. It asserts `DHCP4_LEASE_ADVERT` from the relayed pool. Skipped where there is no Kea or no port 67.
+- `TestManualTwoSocketsBindAndReplyArrivesOffLink` — both sockets bind 67 at once, and the server-facing one is delivered a datagram the confined one cannot see. Needs `RELAY_IF`/`RELAY_ADDR`, so it skips in CI.
+
+Each new test was run against the old behaviour and fails there, including the Kea one, which fails with the lab's exact symptom when `socketTypeFor` is forced back to `raw`.
+
+The end-to-end test asserts `DHCP4_LEASE_ADVERT` rather than `DHCP4_SUBNET_SELECTED`, which says more but is logged at DEBUG while `renderKea` configures INFO. Asserting on a line the rendered configuration cannot produce would be a test that only ever passed against a hand-edited file.
+
+### Two faults left alone, knowingly
+
+**Kea logs `DHCP4_STARTED` when its socket bind failed.** Observed directly: with the port already held, Kea logged `DHCPSRV_OPEN_SOCKET_FAIL`, logged `DHCP4_STARTED`, and stayed running. `keaActive` shells out to `systemctl is-active`, so `dhcpRuntime` would report a healthy server that is answering nobody, and `whyNotServing`'s "the Kea service is not running" branch never fires for the failure that actually happens. Detecting it means reading the log rather than trusting the unit state, which is a change to how this project decides a daemon is up — worth doing on its own rather than inside a DHCP fix.
+
+**`dhcpRuntime` does not deduplicate its interface list** where `renderKea` does, which is why a node with two scopes on one link reports `SERVING ON ETH1, ETH1`. Cosmetic, visible on the page, and not what was broken.
+
+---
+
 ## v971 — 2026-08-26
 
 **Keys, Packet Capture and Logs had toolbar buttons with no colour on them — the transparent, bordered styling the rest of the app uses for *cancel*. They are filled in, and the four that needed something the palette could not say get a new amber.**

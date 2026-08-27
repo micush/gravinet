@@ -221,22 +221,28 @@ const indexHTML = `<!doctype html>
      The value is the dark theme's own --bg, so it is a colour already in the
      palette rather than a new one introduced for one rule. */
   button.warn { background:var(--warn); color:#0f1419; }
-  button.sm { padding:3px 8px; font-size:12px; }
-  /* Ban/Unban/Delete share the .sm row-button recipe but, unlike .tbar-btn,
-     never got their own sizing — matching height via line-height (ratio or
-     explicit pixel value) turned out to still misalign the text vertically;
-     line-height-based centering depends on font metrics that vary by engine
-     and don't behave consistently. Flexbox centering sidesteps that
-     entirely — it centers the actual content box, not a font-metric-derived
-     line box — so it's used here instead. .tbar-btn (below) gets the same
-     treatment so every row button, icon or text label, lines up identically
-     regardless of its own font-size.
+  /* Every small button, one height, whatever colour it is or is not.
+     Matching height via line-height — ratio or explicit pixel value — still
+     misaligned the text vertically, because line-height-based centering
+     depends on font metrics that vary by engine. Flexbox centers the actual
+     content box rather than a font-metric-derived line box, so it is used
+     here instead, and .tbar-btn below gets the same treatment: every small
+     button, icon or text label, lines up regardless of its own font-size.
 
-     .warn and .info are in the list for the same reason and not as an
-     afterthought: they sit shoulder to shoulder with .ok and .danger in the
-     Keys and Logs bars, and a colour that opted out of the sizing would be
-     the one button in the row standing a pixel taller than its neighbours. */
-  button.sm.danger, button.sm.ok, button.sm.warn { height:25px; padding:0 10px; display:inline-flex; align-items:center; justify-content:center; }
+     This lived on button.sm.danger, .ok and .warn until v973, which meant a
+     small button *without* a colour class kept the old padding and an auto
+     height about two pixels shorter. That was invisible while the coloured
+     ones only ever appeared in table row bars, where every sibling carries a
+     colour. v971 filled in the Keys, Packet Capture and Logs toolbars and put
+     them beside plain ones for the first time — Start and Download flanking
+     an amber Clear, Refresh and tshoot beside a red one — and the mismatch
+     became three toolbars of buttons at two different heights.
+
+     The comment that used to sit here worried about a colour opting out of
+     the sizing. The real failure was the other way round: the uncoloured ones
+     had never opted in, and there is no list of colours to keep in step with
+     if the size belongs to .sm rather than to the colours. */
+  button.sm { height:25px; padding:0 10px; font-size:12px; display:inline-flex; align-items:center; justify-content:center; }
   input,select { background:var(--bg); border:1px solid var(--line); color:var(--fg); border-radius:6px; padding:7px 9px; font:inherit; }
   /* Upgrade page's file picker(s) — widened from the default input size so
      a full filename (source tarball, signed manifest) is readable without
