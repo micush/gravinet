@@ -2,6 +2,82 @@
 
 ---
 
+## v978 — 2026-08-27
+
+**A relayed scope still did not work. Kea received the request, selected the subnet, chose a lease, and threw the reply away.** Third fault in the same path, on the same four-node lab as v972, against a config v976 renders correctly.
+
+```
+DHCP4_PACKET_RECEIVED ... DHCPDISCOVER received from 10.4.4.1 to 10.1.1.1 on interface eth1
+DHCP4_LEASE_OFFER     ... lease 10.4.4.10 will be offered
+DHCP4_PACKET_SEND     ... trying to send DHCPOFFER from 10.1.1.1:67 to 10.4.4.1:67 on interface eth1
+DHCP4_PACKET_SEND_FAIL... Interface mesh0/19 does not have any suitable IPv4 sockets open.
+```
+
+### Receiving and answering want different interfaces
+
+v972 gave a relayed scope the `udp` socket type so the forwarded DISCOVER would arrive: a udp socket matches on address rather than on arrival interface, so a unicast to `eth1`'s address coming over the mesh reaches Kea. That works, and the journal above shows it working.
+
+Sending does not follow the socket the query came in on. The reply goes to giaddr, which is by definition on the far side of the relay, so it egresses whatever interface reaches the relay — `mesh0` here. Kea then looks for one of its own sockets on that interface and drops the packet when there is none.
+
+So `interfaces-config` has to name the reply link as well as the scopes' links. Established by adding `"mesh0"` to that list by hand on the lab node, which made the relayed scope work end to end, not by reading Kea's source.
+
+### The interface is resolved, not configured
+
+`relayReplyIfaces` asks the kernel which interface each configured relay address is reached over and hands the answer to `renderKea`, which appends it to `interfaces-config` after the scopes' own links and deduplicated against them — Kea refuses an entire configuration for one interface named twice, and a relay reached over a link that already carries a scope is the ordinary case for that.
+
+The route lookup is a connected UDP socket that sends nothing: the source address the kernel picks is the one the route selected, and the interface owning that address is the one packets leave by. Same answer `ip route get` gives, without a netlink implementation per platform.
+
+A relay with no route to it is named in the apply note rather than guessed at. Choosing an interface there would render a file that looks correct and drops every reply, which is exactly the failure being fixed.
+
+Read at apply time and baked into the file. A later route change that moves a relay to another link leaves Kea holding a socket on the old one and needs another apply — acceptable, because a relay's path is a deployment property rather than something that flaps, and the alternative is watching the routing table to rewrite a config and bounce a daemon.
+
+### This is not the operator naming a mesh device
+
+`refuseMeshIface` is unchanged and still refuses that. What is new is gravinet opening a reply socket on a link a configured relay is already reached over, and what that socket can do is bounded: it is a udp socket, so it receives no broadcasts, and no `subnet4` entry names the overlay or carries an overlay giaddr, so a request arriving on it selects no scope and is dropped. It is a way out, not a way in.
+
+v972's notes claimed the overlay device never has to be nameable. That sentence is now annotated in place rather than left standing, because it is the reason this took a third report to find.
+
+### Why the existing test passed
+
+`TestRealKeaAnswersARelayedDiscover` asserts `DHCP4_LEASE_ADVERT`. In the journal above that line succeeds and `DHCP4_PACKET_SEND_FAIL` is the next one: the assertion sits one line above the bug. v972 chose that line deliberately, because `DHCP4_SUBNET_SELECTED` is DEBUG-only and `renderKea` configures INFO — a reasonable call that happened to stop exactly short of the failure.
+
+### Pinned
+
+- `TestRenderKeaListensOnTheRelayReplyInterface` — a relayed scope renders the reply link into `interfaces-config`, and the baseline without one is asserted in the same test so the check cannot pass vacuously.
+- `TestRenderKeaDoesNotNameTheReplyInterfaceTwice` — the deduplication, since a repeat costs the whole file.
+- `TestRenderKeaAttachedOnlyGainsNoReplyInterface` — an attached-only config renders exactly what it rendered before.
+- `TestRelayReplyIfacesReportsAnUnroutableRelay` and `TestEgressIfaceForResolvesALocalAddress` — the lookup reports rather than guesses, and agrees with the host about loopback.
+
+The first two fail against v977.
+
+---
+
+## v977 — 2026-08-26
+
+**v976 renders a blank page.** The help text written for v976's reset removal contained the word `network's`. The apostrophe closed the single-quoted JS literal it was sitting in, everything after it on that line became syntax, and the whole script failed to parse. Every page in the admin UI is empty.
+
+The fix is one character: `network\'s`, the way `it\'s`, `key\'s` and `node\'s` are already written a few lines above it.
+
+### The guard existed and skipped
+
+`TestUIScriptParses` extracts the script blocks and runs `node --check` on them. It is exactly the test for this, and it did not fire, because it skips when `node` is not on PATH and v976 was built where it was not. A green run said nothing about the page parsing, and nothing in the output distinguished "checked and fine" from "not checked".
+
+That skip is defensible on its own — not every machine that builds gravinet has a JS runtime — but it means the only protection against a blank UI is absent precisely where nobody notices.
+
+### A check that cannot skip
+
+`TestPageScriptHasNoUnterminatedStringLiteral` tokenizes the page's JS in pure Go — tracking line comments, block comments, regex literals and string literals — and fails on any literal still open at end of line. No node, no skip, runs everywhere.
+
+It is narrower than a parse and deliberately so. It covers one bug class, but it is the class this page has now been broken by twice, and the shape is always the same: JS has no multi-line single-quoted string, so an unescaped apostrophe in prose always runs off the end of its line.
+
+Soundness rests on the page having no multi-line strings at all, which is guaranteed rather than assumed: `indexHTML` is a Go raw string, so it cannot contain a backtick and template literals cannot exist in it. `TestPageScriptUsesNoTemplateLiterals` pins that, because the line-based scan stops being valid the moment it stops being true.
+
+`TestUIScriptParses` keeps its node path as the stronger check where a runtime is available, and its skip message now says the built-in check is still running rather than implying nothing is.
+
+Both were run against v976 and fail there, on the exact line.
+
+---
+
 ## v976 — 2026-08-26
 
 **Networks had a reset button for something the state cell already does.** Double-clicking a network's state to disabled and back to enabled drops every peer session on it and brings it back with no retry backoff left to wait out, which is what reset was for.
@@ -146,6 +222,8 @@ What made this hard to see from the outside is that **raw mode binds `<iface-add
 `socketTypeFor` now renders `udp` as soon as any scope is relayed and `raw` otherwise. Nothing else changes: giaddr selects the subnet through the `relay` clause already rendered, with no option 82, no RFC 3527 link-selection, and no mention of the interconnect anywhere in the file.
 
 **`refuseMeshIface` is untouched, and that is the point.** A udp socket matches on the address, not the arrival interface, so a scope naming `eth1` is served correctly by a request that came over the mesh. The overlay device never has to be nameable, and the rule that keeps a DHCP server off the mesh devices stays exactly as strict as it was.
+
+> **Corrected in v978.** The second sentence is true of receiving and false of answering. Kea routes the reply to giaddr and then requires a socket on the interface that route egresses, so the overlay device does have to appear in `interfaces-config` for a relay reached over the mesh. `refuseMeshIface` does stay as strict as it was — the operator still cannot name a mesh device — but gravinet now adds the reply link itself.
 
 ### The relay's client socket moves off the wildcard
 

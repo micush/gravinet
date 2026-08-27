@@ -199,7 +199,11 @@ const defaultLease = 3600
 // same rule renderRadvd follows and for the same reason: Kea refuses to start
 // on a malformed scope, and one bad subnet taking down the leases for every
 // other LAN is a far worse failure than that one LAN going unserved.
-func renderKea(c config.DHCPConfig) ([]byte, error) {
+// replyIfaces are additional interfaces Kea must hold a socket on so it can
+// send relayed replies; see relayReplyIfaces. Variadic so the many callers
+// that render an attached-only config are unchanged, and because an
+// attached-only config genuinely has none.
+func renderKea(c config.DHCPConfig, replyIfaces ...string) ([]byte, error) {
 	conf := keaConf{
 		Dhcp4: keaDhcp4{
 			UserContext: keaUserContext{Marker: true},
@@ -280,6 +284,19 @@ func renderKea(c config.DHCPConfig) ([]byte, error) {
 			listening[name] = true
 			conf.Dhcp4.InterfacesConfig.Interfaces = append(conf.Dhcp4.InterfacesConfig.Interfaces, name)
 		}
+	}
+	// The reply sockets go on last, so the links the scopes name still come
+	// first and an attached-only file is byte-for-byte what it always was.
+	// Deduplicated against the same map, because a relay reached over a link
+	// that also carries a scope is one interface named twice, and Kea refuses
+	// the whole configuration for that.
+	for _, name := range replyIfaces {
+		name = strings.TrimSpace(name)
+		if name == "" || listening[name] {
+			continue
+		}
+		listening[name] = true
+		conf.Dhcp4.InterfacesConfig.Interfaces = append(conf.Dhcp4.InterfacesConfig.Interfaces, name)
 	}
 	b, err := json.MarshalIndent(conf, "", "  ")
 	if err != nil {

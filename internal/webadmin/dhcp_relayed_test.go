@@ -1,6 +1,7 @@
 package webadmin
 
 import (
+	"encoding/json"
 	"net"
 	"strings"
 	"testing"
@@ -320,4 +321,120 @@ func TestDHCPHelpExplainsServingANetworkThisNodeIsNotOn(t *testing.T) {
 	if !strings.Contains(topic, "'relay':") {
 		t.Error("the relay column has no column note, unlike every other column on the page")
 	}
+}
+
+// The reply path (v978).
+//
+// v972 made a relayed DISCOVER *arrive*: udp sockets match on address, so a
+// unicast to eth1's address coming over the mesh reaches Kea. Its notes then
+// claimed the overlay device never had to be named, which was true of
+// receiving and untrue of answering.
+//
+// Kea routes the reply to giaddr, which is on the far side of the relay, so it
+// egresses the link that reaches the relay. It then requires one of its own
+// sockets on that link and drops the packet when there is none:
+//
+//	DHCP4_PACKET_SEND_FAIL ... failed to send DHCPv4 packet:
+//	    Interface mesh0/19 does not have any suitable IPv4 sockets open.
+//
+// So interfaces-config has to carry the reply link too. Confirmed on the lab
+// node by adding it by hand before this was written.
+func TestRenderKeaListensOnTheRelayReplyInterface(t *testing.T) {
+	_, ifaces := keaSubnets(t, config.DHCPConfig{
+		Mode:    config.DHCPServer,
+		Subnets: []config.DHCPSubnet{relayedKeaSubnet("10.4.4", "10.4.4.1")},
+	})
+	if len(ifaces) != 1 || ifaces[0] != "eth0" {
+		t.Fatalf("baseline interfaces = %v, want just the scope's own link", ifaces)
+	}
+
+	b, err := renderKea(config.DHCPConfig{
+		Mode:    config.DHCPServer,
+		Subnets: []config.DHCPSubnet{relayedKeaSubnet("10.4.4", "10.4.4.1")},
+	}, "mesh0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := keaIfaceList(t, b)
+	want := []string{"eth0", "mesh0"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("interfaces = %v, want %v — Kea cannot send a relayed reply "+
+			"without a socket on the link that reaches the relay", got, want)
+	}
+}
+
+// Kea refuses an entire configuration for one interface named twice, so a
+// relay reached over a link that already carries a scope must not double it.
+// That is the ordinary case for an attached relay, not a corner.
+func TestRenderKeaDoesNotNameTheReplyInterfaceTwice(t *testing.T) {
+	b, err := renderKea(config.DHCPConfig{
+		Mode:    config.DHCPServer,
+		Subnets: []config.DHCPSubnet{relayedKeaSubnet("10.4.4", "10.4.4.1")},
+	}, "eth0", "mesh0", "mesh0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := keaIfaceList(t, b)
+	if strings.Join(got, ",") != "eth0,mesh0" {
+		t.Errorf("interfaces = %v, want eth0,mesh0 with no repeat", got)
+	}
+}
+
+// An attached-only config gains nothing: there is no relay, so there is no
+// reply link, and the file is what it was before this change.
+func TestRenderKeaAttachedOnlyGainsNoReplyInterface(t *testing.T) {
+	c := config.DHCPConfig{Mode: config.DHCPServer, Subnets: []config.DHCPSubnet{dhcpSubnet()}}
+	ifaces, unresolved := relayReplyIfaces(c)
+	if len(ifaces) != 0 || len(unresolved) != 0 {
+		t.Errorf("relayReplyIfaces on an attached-only config = %v/%v, want nothing", ifaces, unresolved)
+	}
+}
+
+// A relay with no route to it is reported rather than guessed at. Picking an
+// interface would render a file that looks correct and still drops every
+// reply, which is the failure this whole change is about.
+func TestRelayReplyIfacesReportsAnUnroutableRelay(t *testing.T) {
+	// 192.0.2.0/24 is TEST-NET-1 and is not routed anywhere. If this host
+	// happens to have a default route it will resolve, so the assertion is on
+	// the pair being consistent rather than on it failing.
+	c := config.DHCPConfig{
+		Mode:    config.DHCPServer,
+		Subnets: []config.DHCPSubnet{relayedKeaSubnet("10.9.9", "192.0.2.77")},
+	}
+	ifaces, unresolved := relayReplyIfaces(c)
+	if len(ifaces)+len(unresolved) != 1 {
+		t.Errorf("one relay address should yield exactly one outcome, got ifaces=%v unresolved=%v", ifaces, unresolved)
+	}
+}
+
+// The route lookup sends nothing and must agree with the host's own view: the
+// loopback address is reachable over the loopback interface.
+func TestEgressIfaceForResolvesALocalAddress(t *testing.T) {
+	name, ok := egressIfaceFor("127.0.0.1")
+	if !ok {
+		t.Skip("no route to 127.0.0.1 on this host")
+	}
+	iface, err := net.InterfaceByName(name)
+	if err != nil {
+		t.Fatalf("egressIfaceFor returned %q, which is not an interface: %v", name, err)
+	}
+	if iface.Flags&net.FlagLoopback == 0 {
+		t.Errorf("egressIfaceFor(127.0.0.1) = %q, which is not a loopback interface", name)
+	}
+}
+
+// keaIfaceList pulls interfaces-config.interfaces out of a rendered file.
+func keaIfaceList(t *testing.T, b []byte) []string {
+	t.Helper()
+	var conf struct {
+		Dhcp4 struct {
+			InterfacesConfig struct {
+				Interfaces []string `json:"interfaces"`
+			} `json:"interfaces-config"`
+		} `json:"Dhcp4"`
+	}
+	if err := json.Unmarshal(b, &conf); err != nil {
+		t.Fatalf("rendered config is not JSON: %v", err)
+	}
+	return conf.Dhcp4.InterfacesConfig.Interfaces
 }

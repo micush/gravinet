@@ -167,7 +167,17 @@ func applyDHCP(c config.DHCPConfig) (note string, err error) {
 			}
 			backedUp = "kept the previous config at " + to + "; "
 		}
-		conf, err := renderKea(served)
+		// Which interfaces Kea needs a socket on to *answer* a relayed
+		// scope, as distinct from the ones the scopes name. See
+		// relayReplyIfaces: without this Kea selects the subnet, picks a
+		// lease, and then throws the reply away.
+		replyIfaces, unresolved := relayReplyIfaces(served)
+		noRoute := ""
+		if len(unresolved) > 0 {
+			noRoute = fmt.Sprintf("no route to relay agent(s) %s, so replies to their clients cannot be sent from here until one exists; ",
+				strings.Join(unresolved, ", "))
+		}
+		conf, err := renderKea(served, replyIfaces...)
 		if err != nil {
 			return "", err
 		}
@@ -189,7 +199,7 @@ func applyDHCP(c config.DHCPConfig) (note string, err error) {
 			return "", fmt.Errorf("wrote %s but the Kea service would not start — check `journalctl -u %s`", keaConfPath, keaUnit())
 		}
 		keaService("enable")
-		return noteworthy(installed, backedUp, missing, dhcpProblemNote(c)), nil
+		return noteworthy(installed, backedUp, missing, noRoute, dhcpProblemNote(c)), nil
 	}
 	return "", nil
 }
