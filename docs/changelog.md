@@ -2,6 +2,58 @@
 
 ---
 
+## v976 — 2026-08-26
+
+**Networks had a reset button for something the state cell already does.** Double-clicking a network's state to disabled and back to enabled drops every peer session on it and brings it back with no retry backoff left to wait out, which is what reset was for.
+
+The `\u21bb` button and `netResetRow` behind it are gone. The state cell is untouched.
+
+### The endpoint stays
+
+`POST /api/network/reset` keeps working, and so do its tests and its entry in the API reference. It is not quite the same thing as the toggle pair, and the difference matters more to a script than to somebody clicking:
+
+- Reset drops sessions and clears seed backoff in place. Disable tears the network down — interface, addresses and all — and enable rebuilds it, so there is a window where the node genuinely has no overlay rather than an overlay with no peers.
+- Reset is one call. The toggle pair is two, with a config write and a reload each way, so it lands twice in config history and can be interrupted between them — a failed or forgotten second double-click leaves the network disabled.
+- On Windows the toggle pair can hit the kernel NAT reprogram and interface teardown slow paths that the network enable/disable comment already warns about. Reset does not touch the interface.
+
+None of that argued for a button. An operator clicking reset can equally click the state twice and see what happened between the two clicks, and a network left disabled by a fumbled second click is visible in the row rather than silent. A caller that needs the in-place version is a script, and scripts have the endpoint.
+
+The Networks help described the button; it now describes the double-click instead.
+
+---
+
+## v975 — 2026-08-26
+
+**Keys had Import, Reveal and Copy buttons for three things the key cell can do itself.** Same argument that took Enable and Disable off this toolbar in v974: a row button for something a row can do to itself gives the table two ways to do one thing.
+
+Double-clicking a key cell used to open a blank field to paste a replacement into. It now fetches the key first and opens the field with it already in place and selected, so the same gesture is copy (Ctrl/Cmd-C on the selection), replace (type or paste over it), and reveal (just look at it, then Escape). Committing the key unchanged is a no-op, and clearing the field is not a delete — Delete still is, and it is the one that confirms first and retracts a distributed key from its peers.
+
+Empty slots take the same handler with nothing to fetch: the field opens blank and whatever is pasted fills the slot. That is Import, and it is why Import could go rather than simply being deleted. Nothing else brings an existing key onto a node outside a join token, so dropping the button without giving the gesture somewhere to live would have removed the capability.
+
+The empty row's `empty` cell picks up `keycell` and `data-slot` to make that work, and both variants carry `data-set` so one handler can tell whether there is anything to reveal.
+
+### Copy changes shape rather than moving
+
+The old Copy called `navigator.clipboard.writeText` with a `window.prompt` fallback for the case where that API is missing. That fallback was not a rare path: `navigator.clipboard` is unavailable in insecure contexts, and a LAN admin page served over plain http is exactly one. Selecting text in a focused input needs no API and no permission, and works the same everywhere.
+
+What is lost is copying several keys at once, which was only reachable by ticking several rows first.
+
+### Amber is down to one button
+
+`.warn` was added in v971 for Disable, Reveal and Copy — actions not ordinary enough for the accent, not destructive enough for red. All three have now gone, and the packet buffer's Clear is the only user left.
+
+The colour stays anyway. Deleting `.warn` along with its last two users would leave the next "turns something off" button with no colour to reach for and the same argument to have again, and would take Clear with it, which still means what the table says.
+
+### Pinned
+
+`TestKeysToolbarColours` asserted a colour for each of Reveal, Copy and Delete and fails with two of them gone; it now covers what is left. Generate carries no `cls` at all rather than `cls:''`, so the check for it is the absence of a colour class — and the spec window is bounded at the entry's own closing brace, because a fixed 120-char slice from the shortest spec in the app runs into Delete's `cls:'danger'` on the next line.
+
+`TestKeysHasNoRowButtonForACellsJob` pins both halves: the three buttons stay gone, and both cell variants still carry the titles and `data-set` that make the gesture work. Removing the buttons is only a cleanup for as long as the cell still does their job. It also pins the clipboard call and its prompt fallback staying gone, since re-adding a Copy button is the obvious way to bring both back.
+
+The Keys help still told operators to fill a slot with Generate or Import and to select filled slots for Reveal/Copy/Delete. It now names the two buttons that remain and describes the double-click, and the `key` column gets a note of its own.
+
+---
+
 ## v974 — 2026-08-26
 
 **Keys had Enable and Disable buttons for something its own state column already did.** Every other table in the app enables a row by double-clicking its state; Keys was the only one that also offered buttons, so it was the only one with two ways to do the same thing.

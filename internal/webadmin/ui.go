@@ -167,11 +167,11 @@ const indexHTML = `<!doctype html>
   /* Toolbar and row buttons say what they will do by colour, and every card's
      bar is read the same way:
 
-       blue   (default)  an ordinary action                Generate, Import, Start,
+       blue   (default)  an ordinary action                Generate, Start,
                                                            Refresh, Download, tshoot
-       green  .ok        turns something on                Enable, Unban
-       amber  .warn      turns something off, takes a      Disable, Reveal, Copy,
-                         secret out of hiding, or drops    Clear (capture buffer)
+       green  .ok        turns something on                Unban
+       amber  .warn      turns something off, takes a      Clear (capture buffer)
+                         secret out of hiding, or drops
                          something that can be got again
        red    .danger    throws something away for good    Delete, Clear (log file), Stop
 
@@ -184,9 +184,17 @@ const indexHTML = `<!doctype html>
      colour in Logs and another in Config History would be worse than either.
 
      What the accent could not express is the row above it. Disable, Reveal
-     and Copy are not ordinary actions and were not destructive enough to be
+     and Copy were not ordinary actions and were not destructive enough to be
      red, which is most of why they stayed ghosts — there was no colour for
-     them. Amber is that colour.
+     them. Amber is that colour, and all three have since gone: Enable and
+     Disable in v974, Reveal and Copy in v975, each replaced by a double-click
+     on the cell it concerned. The Keys toolbar was where amber lived, so it
+     is now down to the packet buffer's Clear.
+
+     The meaning is kept rather than the button. Deleting .warn along with its
+     last two users would leave the next "turns something off" button with no
+     colour to reach for and the same argument to have again — and would take
+     Clear with it, which still means what the row says.
 
      .ghost — transparent, bordered — is not a fifth meaning. It is for the
      buttons that decline: cancel, close, dismiss. Those are quiet on purpose
@@ -3741,15 +3749,16 @@ function showModal(title, bodyEl, onClose){
 // documentation written from reading the code.
 const HELP = {
   'networks': {
-    topic: 'Add, remove, and manage networks. Double-click on an existing network to edit the name, subnet, overlay address, or notes for that network, or toggle the network state to enabled or disabled.<br><br><b>+</b> creates a network, <b>=</b> joins an existing one (paste a join token, or enter id/key/seed), <b>\u25cf</b> generates a join token for a ticked network to paste on another node, <b>\u2212</b> deletes the selected networks and all associated items, and <b>\u21bb reset</b> drops the selected networks\' peer connections and immediately reconnects to their peers and seeds.'
+    topic: 'Add, remove, and manage networks. Double-click on an existing network to edit the name, subnet, overlay address, or notes for that network, or toggle the network state to enabled or disabled.<br><br><b>+</b> creates a network, <b>=</b> joins an existing one (paste a join token, or enter id/key/seed), <b>\u25cf</b> generates a join token for a ticked network to paste on another node, <b>\u2212</b> deletes the selected networks and all associated items.<br><br>To drop a network's peer connections and reconnect immediately without waiting out any retry backoff, double-click its state to disabled and then back to enabled.'
       + '<br><br><b>This node\u2019s reachable address for joiners.</b> A brand-new network has no seeds, so a token minted for it would carry no address at all and the joining node would end up holding the right keys with nowhere to dial \u2014 it joins, and nothing forms. The <b>\u25cf</b> box therefore shows an address field, and whatever is in it is embedded in the token as the first seed. The field is only shown when the network has no enabled seed of its own; once it has one, seeds are embedded automatically and there is nothing to fill in.'
       + '<br><br>The prefilled value is a <i>guess</i> and is often wrong \u2014 check it before copying the token. It is the address peers report seeing this node at, or, on a first node where no peer has reported yet, simply the address you are reaching this admin page on plus the mesh port. That is right on a LAN and wrong in the ordinary cases you would expect: a private address is unreachable from across the internet, <i>127.0.0.1</i> is never reachable from anywhere else, and an address you reach this page on over the overlay or through a cluster proxy is not reachable from outside it. Nothing validates the address \u2014 a wrong one produces a perfectly valid token that simply never connects.'
       + '<br><br>Replace it with an address the <i>other</i> node can actually reach this one at, in <i>host:port</i> form, then press Enter (or click away) to re-mint the token with it. Include the port: a bare host falls back to the joining node\u2019s own default ports, which may not be the ports this node listens on.',
   },
   'keys': {
-    topic: 'Manage network keys. Select an empty slot and use Generate or Import to fill it; select filled slots for Reveal/Copy/Delete. Double-click a label, state, or key to change it in place \u2014 double-clicking the state is how a key is enabled or disabled, the same as every other table here. All enabled keys authenticate joiners.<br><br>To rotate keys, generate a new key, tick <b>distributed</b> to push it to every connected peer (no copy/paste needed), then disable the old one once it\'s reached everyone. Untick <b>distributed</b> to retract it from every peer that has it. Renaming a distributed key\'s label, or changing its expiry, pushes the update automatically. Set a date and time to enable key expiry.',
+    topic: 'Manage network keys. Tick empty slots and use Generate to fill them; tick filled slots and use Delete to remove them. Everything else is a double-click on the cell it concerns \u2014 a label, a state (which is how a key is enabled or disabled, the same as every other table here), an expiry, or the key.<br><br><b>Double-click a key to reveal it</b>, already selected, so you can copy it straight out, or type or paste a new one over it to replace it. An empty slot works the same way with nothing to reveal: paste a key in to fill it. Escape, or leaving the key as it was, closes the cell unchanged; clearing the field does not delete the key \u2014 Delete does. All enabled keys authenticate joiners.<br><br>To rotate keys, generate a new key, tick <b>distributed</b> to push it to every connected peer (no copy/paste needed), then disable the old one once it\'s reached everyone. Untick <b>distributed</b> to retract it from every peer that has it. Renaming a distributed key\'s label, or changing its expiry, pushes the update automatically. Set a date and time to enable key expiry.',
     cols: {
-      'slot': 'fill an empty slot with Generate or Import; select a filled one to enable, disable, reveal, copy or delete it',
+      'slot': 'tick empty slots to Generate into, or filled ones to Delete; everything else is a double-click on the cell it concerns',
+      'key': 'double-click to reveal this key, then copy it or paste a new one over it; on an empty slot, paste a key in to fill it',
       'distributed': 'tick to push this key to every connected peer, untick to retract it from every peer that has it',
       'expires': 'set a date and time to enable expiry; blank never expires',
     },
@@ -5041,13 +5050,13 @@ function secKeys(c) {
     for (const k of keys) {
       const sk = esc(selKey(cf.id, k.slot));
       if (!k.set) { h += '<tr class="selectable"><td class="selcol"><input type="checkbox" class="rsel" data-k="'+sk+'"></td>'
-        + '<td>'+k.slot+'</td><td colspan="6" class="empty">empty</td></tr>'; continue; }
+        + '<td>'+k.slot+'</td><td colspan="6" class="empty keycell" data-slot="'+k.slot+'" data-set="0" title="double-click to paste a key in">empty</td></tr>'; continue; }
       const st = k.enabled ? '<span class="on">enabled</span>' : '<span class="off">disabled</span>';
       h += '<tr class="selectable"><td class="selcol"><input type="checkbox" class="rsel" data-k="'+sk+'"></td>'
         + '<td>'+k.slot+'</td>'
         + '<td class="klabel" data-slot="'+k.slot+'" title="double-click to rename">'+esc(k.label||'')+'</td>'
         + '<td class="kstate" data-slot="'+k.slot+'" data-en="'+(k.enabled?1:0)+'" title="double-click to toggle">'+st+'</td>'
-        + '<td class="keycell" data-slot="'+k.slot+'" title="double-click to replace"><span class="kval masked" data-slot="'+k.slot+'">••••••••••••••••</span></td>'
+        + '<td class="keycell" data-slot="'+k.slot+'" data-set="1" title="double-click to reveal, then copy it or paste a new one over it"><span class="kval masked">••••••••••••••••</span></td>'
         + '<td class="kdist"><input type="checkbox" class="dist-cb" data-slot="'+k.slot+'"'+(k.enabled?'':' disabled')+(k.distributed?' checked':'')
           + ' title="'+(k.enabled?'tick to push this key to every peer currently connected on this network; untick to stop managing it together (peers keep their own copy, unaffected). Deleting a distributed key is what removes it from every peer':'enable this key first')+'"></td>'
         + '<td class="kexp" data-slot="'+k.slot+'" data-iso="'+esc(k.expires||'')+'" title="double-click to set an expiry date/time">'+expiryDisp(k.expires)+'</td>'
@@ -5079,11 +5088,42 @@ function secKeys(c) {
           .finally(refresh);
       };
     });
-    t.querySelectorAll('td.keycell').forEach(td => td.ondblclick = () =>
-      inlineCellEdit(td, '', 'paste a new key to replace this one', async (v) => {
-        if (!v){ renderSection(); return; }
-        edit('/api/key', { op:'set', net:cf.name, slot:Number(td.dataset.slot), key:v });
-      }));
+    // Double-clicking a key cell is now the only way key material moves into
+    // or out of a slot. On a filled slot it fetches the key and drops it into
+    // the input already selected, so the next keystroke either copies it out
+    // (Ctrl/Cmd-C) or replaces it (type or paste); Escape, or committing the
+    // key unchanged, leaves the slot exactly as it was. On an empty slot
+    // there is nothing to fetch, so the field opens blank and whatever is
+    // pasted fills the slot — what the Import button did.
+    //
+    // That one gesture is what let Reveal, Copy and Import go. All three were
+    // buttons acting on ticked rows to do something a row can do to itself,
+    // which is the argument that took Enable and Disable off this same
+    // toolbar in v974: a table with two ways to do one thing.
+    //
+    // Copy is the one that changes shape rather than moving: the clipboard
+    // write is now the browser's own, on a selected input, instead of a
+    // navigator.clipboard call with a window.prompt fallback for the insecure
+    // contexts where that API is missing. A LAN admin page served over plain
+    // http is exactly such a context, so the fallback was not a rare path.
+    // Selecting text in a focused input works everywhere and needs no
+    // permission — and it no longer copies several keys at once, which was
+    // only ever reachable by ticking several rows first.
+    t.querySelectorAll('td.keycell').forEach(td => td.ondblclick = async () => {
+      if (td.querySelector('input')) return;
+      const slot = Number(td.dataset.slot), filled = td.dataset.set === '1';
+      // Reveal is a round trip, unlike every other cell here — the masked
+      // dots are all the row was ever sent (see keys[].set in the API docs).
+      const cur = filled ? await revealOne(slot) : '';
+      if (cur === null) return; // reveal failed and already said why; leave the cell masked
+      inlineCellEdit(td, cur, filled ? 'paste a new key to replace this one' : 'paste a key to fill this slot', async (v, prev) => {
+        // Blank is not "delete this key" — Delete is, and it confirms first,
+        // and it knows to retract a distributed key from its peers. Clearing
+        // the field is how someone backs out after revealing.
+        if (!v || v === prev){ renderSection(); return; }
+        edit('/api/key', { op:'set', net:cf.name, slot, key:v });
+      });
+    });
     t.querySelectorAll('td.kexp').forEach(td => td.ondblclick = () => editExpiry(td, cf.name));
     // The "distributed" checkbox is a persisted toggle, not a one-shot
     // trigger: ticking it floods this key to every peer currently connected
@@ -5131,14 +5171,6 @@ function secKeys(c) {
       selection.keys.clear();
       refresh();
     };
-    const importFn = () => {
-      const empties = emptySlots();
-      if (empties.length !== 1){ noticeModal('tick exactly one empty slot to import into'); return; }
-      const key = window.prompt('Paste the key to import into slot '+empties[0]+' on "'+cf.name+'":'); if (key===null) return;
-      if (!key.trim()){ noticeModal('no key provided'); return; }
-      selection.keys.clear();
-      edit('/api/key', { op:'set', net:cf.name, slot:empties[0], key:key.trim() });
-    };
     const deleteFn = async () => { const s=needSet(); if(!s) return;
       const anyDist = s.some(slot => bySlot[slot] && bySlot[slot].distributed);
       const msg = 'Delete '+s.length+' key'+(s.length>1?'s':'')+' on "'+cf.name+'"?'
@@ -5146,34 +5178,14 @@ function secKeys(c) {
       if (!await confirmModal(msg)) return;
       for (const slot of s) await api('/api/key',{method:'POST',body:JSON.stringify({op:'delete',net:cf.name,slot})});
       selection.keys.clear(); refresh(); };
-    const revealFn = async () => { const s=needSet(); if(!s) return;
-      for (const slot of s){
-        const span = t.querySelector('.kval[data-slot="'+slot+'"]'); if (!span) continue;
-        if (span.classList.contains('masked')){
-          const key = await revealOne(slot); if (key===null) continue;
-          span.textContent = key; span.classList.remove('masked');
-        } else { span.textContent = '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022'; span.classList.add('masked'); }
-      } };
-    const copyFn = async (e) => { const s=needSet(); if(!s) return;
-      const vals=[]; for (const slot of s){ const k=await revealOne(slot); if (k!==null) vals.push(k); }
-      if (!vals.length) return;
-      const text = vals.join('\\n'); const btn = e && e.currentTarget;
-      try { await navigator.clipboard.writeText(text); if(btn){ btn.textContent='copied'; setTimeout(()=>{ btn.textContent='Copy'; }, 1200); } }
-      catch(err){ window.prompt('Copy the selected key'+(vals.length>1?'s':'')+':', text); } };
 
+    // What is left is what a row still cannot do to itself. Generate fills
+    // several ticked slots in one go and Delete empties them; everything
+    // else — enable, disable, reveal, copy, replace, import — is a
+    // double-click on the cell it concerns. Enable and Disable went in v974
+    // for that reason; Reveal, Copy and Import follow them here.
     t.querySelector('table')._rowButtons = [
       { label:'Generate', title:'generate a key into each ticked empty slot', onclick: genFn },
-      { label:'Import',   title:'import a key into a ticked empty slot',     onclick: importFn },
-      // No Enable/Disable here. Enablement is the state cell's job, the way
-      // it is on peers, routes, seeds, hosts, DNS, firewall rules and
-      // networks: double-click the state to flip it. Buttons for it made
-      // this the one table with two ways to do the same thing.
-      //
-      // Reveal and Copy are the two ways a key leaves its hiding place — one
-      // onto the screen, one into the clipboard, where it outlives the page.
-      // They share a colour because they share that consequence.
-      { label:'Reveal',  cls:'warn', title:'reveal ticked keys',  onclick: revealFn },
-      { label:'Copy',    cls:'warn', title:'copy ticked keys',    onclick: copyFn },
       { label:'Delete',  cls:'danger', title:'delete ticked keys', onclick: deleteFn },
     ];
     c.appendChild(card);
@@ -5287,7 +5299,16 @@ function secNetworks(c) {
   table._rowButtons = [
     { label:'=', cls:'tbar-btn', title:'join an existing network (paste a token, or enter id/key/seed)', onclick:() => netJoinRow(table) },
     { label:'\u25cf', cls:'tbar-btn', title:'generate a join token for the ticked network', onclick:() => netTokenRow(table) },
-    { label:'\u21bb', cls:'tbar-btn', gap:true, title:'reset', onclick:() => netResetRow(table) },
+    // No reset button. Double-clicking the state cell off and on again
+    // drops every session on the network and brings it back with none of
+    // the old backoff, which is what reset was for, and it is the gesture
+    // every other row-level state in the app already uses.
+    //
+    // /api/network/reset stays. It is a lighter thing than the toggle pair
+    // — sessions drop but the interface and its addresses never go away
+    // — and it is one call rather than two, so nothing can leave the
+    // network disabled halfway through. That is worth keeping for scripts;
+    // it was not worth a button of its own.
   ];
   table._rowRemove = async () => {
     const sel = selCheckedRows(table);
@@ -5475,22 +5496,6 @@ function tokenSeedGuess(){
   if (!host || !port) return '';
   if (host.indexOf(':') >= 0 && host.charAt(0) !== '[') host = '[' + host + ']'; // IPv6 literal
   return host + ':' + port;
-}
-
-// netResetRow drops every current peer session on each ticked network and
-// clears seed retry backoff, so the engine immediately re-handshakes with
-// every peer and reconnects to every seed instead of waiting out any existing
-// timeout. Live and in-place — no config change, no restart.
-async function netResetRow(table){
-  const sel = selCheckedRows(table);
-  if (!sel.length){ await noticeModal('tick one or more networks to reset'); return; }
-  const names = sel.map(tr => tr.dataset.netname).join(', ');
-  if (!await confirmModal('Reset '+sel.length+' network'+(sel.length>1?'s':'')+' ('+names+')? This drops all current peer connections and immediately reconnects to peers and seeds.')) return;
-  for (const tr of sel){
-    const r = await api('/api/network/reset', { method:'POST', body: JSON.stringify({ net:tr.dataset.netid }) });
-    if (!r.ok){ await noticeModal((r.body && r.body.error) || 'reset failed'); break; }
-  }
-  refresh();
 }
 
 function perNet(c, render) {

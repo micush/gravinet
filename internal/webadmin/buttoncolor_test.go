@@ -38,16 +38,18 @@ func TestGhostSurvivesForDecliningButtons(t *testing.T) {
 	}
 }
 
-// The Keys bar is the one with something to say beyond "this is a button".
-// Enable turns a key on and takes the same green .on already means in the
-// table below it; Disable turns one off; Reveal and Copy take key material
-// out of hiding, one onto the screen and one into the clipboard. None of
-// those are destructive enough to be red, which is why they had no colour —
-// amber is the one added for them.
+// The Keys bar is down to the two buttons that act on a selection of rows,
+// and only one of them carries a colour. Generate fills ticked empty slots
+// and is an ordinary action; Delete empties them for good and is red.
+//
+// Reveal and Copy used to be the amber pair here — key material leaving its
+// hiding place, onto the screen and into the clipboard. Both are gone, along
+// with Import, because a double-click on the key cell now reveals the key
+// into a selected input: copy it from there, or paste a new one over it.
+// TestKeysHasNoRowButtonForACellsJob is what keeps them gone.
 func TestKeysToolbarColours(t *testing.T) {
 	for _, c := range []struct{ label, cls string }{
-		{"Reveal", "warn"},
-		{"Copy", "warn"},
+		{"Generate", ""},
 		{"Delete", "danger"},
 	} {
 		want := "{ label:'" + c.label + "',"
@@ -56,10 +58,57 @@ func TestKeysToolbarColours(t *testing.T) {
 			t.Errorf("the Keys toolbar has no %q button", c.label)
 			continue
 		}
-		spec := indexHTML[i : i+120]
+		// Bounded at the entry's own closing brace rather than a fixed
+		// window: Generate is the shortest spec in the app and a 120-char
+		// slice from it runs into Delete's cls:'danger' on the next line.
+		spec := indexHTML[i:]
+		if end := strings.Index(spec, "},"); end >= 0 && end < 200 {
+			spec = spec[:end]
+		} else {
+			spec = spec[:200]
+		}
+		if c.cls == "" {
+			// Generate carries no cls at all rather than cls:'' — the accent
+			// is the default, and the spec goes straight to title.
+			if strings.Contains(spec, "cls:'") {
+				t.Errorf("Generate picked up a colour class: %s", spec)
+			}
+			continue
+		}
 		if !strings.Contains(spec, "cls:'"+c.cls+"'") {
 			t.Errorf("%s is not %s-coloured: %s", c.label, c.cls, spec)
 		}
+	}
+}
+
+// Reveal, Copy and Import were row buttons for something a row can do to
+// itself, which is the argument that took Enable and Disable off this same
+// toolbar in v974. The key cell reveals into an editable, pre-selected input
+// on double-click; that one gesture is copy, replace and import at once, and
+// on an empty slot it is import alone.
+//
+// Pinned as the absence of the buttons and the presence of the cell that
+// replaced them, because removing the buttons is only a cleanup for as long
+// as the cell still does their job.
+func TestKeysHasNoRowButtonForACellsJob(t *testing.T) {
+	for _, label := range []string{"Reveal", "Copy", "Import"} {
+		if strings.Contains(indexHTML, "{ label:'"+label+"',") {
+			t.Errorf("the Keys toolbar has a %s button again; the key cell does that on double-click", label)
+		}
+	}
+	// The filled cell announces itself as revealable, and marks itself filled
+	// so the handler knows to fetch a key before opening the editor.
+	if !strings.Contains(indexHTML, `data-set="1" title="double-click to reveal, then copy it or paste a new one over it"`) {
+		t.Error("the key cell no longer offers reveal-and-replace, and nothing else reveals or copies a key now")
+	}
+	// The empty cell is the import path: same handler, nothing to reveal.
+	if !strings.Contains(indexHTML, `data-set="0" title="double-click to paste a key in"`) {
+		t.Error("an empty slot no longer takes a pasted key, and nothing else imports one now")
+	}
+	// navigator.clipboard is deliberately not the copy path: this admin page
+	// is routinely served over plain http, where that API does not exist.
+	if strings.Contains(indexHTML, "navigator.clipboard.writeText") && strings.Contains(indexHTML, "Copy the selected key") {
+		t.Error("the old clipboard copy and its window.prompt fallback are back")
 	}
 }
 

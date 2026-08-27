@@ -460,8 +460,10 @@ enabled key (which would lock the network), and the web GUI has a **Keys**
 section that does all the same things. In the GUI the **Peers**, **Keys**, and
 **Bans** tables are multi-select: tick one or more rows (or the header box for
 all) and use the single button row above the table — Ban for peers; Unban for
-bans; Enable / Disable / Reveal / Copy / Delete for keys — so the same action
-applies to a whole selection at once. Per-feature on/off (a network, NAT, QoS, a
+bans; Generate / Delete for keys — so the same action applies to a whole
+selection at once. Anything that concerns one row is a double-click on the
+cell itself: a key's label, its state, its expiry, or the key, which reveals
+it for copying or replacement. Per-feature on/off (a network, NAT, QoS, a
 bandwidth cap) is toggled by **double-clicking its enabled/disabled tag**. Key
 changes apply on restart (keys bind into the engine at startup), so
 structural-change rules apply: the change saves immediately and the web UI offers

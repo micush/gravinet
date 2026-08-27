@@ -198,7 +198,7 @@ Go to **Mesh → Keys**. Each network gets its own table, one row per slot:
 
 - **Generate** a new key into an empty slot (tick it, then Generate).
 - Tick **distributed** on a newly generated key to push it straight to every peer currently connected on that network, over the mesh itself — no copy/paste, no separate channel, and it lands in the same slot number on their end too. This is the easiest way to rotate: generate, tick distributed, wait until you're confident it's reached everyone (the Peers page shows who's connected), then disable the old slot.
-- Prefer to hand a key out manually instead (e.g. to a brand-new node that isn't meshed yet, so there's nothing to push it to yet)? Tick a filled slot and use **Reveal**/**Copy** — or generate a join token instead (see section 5), which bundles a key with everything else a new node needs in one paste.
+- Prefer to hand a key out manually instead (e.g. to a brand-new node that isn't meshed yet, so there's nothing to push it to yet)? **Double-click the key** to reveal it, then copy it straight out of the field — or generate a join token instead (see section 5), which bundles a key with everything else a new node needs in one paste.
 - **Disable** a slot to stop it authenticating new joins without deleting it — useful while you're still confirming a rotation reached everyone. **Delete** it once you're sure nothing still depends on it.
 - Double-click **expires** to set a date/time after which a key stops authenticating on its own; anything still using it re-handshakes on a remaining key rather than dropping.
 
