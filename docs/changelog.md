@@ -2,7 +2,7 @@
 
 ---
 
-## v979 — 2026-08-27
+## v981 — 2026-08-27
 
 **v978 resolved the relay reply interface behind the operator's back. It is now a field.**
 
@@ -29,8 +29,41 @@ Blank when the row's relays disagree. One column cannot express two links, and p
 - `TestRenderKeaListensOnTheRelayReplyInterface` — a relayed row naming `mesh0` renders it into `interfaces-config`, and the scope still carries no `interface` key, since gaining one would assert the remote subnet is on the overlay and have Kea refuse the file.
 - `TestRelayedRowMayNameAMeshInterface` — the refusal is conditional and still present, both halves, because deleting it outright would let an attached subnet be served on the mesh.
 - `TestSuggestRelayIfaceIsBlankWhenRelaysDisagree`, `TestRelayIfaceNoteNamesAMismatchedRow`, `TestRelayIfaceNoteIsSilentForAttachedOnly`.
+- `TestRenderKeaKeepsATaggedReplyInterfaceIntact`, `TestRenderKeaKeepsATaggedAttachedInterfaceIntact` and `TestRelayIfaceNoteKeepsATaggedNameIntact` — a tagged interface such as `eth1.22` survives verbatim into the file and into the warning.
+
+### Tagged interfaces
+
+A VLAN works as a reply link with no special handling, because nothing here matches on interface names: the picker lists whatever `net.Interfaces()` reports, the suggestion is resolved from the source address the kernel picks and the device owning it, and `renderKea` passes the name through untouched.
+
+The dot is the part worth pinning. It is exactly what a later change that tidies or splits an interface name would eat, and a truncated device name in `interfaces-config` is a link this host does not have — the same silent non-answer this whole sequence has been about. The three tests above assert the full name in the two places it lands and in the warning.
+
+There is no tagged mesh device to worry about: `refuseVLANParent` refuses a mesh device as a VLAN parent at creation, so `mesh0.22` cannot exist. `refuseMeshIface` compares against the mesh devices themselves and would not recognise one, which is fine only because of that upstream refusal — worth knowing if the parent rule is ever relaxed.
 
 The DHCP help described the interface column as "where the forwarded requests arrive", which is what it was understood to mean and is not what Kea does with it. It now says what the column is for on each kind of row, and that mesh devices are selectable on exactly one of them.
+
+### A new interface never reached the picker
+
+Reported after v980: `eth1.22` created under System > VLANs, absent from the DHCP interface dropdown.
+
+Nothing filters it. `/api/interfaces` returns every non-loopback device and the DHCP page removes only the mesh devices from that list, so the name shape was never the problem — I checked the handler, said it would work, and stopped one call short of the thing that was actually broken.
+
+`systemInterfaces()` caches the list, and that cache was cleared in exactly one place: `setTarget`, on a managed-node switch. Create an interface, open DHCP, and the picker is built from a list fetched before the interface existed. Nothing short of a browser reload dropped it.
+
+`forgetInterfaces()` now does, and is called on rail navigation, on search navigation, and immediately after a VLAN add or delete — the last one because that is the case where the operator never leaves the page.
+
+Not on every `renderSection()`: that also runs on the periodic status refresh, and refetching the interface list every few seconds to catch something that happens a handful of times in a deployment's life is the wrong trade. `TestInterfaceCacheIsDroppedWhenTheHostChanges` pins all three call sites and the absence of that fourth one.
+
+This applies to every picker built from `systemInterfaces()`, not just DHCP — NAT's masquerade dropdown and LLDP's interface box had the same staleness.
+
+### The picker was gated on the wrong thing
+
+First cut made the overlay devices appear only once the row already carried a relay address. That reads correctly and cannot be used: the interface column is left of the relay column, so on a new row the interface is chosen while the row is still attached, and the overlay devices are not in the list yet. There was no order of entry that worked, which is what "I still cannot choose mesh0" was.
+
+The gate is now the table rather than the row's half-typed state: the server table offers them always, grouped and labelled, and the relay-links table never does. An attached row naming one is still refused on save — the picker is a convenience and `refuseMeshIface` is the control, which is what the rest of this page already assumes.
+
+`meshIfaceNames` was also declared in the IPv6 RA section rather than in `secDHCP`, so the assignment fell through to an implicit global. It worked by accident and would stop under strict mode.
+
+`TestDHCPServerPickerOffersOverlayDevices` pins both call sites and the absence of the old gate; `TestDHCPSectionOwnsItsMeshInterfaceList` pins the declaration. Both failures are silent — a select one option short, with nothing anywhere to say why.
 
 ### A second unescaped apostrophe
 

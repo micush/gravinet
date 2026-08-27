@@ -429,3 +429,130 @@ func TestEgressIfaceForResolvesALocalAddress(t *testing.T) {
 }
 
 const EMDASH = "\u2014"
+
+// A tagged interface is an ordinary device name to everything here, and the
+// dot in it is the sort of thing a later "tidy the interface name" change
+// splits on. Nothing downstream may touch it: Kea takes the device name
+// verbatim, and a truncated one names a link this host does not have.
+//
+// A VLAN cannot ride on a mesh device — refuseVLANParent stops that at
+// creation — so the reply link for a relayed row is a tagged LAN interface or
+// a mesh device, never a tagged mesh device.
+func TestRenderKeaKeepsATaggedReplyInterfaceIntact(t *testing.T) {
+	sub := relayedKeaSubnet("10.4.4", "10.4.4.1")
+	sub.Iface = "eth1.22"
+	_, ifaces := keaSubnets(t, config.DHCPConfig{
+		Mode: config.DHCPServer, Subnets: []config.DHCPSubnet{sub},
+	})
+	if len(ifaces) != 1 || ifaces[0] != "eth1.22" {
+		t.Errorf("interfaces = %v, want [eth1.22] verbatim", ifaces)
+	}
+}
+
+// And the same for an attached row, where the tagged interface is also the
+// scope's own link and so appears twice in the file — once as the subnet's
+// "interface" and once in interfaces-config. Both must be the whole name.
+func TestRenderKeaKeepsATaggedAttachedInterfaceIntact(t *testing.T) {
+	sub := dhcpSubnet()
+	sub.Iface = "eth1.22"
+	subs, ifaces := keaSubnets(t, config.DHCPConfig{
+		Mode: config.DHCPServer, Subnets: []config.DHCPSubnet{sub},
+	})
+	if len(ifaces) != 1 || ifaces[0] != "eth1.22" {
+		t.Errorf("interfaces = %v, want [eth1.22] verbatim", ifaces)
+	}
+	if got, _ := subs[0]["interface"].(string); got != "eth1.22" {
+		t.Errorf("subnet interface = %q, want eth1.22 verbatim", got)
+	}
+}
+
+// The mismatch warning names the tagged interface as the operator wrote it,
+// rather than a stem of it, or the note points at a device they cannot find.
+func TestRelayIfaceNoteKeepsATaggedNameIntact(t *testing.T) {
+	lo, ok := egressIfaceFor("127.0.0.1")
+	if !ok {
+		t.Skip("no route to 127.0.0.1 on this host")
+	}
+	sub := relayedKeaSubnet("10.4.4", "127.0.0.1")
+	sub.Iface = "eth1.22"
+	if lo == sub.Iface {
+		t.Skip("loopback is named eth1.22 on this host, which defeats the test")
+	}
+	note := relayIfaceNote(config.DHCPConfig{Mode: config.DHCPServer, Subnets: []config.DHCPSubnet{sub}})
+	if !strings.Contains(note, "eth1.22") {
+		t.Errorf("note = %q, want it to name eth1.22 in full", note)
+	}
+}
+
+// The picker offers overlay devices on the server table and not on the
+// relay-links table.
+//
+// v979 shipped this gated on the row already carrying a relay address, which
+// cannot work: the interface column is left of the relay column, so on a new
+// row the interface is chosen while the row is still attached and the overlay
+// devices are not in the list yet. Reported as "I still cannot choose mesh0".
+//
+// The gate is now the table rather than the row's half-typed state. Pinned as
+// the call sites, because the failure is silent — the select simply renders
+// one option short and nothing anywhere says why.
+func TestDHCPServerPickerOffersOverlayDevices(t *testing.T) {
+	if !strings.Contains(indexHTML, `'<td><select class="dhe-iface" style="width:100px">'+dhIfaceOpts(e.iface||'', true)`) {
+		t.Error("the server table's interface picker no longer offers overlay devices; a relayed row cannot name its reply link")
+	}
+	if !strings.Contains(indexHTML, `'<td><select class="dle-iface" style="width:100px">'+dhIfaceOpts(e.iface||'')`) {
+		t.Error("the relay-links picker gained overlay devices; a relay link must be a LAN interface")
+	}
+	if strings.Contains(indexHTML, "dhIfaceOpts(e.iface||'', !!(e.relays") {
+		t.Error("the picker depends on the row already being relayed again, which no order of entry satisfies")
+	}
+}
+
+// meshIfaceNames must be declared in the DHCP section that assigns it. It was
+// first added to the IPv6 RA section instead, where secDHCP cannot see it, so
+// the assignment fell through to an implicit global — which happens to work
+// and would stop working under strict mode or a bundler.
+func TestDHCPSectionOwnsItsMeshInterfaceList(t *testing.T) {
+	i := strings.Index(indexHTML, "function secDHCP(")
+	if i < 0 {
+		t.Fatal("secDHCP not found")
+	}
+	body := indexHTML[i:]
+	if j := strings.Index(body, "\nfunction "); j > 0 {
+		body = body[:j]
+	}
+	if !strings.Contains(body, "meshIfaceNames = []") {
+		t.Error("secDHCP assigns meshIfaceNames without declaring it; the declaration is in another section's scope")
+	}
+}
+
+// A newly created interface has to reach the pickers.
+//
+// systemInterfaces() caches /api/interfaces, and that cache was cleared in one
+// place only: setTarget, on a managed-node switch. Creating eth1.22 under
+// System > VLANs and then opening DHCP therefore built the picker from a list
+// fetched before the VLAN existed, and the interface was simply absent with
+// nothing to explain it.
+//
+// Pinned at the three points that must drop it: rail navigation, search
+// navigation, and a VLAN add or delete. The last one matters on its own,
+// because it is the case where the operator never leaves the page.
+func TestInterfaceCacheIsDroppedWhenTheHostChanges(t *testing.T) {
+	if !strings.Contains(indexHTML, "function forgetInterfaces(){ _ifaceCache = null; }") {
+		t.Fatal("forgetInterfaces is gone; nothing drops the interface list short of a page reload")
+	}
+	for _, site := range []struct{ what, src string }{
+		{"rail navigation", "setActiveRailTab(s); forgetInterfaces(); refresh();"},
+		{"search navigation", "state.section = targetSection;\n  forgetInterfaces();"},
+		{"a VLAN add or delete", "forgetInterfaces();\n      renderSection();"},
+	} {
+		if !strings.Contains(indexHTML, site.src) {
+			t.Errorf("%s no longer drops the cached interface list; a new interface will not appear in any picker", site.what)
+		}
+	}
+	// Deliberately not on every renderSection: that runs on the periodic
+	// status refresh too, and refetching the interface list every few seconds
+	// is the wrong trade for a change that happens rarely.
+	if strings.Contains(indexHTML, "function renderSection() {\n  forgetInterfaces();") {
+		t.Error("forgetInterfaces moved into renderSection; /api/interfaces is now on the status poll")
+	}
+}
