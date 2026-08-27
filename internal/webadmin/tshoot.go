@@ -14,6 +14,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"gravinet/internal/config"
 )
 
 // Troubleshooting bundle: one download containing everything needed to
@@ -365,6 +367,131 @@ func (s *Server) buildTshootText() (string, time.Time) {
 			continue
 		}
 		fmt.Fprintf(&b, "\n--- %s ---\n%s\n", strings.Join(c, " "), out)
+	}
+
+	// What Kea was actually given, as distinct from what this node was told
+	// to serve. The CONFIG section below carries gravinet's stored DHCP
+	// intent and stops there; the file Kea parses at startup is a separate
+	// artifact on disk, and the two diverging is not a hypothetical. Same
+	// gap, and the same argument, as the FRR section above: gravinet manages
+	// Kea, so a bundle that captures none of Kea's state cannot diagnose the
+	// feature built on it.
+	//
+	// The divergence is the point. renderKea is pure, so the bundle can
+	// render what the stored config *would* produce right now and compare it
+	// against what is on disk, which is the one question a reader otherwise
+	// cannot answer from either side alone — a page showing one set of
+	// subnets while Kea serves another looks completely normal in the CONFIG
+	// section, in the runtime report, and in Kea's own journal.
+	//
+	// reconcileKeaAtBoot closes that at every daemon start, so a diverged
+	// bundle now says something narrower and more useful than it used to: the
+	// reconcile has not run since the configuration changed (no restart yet),
+	// or it ran and declined — an unowned file it will not take over, a Kea
+	// that rejected the render, a service that would not restart. All three
+	// log, and this section is collected beside that log.
+
+	// Emitted whenever there is anything to say — configured, installed, or
+	// running — rather than only when the mode is set, because "the server
+	// card is off and a Kea unit is running anyway" is a state worth a
+	// section, not worth hiding.
+	keaCfg, keaCfgErr := config.Load(s.configPath)
+	keaOnDisk, keaStatErr := os.Stat(keaConfPath)
+	if (keaCfgErr == nil && keaCfg.DHCP.Mode != config.DHCPOff) || keaStatErr == nil || keaInstalled() || keaActive() {
+		sec("DHCP / KEA")
+		fmt.Fprintf(&b, "platform supported: %t (gravinet drives Kea on Linux only)\n", dhcpSupported())
+		fmt.Fprintf(&b, "kea-dhcp4 installed: %t\n", keaInstalled())
+		fmt.Fprintf(&b, "unit: %s\nunit active: %t\n", keaUnit(), keaActive())
+
+		if keaCfgErr != nil {
+			fmt.Fprintf(&b, "\n(could not read the stored config: %v)\n", keaCfgErr)
+		} else {
+			fmt.Fprintf(&b, "stored mode: %q\n", string(keaCfg.DHCP.Mode))
+			dump("runtime (what this node is doing, asked of the host)", dhcpRuntime(keaCfg.DHCP))
+			// Only when the relay half is in play. A server-mode node has no
+			// relay links by definition, and an empty list printed under
+			// every bundle is a line readers learn to skip.
+			if live := dhcpRelay.Listening(); len(live) > 0 || keaCfg.DHCP.Mode == config.DHCPRelay {
+				dump("relay links bound right now", live)
+			}
+			if note := dhcpProblemNote(keaCfg.DHCP); note != "" {
+				fmt.Fprintf(&b, "\n--- preflight ---\n%s\n", note)
+			}
+		}
+
+		fmt.Fprintf(&b, "\n--- %s ---\n", keaConfPath)
+		switch {
+		case keaStatErr != nil:
+			fmt.Fprintf(&b, "(absent: %v)\n", keaStatErr)
+		default:
+			fmt.Fprintf(&b, "size: %d bytes\nmodified: %s\n", keaOnDisk.Size(), keaOnDisk.ModTime().Format(time.RFC3339))
+			// Ownership decides whether any of the rest is gravinet's doing.
+			// An unmarked file is one gravinet will not overwrite, so the
+			// page and the server are unrelated by design and every other
+			// line here has to be read in that light.
+			fmt.Fprintf(&b, "written by gravinet: %t (marker %q in Dhcp4 user-context)\n", keaOwned(keaConfPath), keaMarker)
+			if reason, ok := keaTestConf(keaConfPath); !ok {
+				fmt.Fprintf(&b, "kea-dhcp4 -t: REJECTED — %s\n", reason)
+			} else {
+				fmt.Fprintf(&b, "kea-dhcp4 -t: accepted (or the binary is absent, which is reported as accepted)\n")
+			}
+		}
+
+		// The comparison. Both sides go through the same renderer, so a
+		// difference is a real difference and not formatting.
+		if keaCfgErr == nil {
+			served, _ := servableSubnets(keaCfg.DHCP)
+			want, rerr := renderKea(served)
+			switch {
+			case keaCfg.DHCP.Mode != config.DHCPServer:
+				fmt.Fprintf(&b, "\n--- stored config vs the file on disk ---\nnot compared: this node's mode is %q, so gravinet renders no Kea config.\n", string(keaCfg.DHCP.Mode))
+			case rerr != nil:
+				fmt.Fprintf(&b, "\n--- stored config vs the file on disk ---\n(could not render the stored config: %v)\n", rerr)
+			case keaStatErr != nil:
+				fmt.Fprintf(&b, "\n--- stored config vs the file on disk ---\nDIVERGED: this node is configured to serve, and there is no %s at all. Kea has never been given this configuration.\n", keaConfPath)
+			default:
+				have, herr := os.ReadFile(keaConfPath)
+				switch {
+				case herr != nil:
+					fmt.Fprintf(&b, "\n--- stored config vs the file on disk ---\n(could not read it back: %v)\n", herr)
+				case bytes.Equal(bytes.TrimSpace(have), bytes.TrimSpace(want)):
+					b.WriteString("\n--- stored config vs the file on disk ---\nmatch: the file is what the stored configuration renders to.\n")
+				default:
+					b.WriteString("\n--- stored config vs the file on disk ---\n")
+					b.WriteString("DIVERGED: the file Kea parses is NOT what this node's stored configuration renders to.\n")
+					b.WriteString("Kea is serving the file, not the page. A daemon restart reconciles this, and logs\n")
+					b.WriteString("above if it declines (a config gravinet did not write, a render Kea rejected, a\n")
+					b.WriteString("service that would not start). Re-saving anything on the DHCP page also re-renders it.\n")
+					fmt.Fprintf(&b, "\nwhat the stored configuration renders to right now:\n%s\n", redactConfig(string(want)))
+				}
+			}
+		}
+
+		// The lease database, by existence and size only. Its contents are
+		// every client on the LAN and belong in a bundle no more than the
+		// hostnames file does; that it is present, growing, and readable by
+		// Kea answers the questions asked of it here.
+		if st, err := os.Stat(keaLeasePath); err != nil {
+			fmt.Fprintf(&b, "\n--- %s ---\n(absent: %v)\n", keaLeasePath, err)
+		} else {
+			fmt.Fprintf(&b, "\n--- %s ---\nsize: %d bytes\nmodified: %s\n", keaLeasePath, st.Size(), st.ModTime().Format(time.RFC3339))
+		}
+
+		// Kea's own account of itself. The unit name is resolved rather than
+		// guessed, because it differs by distribution and naming the wrong
+		// one here sends a reader to a unit their host does not have.
+		if unit := keaUnit(); unit != "" {
+			for _, c := range [][]string{
+				{"systemctl", "status", "--no-pager", "--full", unit},
+				{"journalctl", "-u", unit, "-n", "200", "--no-pager"},
+			} {
+				out, err := runDiag(c[0], c[1:]...)
+				if err != nil {
+					continue
+				}
+				fmt.Fprintf(&b, "\n--- %s ---\n%s\n", strings.Join(c, " "), out)
+			}
+		}
 	}
 
 	sec("CONFIG (secrets redacted)")

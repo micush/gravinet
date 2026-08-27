@@ -2,6 +2,60 @@
 
 ---
 
+## v983 — 2026-08-27
+
+**A restored DHCP configuration never reached Kea, and nothing anywhere said so. Both halves of that are fixed: daemon startup now reconciles the file, and the troubleshooting bundle now reports it.**
+
+`applyDHCP` is reached from the DHCP page and from nowhere else. Any path that changes the stored configuration without going through that page leaves `/etc/kea/kea-dhcp4.conf` behind — and a history restore is exactly such a path. It validates, saves and snapshots like any other edit, asks for a restart, and never re-renders Kea.
+
+On the same host that is worse than nothing running. The unit is still enabled from the earlier apply, so systemd starts Kea, Kea serves the *pre-restore* subnets, and the page shows the restored ones. The relay half never had this problem: `StartDHCPRelay` calls `dhcpRelay.Apply` at every boot, so a restored relay comes back with the restart the restore already asks for.
+
+### Reconciled at startup, by comparing rather than re-applying
+
+`reconcileKeaAtBoot` renders what the stored configuration would produce and compares it against the bytes on disk. When they match — every ordinary restart of a node nobody has touched — it writes nothing, starts nothing, and runs no systemctl at all.
+
+That property is the whole design. `StartDHCPRelay` has argued since v950 that re-rendering Kea at boot would be churn on every gravinet restart for no gain, and that argument was right about re-applying. It is answered by measuring instead: `renderKea` is pure and a byte comparison is free, so the cost of looking is nothing and the cost of not looking was a node serving subnets its operator had replaced.
+
+Three things it will not do, all encoded in `keaBootDecision` rather than scattered through the function:
+
+- **Install Kea.** That belongs to an explicit save — v951's rule, and what the page's own hint promises. A daemon start does not pull a DHCP server down from the distribution.
+- **Take over a file gravinet did not write.** `applyDHCP` sets a hand-maintained `kea-dhcp4.conf` aside because an operator just asked it to. Nothing at boot justifies that, so an unowned file is left alone and the divergence is logged.
+- **Touch the unit when the file already agrees.** A correct config with Kea stopped is systemd's state, and the runtime report says so on the page. Re-enabling at every boot would fight an operator who stopped it deliberately.
+
+Server mode with nothing servable stops *and* disables, which is not new reasoning: `applyDHCP` does the same, for a reason that names this exact moment — an enabled unit would otherwise come back at the next boot serving subnets the operator has since removed. That is reached when a restore brings back a configuration whose subnets are all parked or all name interfaces this host does not have.
+
+Failures are logged rather than returned. The caller's error channel belongs to the relay, and a Kea problem surfacing as `dhcp relay:` would send a reader to the wrong half of the page.
+
+### The bundle carried none of this
+
+The `CONFIG` section has always included the stored `dhcp` block — the subnets an operator entered. The file Kea parses was in no section at all, so a bundle could show a page's worth of subnets while saying nothing about whether Kea had ever been handed them. Same gap the FRR section closed for zebra, and the same argument: gravinet manages Kea, so a bundle capturing none of Kea's state cannot diagnose the feature built on it.
+
+New `DHCP / KEA` section, emitted whenever there is anything to say — configured, installed, or running. That last condition is deliberate: "the server card is off and a Kea unit is running anyway" is a state worth a section, and it is one `dhcpRuntime` already warns about on the page.
+
+- Platform support, whether `kea-dhcp4` is installed, which unit name this distribution uses, and whether it is active — asked of the host, not derived from the config.
+- `dhcpRuntime`'s report, and its `why` when what is running differs from what was selected. The relay-links list only when the relay half is in play.
+- The preflight note, so an interface that cannot serve the subnet named against it says so here too.
+- `kea-dhcp4.conf`: size, mtime, whether it carries gravinet's marker, and Kea's own verdict from `kea-dhcp4 -t`. Ownership matters most of the four — an unmarked file is one gravinet will not overwrite, so the page and the server are unrelated by design and every other line has to be read in that light.
+- The lease database by existence, size and mtime. Never its contents: those are every client on the LAN, which is not diagnostic data and does not belong in a file people mail to each other.
+- `systemctl status` and 200 journal lines for the resolved unit.
+
+And the same comparison the reconcile makes, reported as `DIVERGED` with the rendered form printed underneath. With the reconcile in place that now says something narrower and more useful than it would have alone: either the node has not restarted since the configuration changed, or the reconcile ran and declined — an unowned file, a render Kea rejected, a service that would not start. All three log, and the log is collected a few sections below.
+
+### Pinned
+
+- `TestKeaBootDecisionTable` — nine rows, one per branch, including the two orderings that carry meaning: nothing-servable outranks not-installed, and matching outranks ownership.
+- `TestKeaBootDoesNothingWhenTheFileAlreadyAgrees` — the no-churn property on its own, since it is the objection this had to answer. A regression to "re-apply at boot" bounces Kea on every gravinet restart and takes every in-flight lease renewal with it.
+- `TestKeaBootNeverInstallsOrSetsAside` — no `installKea`, no `setAsideKeaConf`, and no bare `keaService("stop")` without the disable that makes it survive a reboot.
+- `TestStartDHCPRelayReconcilesKea` — the reconcile is wired in, and sits *before* the relay's `RelayActive` early return. Behind it, it would never run on a server-mode node, which is every node it exists for.
+- `TestKeaBootReportsItsOwnFailures` — it returns nothing and logs its own problems.
+- `TestTshootCarriesKeaState`, `TestTshootReportsKeaConfigDivergence`, `TestTshootReportsKeaOwnershipAndParserVerdict`, `TestTshootOmitsKeaSectionWhenThereIsNothingToSay`, `TestTshootDoesNotIncludeLeaseContents`.
+
+The decision was split from the doing specifically to be testable. `keaConfPath` is a constant, so a test of `reconcileKeaAtBoot` end to end would write to `/etc/kea` and drive systemd, which is not a test; `keaBootDecision` takes a `keaBootState` and returns what to do, and the table above exercises every row of it. All three guards were mutation-checked — removing the match check, the ownership check, or the call site each fails a test naming what broke.
+
+The tshoot button's description now lists DHCP among the bundle's contents. Writing that line put another apostrophe into a single-quoted JS string; `TestPageScriptHasNoUnterminatedStringLiteral` covers it, as in v981 and v977.
+
+---
+
 ## v982 — 2026-08-27
 
 **The overlay devices in the DHCP server's interface picker are no longer in a labelled group.**

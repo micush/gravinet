@@ -14484,7 +14484,7 @@ function secLogs(c){
         const a = document.createElement('a'); a.href = url; a.download = 'gravinet.log'; a.click();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
       } },
-    { label:'tshoot', cls:'', title:'download a troubleshooting bundle: every peer on every network with reach, relay, session age, path MTU, fragment and drop counters; routes; bans; disabled peers; firewall rules and exemptions; NAT status; interfaces; the config with secrets redacted; and the tail of the log. Asks whether to collect just the current node or every reachable mesh peer at once \u2014 collecting from both ends of any peer problem is often the diagnosis.', onclick: () => openTshootModal() },
+    { label:'tshoot', cls:'', title:'download a troubleshooting bundle: every peer on every network with reach, relay, session age, path MTU, fragment and drop counters; routes; bans; disabled peers; firewall rules and exemptions; NAT status; interfaces; DHCP state, including the Kea config on disk and whether it still matches this node\'s own; the config with secrets redacted; and the tail of the log. Asks whether to collect just the current node or every reachable mesh peer at once \u2014 collecting from both ends of any peer problem is often the diagnosis.', onclick: () => openTshootModal() },
     { label:'Clear', cls:'danger', title:'clear the log file', onclick: async () => {
         if (!await confirmModal('Clear the log file? This cannot be undone.')) return;
         const r = await api('/api/logs/clear', { method:'POST' });

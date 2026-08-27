@@ -1,6 +1,7 @@
 package webadmin
 
 import (
+	"bytes"
 	"fmt"
 	"net/http"
 	"net/netip"
@@ -416,14 +417,197 @@ func (s *Server) handleDHCP(w http.ResponseWriter, r *http.Request) {
 // look" being different for the two halves of this page.
 func logRelay(format string, args ...any) { logx.Warnf(format, args...) }
 
+// keaBootAction is what reconcileKeaAtBoot has decided to do. Split out from
+// the doing so the decision table can be exercised directly: the alternative
+// is a test that writes to /etc/kea and drives systemd, which is not a test.
+type keaBootAction int
+
+const (
+	// keaBootNothing: the file agrees with the configuration, or this node
+	// does not serve. Write nothing, run nothing.
+	keaBootNothing keaBootAction = iota
+	// keaBootStopDisable: server mode with nothing servable.
+	keaBootStopDisable
+	// keaBootNotInstalled: configured to serve, no Kea to serve with.
+	keaBootNotInstalled
+	// keaBootNotOurs: the file on disk is somebody else's and disagrees.
+	keaBootNotOurs
+	// keaBootRewrite: the file is gravinet's, and stale.
+	keaBootRewrite
+)
+
+// keaBootState is everything the decision depends on, gathered by the caller.
+type keaBootState struct {
+	Mode      config.DHCPMode
+	Servable  int  // enabled subnets that name an interface this host has
+	Installed bool // kea-dhcp4 present
+	Owned     bool // keaOwned: absent, or carrying gravinet's marker
+	Matches   bool // on-disk bytes equal what the stored config renders to
+}
+
+// keaBootDecision is reconcileKeaAtBoot's whole decision, as a function of
+// what the host looks like. Ordering carries the meaning:
+//
+//   - Not serving is decided before anything is read. Kea is not this node's
+//     business in relay or off mode, and the exclusion has already been
+//     re-asserted by the caller.
+//   - Nothing servable outranks everything below it, including "not
+//     installed": there is no configuration to render either way, and an
+//     enabled unit left from an earlier apply is the thing that needs
+//     handling. applyDHCP orders these two the same way and for the same
+//     reason.
+//   - Matching outranks ownership. A file that already says what the
+//     configuration says needs no decision about who wrote it, and asking
+//     would only produce a warning about a file that is correct. (In practice
+//     an unowned file cannot match, since renderKea always writes the marker
+//     — but that is renderKea's property to keep, not something this
+//     ordering should depend on.)
+//   - Ownership outranks rewriting, which is the one that matters: a
+//     hand-maintained kea-dhcp4.conf is never taken over during a boot.
+func keaBootDecision(st keaBootState) keaBootAction {
+	if st.Mode != config.DHCPServer {
+		return keaBootNothing
+	}
+	if st.Servable == 0 {
+		return keaBootStopDisable
+	}
+	if !st.Installed {
+		return keaBootNotInstalled
+	}
+	if st.Matches {
+		return keaBootNothing
+	}
+	if !st.Owned {
+		return keaBootNotOurs
+	}
+	return keaBootRewrite
+}
+
+// reconcileKeaAtBoot brings kea-dhcp4.conf back into agreement with the stored
+// configuration, and does nothing at all when the two already agree.
+//
+// applyDHCP is reached from the DHCP page and from nowhere else, so any path
+// that changes the stored configuration without going through that page leaves
+// the file behind. A history restore is the case that prompted this: the
+// restore validates, saves and snapshots like any other edit, asks for a
+// restart, and never re-renders Kea — so a restored server-mode configuration
+// reached Kea when somebody next happened to re-save the page, and not before.
+// On the same host that is worse than nothing running, because the unit is
+// still enabled from the earlier apply: systemd starts Kea, Kea serves the
+// pre-restore subnets, and the page shows the restored ones with nothing
+// anywhere to say they are not what is in service.
+//
+// The no-churn property is the whole reason this is a comparison and not an
+// apply. renderKea is pure, so what the stored configuration *would* produce
+// is cheap to work out and compare against the bytes on disk; when they match
+// — which is every ordinary restart of a node nobody has touched — this
+// function writes nothing, starts nothing, and runs no systemctl at all. That
+// was the objection to re-applying at boot, and it is answered by measuring
+// rather than by not looking.
+//
+// Three things it deliberately does not do, all encoded in keaBootDecision:
+//
+//   - Install Kea. applyDHCP installs when an operator saves a subnet, which
+//     is v951's rule and the page's own hint ("saving a subnet will install
+//     it"). Pulling a package down from the distribution during daemon
+//     startup is not that.
+//   - Take over a file gravinet did not write. applyDHCP sets an operator's
+//     hand-maintained kea-dhcp4.conf aside, justified by an operator having
+//     just asked for it. Nothing at boot justifies that, so an unowned file is
+//     left exactly where it is and the divergence is logged instead.
+//   - Touch the unit when the file already agrees. If the config is right and
+//     Kea is stopped, that is systemd's state and the runtime report says so
+//     on the page; re-enabling it at every boot would fight an operator who
+//     stopped it on purpose. This function reconciles the file.
+//
+// Failures are logged rather than returned. The caller's error channel belongs
+// to the relay, and a Kea problem reported under "dhcp relay:" would send a
+// reader to the wrong half of the page — while dhcpRuntime already reports
+// what is actually serving, which is the same reasoning keaStopAndDisable
+// gives for reporting neither of its own results.
+func reconcileKeaAtBoot(c config.DHCPConfig) {
+	if c.Mode != config.DHCPServer {
+		return
+	}
+	served, _ := servableSubnets(c)
+	st := keaBootState{
+		Mode:      c.Mode,
+		Servable:  len(served.EnabledSubnets()),
+		Installed: keaInstalled(),
+		Owned:     keaOwned(keaConfPath),
+	}
+
+	// Rendered before the decision, because Matches needs it — and a render
+	// that fails is reported here rather than encoded as a fourth outcome, so
+	// the decision table stays about the host rather than about our own bugs.
+	var want []byte
+	if st.Mode == config.DHCPServer && st.Servable > 0 {
+		var err error
+		if want, err = renderKea(served); err != nil {
+			logx.Warnf("dhcp: could not render the stored Kea configuration: %v", err)
+			return
+		}
+		if have, rerr := os.ReadFile(keaConfPath); rerr == nil {
+			st.Matches = bytes.Equal(bytes.TrimSpace(have), bytes.TrimSpace(want))
+		}
+	}
+
+	switch keaBootDecision(st) {
+	case keaBootNothing:
+		return
+
+	case keaBootStopDisable:
+		// Server mode with nothing servable. applyDHCP stops and disables here
+		// for a reason that names this exact moment — an enabled unit would
+		// come back at the next boot serving subnets the operator has since
+		// removed — and this is that boot. Reached when a restore brings back
+		// a configuration whose subnets are all parked, or all name
+		// interfaces this host does not have.
+		keaStopAndDisable()
+
+	case keaBootNotInstalled:
+		logx.Warnf("dhcp: this node is configured to serve DHCP but the Kea DHCPv4 server is not installed; save the DHCP page to install it")
+
+	case keaBootNotOurs:
+		logx.Warnf("dhcp: %s was not written by gravinet and does not match this node's stored DHCP configuration; leaving it alone. Save the DHCP page to take it over (the existing file is kept).", keaConfPath)
+
+	case keaBootRewrite:
+		if err := os.MkdirAll(filepath.Dir(keaConfPath), 0o755); err != nil {
+			logx.Warnf("dhcp: creating %s: %v", filepath.Dir(keaConfPath), err)
+			return
+		}
+		if err := os.WriteFile(keaConfPath, want, 0o644); err != nil {
+			logx.Warnf("dhcp: write %s: %v", keaConfPath, err)
+			return
+		}
+		// Kea's own parser before systemd, for the reason applyDHCP gives: a
+		// file it rejects produces a unit that exits immediately with the
+		// explanation in the journal. Here there is no operator watching a
+		// save, so the reason goes in gravinet's log with the rest of the boot.
+		if why, ok := keaTestConf(keaConfPath); !ok {
+			logx.Warnf("dhcp: rewrote %s from the stored configuration but Kea will not accept it: %s", keaConfPath, why)
+			return
+		}
+		if !keaService("restart") {
+			logx.Warnf("dhcp: rewrote %s from the stored configuration but the Kea service would not start — check `journalctl -u %s`", keaConfPath, keaUnit())
+			return
+		}
+		keaService("enable")
+		logx.Infof("dhcp: %s did not match this node's stored DHCP configuration and was rewritten from it; Kea restarted", keaConfPath)
+	}
+}
+
 // StartDHCPRelay brings this node's DHCP role back up at daemon startup, so a
 // node configured to relay is relaying again after a restart without anyone
 // opening the page.
 //
-// Not the whole apply: Kea's config is not re-rendered and a running server is
-// not bounced, because that would be churn on every gravinet restart for no
-// gain. But the *exclusion* is re-asserted, which is not churn and is not
-// optional.
+// Not the whole apply: Kea is not installed here, an operator's own config is
+// never taken over here, and a server whose file already matches the stored
+// configuration is not bounced — that last one was the objection to doing
+// anything at all at boot, and reconcileKeaAtBoot answers it by comparing
+// rather than by re-applying. What is re-asserted is the *exclusion*, and the
+// agreement between the stored configuration and the file Kea parses. Neither
+// is churn and neither is optional.
 //
 // A node that ever served and then switched away still has the Kea unit
 // enabled from that earlier apply — see keaStopAndDisable for how, and why
@@ -433,15 +617,24 @@ func logRelay(format string, args ...any) { logx.Warnf(format, args...) }
 // this code existed, since the alternative is waiting for somebody to happen
 // to re-save the DHCP page.
 //
-// Idempotent and cheap: disabling an already-disabled unit is a no-op, and it
-// runs once per daemon start.
+// The same "waiting for somebody to re-save the page" is what reconcileKeaAtBoot
+// removes on the server side, where the stored configuration can be changed by
+// a path that never renders Kea at all — a history restore being the one that
+// prompted it. See that function for what it will and will not do.
+//
+// Idempotent and cheap: disabling an already-disabled unit is a no-op, the
+// reconcile writes nothing when there is nothing to reconcile, and the whole
+// thing runs once per daemon start.
 //
 // Returns an error rather than logging one, so the caller decides how loud a
-// failed relay is at boot.
+// failed relay is at boot. The reconcile logs its own failures instead of
+// returning them, so a Kea problem is not reported to the caller as a relay
+// one.
 func StartDHCPRelay(c config.DHCPConfig) error {
 	if c.Mode != config.DHCPServer {
 		keaStopAndDisable()
 	}
+	reconcileKeaAtBoot(c)
 	if !c.RelayActive() {
 		return nil
 	}
