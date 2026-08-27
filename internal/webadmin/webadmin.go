@@ -542,6 +542,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/network", s.authed(s.handleNetwork))
 	mux.HandleFunc("/api/network/token", s.authed(s.handleNetworkToken))
 	mux.HandleFunc("/api/network/reset", s.authed(s.handleNetworkReset))
+	mux.HandleFunc("/api/dhcp/relay-iface", s.authed(s.handleDHCPRelayIface))
 	mux.HandleFunc("/api/key", s.authed(s.handleKey))
 	mux.HandleFunc("/api/route", s.authed(s.handleRoute))
 	mux.HandleFunc("/api/seed", s.authed(s.handleSeed))

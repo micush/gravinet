@@ -199,11 +199,7 @@ const defaultLease = 3600
 // same rule renderRadvd follows and for the same reason: Kea refuses to start
 // on a malformed scope, and one bad subnet taking down the leases for every
 // other LAN is a far worse failure than that one LAN going unserved.
-// replyIfaces are additional interfaces Kea must hold a socket on so it can
-// send relayed replies; see relayReplyIfaces. Variadic so the many callers
-// that render an attached-only config are unchanged, and because an
-// attached-only config genuinely has none.
-func renderKea(c config.DHCPConfig, replyIfaces ...string) ([]byte, error) {
+func renderKea(c config.DHCPConfig) ([]byte, error) {
 	conf := keaConf{
 		Dhcp4: keaDhcp4{
 			UserContext: keaUserContext{Marker: true},
@@ -270,6 +266,14 @@ func renderKea(c config.DHCPConfig, replyIfaces ...string) ([]byte, error) {
 		// on a relayed scope — a relayed subnet still has to be listened for
 		// somewhere, and where is the link the relay reaches this host over.
 		//
+		// That link is also the one Kea sends the reply out of, and Kea will
+		// not send from an interface it holds no socket on: it routes the
+		// DHCPOFFER to giaddr, which is on the far side of the relay, and
+		// drops it with DHCP4_PACKET_SEND_FAIL if this list does not name the
+		// egress. So on a relayed row the iface column is the reply link, and
+		// naming it here is what makes the scope answerable rather than
+		// merely selectable. See v978 in the changelog for the journal.
+		//
 		// Deduplicated because relayed scopes share that link by design, and
 		// a repeat is not tolerated: Kea refuses the entire configuration
 		// for it, not the extra entry —
@@ -284,19 +288,6 @@ func renderKea(c config.DHCPConfig, replyIfaces ...string) ([]byte, error) {
 			listening[name] = true
 			conf.Dhcp4.InterfacesConfig.Interfaces = append(conf.Dhcp4.InterfacesConfig.Interfaces, name)
 		}
-	}
-	// The reply sockets go on last, so the links the scopes name still come
-	// first and an attached-only file is byte-for-byte what it always was.
-	// Deduplicated against the same map, because a relay reached over a link
-	// that also carries a scope is one interface named twice, and Kea refuses
-	// the whole configuration for that.
-	for _, name := range replyIfaces {
-		name = strings.TrimSpace(name)
-		if name == "" || listening[name] {
-			continue
-		}
-		listening[name] = true
-		conf.Dhcp4.InterfacesConfig.Interfaces = append(conf.Dhcp4.InterfacesConfig.Interfaces, name)
 	}
 	b, err := json.MarshalIndent(conf, "", "  ")
 	if err != nil {

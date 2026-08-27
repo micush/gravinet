@@ -2,6 +2,42 @@
 
 ---
 
+## v979 — 2026-08-27
+
+**v978 resolved the relay reply interface behind the operator's back. It is now a field.**
+
+The fix was right and the placement was wrong. A relayed row already has an interface column, and `renderKea` already puts its value in `interfaces-config` — the column *is* the reply link, and has been since v969. What stopped it working was `refuseMeshIface`, which would not let anyone put a mesh device there, so the column was one interface short on exactly the deployments that need it and v978 papered over that by adding the interface itself.
+
+Two problems with that. It made the file depend on something not on the page, so the row said `eth1` and Kea listened on `mesh0` with nothing connecting the two. And a row can carry several relay addresses reached over different links, which the auto-resolver handled by adding all of them and the operator could not see at all.
+
+### The column, prefilled
+
+`refuseMeshIface` no longer applies to a relayed row. It still applies to an attached one, which is the case it was written for: that would put a DHCP server on the overlay. A relayed scope cannot be one — it carries no `interface` key, so it is selected by giaddr alone, and no giaddr is an overlay address. A request arriving on that socket matches no scope and is dropped. It is a way out, not a way in.
+
+The picker offers mesh devices on a relayed row and only there, and entering a relay address prefills the column with the interface this node would answer that relay across. Same posture as the subnet and pool suggestions the attached rows get: computed on the node, written into an editable field, never overwriting a value the operator chose.
+
+The lookup is server-side because the routing table is the node's — on a managed peer, a lookup done in the browser would describe whichever host the page is pointed at. `POST /api/dhcp/relay-iface` is read-only and takes no config lock.
+
+Blank when the row's relays disagree. One column cannot express two links, and picking one of them would answer some of a row's relays and silently drop the rest.
+
+### And checked, not just suggested
+
+`relayIfaceNote` names any relayed scope whose interface column is not the link its relay is actually reached over, in the apply note. A warning, not a refusal: the route is this host's opinion right now, and the operator may be configuring a link that is not up yet or may simply know better. What is not acceptable is v978's failure mode, where the page showed a configuration that looked correct and Kea logged an offer it then discarded.
+
+### Pinned
+
+- `TestRenderKeaListensOnTheRelayReplyInterface` — a relayed row naming `mesh0` renders it into `interfaces-config`, and the scope still carries no `interface` key, since gaining one would assert the remote subnet is on the overlay and have Kea refuse the file.
+- `TestRelayedRowMayNameAMeshInterface` — the refusal is conditional and still present, both halves, because deleting it outright would let an attached subnet be served on the mesh.
+- `TestSuggestRelayIfaceIsBlankWhenRelaysDisagree`, `TestRelayIfaceNoteNamesAMismatchedRow`, `TestRelayIfaceNoteIsSilentForAttachedOnly`.
+
+The DHCP help described the interface column as "where the forwarded requests arrive", which is what it was understood to mean and is not what Kea does with it. It now says what the column is for on each kind of row, and that mesh devices are selectable on exactly one of them.
+
+### A second unescaped apostrophe
+
+Writing that help text put `clients' link` into a single-quoted JS string and broke the page the same way v976 did. `TestPageScriptHasNoUnterminatedStringLiteral`, added in v977 for precisely this, caught it before it left the container. That is the whole of its value: the mistake is easy to make and invisible on inspection, and now it fails a test instead of shipping.
+
+---
+
 ## v978 — 2026-08-27
 
 **A relayed scope still did not work. Kea received the request, selected the subnet, chose a lease, and threw the reply away.** Third fault in the same path, on the same four-node lab as v972, against a config v976 renders correctly.

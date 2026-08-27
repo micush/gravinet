@@ -1,7 +1,6 @@
 package webadmin
 
 import (
-	"encoding/json"
 	"net"
 	"strings"
 	"testing"
@@ -323,11 +322,11 @@ func TestDHCPHelpExplainsServingANetworkThisNodeIsNotOn(t *testing.T) {
 	}
 }
 
-// The reply path (v978).
+// The reply path (v978/v979).
 //
 // v972 made a relayed DISCOVER *arrive*: udp sockets match on address, so a
 // unicast to eth1's address coming over the mesh reaches Kea. Its notes then
-// claimed the overlay device never had to be named, which was true of
+// claimed the overlay device never has to be named, which was true of
 // receiving and untrue of answering.
 //
 // Kea routes the reply to giaddr, which is on the far side of the relay, so it
@@ -337,78 +336,84 @@ func TestDHCPHelpExplainsServingANetworkThisNodeIsNotOn(t *testing.T) {
 //	DHCP4_PACKET_SEND_FAIL ... failed to send DHCPv4 packet:
 //	    Interface mesh0/19 does not have any suitable IPv4 sockets open.
 //
-// So interfaces-config has to carry the reply link too. Confirmed on the lab
-// node by adding it by hand before this was written.
+// The iface column on a relayed row is that link, and it is already what
+// renderKea puts in interfaces-config. What was missing was being allowed to
+// put a mesh device there.
 func TestRenderKeaListensOnTheRelayReplyInterface(t *testing.T) {
-	_, ifaces := keaSubnets(t, config.DHCPConfig{
-		Mode:    config.DHCPServer,
-		Subnets: []config.DHCPSubnet{relayedKeaSubnet("10.4.4", "10.4.4.1")},
+	sub := relayedKeaSubnet("10.4.4", "10.4.4.1")
+	sub.Iface = "mesh0" // the link this node answers the relay across
+	subs, ifaces := keaSubnets(t, config.DHCPConfig{
+		Mode: config.DHCPServer, Subnets: []config.DHCPSubnet{sub},
 	})
-	if len(ifaces) != 1 || ifaces[0] != "eth0" {
-		t.Fatalf("baseline interfaces = %v, want just the scope's own link", ifaces)
+	if len(ifaces) != 1 || ifaces[0] != "mesh0" {
+		t.Errorf("interfaces = %v, want [mesh0] %s Kea cannot send a relayed reply "+
+			"without a socket on the link that reaches the relay", ifaces, EMDASH)
 	}
-
-	b, err := renderKea(config.DHCPConfig{
-		Mode:    config.DHCPServer,
-		Subnets: []config.DHCPSubnet{relayedKeaSubnet("10.4.4", "10.4.4.1")},
-	}, "mesh0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := keaIfaceList(t, b)
-	want := []string{"eth0", "mesh0"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("interfaces = %v, want %v — Kea cannot send a relayed reply "+
-			"without a socket on the link that reaches the relay", got, want)
+	// And still selected by giaddr alone: naming the reply link must not put
+	// an "interface" key on the scope, which would assert the remote subnet is
+	// on the overlay and have Kea refuse the file.
+	if _, ok := subs[0]["interface"]; ok {
+		t.Error("the relayed scope gained an interface key; it must be selected by giaddr only")
 	}
 }
 
-// Kea refuses an entire configuration for one interface named twice, so a
-// relay reached over a link that already carries a scope must not double it.
-// That is the ordinary case for an attached relay, not a corner.
-func TestRenderKeaDoesNotNameTheReplyInterfaceTwice(t *testing.T) {
-	b, err := renderKea(config.DHCPConfig{
-		Mode:    config.DHCPServer,
-		Subnets: []config.DHCPSubnet{relayedKeaSubnet("10.4.4", "10.4.4.1")},
-	}, "eth0", "mesh0", "mesh0")
-	if err != nil {
-		t.Fatal(err)
+// A mesh device is refusable on an attached row and not on a relayed one. The
+// rule exists to keep a DHCP server off the overlay, and a relayed scope
+// cannot be one: it carries no interface key, so it is selected by giaddr, and
+// no giaddr is an overlay address.
+func TestRelayedRowMayNameAMeshInterface(t *testing.T) {
+	src := readSource(t, "dhcp_apply.go")
+	if !strings.Contains(src, "if !e.Relayed() {") {
+		t.Error("the mesh-interface refusal is unconditional again; a relayed row cannot name its reply link")
 	}
-	got := keaIfaceList(t, b)
-	if strings.Join(got, ",") != "eth0,mesh0" {
-		t.Errorf("interfaces = %v, want eth0,mesh0 with no repeat", got)
+	if !strings.Contains(src, "s.refuseMeshIface(e.Iface)") {
+		t.Error("the mesh-interface refusal is gone entirely; an attached subnet could be served on the overlay")
 	}
 }
 
-// An attached-only config gains nothing: there is no relay, so there is no
-// reply link, and the file is what it was before this change.
-func TestRenderKeaAttachedOnlyGainsNoReplyInterface(t *testing.T) {
+// The suggestion offered for a relayed row's iface column.
+func TestSuggestRelayIfaceIsBlankWhenRelaysDisagree(t *testing.T) {
+	// Loopback resolves; TEST-NET-1 almost certainly does not. Either they
+	// differ or the second is unresolvable, and both must yield no guess: one
+	// column cannot answer two links, and picking one would silently drop the
+	// other relay's clients.
+	if got := suggestRelayIface([]string{"127.0.0.1", "192.0.2.77"}); got != "" {
+		t.Errorf("suggestRelayIface for two unlike relays = %q, want no guess", got)
+	}
+	if got := suggestRelayIface([]string{"127.0.0.1"}); got == "" {
+		t.Skip("no route to 127.0.0.1 on this host")
+	}
+}
+
+// The warning that replaces the silent failure: a relayed row whose iface
+// column is not the link its relay is reached over is named in the apply note.
+func TestRelayIfaceNoteNamesAMismatchedRow(t *testing.T) {
+	lo, ok := egressIfaceFor("127.0.0.1")
+	if !ok {
+		t.Skip("no route to 127.0.0.1 on this host")
+	}
+	sub := relayedKeaSubnet("10.4.4", "127.0.0.1")
+	sub.Iface = "definitely-not-" + lo
+	note := relayIfaceNote(config.DHCPConfig{Mode: config.DHCPServer, Subnets: []config.DHCPSubnet{sub}})
+	if !strings.Contains(note, sub.Iface) || !strings.Contains(note, lo) {
+		t.Errorf("note = %q, want it to name both the column's value and the real egress", note)
+	}
+
+	sub.Iface = lo
+	if note := relayIfaceNote(config.DHCPConfig{Mode: config.DHCPServer, Subnets: []config.DHCPSubnet{sub}}); note != "" {
+		t.Errorf("a correctly-pointed row still warns: %q", note)
+	}
+}
+
+// An attached-only config has no relay and nothing to say about one.
+func TestRelayIfaceNoteIsSilentForAttachedOnly(t *testing.T) {
 	c := config.DHCPConfig{Mode: config.DHCPServer, Subnets: []config.DHCPSubnet{dhcpSubnet()}}
-	ifaces, unresolved := relayReplyIfaces(c)
-	if len(ifaces) != 0 || len(unresolved) != 0 {
-		t.Errorf("relayReplyIfaces on an attached-only config = %v/%v, want nothing", ifaces, unresolved)
+	if note := relayIfaceNote(c); note != "" {
+		t.Errorf("attached-only config warned about relays: %q", note)
 	}
 }
 
-// A relay with no route to it is reported rather than guessed at. Picking an
-// interface would render a file that looks correct and still drops every
-// reply, which is the failure this whole change is about.
-func TestRelayReplyIfacesReportsAnUnroutableRelay(t *testing.T) {
-	// 192.0.2.0/24 is TEST-NET-1 and is not routed anywhere. If this host
-	// happens to have a default route it will resolve, so the assertion is on
-	// the pair being consistent rather than on it failing.
-	c := config.DHCPConfig{
-		Mode:    config.DHCPServer,
-		Subnets: []config.DHCPSubnet{relayedKeaSubnet("10.9.9", "192.0.2.77")},
-	}
-	ifaces, unresolved := relayReplyIfaces(c)
-	if len(ifaces)+len(unresolved) != 1 {
-		t.Errorf("one relay address should yield exactly one outcome, got ifaces=%v unresolved=%v", ifaces, unresolved)
-	}
-}
-
-// The route lookup sends nothing and must agree with the host's own view: the
-// loopback address is reachable over the loopback interface.
+// The route lookup sends nothing and must agree with the host's own view.
 func TestEgressIfaceForResolvesALocalAddress(t *testing.T) {
 	name, ok := egressIfaceFor("127.0.0.1")
 	if !ok {
@@ -423,18 +428,4 @@ func TestEgressIfaceForResolvesALocalAddress(t *testing.T) {
 	}
 }
 
-// keaIfaceList pulls interfaces-config.interfaces out of a rendered file.
-func keaIfaceList(t *testing.T, b []byte) []string {
-	t.Helper()
-	var conf struct {
-		Dhcp4 struct {
-			InterfacesConfig struct {
-				Interfaces []string `json:"interfaces"`
-			} `json:"interfaces-config"`
-		} `json:"Dhcp4"`
-	}
-	if err := json.Unmarshal(b, &conf); err != nil {
-		t.Fatalf("rendered config is not JSON: %v", err)
-	}
-	return conf.Dhcp4.InterfacesConfig.Interfaces
-}
+const EMDASH = "\u2014"

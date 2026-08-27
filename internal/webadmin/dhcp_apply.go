@@ -167,17 +167,7 @@ func applyDHCP(c config.DHCPConfig) (note string, err error) {
 			}
 			backedUp = "kept the previous config at " + to + "; "
 		}
-		// Which interfaces Kea needs a socket on to *answer* a relayed
-		// scope, as distinct from the ones the scopes name. See
-		// relayReplyIfaces: without this Kea selects the subnet, picks a
-		// lease, and then throws the reply away.
-		replyIfaces, unresolved := relayReplyIfaces(served)
-		noRoute := ""
-		if len(unresolved) > 0 {
-			noRoute = fmt.Sprintf("no route to relay agent(s) %s, so replies to their clients cannot be sent from here until one exists; ",
-				strings.Join(unresolved, ", "))
-		}
-		conf, err := renderKea(served, replyIfaces...)
+		conf, err := renderKea(served)
 		if err != nil {
 			return "", err
 		}
@@ -199,7 +189,7 @@ func applyDHCP(c config.DHCPConfig) (note string, err error) {
 			return "", fmt.Errorf("wrote %s but the Kea service would not start — check `journalctl -u %s`", keaConfPath, keaUnit())
 		}
 		keaService("enable")
-		return noteworthy(installed, backedUp, missing, noRoute, dhcpProblemNote(c)), nil
+		return noteworthy(installed, backedUp, missing, relayIfaceNote(served), dhcpProblemNote(c)), nil
 	}
 	return "", nil
 }
@@ -331,8 +321,24 @@ func (s *Server) handleDHCP(w http.ResponseWriter, r *http.Request) {
 			}
 			// The picker hides mesh devices, but a picker is a convenience,
 			// not a control. This is what actually prevents it.
-			if err := s.refuseMeshIface(e.Iface); err != nil {
-				return err
+			//
+			// Except on a relayed row, where the iface column is not the link
+			// the clients are on — they are on the far side of a relay — but
+			// the link this node reaches that relay over, and answers it
+			// across. On the lab that is the mesh, and refusing it here left
+			// the scope selectable and unanswerable (v978). A mesh device is
+			// still refused for an attached subnet, which is the case the rule
+			// was written for: that would put a DHCP server on the overlay.
+			//
+			// A relayed row cannot do that even naming one. The scope carries
+			// no "interface" key, so it is selected by giaddr alone, and no
+			// giaddr is an overlay address; a request arriving on the overlay
+			// socket matches no scope and is dropped. The socket is a way out,
+			// not a way in.
+			if !e.Relayed() {
+				if err := s.refuseMeshIface(e.Iface); err != nil {
+					return err
+				}
 			}
 			if req.Op == "add" {
 				// Attached subnets only. Two of those on one link are two

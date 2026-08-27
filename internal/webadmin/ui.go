@@ -3898,14 +3898,14 @@ const HELP = {
     topic: 'This host\u2019s clock, timezone, and time synchronization. [gravinet] refuses handshakes whose timestamp is too far from local time, so a node whose clock has drifted stops forming sessions rather than degrading \u2014 this is where to check that and fix it. Acts on the node you\u2019re currently managing.',
   },
   'dhcp': {
-    topic: 'What this node does about DHCP on the LANs it is attached to, and on networks it is not. Acts on the node you\u2019re currently managing.<br><br>Two cards, each with the same enabled/disabled pill every other card here carries: <b>server</b> hands out leases itself (through Kea), <b>relay</b> forwards requests to a DHCP server somewhere else. <b>Enabling one disables the other</b> \u2014 a node is never both at once, because a relay that also answered locally would shadow the central server for the subnets it relays and clients would take whichever reply arrived first. Leaving both disabled leaves this host alone entirely; one already running its own DHCP server is untouched until you enable something here.<br><br>Both cards stay on the page and stay editable whichever is on, so a configuration you are not currently using is still there to look at and change \u2014 running the relay for an afternoon does not cost you your pools. Adding a row does not enable a card; the pill does that.<br><br>Beside each pill is what that half is <i>actually</i> doing, which is not always the same thing \u2014 a card can be enabled before it has anything to run, and a server with no enabled subnet is stopped rather than left to crash-loop. When the two disagree the reason underneath says which to fix.<br><br><b>Server.</b> One row per subnet served. Use + to add one, double-click a field to edit it, double-click the state tag to park a subnet without deleting it, tick rows and \u2212 to remove. Choosing an <b>interface</b> fills in the rest of the row from that interface\u2019s own address \u2014 the subnet it sits on, a pool inside it, itself as the gateway, and this host\u2019s own resolvers \u2014 and every one of those fields stays editable. The suggested pool keeps a handful of addresses clear at each end and either side of the gateway, so there is room for a printer or a second router later without shrinking a live pool.<br><br><b>Serving a network this node is not on.</b> A DHCP server is not limited to its own links. A relay agent on a distant segment \u2014 usually the router the clients use as their gateway \u2014 catches their broadcasts and forwards them here as ordinary unicast, stamping its own address on each one; this node answers with addresses from that far segment and the relay puts the reply back on the wire there. To set one up, fill in the <b>relay</b> column with the address the agent forwards under \u2014 its <code>giaddr</code>, in the language of RFC 1542 and of most router documentation \u2014 pick the interface that traffic arrives on, and give the subnet, pool and gateway <i>of the remote network</i>. Nothing is prefilled for such a row, because none of it has anything to do with the interface it arrives on. Any number of remote subnets can share one interface, which is the usual shape: every branch relays to the same uplink here. The far end needs configuring too \u2014 on Cisco-style gear that is an <code>ip helper-address</code> pointing at this node, and its source address is what belongs in the relay column. Serving both a LAN of your own and remote ones from the same node is fine and needs no extra setting; each row says which it is.<br><br><b>Relay.</b> One row per client-facing link, edited exactly like the server table: + to add, double-click a field to edit, double-click the state tag to park a link, tick and \u2212 to remove. Each link has its own upstream servers and its own hop limit, so one LAN can relay somewhere different from another \u2014 the relay binds a socket per link regardless, and the address on that link is what it stamps on the requests it forwards. Every server on a row gets a copy of each request and the client takes whichever reply arrives first, which is how a relay does redundancy \u2014 there is no failover to configure. Do not relay from the link the upstream server is on: its replies would be relayed straight back at it. Relaying is Linux-only: it needs the arrival interface of a broadcast, which the other platforms do not offer the same way, and a relay that guessed would hand clients addresses from the wrong LAN\u2019s subnet.<br><br>Serve or relay on a LAN interface, never a mesh device \u2014 they are left out of the pickers, and refused on save even if one reaches them another way. An interface that cannot do its job says so in red under its own row: for a directly attached subnet Kea matches a request to it by the receiving interface\u2019s address, so an interface addressed outside the subnet it serves runs, logs nothing unusual and never answers; a relayed subnet is matched by the relay\u2019s address instead and so is held to the weaker condition that the interface have some IPv4 address for the relay to forward to at all; and a link with no IPv4 address has no relay address to stamp on what it forwards.',
+    topic: 'What this node does about DHCP on the LANs it is attached to, and on networks it is not. Acts on the node you\u2019re currently managing.<br><br>Two cards, each with the same enabled/disabled pill every other card here carries: <b>server</b> hands out leases itself (through Kea), <b>relay</b> forwards requests to a DHCP server somewhere else. <b>Enabling one disables the other</b> \u2014 a node is never both at once, because a relay that also answered locally would shadow the central server for the subnets it relays and clients would take whichever reply arrived first. Leaving both disabled leaves this host alone entirely; one already running its own DHCP server is untouched until you enable something here.<br><br>Both cards stay on the page and stay editable whichever is on, so a configuration you are not currently using is still there to look at and change \u2014 running the relay for an afternoon does not cost you your pools. Adding a row does not enable a card; the pill does that.<br><br>Beside each pill is what that half is <i>actually</i> doing, which is not always the same thing \u2014 a card can be enabled before it has anything to run, and a server with no enabled subnet is stopped rather than left to crash-loop. When the two disagree the reason underneath says which to fix.<br><br><b>Server.</b> One row per subnet served. Use + to add one, double-click a field to edit it, double-click the state tag to park a subnet without deleting it, tick rows and \u2212 to remove. Choosing an <b>interface</b> fills in the rest of the row from that interface\u2019s own address \u2014 the subnet it sits on, a pool inside it, itself as the gateway, and this host\u2019s own resolvers \u2014 and every one of those fields stays editable. The suggested pool keeps a handful of addresses clear at each end and either side of the gateway, so there is room for a printer or a second router later without shrinking a live pool.<br><br><b>Serving a network this node is not on.</b> A DHCP server is not limited to its own links. A relay agent on a distant segment \u2014 usually the router the clients use as their gateway \u2014 catches their broadcasts and forwards them here as ordinary unicast, stamping its own address on each one; this node answers with addresses from that far segment and the relay puts the reply back on the wire there. To set one up, fill in the <b>relay</b> column with the address the agent forwards under \u2014 its <code>giaddr</code>, in the language of RFC 1542 and of most router documentation \u2014 and give the subnet, pool and gateway <i>of the remote network</i>. The subnet, pool and gateway are not prefilled for such a row, because none of them have anything to do with an interface on this node.<br><br>The <b>interface</b> on a relayed row is not the clients\' link \u2014 they are on the far side of the relay \u2014 it is the link this node reaches the relay over, and answers it across. Kea will not reply from an interface it holds no socket on, so getting this wrong means the request arrives, a lease is chosen, and the reply is dropped with nothing on this page to say so. It is therefore filled in for you from this node\'s own routing table the moment you enter a relay address, and it is the one field on a relayed row that is. Check it and change it if you know better; if the row\'s relays are reached over different links, or none is routable yet, it is left blank rather than guessed at. <b>Mesh devices are selectable here, and only here</b> \u2014 on a meshed deployment the relay is usually reached over the overlay. That does not put a DHCP server on the mesh: a relayed scope is matched by the relay\'s address alone, so nothing arriving on the overlay can select it. Any number of remote subnets can share one interface, which is the usual shape: every branch relays to the same uplink here. The far end needs configuring too \u2014 on Cisco-style gear that is an <code>ip helper-address</code> pointing at this node, and its source address is what belongs in the relay column. Serving both a LAN of your own and remote ones from the same node is fine and needs no extra setting; each row says which it is.<br><br><b>Relay.</b> One row per client-facing link, edited exactly like the server table: + to add, double-click a field to edit, double-click the state tag to park a link, tick and \u2212 to remove. Each link has its own upstream servers and its own hop limit, so one LAN can relay somewhere different from another \u2014 the relay binds a socket per link regardless, and the address on that link is what it stamps on the requests it forwards. Every server on a row gets a copy of each request and the client takes whichever reply arrives first, which is how a relay does redundancy \u2014 there is no failover to configure. Do not relay from the link the upstream server is on: its replies would be relayed straight back at it. Relaying is Linux-only: it needs the arrival interface of a broadcast, which the other platforms do not offer the same way, and a relay that guessed would hand clients addresses from the wrong LAN\u2019s subnet.<br><br>Serve or relay on a LAN interface, never a mesh device \u2014 they are left out of the pickers, and refused on save even if one reaches them another way. The single exception is the interface column of a <i>relayed</i> server row, described above, where a mesh device is often the correct answer. An interface that cannot do its job says so in red under its own row: for a directly attached subnet Kea matches a request to it by the receiving interface\u2019s address, so an interface addressed outside the subnet it serves runs, logs nothing unusual and never answers; a relayed subnet is matched by the relay\u2019s address instead and so is held to the weaker condition that the interface have some IPv4 address for the relay to forward to at all; and a link with no IPv4 address has no relay address to stamp on what it forwards.',
     cols: {
       // Server and relay are separate tables, but they are never on screen
       // together (role is one setting), and helpAnnotate matches notes to
       // headers by name across the whole section \u2014 so the two shared
       // columns are worded to hold for either.
       'state': 'a disabled row keeps its settings but is not in service \u2014 the subnet is not served, or the link is not relayed from',
-      'interface': 'the LAN interface this row applies to, never a mesh device \u2014 on a directly attached subnet, choosing one also fills in the rest of the row from its own address; on a relayed one it is only where the forwarded requests arrive, and nothing is prefilled from it',
+      'interface': 'on an attached subnet, the LAN interface the clients are on, never a mesh device \u2014 choosing one fills in the rest of the row from its own address. On a relayed subnet it is instead the link this node reaches the relay over and replies across, may be a mesh device, and is itself the field that gets prefilled',
       'relay': 'blank means the subnet is on this interface. An address here means it is somewhere else, reached through a relay agent forwarding under that address \u2014 Kea picks the scope by matching it, so it is what the far LAN is identified by. List more than one where two routers relay the same segment. Any number of relayed subnets can share one interface.',
       'servers': 'the upstream DHCP servers requests from this link are forwarded to; each gets a copy and the client takes whichever reply arrives first',
       'max hops': 'how many relays a request may already have crossed before this link drops it; blank uses the default of 4',
@@ -8797,6 +8797,7 @@ function secRadvd(c){
   // than when a row is opened, so the select is populated the instant an
   // editor appears instead of filling in a moment later under the cursor.
   let ifaceNames = [];
+  let meshIfaceNames = [];
   function raIfaceOpts(sel){
     // A stored interface that is no longer present still has to be selectable,
     // or opening the editor on it would silently rewrite the row to whatever
@@ -8907,8 +8908,15 @@ function secDHCP(c){
     // Mesh devices are dropped from the picker: serving DHCP into the overlay
     // would hand mesh peers a lease, and relaying out of it would forward
     // their requests to a LAN server that knows nothing about them.
-    const meshIfaces = (r.body && r.body.mesh_ifaces) || [];
-    ifaceNames = allIfaces.filter(n => meshIfaces.indexOf(n) < 0);
+    // Mesh devices are dropped from the picker for an attached row: serving
+    // DHCP into the overlay would hand mesh peers a lease. A *relayed* row is
+    // the exception and keeps them, because its interface column is not the
+    // clients' link at all but the link this node answers their relay across,
+    // and on a meshed deployment that is a mesh device. Kea will not reply
+    // from an interface it holds no socket on, so refusing to name it here is
+    // what left a relayed scope selectable and unanswerable (v978).
+    meshIfaceNames = (r.body && r.body.mesh_ifaces) || [];
+    ifaceNames = allIfaces.filter(n => meshIfaceNames.indexOf(n) < 0);
     suggest = (r.body && r.body.suggest) || {};
     systemDns = (r.body && r.body.system_dns) || [];
     if (!r || !r.ok || !r.body){ wrap.innerHTML = '<div class="card"><div class="hint">could not load: '+esc((r&&r.body&&r.body.error)||'no response')+'</div></div>'; return; }
@@ -9043,7 +9051,7 @@ function secDHCP(c){
   function dhFields(e){
     e = e || {};
     return '<td class="selcol"></td><td class="dh-state"><span class="on">enabled</span></td>'
-      + '<td><select class="dhe-iface" style="width:100px">'+dhIfaceOpts(e.iface||'')+'</select></td>'
+      + '<td><select class="dhe-iface" style="width:100px">'+dhIfaceOpts(e.iface||'', !!(e.relays||''))+'</select></td>'
       + '<td><input class="dhe-relays" placeholder="none \u2014 attached" title="leave empty for a LAN on this interface; fill in the relay agent\u2019s address (giaddr) to serve a network somewhere else" style="width:110px" value="'+esc(e.relays||'')+'"></td>'
       + '<td><input class="dhe-subnet" placeholder="10.1.1.0/24" style="width:120px" value="'+esc(e.subnet||'')+'"></td>'
       + '<td><input class="dhe-start" placeholder="10.1.1.100" style="width:95px" value="'+esc(e.pool_start||'')+'">'
@@ -9054,8 +9062,11 @@ function secDHCP(c){
       + ' <button class="sm dhe-save">save</button> <button class="sm dhe-cancel">cancel</button></td>';
   }
 
-  function dhIfaceOpts(sel){
-    const names = ifaceNames.slice();
+  // relayed rows may pick a mesh device; attached rows may not. Passed in
+  // rather than read off the row, because the options are rebuilt as the relay
+  // column is typed into and the row's own state is mid-change at that point.
+  function dhIfaceOpts(sel, relayed){
+    const names = ifaceNames.concat(relayed ? meshIfaceNames : []);
     if (sel && names.indexOf(sel) < 0) names.unshift(sel);
     let o = names.length ? '' : '<option value="">(no interfaces found)</option>';
     if (!sel) o += '<option value="" selected>choose\u2026</option>';
@@ -9156,7 +9167,47 @@ function secDHCP(c){
     // and dropping the record is what stops a later interface change from
     // treating them as its own to overwrite.
     const rel = tr.querySelector('.dhe-relays');
-    if (rel) rel.onchange = () => { if ((rel.value||'').trim()) delete tr.dataset.dhsuggest; };
+    if (rel) rel.onchange = () => {
+      const relayed = !!(rel.value||'').trim();
+      if (relayed) delete tr.dataset.dhsuggest;
+      dhRelayIface(tr, relayed);
+    };
+  }
+
+  // Becoming (or ceasing to be) a relayed row changes what the interface
+  // column means, so it changes both what may be picked and what is picked.
+  //
+  // Relayed: mesh devices join the list, and the node is asked which interface
+  // it would actually answer these relays across — a route lookup, done
+  // server-side because it is the *node's* routing table and on a managed peer
+  // the browser is not on that host. The answer is filled in only when the
+  // column is empty or still holds a suggestion, on the same rule the subnet
+  // and pool prefill follows: a value the operator chose is never overwritten.
+  //
+  // No longer relayed: mesh devices leave, and a mesh device sitting in the
+  // column goes with them, because an attached scope on the overlay is exactly
+  // what refuseMeshIface exists to stop and the save would be refused anyway.
+  async function dhRelayIface(tr, relayed){
+    const sel = tr.querySelector('.dhe-iface');
+    if (!sel) return;
+    let cur = sel.value;
+    if (!relayed && meshIfaceNames.indexOf(cur) >= 0) cur = '';
+    let suggested = '';
+    if (relayed){
+      const relays = (tr.querySelector('.dhe-relays').value||'')
+        .split(',').map(x => x.trim()).filter(Boolean);
+      if (relays.length){
+        const r = await api('/api/dhcp/relay-iface', {method:'POST', body:JSON.stringify({relays})});
+        if (r.ok && r.body) suggested = r.body.iface || '';
+      }
+    }
+    // The operator's own pick survives; a blank or a previous suggestion does
+    // not. Recorded on the row so the two can be told apart next time.
+    const mine = cur && cur !== (tr.dataset.dhrelayiface || '');
+    if (suggested && !mine) cur = suggested;
+    sel.innerHTML = dhIfaceOpts(cur, relayed);
+    sel.value = cur;
+    if (suggested) tr.dataset.dhrelayiface = suggested; else delete tr.dataset.dhrelayiface;
   }
 
   function dhRead(tr){

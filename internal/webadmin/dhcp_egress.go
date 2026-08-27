@@ -1,7 +1,10 @@
 package webadmin
 
 import (
+	"encoding/json"
+	"fmt"
 	"net"
+	"net/http"
 	"net/netip"
 	"strings"
 
@@ -43,25 +46,69 @@ import (
 // udp socket, so it receives no broadcasts, and no subnet4 entry names the
 // overlay or carries an overlay giaddr, so a request arriving on it selects no
 // scope and is dropped. It is a way out, not a way in.
-func relayReplyIfaces(c config.DHCPConfig) (ifaces []string, unresolved []string) {
-	seen := map[string]bool{}
-	for _, s := range c.EnabledSubnets() {
-		if !s.Relayed() {
+// suggestRelayIface is the interface the page prefills into a relayed row's
+// iface column: the one this host would answer that relay across.
+//
+// A suggestion, not a decision, exactly like the subnet and pool the attached
+// rows get from dhcp_prefill.go. The operator can overwrite it, including with
+// a mesh device, which for a relayed row is often the right answer and is no
+// longer refused on save.
+//
+// Blank when the relays disagree with each other. A row can carry several
+// giaddrs and nothing requires them to be reached the same way; one column
+// cannot express two links, and guessing one of them would produce a row that
+// answers some of its relays and silently drops the rest. Better to leave it
+// empty and let relayIfaceNote say what is wrong once it is filled in.
+func suggestRelayIface(relays []string) string {
+	name := ""
+	for _, addr := range relays {
+		got, ok := egressIfaceFor(addr)
+		if !ok {
+			return ""
+		}
+		if name == "" {
+			name = got
 			continue
 		}
-		for _, addr := range s.RelayAddrs() {
-			name, ok := egressIfaceFor(addr)
+		if name != got {
+			return ""
+		}
+	}
+	return name
+}
+
+// relayIfaceNote reports relayed scopes whose iface column is not the link
+// this host would actually answer their relay across.
+//
+// A warning rather than a refusal, and reported rather than corrected. The
+// route is this host's opinion at this moment; the operator may know better,
+// may be configuring a link that is not up yet, or may be about to change the
+// routing. What is not acceptable is the v978 failure mode, where the page
+// showed a configuration that looked exactly right and Kea logged an offer it
+// then discarded, with nothing anywhere to connect the two.
+func relayIfaceNote(c config.DHCPConfig) string {
+	var wrong []string
+	for _, sub := range c.EnabledSubnets() {
+		if !sub.Relayed() {
+			continue
+		}
+		named := strings.TrimSpace(sub.Iface)
+		for _, addr := range sub.RelayAddrs() {
+			got, ok := egressIfaceFor(addr)
 			if !ok {
-				unresolved = append(unresolved, addr)
+				wrong = append(wrong, fmt.Sprintf("no route to relay %s, so %s cannot be answered from here", addr, sub.Subnet))
 				continue
 			}
-			if !seen[name] {
-				seen[name] = true
-				ifaces = append(ifaces, name)
+			if got != named {
+				wrong = append(wrong, fmt.Sprintf("%s relays via %s but its interface column says %s, and Kea can only reply from an interface it listens on",
+					sub.Subnet, got, named))
 			}
 		}
 	}
-	return ifaces, unresolved
+	if len(wrong) == 0 {
+		return ""
+	}
+	return strings.Join(dedupe(wrong), "; ") + "; "
 }
 
 // egressIfaceFor reports which interface this host would send to addr from.
@@ -130,4 +177,26 @@ func ifaceOwning(addr netip.Addr) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// handleDHCPRelayIface answers "which interface would this node reach these
+// relay agents over?" for the DHCP editor, which prefills the answer into a
+// relayed row's interface column.
+//
+// Server-side because the routing table is the *node's*. On a managed peer the
+// browser is not on that host, and a lookup done in the page would confidently
+// describe whichever machine it happens to be pointed at.
+//
+// Read-only, so it takes no config lock and changes nothing. A blank iface is
+// a normal answer, not an error: see suggestRelayIface for when there is no
+// single honest one to give.
+func (s *Server) handleDHCPRelayIface(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Relays []string `json:"relays"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "bad request"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"iface": suggestRelayIface(trimAll(req.Relays))})
 }
