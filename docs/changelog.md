@@ -2,6 +2,20 @@
 
 ---
 
+## v982 — 2026-08-27
+
+**The overlay devices in the DHCP server's interface picker are no longer in a labelled group.**
+
+v981 put them under `<optgroup label="overlay — relayed rows only">`, reasoning that a list offering `mesh0` beside `eth1` ought to say what the mesh device is doing there. What it said instead was a rule about the row — that a mesh device is valid only once the relay column is filled in — printed on a control that is not the row and does not enforce it. The picker offers the same devices whatever the row is; `refuseMeshIface` is what refuses an attached one, on save. So the label was a warning shown in the wrong place, at the moment it could not act, to an operator who may not yet have decided what kind of row they are filling in.
+
+They are listed plainly now, after this host's own links. The ordering has not changed, so the mesh devices are still last and still the last thing in the list, which is as much as the grouping was really doing.
+
+No behaviour moved. `dhIfaceOpts` offers overlay devices on the server table and never on the relay-links table, exactly as before, and an attached row naming one is still refused. `TestDHCPServerPickerOffersOverlayDevices` passes untouched — it was written against the call sites rather than the markup, which is why removing a wrapper from the middle of the function did not disturb it.
+
+The DHCP help described the devices as "grouped at the bottom" and now says they are listed after this host's own links. The relayed-rows-only rule stays in that same paragraph, which is where it was already and where there is room to say why.
+
+---
+
 ## v981 — 2026-08-27
 
 **v978 resolved the relay reply interface behind the operator's back. It is now a field.**
