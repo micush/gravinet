@@ -61,14 +61,22 @@ func ddnsParams(cfg *config.Config, meshIfaces []string) (ddns.Params, error) {
 	if err != nil {
 		return ddns.Params{}, err
 	}
+	// The overlay devices are skipped unless the operator asked for them. When
+	// they are published they go in as ordinary interfaces, alias name and all,
+	// which is why this is a skip list rather than a separate code path.
+	skip := meshIfaces
+	if cfg.DDNS.MeshEnabled() {
+		skip = nil
+	}
 	return ddns.Params{
-		Hostname:   host,
-		Domain:     domain,
-		Servers:    servers,
-		TTL:        uint32(cfg.DDNS.TTL),
-		Key:        key,
-		SkipIfaces: meshIfaces,
-		Reverse:    cfg.DDNS.ReverseEnabled(),
+		Hostname:    host,
+		Domain:      domain,
+		Servers:     servers,
+		TTL:         uint32(cfg.DDNS.TTL),
+		Key:         key,
+		SkipIfaces:  skip,
+		Reverse:     cfg.DDNS.ReverseEnabled(),
+		PublishMesh: cfg.DDNS.MeshEnabled(),
 	}, nil
 }
 
@@ -193,6 +201,7 @@ func (s *Server) handleDDNS(w http.ResponseWriter, r *http.Request) {
 			"interval_minutes": cfg.DDNS.IntervalMinutes,
 			"ttl":              cfg.DDNS.TTL,
 			"reverse":          cfg.DDNS.ReverseEnabled(),
+			"mesh":             cfg.DDNS.MeshEnabled(),
 			// Whether a key is set, never the key. A secret does not travel to
 			// a browser to be redrawn into a field an operator did not ask to
 			// see; setting a new one replaces it, and clearing is explicit.
@@ -213,6 +222,7 @@ func (s *Server) handleDDNS(w http.ResponseWriter, r *http.Request) {
 		Interval *int    `json:"interval_minutes"`
 		TTL      *int    `json:"ttl"`
 		Reverse  *bool   `json:"reverse"`
+		Mesh     *bool   `json:"mesh"`
 		TSIGKey  *string `json:"tsig_key"`
 	}
 	if !decode(w, r, &req) {
@@ -229,6 +239,10 @@ func (s *Server) handleDDNS(w http.ResponseWriter, r *http.Request) {
 		if req.Reverse != nil {
 			v := *req.Reverse
 			d.Reverse = &v
+		}
+		if req.Mesh != nil {
+			v := *req.Mesh
+			d.Mesh = &v
 		}
 		if req.TSIGKey != nil {
 			key := strings.TrimSpace(*req.TSIGKey)

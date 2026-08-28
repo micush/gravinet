@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"os"
 	"strconv"
 	"strings"
 
@@ -699,6 +700,127 @@ func validateListenAddrList(in []string) ([]string, error) {
 	return out, nil
 }
 
+// overlayIfaces is this node's own overlay devices, by interface name.
+//
+// The daemon hands the registrar the list the engine actually has up. From a
+// terminal there is no engine to ask, and the obvious substitute — the names
+// configured for them — is empty on every network left at "auto", which is
+// most of them. A check built on that alone reported overlay addresses as
+// "would write" while the daemon skipped them on every run, which is the check
+// contradicting the thing it exists to describe.
+//
+// So the names are a starting point and the addressing settles it: an
+// interface holding an address inside a configured overlay subnet is an
+// overlay interface, whatever it ended up being called. That is the same fact
+// the engine would report, arrived at from the config rather than from the
+// running daemon, and it is right whether or not anyone set a tun_name.
+func overlayIfaces(cfg *config.Config) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(n string) {
+		if n != "" && !seen[n] {
+			seen[n], out = true, append(out, n)
+		}
+	}
+
+	var subnets []netip.Prefix
+	for _, n := range cfg.Networks {
+		add(n.TUNName)
+		for _, cidr := range []string{n.Subnet4, n.Subnet6} {
+			if cidr == "" {
+				continue
+			}
+			if pfx, err := netip.ParsePrefix(cidr); err == nil {
+				subnets = append(subnets, pfx)
+			}
+		}
+	}
+	if len(subnets) == 0 {
+		return out
+	}
+
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return out
+	}
+	for _, ifi := range ifaces {
+		addrs, err := ifi.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipn, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			addr, ok := netip.AddrFromSlice(ipn.IP)
+			if !ok {
+				continue
+			}
+			addr = addr.Unmap()
+			for _, pfx := range subnets {
+				if pfx.Contains(addr) {
+					add(ifi.Name)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// ddnsParamsForCheck assembles the same inputs a registration run uses, from
+// the same places: the three network facts from the host's live resolver
+// settings, and the key from config.
+//
+// The skip list comes from overlayIfaces rather than from a running engine,
+// which is the one place this can differ from what the daemon does. See there
+// for why matching on addressing rather than on configured names is what makes
+// the two agree in practice.
+func ddnsParamsForCheck(cfg *config.Config) (ddns.Params, error) {
+	info := service.HostResolver()
+	host := strings.TrimSpace(info.Hostname)
+	domain := strings.TrimSpace(info.SearchDomain)
+	var servers []string
+	for _, s := range info.DNSServers {
+		if s = strings.TrimSpace(s); s != "" {
+			servers = append(servers, s)
+		}
+	}
+
+	var missing []string
+	if host == "" {
+		missing = append(missing, "a hostname")
+	}
+	if domain == "" {
+		missing = append(missing, "a search domain")
+	}
+	if len(servers) == 0 {
+		missing = append(missing, "at least one DNS server")
+	}
+	if len(missing) > 0 {
+		return ddns.Params{}, fmt.Errorf("this node has no %s set; see `gravinet system resolver`", strings.Join(missing, " and no "))
+	}
+
+	key, err := ddns.ParseKey(cfg.DDNS.TSIGKey)
+	if err != nil {
+		return ddns.Params{}, err
+	}
+	var skip []string
+	if !cfg.DDNS.MeshEnabled() {
+		skip = overlayIfaces(cfg)
+	}
+	return ddns.Params{
+		Hostname:    host,
+		Domain:      domain,
+		Servers:     servers,
+		TTL:         uint32(cfg.DDNS.TTL),
+		Key:         key,
+		SkipIfaces:  skip,
+		Reverse:     cfg.DDNS.ReverseEnabled(),
+		PublishMesh: cfg.DDNS.MeshEnabled(),
+	}, nil
+}
+
 // cmdSettingsDDNS is "gravinet settings ddns" — dynamic DNS self-registration.
 //
 // One leaf for the whole block rather than four, which is the exception to how
@@ -722,6 +844,7 @@ func cmdSettingsDDNS(args []string) {
 		fmt.Printf("dynamic dns registration: %s\n", state)
 		fmt.Printf("  ttl:      %s\n", orDash(ttlLabel(d.TTL)))
 		fmt.Printf("  reverse:  %s\n", onOff(d.ReverseEnabled()))
+		fmt.Printf("  mesh:     %s\n", onOff(d.MeshEnabled()))
 		fmt.Printf("  tsig key: %s\n", tsigLabel(d.TSIGKey))
 		// The three inputs the run needs, read from the host rather than from
 		// this file — the same values System > Resolver shows, and the reason
@@ -738,6 +861,64 @@ func cmdSettingsDDNS(args []string) {
 	}
 
 	switch rest[0] {
+	case "check":
+		// A dry run. Everything a registration does except the updates: the
+		// same SOA lookups, the same read-backs, and a verdict per name.
+		//
+		// This is an operational action on a settings leaf, which the register-
+		// now button was removed from the web page for being in v996. The
+		// difference is that this one writes nothing and answers a question the
+		// settings themselves cannot: the config can be entirely correct and
+		// the run still publish no PTR, for reasons that live on the network
+		// rather than in this file.
+		p, err := ddnsParamsForCheck(cfg)
+		if err != nil {
+			fatal("%v", err)
+		}
+		d, err := ddns.Diagnose(p)
+		if err != nil {
+			fatal("%v", err)
+		}
+		fmt.Print(d.String())
+		return
+	case "run":
+		// A registration, now, with the outcome on stdout.
+		//
+		// The daemon does this on a timer and reports to the log, which is the
+		// right home for a recurring job's output and the wrong place to stand
+		// while changing a zone. Anyone who has just fixed an update policy
+		// wants to know whether it worked before the next quarter hour, and
+		// "wait fifteen minutes, then read a log" is not an answer.
+		//
+		// This is the register-now button that came off the web page in v996,
+		// put where it belongs. The objection then was that triggering a
+		// registration is an operational action and does not go beside a
+		// dark-mode switch; a terminal is exactly where operational actions do
+		// go, and unlike a button this one prints what happened.
+		p, err := ddnsParamsForCheck(cfg)
+		if err != nil {
+			fatal("%v", err)
+		}
+		res, err := ddns.Register(p, func(format string, args ...any) {
+			fmt.Printf(format+"\n", args...)
+		})
+		if err != nil {
+			fatal("%v", err)
+		}
+		for _, name := range res.Published {
+			fmt.Printf("  ok      %s\n", name)
+		}
+		for _, e := range res.Errors {
+			fmt.Printf("  FAILED  %s\n", e)
+		}
+		fmt.Printf("\n%d name(s) published, %d changed by this run, %d problem(s)\n",
+			len(res.Published), res.Updated, len(res.Errors))
+		if len(res.Errors) > 0 {
+			// A non-zero exit so a script that runs this after a zone change
+			// notices, rather than reading "FAILED" into a log nobody greps.
+			os.Exit(1)
+		}
+		return
 	case "interval":
 		if len(rest) < 2 {
 			fatal("usage: gravinet settings ddns interval <minutes|0>")
@@ -754,6 +935,12 @@ func cmdSettingsDDNS(args []string) {
 		}
 		v := rest[1] == "on"
 		d.Reverse = &v
+	case "mesh":
+		if len(rest) < 2 {
+			fatal("usage: gravinet settings ddns mesh <on|off>")
+		}
+		v := rest[1] == "on"
+		d.Mesh = &v
 	case "key":
 		if len(rest) < 2 {
 			fatal("usage: gravinet settings ddns key <path|name:base64secret[:algorithm]|->")
@@ -769,7 +956,7 @@ func cmdSettingsDDNS(args []string) {
 			d.TSIGKey = rest[1]
 		}
 	default:
-		fatal("usage: gravinet settings ddns [interval <minutes>|ttl <seconds>|reverse <on|off>|key <spec|->]")
+		fatal("usage: gravinet settings ddns [check|run|interval <minutes>|ttl <seconds>|reverse <on|off>|mesh <on|off>|key <spec|->]")
 	}
 
 	if err := cfg.Validate(); err != nil {

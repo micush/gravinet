@@ -34,8 +34,14 @@ type Params struct {
 	// SkipIfaces are interfaces whose addresses must not be published —
 	// gravinet's own overlay devices. See Registrar.Run.
 	SkipIfaces []string
-	// Reverse also publishes a PTR for the primary name.
+	// Reverse also publishes a PTR for every address published forward.
 	Reverse bool
+	// PublishMesh is informational: it records that SkipIfaces was left empty
+	// deliberately rather than by omission. This package never reads it for a
+	// decision — the skip list is the decision — but a diagnosis that cannot
+	// tell "no overlay addresses configured" from "overlay addresses excluded"
+	// is missing the only fact that distinguishes them.
+	PublishMesh bool
 }
 
 // A note on TTL: Params.TTL is taken literally, including zero.
@@ -119,10 +125,20 @@ func Register(p Params, log Logf) (Result, error) {
 		return res, fmt.Errorf("no address on this host is worth publishing (every interface is loopback, link-local, or one of gravinet's own)")
 	}
 
-	// Where the zone's updates go. Asked once and reused for every name in it.
-	master, err := findMaster(domain, p.Servers)
+	// Where the zone's updates go, and what that zone is actually called.
+	// Asked once and reused for every name in it.
+	//
+	// The apex is taken from the server's answer rather than assumed to be the
+	// search domain, because those are two different things: a host in
+	// eng.corp.internal whose records live in the corp.internal zone has to
+	// name corp.internal in the update, and naming the search domain would be
+	// refused by a server that does not serve a zone by that name.
+	master, zone, err := findMaster(domain, p.Servers)
 	if err != nil {
 		return res, err
+	}
+	if zone == "" {
+		zone = domain
 	}
 
 	for _, rs := range records {
@@ -156,7 +172,7 @@ func Register(p Params, log Logf) (Result, error) {
 			_, rdata := rdataAddr(a)
 			upd = append(upd, addRecord(rs.fqdn, rs.rtype, ttl, rdata))
 		}
-		if err := send(master, domain, upd, p.Key); err != nil {
+		if err := send(master, zone, upd, p.Key); err != nil {
 			res.Errors = append(res.Errors, fmt.Sprintf("%s: %v", label, err))
 			// No PTR for a forward record that did not land: a pointer to a
 			// name that does not resolve is worse than no pointer.
@@ -177,32 +193,79 @@ func Register(p Params, log Logf) (Result, error) {
 	// zones, quite often on different servers, and there is no reason for the
 	// state of one to be evidence about the other.
 	//
-	// One per primary address, which on a dual-stack node means one in
-	// in-addr.arpa and one in ip6.arpa, both pointing at the same name.
+	// One per published address, pointing at the name that carries it. Through
+	// v1002 only the primary name's address got one, on the reasoning that a
+	// reverse lookup has a single answer and it should be the name a human
+	// would use. That is true of an address, and the mistake was applying it to
+	// a *host*: a multi-homed node's other addresses are not aliases of the
+	// primary one, they are separate addresses on separate networks, and the
+	// name a human wants back for 10.1.1.1 is the name that resolves to
+	// 10.1.1.1. Leaving them out meant a gateway with three LANs published one
+	// PTR and left every reverse zone the operator actually ran untouched.
+	//
+	// Where an address appears under both the primary name and a per-interface
+	// alias, the primary wins: that is the single-answer rule, applied per
+	// address where it belongs.
 	if p.Reverse {
-		for _, rs := range records {
-			if !rs.primary || len(rs.addrs) == 0 {
+		for _, t := range ptrTargets(records) {
+			if failedForward(res.Errors, t.fqdn, t.rtype) {
 				continue
 			}
-			if failedForward(res.Errors, rs.fqdn, rs.rtype) {
-				continue
-			}
-			addr := rs.addrs[0]
-			changed, err := syncPTR(master, p.Servers, addr, rs.fqdn, ttl, p.Key)
+			changed, err := syncPTR(master, p.Servers, t.addr, t.fqdn, ttl, p.Key)
+			label := fmt.Sprintf("%s PTR", t.addr)
 			switch {
 			case err != nil:
 				// Reported, never fatal. A forward record that resolves is the
 				// job; a missing PTR is a lesser problem and very often means
 				// the reverse zone simply is not delegated here, which is not
 				// this node's to fix.
-				res.Errors = append(res.Errors, fmt.Sprintf("PTR for %s: %v", addr, err))
+				res.Errors = append(res.Errors, fmt.Sprintf("PTR for %s: %v", t.addr, err))
 			case changed:
-				log("ddns: published PTR %s -> %s", addr, rs.fqdn)
+				log("ddns: published PTR %s -> %s", t.addr, t.fqdn)
+				res.Published = append(res.Published, label)
 				res.Updated++
+			default:
+				// Already correct. Counted as published for the same reason the
+				// forward sets are: the summary line is meant to say what this
+				// node has in DNS, and a reverse record that is right is not
+				// less published than one written a moment ago. Leaving it out
+				// made a run with working PTRs and a run with none produce the
+				// same numbers.
+				res.Published = append(res.Published, label)
 			}
 		}
 	}
 	return res, nil
+}
+
+// ptrTarget is one address and the name its PTR should answer with.
+type ptrTarget struct {
+	addr  netip.Addr
+	fqdn  string
+	rtype int
+}
+
+// ptrTargets is one entry per distinct address, carrying the name that should
+// be returned for it.
+//
+// First-seen wins, and collectRecords builds the primary set for an address
+// before the per-interface alias that shares it, so the primary name is
+// preferred without this needing to know which is which. An address that only
+// ever appears under an alias — every interface after the first of its family —
+// gets that alias, which is the only name that resolves to it.
+func ptrTargets(records []recordSet) []ptrTarget {
+	seen := map[netip.Addr]bool{}
+	var out []ptrTarget
+	for _, rs := range records {
+		for _, a := range rs.addrs {
+			if seen[a] {
+				continue
+			}
+			seen[a] = true
+			out = append(out, ptrTarget{addr: a, fqdn: rs.fqdn, rtype: rs.rtype})
+		}
+	}
+	return out
 }
 
 // collectRecords is every address on this host worth publishing, grouped into
@@ -313,23 +376,37 @@ func sanitizeLabel(name string) string {
 	return strings.Trim(b.String(), "-")
 }
 
-// findMaster is the server an update for this zone has to be sent to.
+// findMaster is the server an update for a name has to be sent to, and the zone
+// that update has to name.
 //
 // The zone's SOA names its primary master, and that is where RFC 2136 updates
 // go — not to whichever resolver this host happens to use, which may be a
 // forwarder with no authority and will answer REFUSED or NOTAUTH. Asking is one
 // query and removes a whole class of "it works from my laptop" confusion.
 //
+// The same answer settles the zone name. An UPDATE's zone section has to carry
+// the apex — the name the server knows the zone by — and the caller very often
+// has only a name from inside it. A server asked for the SOA of a name below an
+// apex returns the apex's SOA, owned by the apex, in the authority section of a
+// negative answer, so one lookup yields both facts. Taking the owner rather than
+// echoing the queried name is what lets this work against a zone delegated
+// somewhere the caller did not predict.
+//
+// An empty zone means the server answered without an SOA anywhere. The caller
+// decides what to do with that, because the sensible fallback differs: for a
+// forward name it is the search domain, and for a reverse name it is the
+// classful guess.
+//
 // Falls back to the configured server when the SOA names something that does
 // not resolve. On a small network the resolver and the authoritative server are
 // usually the same box, so the fallback is right far more often than it is a
 // guess.
-func findMaster(domain string, servers []string) (string, error) {
+func findMaster(name string, servers []string) (master, zone string, err error) {
 	var lastErr error
 	for _, s := range servers {
-		id, q, err := buildQuery(domain, typeSOA, true)
+		id, q, err := buildQuery(name, typeSOA, true)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		reply, err := exchange(s, id, q)
 		if err != nil {
@@ -342,7 +419,7 @@ func findMaster(domain string, servers []string) (string, error) {
 			continue
 		}
 		if rcode != rcodeNoError && rcode != rcodeNXDomain {
-			lastErr = fmt.Errorf("%s answered %s for the SOA of %s", s, rcodeText(rcode), domain)
+			lastErr = fmt.Errorf("%s answered %s for the SOA of %s", s, rcodeText(rcode), name)
 			continue
 		}
 		for _, a := range answers {
@@ -351,21 +428,71 @@ func findMaster(domain string, servers []string) (string, error) {
 			}
 			if strings.Contains(a.text, "root-servers") {
 				// The root's SOA means the resolver went all the way up and
-				// found nothing: this domain is not a zone anybody here serves.
-				return "", fmt.Errorf("%s is not a zone on any configured server (the lookup reached the root), so there is nothing to register into", domain)
+				// found nothing: this name is not in a zone anybody here serves.
+				return "", "", fmt.Errorf("%s is not a zone on any configured server (the lookup reached the root), so there is nothing to register into", name)
 			}
+			apex := zoneFromSOA(a.name, name)
 			if ip := resolveHost(a.text, s); ip != "" {
-				return ip, nil
+				return ip, apex, nil
 			}
-			return a.text, nil
+			// The MNAME did not resolve, so it is not an address anything can
+			// be sent to. The server that just answered is: on a small network
+			// it is the same box, and on a larger one it is at least reachable
+			// and will answer NOTAUTH rather than nothing at all.
+			//
+			// Returning the unresolvable name instead — which this did through
+			// v1002 — produced an update dialled at a hostname with no address,
+			// failing in the socket layer with a DNS error about the zone's own
+			// name. The common way to land there is the `@ IN SOA @ ...` idiom,
+			// where MNAME expands to the zone apex: extremely ordinary in a
+			// hand-written reverse zone, and fatal to every update sent to it.
+			return s, apex, nil
 		}
-		// Answered, no SOA. The configured server is the best remaining guess.
-		return s, nil
+		// Answered, no SOA. The configured server is the best remaining guess,
+		// and there is nothing to say about the zone name.
+		return s, "", nil
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no configured DNS server answered")
 	}
-	return "", fmt.Errorf("could not find the server authoritative for %s: %w", domain, lastErr)
+	return "", "", fmt.Errorf("could not find the server authoritative for %s: %w", name, lastErr)
+}
+
+// zoneFromSOA is the zone apex an SOA answer establishes, given the name that
+// was asked about.
+//
+// The owner of the SOA is the apex. The check is that it encloses the queried
+// name, which it does in every well-formed answer; anything else is a reply
+// this code does not understand well enough to build an update from, and the
+// queried name is the more conservative of the two guesses left.
+func zoneFromSOA(owner, queried string) string {
+	o := strings.ToLower(strings.Trim(strings.TrimSpace(owner), "."))
+	q := strings.ToLower(strings.Trim(strings.TrimSpace(queried), "."))
+	if o == "" {
+		return q
+	}
+	if o != q && !strings.HasSuffix(q, "."+o) {
+		return q
+	}
+	return o
+}
+
+// usableReverseZone reports whether an apex is one a PTR for rev could actually
+// live in.
+//
+// The arpa apexes are the interesting rejects. A resolver asked about a reverse
+// name nobody here serves walks up and answers with the SOA of in-addr.arpa or
+// ip6.arpa, which is a real zone and would be accepted by the checks above —
+// and an update naming it is refused by every server on earth. Catching it here
+// turns that into a sentence about a missing delegation, which is what it is.
+func usableReverseZone(zone, rev string) bool {
+	z := strings.ToLower(strings.Trim(strings.TrimSpace(zone), "."))
+	switch z {
+	case "", "arpa", "in-addr.arpa", "ip6.arpa":
+		return false
+	}
+	r := strings.ToLower(strings.Trim(strings.TrimSpace(rev), "."))
+	return r == z || strings.HasSuffix(r, "."+z)
 }
 
 // resolveHost turns a nameserver's own name into an address, using the resolver
@@ -455,17 +582,34 @@ func send(server, zone string, updates []rr, key *Key) error {
 // The reverse zone gets its own SOA lookup, because it is very often served by
 // something other than the forward zone's master — or by nothing at all, which
 // is why the caller treats a failure here as a note rather than an error.
+//
+// The lookup asks about the full PTR name rather than a guessed zone. That is
+// the whole difference between this working and not: the answer to "what is the
+// SOA for 2.2.0.192.in-addr.arpa" names the zone that actually holds that name,
+// whatever boundary it was delegated on, and that is the name the update has to
+// carry in its zone section. Deriving the zone arithmetically instead — the /24,
+// the /64 — is right only for sites that happen to delegate there, and every
+// other site gets an update naming a zone their server has never heard of,
+// which is refused. See v1001.
 func syncPTR(forwardMaster string, servers []string, addr netip.Addr, fqdn string, ttl uint32, key *Key) (bool, error) {
-	rev, zone := reverseName(addr)
+	rev, guess := reverseName(addr)
 	if rev == "" {
 		return false, fmt.Errorf("no reverse name for %s", addr)
 	}
-	master, err := findMaster(zone, servers)
-	if err != nil {
+	master, zone, err := findMaster(rev, servers)
+	if err != nil || zone == "" {
 		// The reverse zone may not be delegated to these servers at all. Try
 		// the forward zone's master, which on a single-server network is the
-		// same box and does hold it.
-		master = forwardMaster
+		// same box and does hold it, and fall back to the classful boundary
+		// for the zone name because nothing better was offered.
+		master, zone = forwardMaster, guess
+	}
+	if !usableReverseZone(zone, rev) {
+		// The closest enclosing zone is one of the arpa apexes, which means no
+		// reverse zone for this address is served here. Sending the update
+		// anyway would produce a refusal and an operator hunting through TSIG
+		// settings for a problem that is a missing delegation.
+		return false, fmt.Errorf("no reverse zone covering %s is served here (the nearest zone is %s, which is not a delegation this node can update)", addr, zone)
 	}
 	// Trailing dots are not significant and the wire form carries none, so the
 	// comparison is made on the bare names.
@@ -487,13 +631,20 @@ func syncPTR(forwardMaster string, servers []string, addr netip.Addr, fqdn strin
 	return true, nil
 }
 
-// reverseName is an address's PTR name and the zone that holds it.
+// reverseName is an address's PTR name, and a guess at the zone that holds it.
 //
-// The zone is the /24 for IPv4 and the /64 for IPv6 — the classful boundaries
-// reverse delegation actually happens on. A network delegated on some other
-// boundary (RFC 2317 style) will refuse the update, which is reported and is
-// the right outcome: guessing at a delegation shape would send updates to a
-// zone that does not exist.
+// The name is exact. The zone is the /24 for IPv4 and the /64 for IPv6, which
+// is a guess and is used only when the servers cannot be asked — syncPTR
+// discovers the real apex from the SOA and falls back to this only when the
+// lookup itself fails.
+//
+// It was the primary source of the zone name through v1000, and it was wrong
+// for every site that delegates anywhere other than those two boundaries: a
+// 192.168.0.0/16 held as one reverse zone, a 10/8 held as one, an RFC 2317
+// slice of a /24. All of them got an update naming a zone that does not exist,
+// all of them answered NOTAUTH, and none of them ever got a PTR — while the
+// forward records, whose zone name came from the search domain and was
+// therefore usually right, published normally.
 func reverseName(a netip.Addr) (name, zone string) {
 	if a.Is4() {
 		b := a.As4()

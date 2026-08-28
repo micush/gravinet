@@ -87,7 +87,10 @@ func rcodeText(rc int) string {
 	case rcodeRefused:
 		return "REFUSED (the server understood the update and declined it — check that this zone allows dynamic updates from this node's address, and that a TSIG key is configured if the zone requires one)"
 	case rcodeNotAuth:
-		return "NOTAUTH (the server rejected the signature or is not authoritative — check the TSIG key name, secret and algorithm, and that this node's clock is right)"
+		// Two quite different faults share this code, and naming only the
+		// signature one sent operators to the TSIG settings for what was
+		// usually a zone that the server does not serve under that name.
+		return "NOTAUTH (the server is not authoritative for the zone this update names, or it rejected the signature — check that the zone exists on that server under exactly that name, then the TSIG key name, secret and algorithm and this node's clock)"
 	case 16:
 		return "BADSIG (the TSIG signature did not verify — the secret or algorithm does not match the server's)"
 	case 17:

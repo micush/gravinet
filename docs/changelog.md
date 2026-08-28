@@ -2,6 +2,208 @@
 
 ---
 
+## v1004 — 2026-08-28
+
+**Every interface this node has is published, overlay devices included, and there is a command that registers now instead of within fifteen minutes.**
+
+### The overlay exclusion is gone
+
+v1003 added a switch for publishing overlay addresses and left it off, on the argument that such an address is reachable only by mesh peers, who already resolve each other through the hosts-file sync, so publishing one into LAN DNS answers queries from hosts that cannot use the answer.
+
+That is true and it is not a reason to withhold the record.
+
+A DNS zone is not a promise of reachability. Half the addresses in any private zone are unreachable from somewhere, and *this name resolves but you cannot route to it* is an ordinary thing for an operator to work with. *No record exists and nothing says why* is not. The hosts-file sync serves gravinet's own peers and does nothing for a monitoring box, a jump host, a script, or anybody holding a terminal — and those are exactly the callers that need a name to resolve. For a feature whose entire job is publishing this node's addresses, publishing all of them is also the least surprising behaviour by a distance.
+
+So `mesh` defaults on. `gravinet settings ddns mesh off` restores the exclusion, and the setting stays tri-state so that choice survives any later change to the default.
+
+### `gravinet settings ddns run`
+
+Registers immediately and prints what happened:
+
+```
+  ok      grav1.mesh A
+  ok      10.1.1.1 PTR
+  FAILED  PTR for fdff::10:255:255:1: the server answered REFUSED (...)
+
+7 name(s) published, 2 changed by this run, 1 problem(s)
+```
+
+Non-zero exit when anything failed, so a script that runs this after a zone change notices rather than writing "FAILED" into a log nobody greps.
+
+`check` remains the dry run — same queries, no updates, safe against anything. `run` is the one that writes. Having only the former was a gap: the answer to "did my update policy fix take" was *wait fifteen minutes, then read a log*, which is not an answer.
+
+This is the register-now button that came off the web page in v996, put somewhere it belongs. The objection then was that triggering a registration is an operational action and does not go beside a dark-mode switch. That still holds for the settings page. A terminal is where operational actions go, and unlike a button this one reports its outcome to the person who asked for it.
+
+### The check no longer contradicts the daemon
+
+`check` reported overlay addresses as *would write* while the daemon skipped them on every run — visible as a forward verdict of "would write (published now: nothing)" that stayed that way forever.
+
+The cause was the skip list. The daemon hands the registrar the overlay devices the engine has up; from a terminal there is no engine to ask, and the substitute was the names configured for them — empty on every network left at `tun_name` auto, which is most of them. So the check believed there was nothing to skip.
+
+`overlayIfaces` settles it by addressing instead: an interface holding an address inside a configured overlay subnet is an overlay interface, whatever it ended up being called. Same fact the engine would report, reached from the config, and correct whether or not anyone set a name. With `mesh` on by default this list is unused most of the time, which is a good place for a heuristic to sit — it only matters to operators who have deliberately turned the exclusion back on, and it is right for them too.
+
+---
+
+## v1003 — 2026-08-28
+
+**Three things, all from one `ddns check` on a real node: an update aimed at a hostname with no address, a PTR for one address out of seven, and no way to publish an overlay address at all.**
+
+### The update was dialled at the zone's own name
+
+`findMaster` reads a zone's SOA to learn where updates go. The answer is MNAME, a *name*, so it resolves it to an address — and when that failed it returned the unresolvable name regardless. `send` then dialled that as a host, the system resolver had nothing for it, and the update died in the socket layer with a DNS error naming the zone.
+
+The way to land there is `@ IN SOA @ root.@ (...)`, where `@` expands to the apex, so MNAME *is* the zone name. That is an ordinary line in a hand-written reverse zone and it is fatal to every update sent to it:
+
+```
+would write PTR in zone 168.192.in-addr.arpa via 168.192.in-addr.arpa
+```
+
+The second name should be a server. It falls back to the server that answered the SOA query now — which is reachable by definition, having just replied, and on a small network is the same box anyway. That was already the stated reasoning for the *other* fallback in the same function; this branch just didn't follow it.
+
+Worth noting how this hid: the forward zone on the node this came from has an address at its apex, so the same idiom resolved there and the forward half worked. The reverse zone had no such record. One idiom, two zones, and only one of them broken.
+
+### A PTR per address, not per host
+
+A PTR was attempted only for the address the primary name carried. The reasoning was that a reverse lookup has one answer and it should be the name a human would use — true of an address, and the mistake was applying it to a host.
+
+A multi-homed node's other addresses are not aliases of the primary one. They are separate addresses on separate networks, and the name wanted back for `10.1.1.1` is the name that resolves to `10.1.1.1`. A gateway with three LANs therefore published one PTR and left every reverse zone its operator actually ran untouched — no query, no update, no error, nothing in the log.
+
+Every published address now gets a PTR pointing at the name that carries it. Where one address appears under both the primary name and a per-interface alias, the primary wins: the single-answer rule, applied per address, which is where it belongs. `ptrTargets` does the selection and both the run and the check call it, so the two cannot drift apart on what they think should exist.
+
+### Overlay addresses can be published
+
+`gravinet settings ddns mesh on`.
+
+Off by default and staying that way. An overlay address is reachable only by mesh peers, who already resolve each other through the hosts-file sync, so publishing one into LAN DNS answers queries from hosts that cannot use the answer. That is a good reason not to do it unasked and a poor reason to refuse: a node whose overlay address is in DNS can be reached by name from anywhere on the mesh, including by tooling that has no idea gravinet exists.
+
+Switched on, the overlay devices come out of the skip list and go in as ordinary interfaces — alias name, both families, PTR — rather than through a path of their own. It is a skip list precisely so that this is all it takes.
+
+### The check reports both new facts
+
+`mesh: on|off` in the header, because an absent overlay alias and a broken one look identical without it. And the reverse block now shows the name each PTR would answer with, since with per-address targets that is no longer always the primary:
+
+```
+reverse
+  192.168.122.12   -> grav1.mesh
+                      would write PTR in zone 168.192.in-addr.arpa via 10.1.1.5
+  10.1.1.1         -> grav1-eth1.mesh
+                      would write PTR in zone 1.10.in-addr.arpa via 10.1.1.5
+```
+
+`Params.PublishMesh` carries the setting into the registrar without being read for any decision — the skip list is still the decision. It exists so a diagnosis can tell "no overlay addresses configured" from "overlay addresses deliberately excluded", which are the same output otherwise.
+
+### Consequences
+
+`TestNoPTRWhenTheForwardRecordFailed` still pins that a failed forward set gets no pointer aimed at it; the names it matches moved with the loop. `TestDiagnoseAccountsForEveryAddress` counts distinct addresses rather than set members, since an address under two names is one address and one PTR.
+
+Two new ones worth naming. `TestSharedAddressPTRPrefersThePrimaryName` checks both halves of the target rule — one target per address, and the primary name where there is a choice. `TestMNAMEThatDoesNotResolveFallsBackToTheAnsweringServer` needs two servers at once, which the fake could not do while every instance wanted port 53; it takes an ephemeral port when its MNAME resolves to nothing, because that is exactly the case with no second dial to aim anywhere.
+
+---
+
+## v1002 — 2026-08-28
+
+**A node publishing no PTR records produced exactly the same output as a node whose PTRs were all correct: none.** `gravinet settings ddns check` now says which of the several possible reasons applies.
+
+v1001 fixed a real fault — the reverse zone name was arithmetic, and every site not delegated on a /24 or a /64 got NOTAUTH. It was not the only way to end up with no PTRs, and the reason it took a guess to find it is that the code had no way of being asked.
+
+### What was invisible
+
+`Register` takes a log sink and the daemon passes `logx.Debugf`, so the line announcing a published PTR was a debug line. `Result` carried no reverse entries at all — `Published` listed forward names only — so the timer loop's summary counted the forward half and reported the reverse half as nothing either way. And the register-now button went in v996, leaving no way to run one pass and look at it.
+
+The result is that at least five distinct situations were one symptom:
+
+- reverse publishing switched off in config;
+- an address whose reverse zone nobody local serves;
+- a zone that serves the address but refuses this node's key;
+- a PTR already present and already correct;
+- an address that is never considered, because a PTR is only attempted for the one address the primary name carries and this one is published under a per-interface alias.
+
+The last is the one worth stating plainly, because it is design rather than fault and it is still surprising. A gateway with three LAN interfaces publishes `gw.corp.internal` plus `gw-eth0`, `gw-eth1`, `gw-eth2`, and attempts exactly one PTR: for whichever address the first enumerated interface holds. If that happens to be a WAN address in a reverse zone somebody else runs, every reverse zone the operator does control is never contacted, and nothing anywhere says so.
+
+### The check
+
+`ddns.Diagnose` sends the queries a run sends and skips the updates. It is safe against production because it writes nothing, and it accounts for **every** address the host would publish rather than only the ones a run acts on:
+
+```
+reverse
+  192.0.2.2      2.2.0.192.in-addr.arpa
+                 would write PTR in zone 0.192.in-addr.arpa via 10.0.0.1
+  10.4.0.1       1.0.4.10.in-addr.arpa
+                 no PTR: only the primary name gw.corp.internal gets one, and
+                 this address is published under the per-interface alias
+                 gw-eth1.corp.internal
+```
+
+The second line is the whole point. It corresponds to no query, no update, no error and no log line, and it was previously indistinguishable from success.
+
+Zone discovery is reported as a note separate from the verdict, because the verdict comes after it and would otherwise overwrite it — and a fallback to the classful guess is very often the entire answer, being precisely the assumption v1001 removed from the write path.
+
+### Reaching it
+
+`gravinet settings ddns check`, a subcommand of the existing leaf rather than a new one, so the Settings-to-CLI parity map is untouched.
+
+This is an operational action on a settings leaf, which is what the register-now button was removed from the web page for being. The distinction is that this one writes nothing and answers a question the settings cannot: the configuration can be entirely correct and the run still publish no PTR, for reasons that live on the network rather than in `config.json`.
+
+Its one imprecision is the skip list. The daemon hands the registrar the overlay interfaces the engine currently has up; from a terminal the best available answer is the names configured for them, which matches whenever an operator has set one and is short by however many are on "auto". An overlay interface missing from that list appears as an extra address in the output rather than as a wrong verdict, so the failure mode is a visible surplus rather than a silent gap.
+
+### PTRs are reported as published now
+
+A reverse record that is already correct is not less published than one written a moment ago, and leaving it out of `Result.Published` is what made a run with working PTRs and a run with none report the same figures. Both the written and the already-correct cases are counted, so `published N name(s)` finally includes the reverse half.
+
+`Updated` is untouched and still counts only what this run changed, which remains the number worth watching: a run that updates something every interval is a symptom.
+
+---
+
+## v1001 — 2026-08-28
+
+**No PTR record was ever created on any network whose reverse zone is not delegated on a /24 or a /64.** The forward records published normally on the same run, against the same server, with the same key.
+
+The reverse zone's name was arithmetic. `reverseName` took an address and returned the classful boundary under it — the /24 for IPv4, the /64 for IPv6 — and that name went straight into the zone section of the update. A zone section names the zone; a server that does not hold a zone by that name answers NOTAUTH and does nothing else. So a site holding 192.168.0.0/16 as one reverse zone, or a 10/8 as one, or an RFC 2317 slice of a /24, sent a perfectly well-formed update naming a zone that does not exist, every interval, forever.
+
+The forward half was doing the same thing and getting away with it, because the name it guessed — the host's search domain — is usually also a zone. That is the whole asymmetry: A and AAAA appear, PTRs never do, and nothing about the configuration looks wrong.
+
+### The server was already telling us
+
+`findMaster` sends one SOA query per zone and reads the answer to find the primary master, which is where an update has to go. The apex was in that same answer the entire time and was being discarded.
+
+An SOA record's *owner* is the apex. Ask a server for the SOA of a name below one and it returns the enclosing zone's SOA, owned by the apex, in the authority section of a negative answer — which the parser here already reads, for an unrelated reason noted in `parseResponse`. One lookup, two facts, and the code was keeping one of them.
+
+So `findMaster` returns both now, and `syncPTR` asks about the full PTR name rather than a guessed zone. The answer names whatever zone actually holds that name, on whatever boundary it was delegated, and that is what the update carries.
+
+### The arpa apexes
+
+A resolver asked about a reverse name nobody local serves walks up and answers with the SOA of `in-addr.arpa` or `ip6.arpa`. Those are real zones, owned by a real apex that really does enclose the queried name, so they pass every check the paragraph above describes — and an update naming one is refused by every server on earth.
+
+`usableReverseZone` rejects them, and the run reports a missing delegation instead. That is the accurate sentence and it is also the useful one, because it is a fact about the network rather than about this node.
+
+### NOTAUTH stopped lying
+
+`rcodeText` described NOTAUTH as a signature problem and nothing else: *check the TSIG key name, secret and algorithm, and that this node's clock is right*. Two unrelated faults share that rcode, and the one operators were actually hitting was the other one. Anyone who read the log went and audited a TSIG key that was fine. It now names the zone case first, since that is the likelier of the two, and keeps the signature case after it.
+
+### The forward path gets the same fix
+
+Not a symptom anyone reported, but the same bug: a host whose search domain is `eng.corp.internal` while its records live in the `corp.internal` zone was naming the search domain in the zone section and being refused for it. The update now names the discovered apex. Where the search domain *is* the zone, which is the ordinary case and the reason this went unnoticed, the discovered apex is the search domain and nothing changes.
+
+### What kept this hidden
+
+The tests for this package were structural — they read `register.go` as source text and asserted on its shape. That was a deliberate choice and it caught a real bug once: v996's PTR sat inside the branch taken only when the forward record had just changed, which is a control-flow fault and visible in the text.
+
+This is not that. The control flow was correct and had been since v996; the PTR was attempted on every run, exactly as intended. What was wrong was a name computed from arithmetic, and a name is only observable from the other end of a socket. `TestPTRIsNotConditionalOnTheForwardRecordChanging` says standing up a fake server "would test the fake" — true of what it was checking, and the reason there was no server here to catch what it wasn't.
+
+There is one now. It is small, it serves a fixed list of zones, and it refuses updates naming anything else, which is the single behaviour that matters. `TestPTRGoesToTheZoneTheServerActuallyHolds` points it at a reverse zone delegated on a /16 and fails against the old code with the same NOTAUTH a real server sends. `TestForwardUpdateNamesTheDiscoveredApex` does the subdomain case. `TestNoReverseZoneIsReportedAsAMissingDelegation` checks that the arpa apexes produce a sentence rather than a doomed update.
+
+`zoneFromSOA` and `usableReverseZone` are unit-tested directly, including the case that looks like it works and does not: an owner that ends in the same letters as the queried name without being an enclosing zone. The boundary is a label, not a substring.
+
+### Consequences
+
+`findMaster` returns three values now and its second is a zone name, so `send(master, domain, …)` in the forward loop became `send(master, zone, …)` and the structural test naming that line moved with it.
+
+An empty zone from `findMaster` means the server answered without an SOA anywhere. Callers decide what to do with that, because the right fallback differs by caller: the search domain for a forward name, the classful guess for a reverse one. `reverseName` still computes that guess and is still worth having, but it is now a fallback for when the lookup itself fails rather than the primary source it was through v1000.
+
+Still not handled: RFC 2317 delegation, where the reverse name is a CNAME into a sub-zone. Discovery finds that sub-zone's apex correctly, but the name the PTR has to be written at is the CNAME target rather than the address's own reverse name, so those sites get a clear refusal instead of a working PTR. Better than a silent one, still not right, and it wants its own version rather than a paragraph in this one.
+
+---
+
 ## v1000 — 2026-08-27
 
 **Settings › General no longer reports what the last dynamic DNS run did.** A settings page says what this node is configured to do; what it actually did belongs in the log.

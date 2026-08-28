@@ -333,7 +333,7 @@ func TestPTRIsNotConditionalOnTheForwardRecordChanging(t *testing.T) {
 // A forward set that failed to land must not get a pointer aimed at it.
 func TestNoPTRWhenTheForwardRecordFailed(t *testing.T) {
 	src := mustReadSource(t, "register.go")
-	if !strings.Contains(src, "failedForward(res.Errors, rs.fqdn, rs.rtype)") {
+	if !strings.Contains(src, "failedForward(res.Errors, t.fqdn, t.rtype)") {
 		t.Error("the reverse pass no longer checks whether the forward set failed this run")
 	}
 }
@@ -343,7 +343,7 @@ func TestNoPTRWhenTheForwardRecordFailed(t *testing.T) {
 func TestForwardRecordIsReadBeforeItIsWritten(t *testing.T) {
 	loop := between(t, mustReadSource(t, "register.go"), "for _, rs := range records {", "\n\t}\n")
 	cur := strings.Index(loop, "currentRecords(master, rs.fqdn, rs.rtype)")
-	send := strings.Index(loop, "send(master, domain, upd, p.Key)")
+	send := strings.Index(loop, "send(master, zone, upd, p.Key)")
 	if cur < 0 || send < 0 || cur > send {
 		t.Fatal("the forward set is written without being read first")
 	}

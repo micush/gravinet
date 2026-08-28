@@ -319,7 +319,7 @@ var settingsGroup = []groupLeaf{
 	{"tun-queues", "read queues per overlay interface, Linux only; needs a restart", cmdSettingsTunQueues},
 	{"socket-buffer", "per-UDP-socket buffer in MB (0 = default); needs a restart", cmdSettingsSocketBuffer},
 	{"udp-gso", "batch packets per syscall on the underlay socket: on|off|status; needs a restart", cmdSettingsUDPGSO},
-	{"ddns", "register this node's own name in DNS on a timer (on by default, every 15m): interval|ttl|reverse|key", cmdSettingsDDNS},
+	{"ddns", "register this node's own name in DNS on a timer (on by default, every 15m): check|run|interval|ttl|reverse|mesh|key", cmdSettingsDDNS},
 }
 
 // cmdMeshPeers is "gravinet mesh peers" — the live peer list, the same data

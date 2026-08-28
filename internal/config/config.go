@@ -3950,6 +3950,29 @@ type DDNSConfig struct {
 	// this is a pointer rather than a bool so an operator can turn it off and
 	// have that survive, which a plain false could not be told from unset.
 	Reverse *bool `json:"reverse,omitempty"`
+
+	// Mesh publishes this node's overlay addresses too, under the same
+	// per-interface alias scheme as any other interface.
+	//
+	// On by default. The argument for excluding them was that an overlay
+	// address is reachable only by mesh peers, who already resolve each other
+	// through the hosts-file sync, so publishing one into LAN DNS answers
+	// queries from hosts that cannot use the answer.
+	//
+	// That is true and it is not a reason to withhold the record. A DNS zone is
+	// not a promise of reachability — half the addresses in any private zone
+	// are unreachable from somewhere — and "this name resolves but you cannot
+	// route to it" is an ordinary thing for an operator to work with, where "no
+	// record exists and nothing says why" is not. The hosts-file sync serves
+	// gravinet's own peers; it does nothing for a monitoring box, a jump host,
+	// a script, or anyone holding a terminal, and those are the callers that
+	// need a name to resolve. Publishing every interface this node has is also
+	// simply the least surprising thing for a feature whose entire job is
+	// publishing this node's addresses.
+	//
+	// Set it false to get the old exclusion back. A pointer for the same reason
+	// Reverse is: so an explicit choice survives a later change to the default.
+	Mesh *bool `json:"mesh,omitempty"`
 }
 
 // DefaultDDNSInterval is how often a node re-registers when nothing says
@@ -3976,6 +3999,10 @@ func (d DDNSConfig) Interval() time.Duration {
 
 // ReverseEnabled reports whether PTRs are published, defaulting to yes.
 func (d DDNSConfig) ReverseEnabled() bool { return d.Reverse == nil || *d.Reverse }
+
+// MeshEnabled reports whether overlay addresses are published, defaulting to
+// yes. See the Mesh field.
+func (d DDNSConfig) MeshEnabled() bool { return d.Mesh == nil || *d.Mesh }
 
 // Validate checks the block. The TSIG key is parsed rather than pattern-matched
 // so a secret that is not valid base64, or an algorithm nothing implements, is
