@@ -502,3 +502,27 @@ func TestParseKeyFileIsBoundedAndRegular(t *testing.T) {
 		t.Fatal("ParseKey blocked on a fifo")
 	}
 }
+
+// Transaction IDs must not be predictable. gosec G404.
+//
+// A weak generator would still pass any test that only checks the IDs differ,
+// which is what makes this worth writing down: the property is unpredictability,
+// not variety. Checked here as the crude thing a broken source would fail — a
+// stuck or low-entropy value across many draws — with the real guarantee coming
+// from newID reading crypto/rand at all.
+func TestTransactionIDsAreNotPredictable(t *testing.T) {
+	seen := map[uint16]int{}
+	const draws = 4096
+	for i := 0; i < draws; i++ {
+		id, err := newID()
+		if err != nil {
+			t.Fatalf("newID: %v", err)
+		}
+		seen[id]++
+	}
+	// 4096 draws from 65536 values: collisions are expected, a shortage of
+	// distinct values is not. Birthday maths puts the mean near 3970.
+	if len(seen) < draws*9/10 {
+		t.Errorf("%d distinct IDs from %d draws; the source looks predictable", len(seen), draws)
+	}
+}

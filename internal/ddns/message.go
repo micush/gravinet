@@ -32,9 +32,9 @@
 package ddns
 
 import (
+	"crypto/rand"
 	"encoding/binary"
 	"fmt"
-	"math/rand"
 	"net/netip"
 	"strings"
 )
@@ -187,7 +187,29 @@ func (h header) marshal() []byte {
 	return b
 }
 
-func newID() uint16 { return uint16(rand.Intn(1 << 16)) }
+// newID is a DNS transaction ID: sixteen bits an off-path attacker has to
+// guess, alongside the source port, to land a forged reply before the real one
+// arrives. It is entropy, not a serial number.
+//
+// It has to be unpredictable rather than merely varied, which is why this is
+// crypto/rand and not math/rand. math/rand is a deterministic PRNG however it
+// is seeded, so a few observed IDs give up the rest of the sequence — and the
+// answers this protects are the ones that decide where an update goes. Zone
+// discovery is an ordinary query whose reply names the master; forge that and
+// the update, credentials and all, is addressed to a server of the attacker's
+// choosing. Unsigned updates are a supported configuration here, so TSIG
+// cannot be assumed to be catching what gets past this.
+//
+// The error is returned rather than swallowed. Both callers were already
+// returning one, and a registration that fails loudly because the system has
+// no entropy is better than one that proceeds with a predictable ID.
+func newID() (uint16, error) {
+	var b [2]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return 0, fmt.Errorf("no entropy for a DNS transaction ID: %w", err)
+	}
+	return binary.BigEndian.Uint16(b[:]), nil
+}
 
 // buildQuery builds an ordinary question. Used to find a zone's authoritative
 // server and to read back the record currently published for a name.
@@ -201,7 +223,11 @@ func buildQuery(name string, qtype int, recursion bool) (uint16, []byte, error) 
 	if err != nil {
 		return 0, nil, err
 	}
-	h := header{id: newID(), qdcount: 1}
+	id, err := newID()
+	if err != nil {
+		return 0, nil, err
+	}
+	h := header{id: id, qdcount: 1}
 	if recursion {
 		h.flags = 0x0100
 	}
@@ -272,8 +298,12 @@ func buildUpdate(zone string, updates []rr) (uint16, []byte, error) {
 	if err != nil {
 		return 0, nil, fmt.Errorf("zone: %w", err)
 	}
+	id, err := newID()
+	if err != nil {
+		return 0, nil, err
+	}
 	h := header{
-		id:      newID(),
+		id:      id,
 		flags:   opcodeUpdate << 11,
 		qdcount: 1,                    // ZOCOUNT
 		nscount: uint16(len(updates)), // UPCOUNT

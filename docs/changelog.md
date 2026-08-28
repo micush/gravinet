@@ -2,6 +2,28 @@
 
 ---
 
+## v1009 — 2026-08-28
+
+**DNS transaction IDs come from `crypto/rand`. gosec G404.**
+
+`newID` drew the transaction ID from `math/rand`. That ID is not a serial number: it is sixteen bits an off-path attacker has to guess, alongside the source port, to land a forged reply ahead of the real one. `math/rand` is a deterministic PRNG however it is seeded, so a handful of observed IDs gives up the rest of the sequence.
+
+What that protects is worth being precise about. Zone discovery is an ordinary query whose answer names the master for the zone; forge it and the update that follows — credentials and all — is addressed to a server of the attacker's choosing. Unsigned updates are a supported configuration here and the field says so, so TSIG cannot be assumed to be catching whatever gets past this.
+
+The error is returned rather than swallowed. Both callers were already returning one, and a registration that fails loudly because the system has no entropy beats one that proceeds with a guessable ID.
+
+### On the rest of the scan
+
+A gosec pass over the tree reports 541 findings across 190 files, and this is the only one that was a bug. Recorded here so the next person to run it does not re-triage the same list:
+
+- **G407, hardcoded IV/nonce, four in `internal/crypto`** — false. `nonceFor` is a counter nonce, unique per key for 2^64 packets, and `SealWithKey` already reads `crypto/rand`. gosec cannot see through either helper.
+- **G402, `InsecureSkipVerify`, two** — deliberate, and both already carry the reasoning. The cluster one states its own residual risk in the comment above it: `OverlayContains` checks the address is inside the overlay range, not that the packet left through the tunnel, and closing that needs certificate pinning rather than a config field.
+- **G505/G401, SHA-1** — required by the specs. RFC 6455 defines the WebSocket accept key in terms of SHA-1, and hmac-sha1 is a TSIG algorithm a zone may be configured for.
+- **G115 (~130), integer conversions** — wire-format packing, where the narrowing is the point and the widths come from the protocol.
+- **G104 (221) and G304/G204** — unchecked errors on deferred closes and writes, and paths and arguments that come from config rather than from requests. The one place a request could name a path was fixed in v1008.
+
+---
+
 ## v1008 — 2026-08-28
 
 **A TSIG key set through the API or the CLI can no longer name a file to open. CodeQL `go/path-injection`, alerts #16 and #17.**
