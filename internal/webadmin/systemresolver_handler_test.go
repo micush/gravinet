@@ -284,3 +284,38 @@ func TestResolverDNSIsRecorded(t *testing.T) {
 		t.Errorf("resolver not recorded as given: %+v", rz)
 	}
 }
+
+// The servers field and the search field save as a unit, and saving redraws
+// the card — so a save fired while the operator is still moving between the
+// two takes the input they just focused out of the DOM underneath them.
+// Reported as the search box losing focus the instant it was clicked or
+// tabbed into, which is exactly what it was: the element had been replaced.
+//
+// The guard is that both blur handlers consult where focus is going before
+// saving, rather than saving unconditionally.
+func TestResolverPairDoesNotSaveWhileMovingBetweenItsFields(t *testing.T) {
+	sec := between(t, indexHTML, "function secResolver(c){", "\n}")
+	if !strings.Contains(sec, "relatedTarget") {
+		t.Fatal("the resolver fields save on any blur, so tabbing from servers into search redraws the card and drops focus")
+	}
+	for _, want := range []string{
+		"dnsIn.onblur = (e) => { if (leavingPair(e)) saveDNS(); }",
+		"searchIn.onblur = (e) => { if (leavingPair(e)) saveDNS(); }",
+	} {
+		if !strings.Contains(sec, want) {
+			t.Errorf("missing guarded blur handler: %s", want)
+		}
+	}
+	// Both directions, or tabbing back the other way still loses focus.
+	guard := between(t, sec, "const leavingPair =", "\n")
+	for _, field := range []string{"dnsIn", "searchIn"} {
+		if !strings.Contains(guard, "e.relatedTarget === "+field) {
+			t.Errorf("leavingPair does not treat %s as part of the pair: %s", field, guard)
+		}
+	}
+	// Enter must still save. It blurs with no relatedTarget, which is the
+	// case leavingPair deliberately treats as leaving.
+	if !strings.Contains(sec, "dnsIn.blur()") || !strings.Contains(sec, "searchIn.blur()") {
+		t.Error("Enter no longer commits the field")
+	}
+}

@@ -9690,9 +9690,25 @@ function secResolver(c){
         if (res.body && res.body.note) await noticeModal(res.body.note);
         load();
       };
-      dnsIn.onblur = saveDNS;
+      // Moving between these two fields is not leaving them, so it must not
+      // save. saveDNS ends in load(), which redraws this whole card — so a
+      // save fired by tabbing from servers into search destroyed the input
+      // the operator had just landed in and dropped their focus on the
+      // floor. They had to click the field a second time to type in it, and
+      // the field they were typing into was a different element by then.
+      //
+      // relatedTarget is where focus is going. When that is the other half of
+      // the pair, the edit is still in progress and the save waits for focus
+      // to leave both. It is null when focus goes nowhere the page can name
+      // (the window losing focus, Enter blurring the field), which saves —
+      // the safe direction, and what Enter has always meant here.
+      //
+      // The pair saves as a unit anyway, for the reason above, so waiting for
+      // both is also the more honest reading of what one save means.
+      const leavingPair = (e) => !(e && (e.relatedTarget === dnsIn || e.relatedTarget === searchIn));
+      dnsIn.onblur = (e) => { if (leavingPair(e)) saveDNS(); };
       dnsIn.onkeydown = (e) => { if (e.key === 'Enter'){ e.preventDefault(); dnsIn.blur(); } };
-      searchIn.onblur = saveDNS;
+      searchIn.onblur = (e) => { if (leavingPair(e)) saveDNS(); };
       searchIn.onkeydown = (e) => { if (e.key === 'Enter'){ e.preventDefault(); searchIn.blur(); } };
     }
     body.appendChild(dnsCard);

@@ -2,6 +2,22 @@
 
 ---
 
+## v991 — 2026-08-27
+
+**The search domain field on System › Resolver lost focus the moment you entered it.** Type a DNS server, tab or click into Search domain, and the caret was gone — the field had to be clicked a second time before it would take a character.
+
+The two fields save as a unit, which is correct and deliberate: several of the backends behind this page (systemd-resolved's global drop-in, a `resolv.conf` rewrite) apply servers and the search domain in the same write, so saving them independently would risk one clobbering the other mid-edit.
+
+What was wrong is *when* the unit saved. Both fields called the shared save on any blur at all, and the save ends by reloading the card, which rebuilds its whole body. Tabbing from servers into search is a blur — so the save fired, the card redrew, and the input the operator had just landed in was removed from the document and replaced by a new element with the same id. Focus does not survive that. Nothing failed, the value was stored correctly, and the only symptom was a field that would not accept typing until it was clicked again.
+
+Both handlers now check `relatedTarget` — where focus is heading — and skip the save when it is the other half of the pair. Moving between the two is not leaving them, so the edit stays in progress and the save waits until focus leaves both. That also happens to be the more honest reading of a pair that saves as a unit.
+
+Enter still commits, and still saves: it blurs with no `relatedTarget`, which is the case the guard treats as leaving. So does clicking anywhere else on the page, and so does the window losing focus.
+
+`TestResolverPairDoesNotSaveWhileMovingBetweenItsFields` pins both directions, since guarding only the servers field would leave the same bug for anyone tabbing backwards.
+
+---
+
 ## v990 — 2026-08-27
 
 **The DHCP Relay help no longer explains what happened to the DHCP server.** One paragraph removed and nothing else changed.
