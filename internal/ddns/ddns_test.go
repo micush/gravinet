@@ -444,17 +444,14 @@ func TestTTLIsTakenLiterally(t *testing.T) {
 	}
 }
 
-// A spec that was evidently meant as a filename, with no file at it, is
-// reported as a missing file rather than as bad inline syntax.
+// A spec that is plainly not an inline key is refused with the form that is,
+// rather than with a grammar listing one the help no longer mentions.
 //
-// A path is what the settings card used to recommend and what gravinet cannot
-// create, so naming one that does not exist is the mistake the old advice
-// invited; what came back was a restatement of a grammar the operator plainly
-// was not attempting. The last case is why this matches on separators rather
-// than on a drive letter: "k:secret" is a legal inline key, not a Windows path.
-func TestParseKeyTellsAMissingFileFromInlineSyntax(t *testing.T) {
+// The last case is why this matches on separators rather than on a drive
+// letter: "k:secret" is a legal inline key, not a Windows path.
+func TestParseKeyRefusesAPathWithTheInlineForm(t *testing.T) {
 	for _, spec := range []string{"/etc/gravinet/tsig.key", `C:\keys\tsig.key`, "./tsig.key", "~/tsig.key"} {
-		if _, err := ParseKey(spec); err == nil || !strings.Contains(err.Error(), "no TSIG key file at") {
+		if _, err := ParseKey(spec); err == nil || !strings.Contains(err.Error(), "is not a TSIG key") {
 			t.Errorf("ParseKey(%q) = %v, want it to name the missing file", spec, err)
 		}
 	}

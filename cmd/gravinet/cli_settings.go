@@ -864,7 +864,7 @@ func cmdSettingsDDNS(args []string) {
 		d.Reverse = &v
 	case "key":
 		if len(rest) < 2 {
-			fatal("usage: gravinet settings ddns key <path|name:base64secret[:algorithm]|->")
+			fatal("usage: gravinet settings ddns key <name:base64secret[:algorithm]|->")
 		}
 		if rest[1] == "-" {
 			d.TSIGKey = ""
@@ -877,7 +877,7 @@ func cmdSettingsDDNS(args []string) {
 			d.TSIGKey = rest[1]
 		}
 	default:
-		fatal("usage: gravinet settings ddns [check|run|interval <minutes>|ttl <seconds>|reverse <on|off>|key <spec|->]")
+		fatal("usage: gravinet settings ddns [check|run|interval <minutes>|ttl <seconds>|reverse <on|off>|key <name:base64secret[:algorithm]|->]")
 	}
 
 	if err := cfg.Validate(); err != nil {

@@ -2,6 +2,26 @@
 
 ---
 
+## v1006 — 2026-08-28
+
+**The TSIG field asks for a key, and stops grabbing the cursor when you open Settings.**
+
+### One form, and it is the one that works
+
+v1005 stopped ranking the two forms the field accepted. This stops offering the second one.
+
+The reasoning is the same and carried one step further: a path to a key file is not something an operator administering this node from the web admin can produce, because gravinet cannot put a file on its own host. A form most readers have no way to use does not belong in the help for a field with one box in it. The card now says `name:base64secret`, optionally `:algorithm`, and nothing else; so do the CLI usage lines and both parse errors a bad key can produce.
+
+A path already sitting in a config is still read. Breaking working nodes on upgrade to tidy up a help string would be the worse trade by a distance — the form is undocumented, not removed, and `ParseKey` says so where the next person to touch it will look.
+
+### The field no longer takes focus on render
+
+Opening Settings for any reason put the cursor in the TSIG key box.
+
+The reveal and the empty state are the same control — an editable box — and it focused and selected itself whenever it was drawn, which is right when a click asked for it and wrong when the page merely rendered. Focus is now something the click passes in, so revealing a key still lands you in the box with it selected, and loading the page does not.
+
+---
+
 ## v1005 — 2026-08-28
 
 **The TSIG key can be read back from the page that set it, the advice to keep it in a file instead is withdrawn, and the overlay exclusion is removed rather than left half-built.**
@@ -16,25 +36,19 @@ So the field is a row of dots, and clicking them reveals the key, already select
 
 The reveal is a round trip rather than a value delivered with the rest of the settings — the same shape Keys has used for a masked slot since v975. Settings loads constantly and mostly for other reasons, and a secret sitting in the DOM every time is a different exposure from one fetched because somebody clicked to see it. It also puts a line in the log when a key is read, which a value shipped with the page could never do.
 
-### A file path was not an option for most of the people being told to prefer one
+### The recommendation to keep the key in a file is withdrawn
 
 The field offered two forms and recommended one: a path to a BIND-style key file, *the better answer where you have the choice*, because it keeps the secret out of a config that gets snapshotted and exported.
 
-There is no choice. gravinet cannot put a file on its own host — there is no upload and no editor — so the only way to follow that advice from the web admin is the remote shell, which is off by default and, by its own design, keeps a full transcript of everything typed into it. Pasting a key file through it writes the secret to a plaintext log next to the config. The advice inverted itself: the recommended route moved the secret *out* of a field the redactor blanks and *into* one it never sees.
+There is no choice. gravinet cannot put a file on its own host — there is no upload and no editor — so the only way to follow that advice from the web admin is the remote shell, which is off by default and keeps a full transcript of everything typed into it. Pasting a key file through it writes the secret to a plaintext log next to the config. The advice inverted itself: the recommended route moved the secret *out* of a field the redactor blanks and *into* one it never sees.
 
-Both forms are still accepted and neither is recommended now. A path is right for an operator who already has a shell on the node and somewhere they keep secrets; nothing gravinet stores is as well protected as a file it never sees. Inline is right for everyone else, and for them it is not the lesser option, it is the mechanism. The card says which is which instead of ranking them.
+Both forms are still accepted and neither is ranked. (v1006 goes further and stops mentioning the file form at all.)
 
 ### A path with no file at it says so
 
-`ParseKey` stats the spec, and on failure fell through to the inline parser, which reported:
+`ParseKey` stats the spec, and on failure fell through to the inline parser, which restated the grammar to somebody who had plainly just typed a filename. `C:\keys\tsig.key` was worse, splitting on its drive colon into *TSIG secret is not valid base64*.
 
-```
-TSIG key must be a path to a key file, or name:base64secret[:algorithm]
-```
-
-— the grammar, restated, to somebody who had plainly just typed a filename. This is the common failure rather than an exotic one: a path is what the field used to recommend and what gravinet cannot create, so naming one that does not exist is exactly the mistake the old advice invited. It now names the file.
-
-`C:\keys\tsig.key` was worse, splitting on its drive colon into *TSIG secret is not valid base64*. The obvious fix — test for a drive letter — is wrong, because it cannot be told from an inline key whose name is one character, which is unusual and perfectly legal; misreading one would report a missing file to somebody holding a valid key. A path separator anywhere, or a leading `~` or `.`, catches every real path including both Windows spellings, and cannot occur in the inline form at all.
+The obvious fix — test for a drive letter — is wrong, because it cannot be told from an inline key whose name is one character, which is unusual and perfectly legal; misreading one would report a missing file to somebody holding a valid key. A path separator anywhere, or a leading `~` or `.`, catches every real path including both Windows spellings, and cannot occur in the inline form at all.
 
 ### The overlay exclusion is gone, not defaulted on
 

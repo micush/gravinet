@@ -3938,22 +3938,12 @@ type DDNSConfig struct {
 	// accept updates from a list of addresses, and on a private network that
 	// is a choice an operator has already made in their DNS server.
 	//
-	// Either a path to a BIND-style key file, or the inline "name:base64secret"
-	// or "name:base64secret:algorithm" form. Both are redacted on the way out
-	// of this file (the field name carries "key", which is what the redactor
-	// matches).
+	// The inline "name:base64secret" or "name:base64secret:algorithm" form,
+	// which is the only one documented. Redacted on the way out of this file
+	// (the field name carries "key", which is what the redactor matches).
 	//
-	// Neither form is recommended over the other, which is a change from
-	// v1004. A path was, on the reasoning that it keeps the secret out of this
-	// file — true, and useless as advice to most of the people reading it,
-	// because gravinet cannot put a file on its own host. There is no upload
-	// and no editor; the only route that could write one is the remote shell,
-	// which is off by default and transcribes everything typed into it, so
-	// following the advice through gravinet moved the secret out of a redacted
-	// config field and into an unredacted log. A path is right for an operator
-	// who already has a shell and a place they keep secrets. Inline is right
-	// for everyone else, and for them it is not a compromise, it is the
-	// mechanism.
+	// A path to a key file is still parsed if one is here, for configs written
+	// when that form was advertised; see ParseKey for why it stopped being.
 	TSIGKey string `json:"tsig_key,omitempty"`
 
 	// Reverse also publishes a PTR for the primary name. On by default —

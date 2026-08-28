@@ -4494,10 +4494,9 @@ function secSettingsGeneral(c) {
     // the DOM every time is a different exposure from one fetched because
     // somebody clicked to see it.
     const keyRow = $('<div class="settings-row" id="ddns-tsig-row"></div>');
-    keyRow.appendChild($('<div><div class="settings-label">TSIG key</div><div class="settings-desc">Signs the updates, if the zone requires it. Either <code>name:base64secret</code> (optionally <code>:algorithm</code>, default hmac-sha256), or the path to a BIND-style key file. '
+    keyRow.appendChild($('<div><div class="settings-label">TSIG key</div><div class="settings-desc">Signs the updates, if the zone requires it. Give it as <code>name:base64secret</code>, optionally <code>:algorithm</code> (default hmac-sha256) \u2014 the same secret your DNS server has for this key, base64 as <code>tsig-keygen</code> wrote it. '
       + 'Leave it empty to send unsigned updates, which works where the zone is set to accept them from this node\u2019s address.<br><br>'
-      + 'Neither form is better than the other; they are for two different situations. Paste the key in if you administer this node from here \u2014 gravinet cannot put a file on its own host, so a path is only useful if you already have a shell on it and somewhere you keep secrets. '
-      + 'A key set here is stored in this node\u2019s config, and redacted out of support bundles.<br><br>'
+      + 'The key is stored in this node\u2019s config, and redacted out of support bundles.<br><br>'
       + '<b>Click the dots to reveal the key</b>, already selected, so you can copy it out or type a new one over it. Escape leaves it as it was. To remove a key, clear the box, or use <code>gravinet settings ddns key -</code>.</div></div>'));
 
     const keyBox = $('<div style="width:260px"></div>');
@@ -4515,7 +4514,11 @@ function secSettingsGeneral(c) {
     };
 
     // editKey swaps in the editable box. cur is '' when no key is set.
-    const editKey = (cur) => {
+    //
+    // take says whether to grab focus. Only a click asks for it: this box is
+    // also what an unset key renders as, and focusing on render meant opening
+    // Settings for any reason at all put the cursor in the TSIG field.
+    const editKey = (cur, take) => {
       keyBox.innerHTML = '';
       const inp = $('<input type="text" style="width:100%;box-sizing:border-box" autocomplete="off" spellcheck="false">');
       inp.value = cur;
@@ -4530,18 +4533,17 @@ function secSettingsGeneral(c) {
         if (!await saveKey(inp.value.trim())) done = false;
       };
       keyBox.appendChild(inp);
-      inp.focus();
-      inp.select();
+      if (take){ inp.focus(); inp.select(); }
     };
 
     function renderKeyBox(){
       keyBox.innerHTML = '';
-      if (!b.tsig_configured){ editKey(''); return; }
+      if (!b.tsig_configured){ editKey('', false); return; }
       const dots = $('<span class="tsig-dots" title="click to reveal this key">\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022</span>');
       dots.onclick = async () => {
         const r = await api('/api/ddns', { method:'POST', body: JSON.stringify({ op:'reveal_tsig' }) });
         if (!r.ok || !r.body){ await noticeModal((r.body && r.body.error) || 'could not read this node\u2019s TSIG key'); return; }
-        editKey(r.body.tsig_key || '');
+        editKey(r.body.tsig_key || '', true);
       };
       keyBox.appendChild(dots);
     }

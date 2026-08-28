@@ -76,37 +76,31 @@ var (
 	bindSecret    = regexp.MustCompile(`(?s)secret\s+"([^"]+)"`)
 )
 
-// ParseKey reads a TSIG key from either shape an operator is likely to have.
+// ParseKey reads a TSIG key.
 //
-// A path to a BIND-style key file, which is what `tsig-keygen` writes and what
-// most servers hand out:
-//
-//	key "gravinet" {
-//		algorithm hmac-sha256;
-//		secret "base64==";
-//	};
-//
-// or the inline form, for pasting into a field:
+// The documented form, and the only one offered anywhere a user can see, is
+// inline:
 //
 //	name:base64secret
 //	name:base64secret:hmac-sha256
 //
+// A path to a BIND-style key file is still read if one is given, because
+// configs in the field contain them and breaking those on upgrade would be a
+// worse outcome than an undocumented form. It is no longer offered, and as of
+// v1005 nothing in the settings card, the CLI usage or any error message
+// mentions it.
+//
+// It was offered, and recommended, on the reasoning that a secret in a
+// root-owned file is better protected than one in gravinet's config. True, and
+// useless as advice, because gravinet cannot put a file on its own host: there
+// is no upload and no editor, and the one route that could write one — the
+// remote shell — is off by default and transcribes everything typed into it,
+// so following the recommendation through gravinet moved the secret out of a
+// redacted config field and into a plaintext log. A form most operators had no
+// way to use does not belong in the help for a field with one box.
+//
 // Empty input is not an error — it means no key, which is a supported
 // configuration. The caller distinguishes them by the returned pointer.
-//
-// A file is read in preference to the inline form when the string names one
-// that exists. That is disambiguation, not advice: the two forms are for two
-// different operators. Anyone who already keeps secrets in root-owned files,
-// and has a shell on this node to put one there, should carry on doing that —
-// nothing gravinet stores is as well protected as a file it never sees. Anyone
-// administering this node through the web admin has no such option, because
-// gravinet cannot put a file on its own host: there is no upload, no editor,
-// and the one route that could write one — the remote shell — is off by
-// default and keeps a full transcript of everything typed into it, so pasting
-// a secret through it lands the secret in a plaintext log file. For that
-// operator the inline form is not the lesser choice, it is the only one, and
-// v1005 stopped pretending otherwise. See the TSIGKey field in
-// internal/config.
 func ParseKey(spec string) (*Key, error) {
 	spec = strings.TrimSpace(spec)
 	if spec == "" {
@@ -124,13 +118,13 @@ func ParseKey(spec string) (*Key, error) {
 	// invited. "C:\keys\tsig.key" is caught here too — it splits on its drive
 	// colon into something the inline parser called invalid base64.
 	if looksLikePath(spec) {
-		return nil, fmt.Errorf("no TSIG key file at %s — check the path, or set the key inline as name:base64secret[:algorithm]", spec)
+		return nil, fmt.Errorf("%s is not a TSIG key: give the key as name:base64secret[:algorithm]", spec)
 	}
 	// Inline. Split on the first two colons only: base64 has no colon, but a
 	// name conceivably could, and the algorithm never does.
 	parts := strings.SplitN(spec, ":", 3)
 	if len(parts) < 2 {
-		return nil, fmt.Errorf("TSIG key must be a path to a key file, or name:base64secret[:algorithm]")
+		return nil, fmt.Errorf("TSIG key must be name:base64secret[:algorithm]")
 	}
 	k := Key{Name: strings.TrimSpace(parts[0]), Algorithm: tsigSHA256}
 	if len(parts) == 3 {
