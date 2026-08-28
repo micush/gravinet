@@ -94,11 +94,19 @@ var (
 // Empty input is not an error — it means no key, which is a supported
 // configuration. The caller distinguishes them by the returned pointer.
 //
-// A file is preferred over the inline form when the string names one that
-// exists, so a secret can stay in a root-owned file rather than in gravinet's
-// config. That matters more here than usual: the config is snapshotted into the
-// history and exported, and while both redact anything key-shaped, a path is
-// not a secret at all.
+// A file is read in preference to the inline form when the string names one
+// that exists. That is disambiguation, not advice: the two forms are for two
+// different operators. Anyone who already keeps secrets in root-owned files,
+// and has a shell on this node to put one there, should carry on doing that —
+// nothing gravinet stores is as well protected as a file it never sees. Anyone
+// administering this node through the web admin has no such option, because
+// gravinet cannot put a file on its own host: there is no upload, no editor,
+// and the one route that could write one — the remote shell — is off by
+// default and keeps a full transcript of everything typed into it, so pasting
+// a secret through it lands the secret in a plaintext log file. For that
+// operator the inline form is not the lesser choice, it is the only one, and
+// v1005 stopped pretending otherwise. See the TSIGKey field in
+// internal/config.
 func ParseKey(spec string) (*Key, error) {
 	spec = strings.TrimSpace(spec)
 	if spec == "" {
@@ -106,6 +114,17 @@ func ParseKey(spec string) (*Key, error) {
 	}
 	if st, err := os.Stat(spec); err == nil && !st.IsDir() {
 		return parseKeyFile(spec)
+	}
+	// Something shaped like a path that isn't one is reported as such rather
+	// than falling through to the inline parser, which would describe it in
+	// terms of a grammar the operator plainly wasn't attempting. This is the
+	// common failure rather than an exotic one: a path is what the field used
+	// to recommend, and the web admin cannot create the file it asks for, so
+	// naming one that does not exist is exactly the mistake the old advice
+	// invited. "C:\keys\tsig.key" is caught here too — it splits on its drive
+	// colon into something the inline parser called invalid base64.
+	if looksLikePath(spec) {
+		return nil, fmt.Errorf("no TSIG key file at %s — check the path, or set the key inline as name:base64secret[:algorithm]", spec)
 	}
 	// Inline. Split on the first two colons only: base64 has no colon, but a
 	// name conceivably could, and the algorithm never does.
@@ -123,6 +142,27 @@ func ParseKey(spec string) (*Key, error) {
 	}
 	k.Secret = secret
 	return finishKey(k)
+}
+
+// looksLikePath reports whether a spec was evidently meant as a filename, so a
+// stat that failed can be reported as a missing file rather than as bad inline
+// syntax.
+//
+// Deliberately decided on shape alone, with no second stat: the file has
+// already been looked for and was not there, and the only question left is
+// which error to print.
+//
+// A separator anywhere, or a leading ~ or . — none of which can occur in the
+// inline form, where the name is a DNS label, the secret is base64 and the
+// algorithm comes from a fixed list. A Windows path needs no rule of its own:
+// "C:\keys\tsig.key" and "C:/keys/tsig.key" both carry a separator. Testing
+// the drive letter directly was the obvious alternative and is wrong — it
+// cannot be told from an inline key whose name is one character, which is
+// unusual but perfectly legal, and misreading one as a filename would report
+// a missing file to someone holding a valid key.
+func looksLikePath(spec string) bool {
+	return strings.ContainsAny(spec, `/\`) ||
+		strings.HasPrefix(spec, "~") || strings.HasPrefix(spec, ".")
 }
 
 func parseKeyFile(path string) (*Key, error) {

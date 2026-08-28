@@ -101,7 +101,7 @@ func TestAliasOnlyAddressGetsAPTRNamingTheAlias(t *testing.T) {
 // names the primary. A reverse lookup has one answer; that rule belongs to the
 // address, which is where it is applied now, rather than to the host.
 func TestSharedAddressPTRPrefersThePrimaryName(t *testing.T) {
-	recs, err := collectRecords("node7", "corp.internal", nil)
+	recs, err := collectRecords("node7", "corp.internal")
 	if err != nil {
 		t.Fatalf("collect: %v", err)
 	}

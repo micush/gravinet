@@ -527,6 +527,12 @@ const indexHTML = `<!doctype html>
   .cell-saving-note { font-size:12px; color:var(--mut); white-space:nowrap; }
   .keycell .kval { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12px; word-break:break-all; }
   .keycell .kval.masked { color:var(--mut); letter-spacing:2px; }
+  /* The masked TSIG key. Sized and bordered like the input it swaps places
+     with, so revealing it doesn't shift the row. */
+  .tsig-dots { display:block; box-sizing:border-box; width:100%; cursor:pointer; user-select:none;
+    font-family:ui-monospace,Menlo,Consolas,monospace; font-size:13px; letter-spacing:2px; color:var(--mut);
+    padding:5px 8px; border:1px solid var(--line); border-radius:4px; background:var(--bg); }
+  .tsig-dots:hover { border-color:var(--acc); color:var(--fg); }
   .tag-toggle { cursor:pointer; user-select:none; }
   .tag-toggle:hover { text-decoration:underline; text-underline-offset:2px; }
   tr.peer-dis td:not(.selcol) { opacity:.5; }
@@ -4419,8 +4425,7 @@ function secSettingsGeneral(c) {
       + 'A host that takes its address from DHCP is registered by whatever hands out the lease; a gateway with static addresses is not, and its name resolves only if somebody typed it into a zone by hand. '
       + 'The name, the domain and the servers all come from System \u2192 Resolver \u2014 there is nothing to fill in twice.<br><br>'
       + 'Each address is published under <b>hostname-interface.domain</b>, and the first address of each family also under the bare <b>hostname.domain</b> \u2014 so a multi-homed node has a name that means \u201cthis node\u201d and one per link. '
-      + 'IPv4 and IPv6 are both published: A and AAAA are separate record types, and a dual-stack node gets both under the same name. '
-      + 'Mesh devices are never published: an overlay address in LAN DNS answers queries from hosts that cannot reach it, and peers already resolve each other through the hosts-file sync.</div>'));
+      + 'IPv4 and IPv6 are both published: A and AAAA are separate record types, and a dual-stack node gets both under the same name.</div>'));
 
     // What the run actually needs, and whether it has it. Shown before the
     // controls because an interval set on a node with no search domain is the
@@ -4467,29 +4472,80 @@ function secSettingsGeneral(c) {
     revRow.appendChild(revSw);
     ddWrap.appendChild(revRow);
 
-    // The key. Never sent back to the browser \u2014 the field says whether one
-    // is set, and typing replaces it.
+    // The key. Masked to a row of dots when one is set; clicking the dots
+    // fetches it and puts it in an editable box, selected, so it can be read,
+    // copied, or typed over.
+    //
+    // It was write-only through v1004 \u2014 the field showed "key set" and the
+    // value never left the node \u2014 on the reasoning that a secret does not
+    // travel to a browser to be redrawn into a field nobody asked to see. Two
+    // things were wrong with that. It was not true: Config History, on the card
+    // directly above this one, serves whole snapshots as JSON and renders them
+    // in a modal, unredacted, through the same session. Anyone who could see
+    // this row could already read the key, just somewhere less obvious than the
+    // box they typed it into. And it cost the operator the one thing the mask
+    // was supposed to be protecting \u2014 checking whether the key on this node
+    // is the key they think it is, which on a REFUSED update is the first
+    // question worth asking.
+    //
+    // The reveal is a round trip rather than a value delivered with the rest of
+    // the settings, which is the shape Keys already uses for a masked slot. This
+    // page loads constantly and mostly for other reasons; a secret sitting in
+    // the DOM every time is a different exposure from one fetched because
+    // somebody clicked to see it.
     const keyRow = $('<div class="settings-row" id="ddns-tsig-row"></div>');
-    keyRow.appendChild($('<div><div class="settings-label">TSIG key</div><div class="settings-desc">Signs the updates, if the zone requires it. Either the path to a BIND-style key file, or <code>name:base64secret</code> (optionally <code>:algorithm</code>, default hmac-sha256). '
-      + 'Leave empty to send unsigned updates, which works where the zone is set to accept them from this node\u2019s address. '
-      + 'A file path is the better answer where you have the choice: it keeps the secret out of this node\u2019s config, which is snapshotted into the history and included in support bundles. '
-      + 'The key is never sent back to this page, so the box reads <b>key set</b> or <b>unsigned</b> rather than showing one; typing replaces whatever is there. '
-      + 'To remove a key, use <code>gravinet settings ddns key -</code>.</div></div>'));
-    // Two words, because a placeholder is clipped at the width of its box and
-    // the box is 260px. It said "none \u2014 updates are sent unsigned",
-    // which arrived on screen as "none \u2014 updates are sent unsig" \u2014 a
-    // sentence that stops mid-word tells the reader less than the one word it
-    // was trying to get to. What it was explaining now lives in the
-    // description above, where there is room for it.
-    const keyState = () => b.tsig_configured ? 'key set' : 'unsigned';
-    const keyInp = $('<input type="text" style="width:260px">');
-    keyInp.placeholder = keyState();
-    keyInp.onchange = async () => {
-      const v = keyInp.value.trim();
-      if (await edit('/api/ddns', { tsig_key: v })){ b.tsig_configured = v !== ''; keyInp.value = ''; keyInp.placeholder = keyState(); }
-    };
-    keyRow.appendChild(keyInp);
+    keyRow.appendChild($('<div><div class="settings-label">TSIG key</div><div class="settings-desc">Signs the updates, if the zone requires it. Either <code>name:base64secret</code> (optionally <code>:algorithm</code>, default hmac-sha256), or the path to a BIND-style key file. '
+      + 'Leave it empty to send unsigned updates, which works where the zone is set to accept them from this node\u2019s address.<br><br>'
+      + 'Neither form is better than the other; they are for two different situations. Paste the key in if you administer this node from here \u2014 gravinet cannot put a file on its own host, so a path is only useful if you already have a shell on it and somewhere you keep secrets. '
+      + 'A key set here is stored in this node\u2019s config, and redacted out of support bundles.<br><br>'
+      + '<b>Click the dots to reveal the key</b>, already selected, so you can copy it out or type a new one over it. Escape leaves it as it was. To remove a key, clear the box, or use <code>gravinet settings ddns key -</code>.</div></div>'));
+
+    const keyBox = $('<div style="width:260px"></div>');
+    keyRow.appendChild(keyBox);
     ddWrap.appendChild(keyRow);
+
+    // saveKey writes a new value and re-renders from what the server took. A
+    // rejected key \u2014 bad base64, an algorithm nothing implements, a path
+    // with no file at it \u2014 leaves the box open with the typed value still
+    // in it: edit() has already said why, and clearing the field would make
+    // the operator retype something that is probably one character wrong.
+    const saveKey = async (v) => {
+      if (await edit('/api/ddns', { tsig_key: v })){ b.tsig_configured = v !== ''; renderKeyBox(); return true; }
+      return false;
+    };
+
+    // editKey swaps in the editable box. cur is '' when no key is set.
+    const editKey = (cur) => {
+      keyBox.innerHTML = '';
+      const inp = $('<input type="text" style="width:100%;box-sizing:border-box" autocomplete="off" spellcheck="false">');
+      inp.value = cur;
+      if (!cur) inp.placeholder = 'unsigned';
+      let done = false;
+      inp.onkeydown = (e) => { if (e.key === 'Escape'){ done = true; renderKeyBox(); } };
+      // change, not blur: blur also fires when a re-render tears the field
+      // down, which would save the same value a second time.
+      inp.onchange = async () => {
+        if (done) return;
+        done = true;
+        if (!await saveKey(inp.value.trim())) done = false;
+      };
+      keyBox.appendChild(inp);
+      inp.focus();
+      inp.select();
+    };
+
+    function renderKeyBox(){
+      keyBox.innerHTML = '';
+      if (!b.tsig_configured){ editKey(''); return; }
+      const dots = $('<span class="tsig-dots" title="click to reveal this key">\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022</span>');
+      dots.onclick = async () => {
+        const r = await api('/api/ddns', { method:'POST', body: JSON.stringify({ op:'reveal_tsig' }) });
+        if (!r.ok || !r.body){ await noticeModal((r.body && r.body.error) || 'could not read this node\u2019s TSIG key'); return; }
+        editKey(r.body.tsig_key || '');
+      };
+      keyBox.appendChild(dots);
+    }
+    renderKeyBox();
 
   })();
 }

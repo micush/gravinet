@@ -443,3 +443,23 @@ func TestTTLIsTakenLiterally(t *testing.T) {
 		t.Errorf("the TTL is rewritten after being read: %s", seg)
 	}
 }
+
+// A spec that was evidently meant as a filename, with no file at it, is
+// reported as a missing file rather than as bad inline syntax.
+//
+// A path is what the settings card used to recommend and what gravinet cannot
+// create, so naming one that does not exist is the mistake the old advice
+// invited; what came back was a restatement of a grammar the operator plainly
+// was not attempting. The last case is why this matches on separators rather
+// than on a drive letter: "k:secret" is a legal inline key, not a Windows path.
+func TestParseKeyTellsAMissingFileFromInlineSyntax(t *testing.T) {
+	for _, spec := range []string{"/etc/gravinet/tsig.key", `C:\keys\tsig.key`, "./tsig.key", "~/tsig.key"} {
+		if _, err := ParseKey(spec); err == nil || !strings.Contains(err.Error(), "no TSIG key file at") {
+			t.Errorf("ParseKey(%q) = %v, want it to name the missing file", spec, err)
+		}
+	}
+	k, err := ParseKey("k:c2VjcmV0c2VjcmV0c2VjcmV0c2VjcmV0Cg==")
+	if err != nil || k.Name != "k" {
+		t.Errorf("ParseKey with a one-character name = %v, %v; want it read as an inline key", k, err)
+	}
+}

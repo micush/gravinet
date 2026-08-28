@@ -32,9 +32,6 @@ type Diagnosis struct {
 	Domain   string
 	Servers  []string
 	Reverse  bool
-	// Mesh reports whether overlay addresses are being published, which is the
-	// difference between an absent overlay alias and a broken one.
-	Mesh bool
 
 	// The forward zone, as discovered rather than as assumed.
 	ForwardZone   string
@@ -88,9 +85,7 @@ func Diagnose(p Params) (Diagnosis, error) {
 	}
 	host = strings.TrimSuffix(strings.TrimSuffix(host, "."+domain), ".")
 	d.Hostname, d.Domain, d.Servers, d.Reverse = host, domain, p.Servers, p.Reverse
-	d.Mesh = p.PublishMesh
-
-	records, err := collectRecords(host, domain, p.SkipIfaces)
+	records, err := collectRecords(host, domain)
 	if err != nil {
 		return d, err
 	}
@@ -197,7 +192,6 @@ func (d Diagnosis) String() string {
 	fmt.Fprintf(&b, "name:     %s.%s\n", d.Hostname, d.Domain)
 	fmt.Fprintf(&b, "servers:  %s\n", strings.Join(d.Servers, ", "))
 	fmt.Fprintf(&b, "reverse:  %s\n", onOffLabel(d.Reverse))
-	fmt.Fprintf(&b, "mesh:     %s\n", onOffLabel(d.Mesh))
 	if d.ForwardErr != "" {
 		fmt.Fprintf(&b, "\nforward zone: FAILED — %s\n", d.ForwardErr)
 		return b.String()

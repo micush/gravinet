@@ -90,6 +90,12 @@ point of a mesh.
   first, which is how a relay does redundancy without a failover to configure.
   Linux only. (gravinet served leases itself through Kea until v988; it no
   longer does.)
+- **Registers its own name in DNS.** A node publishes its own addresses into
+  the domain it searches with dynamic updates (RFC 2136), signed with TSIG
+  where the zone wants it, and re-asserts them on a timer. A host on DHCP gets
+  registered by whatever hands out the lease; a gateway with static addresses
+  does not, and this is how its name resolves without somebody hand-editing a
+  zone. Every interface is published, forward and reverse.
 - **BGP and BFD** for anyone running dynamic routing (through FRR), including a
   live view of BGP peer sessions, selective redistribution in and out of the
   mesh, and per-neighbor inbound/outbound route filtering.

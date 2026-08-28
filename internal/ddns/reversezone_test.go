@@ -196,7 +196,7 @@ func (f *fakeDNS) respond(msg []byte) []byte {
 // without hard-coding this machine's addressing.
 func hostAddrs(t *testing.T) []netip.Addr {
 	t.Helper()
-	recs, err := collectRecords("node7", "corp.internal", nil)
+	recs, err := collectRecords("node7", "corp.internal")
 	if err != nil {
 		t.Fatalf("collect: %v", err)
 	}

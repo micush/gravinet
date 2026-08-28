@@ -51,7 +51,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "1004"
+	version = "1005"
 	commit  = "none"
 )
 
@@ -962,21 +962,10 @@ func cmdRun(args []string) {
 		// rather than earlier because it publishes this node's addresses, and
 		// engine.Start above is what settles which devices exist — a run
 		// before that would register whatever the host looked like mid-boot.
-		//
-		// The overlay devices are handed over as the skip list rather than
-		// baked into the registrar: it is gravinet that knows which interfaces
-		// are its own, and an overlay address published into LAN DNS answers
-		// queries from hosts that cannot reach it.
+		// That ordering still matters now that every interface is published:
+		// it is what decides whether the overlay devices are there to find.
 		ddnsStop := make(chan struct{})
-		webadmin.StartDDNS(*cfgPath, func() []string {
-			var out []string
-			for _, ifc := range engine.Interfaces() {
-				if ifc.Iface != "" {
-					out = append(out, ifc.Iface)
-				}
-			}
-			return out
-		}, ddnsStop)
+		webadmin.StartDDNS(*cfgPath, ddnsStop)
 
 		// Turn off host acceptance (and, where the platform exposes it,
 		// sending) of ICMP IPv4/IPv6 redirects — an unauthenticated redirect

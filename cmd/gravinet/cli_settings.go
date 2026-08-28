@@ -700,82 +700,16 @@ func validateListenAddrList(in []string) ([]string, error) {
 	return out, nil
 }
 
-// overlayIfaces is this node's own overlay devices, by interface name.
-//
-// The daemon hands the registrar the list the engine actually has up. From a
-// terminal there is no engine to ask, and the obvious substitute — the names
-// configured for them — is empty on every network left at "auto", which is
-// most of them. A check built on that alone reported overlay addresses as
-// "would write" while the daemon skipped them on every run, which is the check
-// contradicting the thing it exists to describe.
-//
-// So the names are a starting point and the addressing settles it: an
-// interface holding an address inside a configured overlay subnet is an
-// overlay interface, whatever it ended up being called. That is the same fact
-// the engine would report, arrived at from the config rather than from the
-// running daemon, and it is right whether or not anyone set a tun_name.
-func overlayIfaces(cfg *config.Config) []string {
-	seen := map[string]bool{}
-	var out []string
-	add := func(n string) {
-		if n != "" && !seen[n] {
-			seen[n], out = true, append(out, n)
-		}
-	}
-
-	var subnets []netip.Prefix
-	for _, n := range cfg.Networks {
-		add(n.TUNName)
-		for _, cidr := range []string{n.Subnet4, n.Subnet6} {
-			if cidr == "" {
-				continue
-			}
-			if pfx, err := netip.ParsePrefix(cidr); err == nil {
-				subnets = append(subnets, pfx)
-			}
-		}
-	}
-	if len(subnets) == 0 {
-		return out
-	}
-
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return out
-	}
-	for _, ifi := range ifaces {
-		addrs, err := ifi.Addrs()
-		if err != nil {
-			continue
-		}
-		for _, a := range addrs {
-			ipn, ok := a.(*net.IPNet)
-			if !ok {
-				continue
-			}
-			addr, ok := netip.AddrFromSlice(ipn.IP)
-			if !ok {
-				continue
-			}
-			addr = addr.Unmap()
-			for _, pfx := range subnets {
-				if pfx.Contains(addr) {
-					add(ifi.Name)
-				}
-			}
-		}
-	}
-	return out
-}
-
 // ddnsParamsForCheck assembles the same inputs a registration run uses, from
 // the same places: the three network facts from the host's live resolver
 // settings, and the key from config.
 //
-// The skip list comes from overlayIfaces rather than from a running engine,
-// which is the one place this can differ from what the daemon does. See there
-// for why matching on addressing rather than on configured names is what makes
-// the two agree in practice.
+// Nothing here has to reconstruct what the daemon would do with interfaces any
+// more. Through v1004 it did — the daemon passed the registrar the overlay
+// devices its engine had up, and from a terminal there is no engine to ask, so
+// this had to derive the same list from the config and the two could disagree.
+// Every interface is published now, so both callers pass the same thing:
+// nothing.
 func ddnsParamsForCheck(cfg *config.Config) (ddns.Params, error) {
 	info := service.HostResolver()
 	host := strings.TrimSpace(info.Hostname)
@@ -805,19 +739,13 @@ func ddnsParamsForCheck(cfg *config.Config) (ddns.Params, error) {
 	if err != nil {
 		return ddns.Params{}, err
 	}
-	var skip []string
-	if !cfg.DDNS.MeshEnabled() {
-		skip = overlayIfaces(cfg)
-	}
 	return ddns.Params{
-		Hostname:    host,
-		Domain:      domain,
-		Servers:     servers,
-		TTL:         uint32(cfg.DDNS.TTL),
-		Key:         key,
-		SkipIfaces:  skip,
-		Reverse:     cfg.DDNS.ReverseEnabled(),
-		PublishMesh: cfg.DDNS.MeshEnabled(),
+		Hostname: host,
+		Domain:   domain,
+		Servers:  servers,
+		TTL:      uint32(cfg.DDNS.TTL),
+		Key:      key,
+		Reverse:  cfg.DDNS.ReverseEnabled(),
 	}, nil
 }
 
@@ -844,7 +772,6 @@ func cmdSettingsDDNS(args []string) {
 		fmt.Printf("dynamic dns registration: %s\n", state)
 		fmt.Printf("  ttl:      %s\n", orDash(ttlLabel(d.TTL)))
 		fmt.Printf("  reverse:  %s\n", onOff(d.ReverseEnabled()))
-		fmt.Printf("  mesh:     %s\n", onOff(d.MeshEnabled()))
 		fmt.Printf("  tsig key: %s\n", tsigLabel(d.TSIGKey))
 		// The three inputs the run needs, read from the host rather than from
 		// this file — the same values System > Resolver shows, and the reason
@@ -935,12 +862,6 @@ func cmdSettingsDDNS(args []string) {
 		}
 		v := rest[1] == "on"
 		d.Reverse = &v
-	case "mesh":
-		if len(rest) < 2 {
-			fatal("usage: gravinet settings ddns mesh <on|off>")
-		}
-		v := rest[1] == "on"
-		d.Mesh = &v
 	case "key":
 		if len(rest) < 2 {
 			fatal("usage: gravinet settings ddns key <path|name:base64secret[:algorithm]|->")
@@ -956,7 +877,7 @@ func cmdSettingsDDNS(args []string) {
 			d.TSIGKey = rest[1]
 		}
 	default:
-		fatal("usage: gravinet settings ddns [check|run|interval <minutes>|ttl <seconds>|reverse <on|off>|mesh <on|off>|key <spec|->]")
+		fatal("usage: gravinet settings ddns [check|run|interval <minutes>|ttl <seconds>|reverse <on|off>|key <spec|->]")
 	}
 
 	if err := cfg.Validate(); err != nil {

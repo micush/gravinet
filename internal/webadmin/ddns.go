@@ -37,7 +37,7 @@ import (
 // The three preconditions are reported as a sentence rather than a bool,
 // because "nothing happened" is the hardest state to debug on a feature whose
 // whole output is somewhere else.
-func ddnsParams(cfg *config.Config, meshIfaces []string) (ddns.Params, error) {
+func ddnsParams(cfg *config.Config) (ddns.Params, error) {
 	info := service.HostResolver()
 	host := strings.TrimSpace(info.Hostname)
 	domain := strings.TrimSpace(info.SearchDomain)
@@ -61,22 +61,13 @@ func ddnsParams(cfg *config.Config, meshIfaces []string) (ddns.Params, error) {
 	if err != nil {
 		return ddns.Params{}, err
 	}
-	// The overlay devices are skipped unless the operator asked for them. When
-	// they are published they go in as ordinary interfaces, alias name and all,
-	// which is why this is a skip list rather than a separate code path.
-	skip := meshIfaces
-	if cfg.DDNS.MeshEnabled() {
-		skip = nil
-	}
 	return ddns.Params{
-		Hostname:    host,
-		Domain:      domain,
-		Servers:     servers,
-		TTL:         uint32(cfg.DDNS.TTL),
-		Key:         key,
-		SkipIfaces:  skip,
-		Reverse:     cfg.DDNS.ReverseEnabled(),
-		PublishMesh: cfg.DDNS.MeshEnabled(),
+		Hostname: host,
+		Domain:   domain,
+		Servers:  servers,
+		TTL:      uint32(cfg.DDNS.TTL),
+		Key:      key,
+		Reverse:  cfg.DDNS.ReverseEnabled(),
 	}, nil
 }
 
@@ -89,8 +80,8 @@ func ddnsParams(cfg *config.Config, meshIfaces []string) (ddns.Params, error) {
 // than a preference, and a button that reaches out to somebody else's DNS
 // server does not belong beside a dark-mode switch. There was one there
 // through v995.
-func RunDDNSOnce(cfg *config.Config, meshIfaces []string) (ddns.Result, error) {
-	p, err := ddnsParams(cfg, meshIfaces)
+func RunDDNSOnce(cfg *config.Config) (ddns.Result, error) {
+	p, err := ddnsParams(cfg)
 	if err != nil {
 		return ddns.Result{}, err
 	}
@@ -114,7 +105,7 @@ const ddnsJitter = 0.3
 // booted with a new address is exactly when its record is most wrong, and
 // waiting an hour to say so would make the feature useless at the only moment
 // it is urgently needed.
-func StartDDNS(configPath string, meshIfaces func() []string, stop <-chan struct{}) {
+func StartDDNS(configPath string, stop <-chan struct{}) {
 	go func() {
 		for {
 			cfg, err := config.Load(configPath)
@@ -137,11 +128,7 @@ func StartDDNS(configPath string, meshIfaces func() []string, stop <-chan struct
 					continue
 				}
 			}
-			var skip []string
-			if meshIfaces != nil {
-				skip = meshIfaces()
-			}
-			res, err := RunDDNSOnce(cfg, skip)
+			res, err := RunDDNSOnce(cfg)
 			switch {
 			case err != nil:
 				logx.Warnf("ddns: %v", err)
@@ -201,16 +188,15 @@ func (s *Server) handleDDNS(w http.ResponseWriter, r *http.Request) {
 			"interval_minutes": cfg.DDNS.IntervalMinutes,
 			"ttl":              cfg.DDNS.TTL,
 			"reverse":          cfg.DDNS.ReverseEnabled(),
-			"mesh":             cfg.DDNS.MeshEnabled(),
-			// Whether a key is set, never the key. A secret does not travel to
-			// a browser to be redrawn into a field an operator did not ask to
-			// see; setting a new one replaces it, and clearing is explicit.
+			// Whether a key is set, not the key. The page draws dots from
+			// this and fetches the value only if somebody clicks them — see
+			// the reveal_tsig op below.
 			"tsig_configured": strings.TrimSpace(cfg.DDNS.TSIGKey) != "",
 			"hostname":        info.Hostname,
 			"search_domain":   info.SearchDomain,
 			"servers":         info.DNSServers,
 		}
-		if _, err := ddnsParams(cfg, nil); err != nil {
+		if _, err := ddnsParams(cfg); err != nil {
 			body["blocked"] = err.Error()
 		}
 		writeJSON(w, http.StatusOK, body)
@@ -222,10 +208,30 @@ func (s *Server) handleDDNS(w http.ResponseWriter, r *http.Request) {
 		Interval *int    `json:"interval_minutes"`
 		TTL      *int    `json:"ttl"`
 		Reverse  *bool   `json:"reverse"`
-		Mesh     *bool   `json:"mesh"`
 		TSIGKey  *string `json:"tsig_key"`
 	}
 	if !decode(w, r, &req) {
+		return
+	}
+	// "reveal_tsig" returns the key as configured — the inline secret, or the
+	// path, whichever is in the field. Read-only, and handled before anything
+	// below touches config.
+	//
+	// The settings page masks the key to a row of dots and calls this when the
+	// operator clicks them. It is not much of a gate, and is not meant to be:
+	// the same session can already read the same secret out of a config
+	// snapshot through /api/history/get, which redacts nothing. What it does
+	// buy is that the key is not in the page every time somebody opens
+	// Settings for an unrelated reason, and that a reveal is a request in the
+	// log rather than a side effect of navigation.
+	if req.Op == "reveal_tsig" {
+		cfg, err := config.Load(s.configPath)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		logx.Infof("ddns: TSIG key revealed to the web admin")
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "tsig_key": cfg.DDNS.TSIGKey})
 		return
 	}
 	err := s.mutateConfig(r, func(cfg *config.Config) error {
@@ -239,10 +245,6 @@ func (s *Server) handleDDNS(w http.ResponseWriter, r *http.Request) {
 		if req.Reverse != nil {
 			v := *req.Reverse
 			d.Reverse = &v
-		}
-		if req.Mesh != nil {
-			v := *req.Mesh
-			d.Mesh = &v
 		}
 		if req.TSIGKey != nil {
 			key := strings.TrimSpace(*req.TSIGKey)

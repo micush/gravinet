@@ -95,29 +95,26 @@ func TestLiveStatusIsNotMarkedAsHelpText(t *testing.T) {
 }
 
 // A placeholder is clipped at the width of its box, so it has to be short
-// enough to finish. The TSIG field's said "none — updates are sent unsigned"
-// in a 260px box and arrived as "none — updates are sent unsig": a sentence
-// that stops mid-word says less than the single word it was reaching for.
+// enough to finish. This field's said "none — updates are sent unsigned" in a
+// 260px box and arrived as "none — updates are sent unsig": a sentence that
+// stops mid-word says less than the single word it was reaching for.
 //
-// Both states are checked, because the two are set from the same expression
-// and only the unset one was visible in the report.
+// Still guarded now that the box is only a placeholder in the unset case,
+// because that is the case the bug was in.
 func TestTSIGPlaceholderFitsItsBox(t *testing.T) {
 	sec := between(t, indexHTML, "Dynamic DNS registration</h3>", "\nfunction secSettingsSecurity")
-	state := between(t, sec, "const keyState = () =>", "\n")
-	for _, want := range []string{"'key set'", "'unsigned'"} {
-		if !strings.Contains(state, want) {
-			t.Errorf("the TSIG placeholder no longer reads %s: %s", want, state)
-		}
+	if !strings.Contains(sec, "inp.placeholder = 'unsigned'") {
+		t.Error("the unset TSIG field no longer reads 'unsigned'")
 	}
 	// Roughly 29 characters fit. Anything approaching that is a sentence that
 	// will be cut, which is the failure this replaced.
 	for _, lit := range []string{"updates are sent unsigned", "type to replace it"} {
-		if strings.Contains(sec, `placeholder="`+lit) || strings.Contains(state, lit) {
+		if strings.Contains(sec, `placeholder="`+lit) || strings.Contains(sec, "placeholder = '"+lit) {
 			t.Errorf("a sentence is back in the placeholder: %q — it belongs in the description", lit)
 		}
 	}
 	// And the explanation it displaced is in the description, which has room.
-	if !strings.Contains(sec, "typing replaces whatever is there") {
-		t.Error("the description no longer explains what the placeholder used to")
+	if !strings.Contains(sec, "Click the dots to reveal the key") {
+		t.Error("the description no longer explains how to read the key back")
 	}
 }

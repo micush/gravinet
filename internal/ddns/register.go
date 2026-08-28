@@ -31,18 +31,30 @@ type Params struct {
 	TTL uint32
 	// Key signs the updates, or nil for unsigned.
 	Key *Key
-	// SkipIfaces are interfaces whose addresses must not be published —
-	// gravinet's own overlay devices. See Registrar.Run.
-	SkipIfaces []string
 	// Reverse also publishes a PTR for every address published forward.
 	Reverse bool
-	// PublishMesh is informational: it records that SkipIfaces was left empty
-	// deliberately rather than by omission. This package never reads it for a
-	// decision — the skip list is the decision — but a diagnosis that cannot
-	// tell "no overlay addresses configured" from "overlay addresses excluded"
-	// is missing the only fact that distinguishes them.
-	PublishMesh bool
 }
+
+// A note on interfaces: every one this host has up is published, and there is
+// no way to ask for fewer.
+//
+// There was, through v1004: a skip list, carrying gravinet's own overlay
+// devices, and a PublishMesh flag recording whether the list had been left
+// empty on purpose. The argument for excluding them was that an overlay
+// address is reachable only by mesh peers, who already resolve each other
+// through the hosts-file sync, so publishing one into LAN DNS answers queries
+// from hosts that cannot use the answer.
+//
+// v1004 accepted that this was true and not a reason to withhold the record —
+// a zone is not a promise of reachability, and "this name resolves but you
+// cannot route to it" is an ordinary thing for an operator to work with where
+// "no record exists and nothing says why" is not — and flipped the default to
+// publishing them. What it left behind was a switch nobody could reach: the
+// web admin never grew a control for it, so the only way to turn the exclusion
+// back on was a CLI subcommand, and the settings card went on telling everyone
+// the opposite of what the node did. v1005 removes the switch rather than
+// finishing it. A feature whose entire job is publishing this node's addresses
+// publishes this node's addresses.
 
 // A note on TTL: Params.TTL is taken literally, including zero.
 //
@@ -117,7 +129,7 @@ func Register(p Params, log Logf) (Result, error) {
 	}
 	ttl := p.TTL
 
-	records, err := collectRecords(host, domain, p.SkipIfaces)
+	records, err := collectRecords(host, domain)
 	if err != nil {
 		return res, err
 	}
@@ -282,18 +294,11 @@ func ptrTargets(records []recordSet) []ptrTarget {
 // cannot reach. The per-interface alias is where the rest live, and it carries
 // every address of its family on that interface.
 //
-// Skipped: loopback, IPv6 link-local, and gravinet's own overlay devices. The
-// last is the one this project has to decide for itself — an overlay address
-// published into LAN DNS is reachable only by mesh peers, who already resolve
-// each other through the hosts-file sync, so it would answer queries from hosts
-// that cannot use it while adding nothing for the hosts that can.
-func collectRecords(host, domain string, skip []string) ([]recordSet, error) {
-	skipSet := map[string]bool{}
-	for _, n := range skip {
-		if n = strings.TrimSpace(n); n != "" {
-			skipSet[n] = true
-		}
-	}
+// Skipped: loopback and IPv6 link-local, neither of which means anything to a
+// caller that looked the name up. Nothing else — gravinet's own overlay
+// devices are ordinary interfaces here and are published like any other. See
+// the note on Params for why the exclusion that used to sit here is gone.
+func collectRecords(host, domain string) ([]recordSet, error) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return nil, fmt.Errorf("reading this host's interfaces: %w", err)
@@ -324,7 +329,7 @@ func collectRecords(host, domain string, skip []string) ([]recordSet, error) {
 
 	primaryTaken := map[int]bool{} // by record type, so v4 and v6 each get one
 	for _, ifi := range ifaces {
-		if skipSet[ifi.Name] || ifi.Flags&net.FlagLoopback != 0 || ifi.Flags&net.FlagUp == 0 {
+		if ifi.Flags&net.FlagLoopback != 0 || ifi.Flags&net.FlagUp == 0 {
 			continue
 		}
 		addrs, err := ifi.Addrs()

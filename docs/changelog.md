@@ -2,6 +2,52 @@
 
 ---
 
+## v1005 — 2026-08-28
+
+**The TSIG key can be read back from the page that set it, the advice to keep it in a file instead is withdrawn, and the overlay exclusion is removed rather than left half-built.**
+
+### The key field shows dots, and clicking them shows the key
+
+It was write-only through v1004. The field read `key set`, the value never left the node, and the reasoning was that a secret does not travel to a browser to be redrawn into a field nobody asked to see.
+
+That was not true, in the same UI, one card higher up. Config History serves whole snapshots as JSON through `/api/history/get` and renders them in a modal, unredacted, on the same session cookie. Anyone who could see the TSIG row could already read the key — just somewhere less obvious than the box they typed it into. The mask was not keeping the secret from anybody. It was keeping it from the operator, who is the one person with a reason to look: *is the key on this node the key the zone expects* is the first question worth asking about a REFUSED update, and the answer was three clicks away in a snapshot viewer or absent entirely.
+
+So the field is a row of dots, and clicking them reveals the key, already selected, so it can be copied out or typed over. Escape leaves it as it was.
+
+The reveal is a round trip rather than a value delivered with the rest of the settings — the same shape Keys has used for a masked slot since v975. Settings loads constantly and mostly for other reasons, and a secret sitting in the DOM every time is a different exposure from one fetched because somebody clicked to see it. It also puts a line in the log when a key is read, which a value shipped with the page could never do.
+
+### A file path was not an option for most of the people being told to prefer one
+
+The field offered two forms and recommended one: a path to a BIND-style key file, *the better answer where you have the choice*, because it keeps the secret out of a config that gets snapshotted and exported.
+
+There is no choice. gravinet cannot put a file on its own host — there is no upload and no editor — so the only way to follow that advice from the web admin is the remote shell, which is off by default and, by its own design, keeps a full transcript of everything typed into it. Pasting a key file through it writes the secret to a plaintext log next to the config. The advice inverted itself: the recommended route moved the secret *out* of a field the redactor blanks and *into* one it never sees.
+
+Both forms are still accepted and neither is recommended now. A path is right for an operator who already has a shell on the node and somewhere they keep secrets; nothing gravinet stores is as well protected as a file it never sees. Inline is right for everyone else, and for them it is not the lesser option, it is the mechanism. The card says which is which instead of ranking them.
+
+### A path with no file at it says so
+
+`ParseKey` stats the spec, and on failure fell through to the inline parser, which reported:
+
+```
+TSIG key must be a path to a key file, or name:base64secret[:algorithm]
+```
+
+— the grammar, restated, to somebody who had plainly just typed a filename. This is the common failure rather than an exotic one: a path is what the field used to recommend and what gravinet cannot create, so naming one that does not exist is exactly the mistake the old advice invited. It now names the file.
+
+`C:\keys\tsig.key` was worse, splitting on its drive colon into *TSIG secret is not valid base64*. The obvious fix — test for a drive letter — is wrong, because it cannot be told from an inline key whose name is one character, which is unusual and perfectly legal; misreading one would report a missing file to somebody holding a valid key. A path separator anywhere, or a leading `~` or `.`, catches every real path including both Windows spellings, and cannot occur in the inline form at all.
+
+### The overlay exclusion is gone, not defaulted on
+
+v1003 added a switch for publishing overlay addresses and left it off. v1004 accepted the argument that an unreachable record is still a useful record, flipped the default on, and kept the setting tri-state so an explicit `off` would survive a later change of default.
+
+What that left was a knob nobody could reach and a page that described it backwards. The web admin never grew a control for it, so the only way to restore the exclusion was `gravinet settings ddns mesh off` — and the settings card, meanwhile, went on telling every reader *Mesh devices are never published*, which was the v1002 text and the opposite of what the node had done since v1004. A whole release of a feature whose entire job is publishing this node's addresses, describing itself as declining to publish some of them.
+
+The setting is removed rather than finished. Every interface this host has up is published; `collectRecords` skips loopback and IPv6 link-local and nothing else. `DDNSConfig.Mesh`, `MeshEnabled`, `Params.SkipIfaces`, `Params.PublishMesh`, `Diagnosis.Mesh` and the `mesh:` line in `ddns check` all go, along with `overlayIfaces` — fifty lines added in v1004 for no purpose but reconstructing the skip list from a terminal, where there is no engine to ask — and the interface-list callback the daemon passed to `StartDDNS`. A config carrying `"mesh": false` is not an error; the field is ignored and the node publishes everything, which is the point.
+
+The guard is on the struct rather than the helper, because the way this comes back is somebody adding the field again.
+
+---
+
 ## v1004 — 2026-08-28
 
 **Every interface this node has is published, overlay devices included, and there is a command that registers now instead of within fifteen minutes.**
