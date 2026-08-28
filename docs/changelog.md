@@ -2,6 +2,18 @@
 
 ---
 
+## v1007 — 2026-08-28
+
+**The two file pickers under Settings > Security > TLS certificate say which is which.**
+
+They are identical controls, side by side, and are not interchangeable: one wants the certificate, the other the private key. Which was which lived in a `title` attribute, so finding out meant hovering over each in turn, and a tooltip is not there at all on a touch screen.
+
+Getting it wrong is not a quiet mistake either. The pair is validated together before anything is written, so a swapped upload is refused — correctly — with a parse error about the contents, which is a poor way to be told that two fields are the wrong way round.
+
+Each input now carries a visible caption, in a `<label>` wrapping the input rather than beside it, so the caption is clickable and the pairing holds however the row wraps. The tooltips are gone: repeating a label the reader can already see is noise.
+
+---
+
 ## v1006 — 2026-08-28
 
 **The TSIG field asks for a key, and stops grabbing the cursor when you open Settings.**

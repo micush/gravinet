@@ -4681,12 +4681,24 @@ function secSettingsSecurity(c) {
   card.appendChild($('<h3>TLS certificate</h3>'));
   card.appendChild($('<div class="settings-desc" style="margin-bottom:10px">Upload a certificate and its matching private key (PEM). Validated before anything is saved. Needs a restart to take effect.</div>'));
 
-  const tc = $('<div class="settings-row" id="tls-cert-upload-row" style="justify-content:flex-start;gap:10px"></div>');
-  const tcCertFile = $('<input type="file" accept=".pem,.crt,.cer,.cert" title="certificate (PEM)" style="width:340px">');
-  const tcKeyFile = $('<input type="file" accept=".pem,.key" title="private key (PEM)" style="width:340px">');
+  // Two file pickers that look identical and are not interchangeable. Which
+  // is which was in a title attribute, so it took hovering to find out, and
+  // the cost of guessing wrong is a rejected upload that names neither field.
+  // The label is on the page now; a tooltip repeating it would just be noise.
+  const tc = $('<div class="settings-row" id="tls-cert-upload-row" style="justify-content:flex-start;align-items:flex-end;gap:10px"></div>');
+  const tcCertFile = $('<input type="file" accept=".pem,.crt,.cer,.cert" style="width:340px">');
+  const tcKeyFile = $('<input type="file" accept=".pem,.key" style="width:340px">');
   const tcBtn = $('<button class="sm">Upload</button>');
-  tc.appendChild(tcCertFile);
-  tc.appendChild(tcKeyFile);
+  // A <label> around the input, so the caption is clickable rather than
+  // decorative and the pairing survives however the row wraps.
+  const tcField = (text, inp) => {
+    const w = $('<label style="display:flex;flex-direction:column;gap:5px"></label>');
+    w.appendChild($('<span class="settings-label">'+text+'</span>'));
+    w.appendChild(inp);
+    return w;
+  };
+  tc.appendChild(tcField('Certificate (PEM)', tcCertFile));
+  tc.appendChild(tcField('Private key (PEM)', tcKeyFile));
   tc.appendChild(tcBtn);
   card.appendChild(tc);
 
