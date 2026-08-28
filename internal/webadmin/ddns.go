@@ -253,7 +253,7 @@ func (s *Server) handleDDNS(w http.ResponseWriter, r *http.Request) {
 			// looking at the field rather than once an interval in a log they
 			// are not reading.
 			if key != "" {
-				if _, perr := ddns.ParseKey(key); perr != nil {
+				if _, perr := ddns.ParseInlineKey(key); perr != nil {
 					return perr
 				}
 			}

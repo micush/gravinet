@@ -2,6 +2,20 @@
 
 ---
 
+## v1008 — 2026-08-28
+
+**A TSIG key set through the API or the CLI can no longer name a file to open. CodeQL `go/path-injection`, alerts #16 and #17.**
+
+`ParseKey` took either an inline key or a path, and both setters ran the same function over whatever arrived: the value went from an HTTP request body to `os.Stat` and then `os.ReadFile` with nothing in between. A web session could name any path on the host and learn from the reply whether it existed, whether the daemon could read it, and whether it parsed as a BIND key file.
+
+That the session is an authenticated administrator is not a defence. It can already read the config and upload a certificate — but *can do administrative things* is not *can make the daemon open arbitrary paths as root*, and the gap between those is worth keeping. The scanner was right, and the fix costs nothing here because since v1006 nothing offers the file form to anybody.
+
+`ParseInlineKey` is the setter's entry point now. It never touches the filesystem: a value shaped like a path is refused with the documented form, which is also what somebody who typed one deserves to be told. `ParseKey` keeps both branches and is reached only from a config already on disk — a path there was written by somebody who could write the config, which on this node means root, and a daemon reading an operator-configured path is not the same thing as a daemon opening a request body.
+
+The file branch is bounded as well, since a config can still point it somewhere unhelpful. It requires an absolute path, because a relative one resolves against a working directory that differs between a unit start and a shell, so the same config would read different files. It stats before opening and takes regular files only: a FIFO blocks in `open()` until something writes, which would hang registration, and a character device may never end. And the read is capped at 1 MiB — four orders of magnitude above any real key file, and a bound on what a config pointing at `/dev/zero` can do to a daemon that re-reads it on a timer.
+
+---
+
 ## v1007 — 2026-08-28
 
 **The two file pickers under Settings > Security > TLS certificate say which is which.**

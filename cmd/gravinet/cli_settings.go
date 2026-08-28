@@ -871,7 +871,7 @@ func cmdSettingsDDNS(args []string) {
 		} else {
 			// Parsed before it is stored, so a bad secret is refused here
 			// rather than once an interval in a log nobody is reading.
-			if _, err := ddns.ParseKey(rest[1]); err != nil {
+			if _, err := ddns.ParseInlineKey(rest[1]); err != nil {
 				fatal("%v", err)
 			}
 			d.TSIGKey = rest[1]

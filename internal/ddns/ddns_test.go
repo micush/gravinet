@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -444,19 +445,60 @@ func TestTTLIsTakenLiterally(t *testing.T) {
 	}
 }
 
-// A spec that is plainly not an inline key is refused with the form that is,
-// rather than with a grammar listing one the help no longer mentions.
+// A path typed into a setting is refused without the filesystem being touched.
+//
+// ParseInlineKey is what every setter uses, and the reason it exists: a path
+// in the config was written by somebody who could write the config, which here
+// means root, while a path in a request came from a web session. Letting the
+// second name a file to open hands that session a probe for what exists and is
+// readable on the host, which is not something an admin session should get for
+// free just because it is an admin session.
 //
 // The last case is why this matches on separators rather than on a drive
 // letter: "k:secret" is a legal inline key, not a Windows path.
-func TestParseKeyRefusesAPathWithTheInlineForm(t *testing.T) {
-	for _, spec := range []string{"/etc/gravinet/tsig.key", `C:\keys\tsig.key`, "./tsig.key", "~/tsig.key"} {
-		if _, err := ParseKey(spec); err == nil || !strings.Contains(err.Error(), "is not a TSIG key") {
-			t.Errorf("ParseKey(%q) = %v, want it to name the missing file", spec, err)
+func TestParseInlineKeyRefusesAPath(t *testing.T) {
+	// A file that really is a valid key, so a pass here would mean the
+	// filesystem was consulted rather than the shape.
+	dir := t.TempDir()
+	real := filepath.Join(dir, "tsig.key")
+	if err := os.WriteFile(real, []byte("key \"gravinet\" {\n algorithm hmac-sha256;\n secret \"c2VjcmV0c2VjcmV0c2VjcmV0c2VjcmV0Cg==\";\n};\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if k, err := ParseKey(real); err != nil || k == nil {
+		t.Fatalf("the fixture is not a readable key file: %v", err)
+	}
+	for _, spec := range []string{real, "/etc/shadow", `C:\keys\tsig.key`, "./tsig.key", "~/tsig.key"} {
+		if _, err := ParseInlineKey(spec); err == nil {
+			t.Errorf("ParseInlineKey(%q) was accepted; a setter must not open files", spec)
 		}
 	}
-	k, err := ParseKey("k:c2VjcmV0c2VjcmV0c2VjcmV0c2VjcmV0Cg==")
+	k, err := ParseInlineKey("k:c2VjcmV0c2VjcmV0c2VjcmV0c2VjcmV0Cg==")
 	if err != nil || k.Name != "k" {
-		t.Errorf("ParseKey with a one-character name = %v, %v; want it read as an inline key", k, err)
+		t.Errorf("ParseInlineKey with a one-character name = %v, %v; want it read as an inline key", k, err)
+	}
+}
+
+// And the file branch, which only a config on disk reaches, opens regular
+// files by absolute path and nothing else. A FIFO blocks in open() until
+// something writes; a character device may never end.
+func TestParseKeyFileIsBoundedAndRegular(t *testing.T) {
+	if _, err := ParseKey("relative/tsig.key"); err == nil || !strings.Contains(err.Error(), "absolute") {
+		t.Errorf("a relative path = %v, want it refused as relative", err)
+	}
+	dir := t.TempDir()
+	fifo := filepath.Join(dir, "fifo")
+	if err := syscall.Mkfifo(fifo, 0600); err != nil {
+		t.Skipf("cannot create a fifo here: %v", err)
+	}
+	// Must return rather than block. Any error will do; hanging is the failure.
+	done := make(chan error, 1)
+	go func() { _, err := ParseKey(fifo); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("a fifo was accepted as a key file")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ParseKey blocked on a fifo")
 	}
 }

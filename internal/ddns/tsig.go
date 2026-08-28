@@ -9,7 +9,9 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash"
+	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -101,27 +103,50 @@ var (
 //
 // Empty input is not an error — it means no key, which is a supported
 // configuration. The caller distinguishes them by the returned pointer.
+//
+// Use ParseInlineKey, not this, for anything an operator just typed. Only a
+// value already in the config on disk reaches the file branch here.
 func ParseKey(spec string) (*Key, error) {
 	spec = strings.TrimSpace(spec)
 	if spec == "" {
 		return nil, nil
 	}
-	if st, err := os.Stat(spec); err == nil && !st.IsDir() {
+	if looksLikePath(spec) {
 		return parseKeyFile(spec)
 	}
-	// Something shaped like a path that isn't one is reported as such rather
-	// than falling through to the inline parser, which would describe it in
-	// terms of a grammar the operator plainly wasn't attempting. This is the
-	// common failure rather than an exotic one: a path is what the field used
-	// to recommend, and the web admin cannot create the file it asks for, so
-	// naming one that does not exist is exactly the mistake the old advice
-	// invited. "C:\keys\tsig.key" is caught here too — it splits on its drive
-	// colon into something the inline parser called invalid base64.
+	return parseInline(spec)
+}
+
+// ParseInlineKey is ParseKey without the file branch: it validates a key an
+// operator supplied, and never touches the filesystem.
+//
+// Every setter uses this — the API handler, the CLI. The distinction is the
+// whole point. A path in the config was put there by somebody who could write
+// the config, which on this node means root; a path in a request was typed by
+// a web session, which is a lower bar, and letting one name a file to open
+// hands the session a filesystem probe it should not have. That the session is
+// an authenticated administrator is not the answer: it can already read the
+// config and upload a certificate, but "can do administrative things" is not
+// "can make the daemon open any path on the host as root", and the gap between
+// those is worth keeping. It also costs nothing, because as of v1006 nothing
+// offers the file form to anybody in the first place.
+//
+// So a path is refused here with the form that is documented, which is also
+// what somebody who typed one deserves to be told.
+func ParseInlineKey(spec string) (*Key, error) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return nil, nil
+	}
 	if looksLikePath(spec) {
 		return nil, fmt.Errorf("%s is not a TSIG key: give the key as name:base64secret[:algorithm]", spec)
 	}
-	// Inline. Split on the first two colons only: base64 has no colon, but a
-	// name conceivably could, and the algorithm never does.
+	return parseInline(spec)
+}
+
+// parseInline splits on the first two colons only: base64 has no colon, but a
+// name conceivably could, and the algorithm never does.
+func parseInline(spec string) (*Key, error) {
 	parts := strings.SplitN(spec, ":", 3)
 	if len(parts) < 2 {
 		return nil, fmt.Errorf("TSIG key must be name:base64secret[:algorithm]")
@@ -159,8 +184,34 @@ func looksLikePath(spec string) bool {
 		strings.HasPrefix(spec, "~") || strings.HasPrefix(spec, ".")
 }
 
+// maxKeyFile caps the read. A BIND key file is a few hundred bytes; this is
+// four orders of magnitude of headroom and still bounds what a config pointing
+// at /dev/zero can do to a daemon that reads it on a timer.
+const maxKeyFile = 1 << 20
+
 func parseKeyFile(path string) (*Key, error) {
-	b, err := os.ReadFile(path)
+	// Absolute only. A relative path resolves against the daemon's working
+	// directory, which nothing here controls and which differs between a unit
+	// start and a shell, so the same config would read different files.
+	if !filepath.IsAbs(path) {
+		return nil, fmt.Errorf("TSIG key file %s must be an absolute path", path)
+	}
+	// Regular files only, checked before opening rather than after. A FIFO
+	// blocks in open() until something writes, which would hang registration
+	// holding whatever the caller holds; a character device may never end.
+	st, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("%s is not a TSIG key: give the key as name:base64secret[:algorithm]", path)
+	}
+	if !st.Mode().IsRegular() {
+		return nil, fmt.Errorf("TSIG key file %s is not a regular file", path)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading TSIG key file: %w", err)
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, maxKeyFile))
 	if err != nil {
 		return nil, fmt.Errorf("reading TSIG key file: %w", err)
 	}
