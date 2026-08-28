@@ -134,6 +134,16 @@ const indexHTML = `<!doctype html>
   .settings-row { display:flex; align-items:center; justify-content:space-between; gap:40px; padding:12px 0; border-bottom:1px solid var(--line); }
   .settings-row:has(.route-picker), .settings-row.stacked { flex-direction:column; align-items:stretch; justify-content:flex-start; gap:10px; }
   .settings-row:last-child { border-bottom:0; }
+  /* A row's border is a separator *between* rows, so the last one in a card
+     must not draw one. :last-child covers that only when the row really is the
+     final element \u2014 and several cards end with a status line or a note
+     after their last row, which left a rule hanging across the bottom of the
+     card with nothing under it (Config history showed this most plainly: one
+     row, a snapshot count beneath it, and a line between them going nowhere).
+     This says the same thing structurally: no following row, no separator.
+     :last-child is kept above rather than replaced, so the common case still
+     works if :has() ever isn't available. */
+  .settings-row:not(:has(~ .settings-row)) { border-bottom:0; }
   .settings-row > input, .settings-row > .sw { flex-shrink:0; }
   .local-only-disabled { opacity:.5; }
   .settings-label { font-size:14px; }
@@ -1632,6 +1642,10 @@ function buildSearchIndex(){
     ['tls-cert-upload-row', 'TLS certificate', 'Upload a certificate and private key to replace the self-signed one.', 'security'],
     ['tls-cert-reset-row', 'Revert to self-signed', 'Stop using an uploaded certificate.', 'security'],
     ['config-history-limit-row', 'Config history retention limit', 'How many configuration snapshots to keep before the oldest are pruned.', 'general'],
+    ['ddns-interval-row', 'Dynamic DNS registration interval', 'How often this node republishes its own name and addresses into the domain it searches, 15 minutes by default. 0 turns it off.', 'general'],
+    ['ddns-ttl-row', 'Dynamic DNS record TTL', 'How long other resolvers may cache the records this node publishes for itself. 0 means do not cache.', 'general'],
+    ['ddns-reverse-row', 'Dynamic DNS reverse records', 'Whether this node also publishes a PTR pointing its address back at its name.', 'general'],
+    ['ddns-tsig-row', 'Dynamic DNS TSIG key', 'The shared key that signs this node\u2019s dynamic DNS updates, where the zone requires one.', 'general'],
     ['cluster-managed-row', 'Managed mode', 'Let Manager-mode peers in the cluster remotely configure this node.', 'security'],
     ['cluster-manager-row', 'Manager mode', 'Let this node browse and remotely configure other Managed-mode peers in the cluster.', 'security'],
     ['shell-allow-row', 'Remote shell', 'Let a Manager peer open a real OS shell on this node through the web admin.', 'security'],
@@ -4358,7 +4372,11 @@ function secSettingsGeneral(c) {
   card.appendChild($('<h3>Config history</h3>'));
 
   const chRow = $('<div class="settings-row" id="config-history-limit-row"></div>');
-  const chLabel = $('<div><div class="settings-desc">How many automatic and manual configuration snapshots to keep (System \u2192 Config History), FIFO \u2014 oldest pruned first once you go over this. 0 uses the default (250).</div></div>');
+  // The label is what stays when help is off; the description under it is not.
+  // This row shipped with only a description, so with help off \u2014 the
+  // default \u2014 the whole card rendered as a number box with nothing saying
+  // what the number was for.
+  const chLabel = $('<div><div class="settings-label">Snapshots to keep</div><div class="settings-desc">How many automatic and manual configuration snapshots to keep (System \u2192 Config History), FIFO \u2014 oldest pruned first once you go over this. 0 uses the default (250).</div></div>');
   const chInp = $('<input type="number" min="0" step="1" style="width:80px">');
   chInp.value = state.configHistoryLimit;
   chInp.onchange = async () => {
@@ -4371,9 +4389,109 @@ function secSettingsGeneral(c) {
   };
   chRow.appendChild(chLabel); chRow.appendChild(chInp);
   card.appendChild(chRow);
-  card.appendChild($('<div class="settings-desc" style="margin-top:10px">Currently holding '+state.configHistoryCount+' of '+state.configHistoryLimit+' snapshot'+(state.configHistoryCount===1?'':'s')+'.</div>'));
+  // hint, not settings-desc: this is what the node currently holds, and live
+  // status is never hidden \u2014 see the .settings-desc rule's own comment.
+  card.appendChild($('<div class="hint" style="margin:10px 0 0">Currently holding '+state.configHistoryCount+' of '+state.configHistoryLimit+' snapshot'+(state.configHistoryCount===1?'':'s')+'.</div>'));
 
+  c.appendChild(card); card = $('<div class="card"></div>');
+
+  // Dynamic DNS registration. Node configuration rather than a browser
+  // preference, so unlike Dark mode and Updates above it is loaded from and
+  // saved to the node currently being managed.
+  //
+  // There is no enable switch: the interval is the switch, and what the
+  // feature needs beyond it already lives on System \u2192 Resolver. A fourth
+  // toggle that could disagree with those three would be a way to have this
+  // configured and silently doing nothing, which is the state the whole card
+  // is arranged to make visible.
+  card.appendChild($('<h3>Dynamic DNS registration</h3>'));
+  const ddWrap = $('<div><div class="hint">loading\u2026</div></div>');
+  card.appendChild(ddWrap);
   c.appendChild(card);
+
+  (async () => {
+    const r = await api('/api/ddns');
+    if (!r.ok || !r.body){ ddWrap.innerHTML = '<div class="hint">could not read this node\u2019s registration settings.</div>'; return; }
+    const b = r.body;
+    ddWrap.innerHTML = '';
+
+    ddWrap.appendChild($('<div class="settings-desc">Publish this node\u2019s own name and addresses into the domain it searches, using dynamic DNS updates (RFC 2136), and re-assert them on a timer. '
+      + 'A host that takes its address from DHCP is registered by whatever hands out the lease; a gateway with static addresses is not, and its name resolves only if somebody typed it into a zone by hand. '
+      + 'The name, the domain and the servers all come from System \u2192 Resolver \u2014 there is nothing to fill in twice.<br><br>'
+      + 'Each address is published under <b>hostname-interface.domain</b>, and the first address of each family also under the bare <b>hostname.domain</b> \u2014 so a multi-homed node has a name that means \u201cthis node\u201d and one per link. '
+      + 'IPv4 and IPv6 are both published: A and AAAA are separate record types, and a dual-stack node gets both under the same name. '
+      + 'Mesh devices are never published: an overlay address in LAN DNS answers queries from hosts that cannot reach it, and peers already resolve each other through the hosts-file sync.</div>'));
+
+    // What the run actually needs, and whether it has it. Shown before the
+    // controls because an interval set on a node with no search domain is the
+    // one configuration that looks complete and does nothing.
+    // What this node would actually register, read live. State rather than
+    // help, so it must survive help mode being off \u2014 it is the line that
+    // explains an interval that is set and a zone that stays empty.
+    const facts = $('<div class="hint" style="margin:10px 0 0"></div>');
+    facts.innerHTML = 'Registering <b>' + esc(b.hostname || '(no hostname)') + '</b> into <b>' + esc(b.search_domain || '(no search domain)') + '</b>'
+      + ' via ' + esc((b.servers && b.servers.length) ? b.servers.join(', ') : '(no DNS servers)') + '.';
+    ddWrap.appendChild(facts);
+    if (b.blocked) ddWrap.appendChild($('<div class="err" style="margin:8px 0 0;font-size:12px">'+esc(b.blocked)+'</div>'));
+
+    const ivRow = $('<div class="settings-row" id="ddns-interval-row"></div>');
+    ivRow.appendChild($('<div><div class="settings-label">Registration interval</div><div class="settings-desc">Minutes between runs, 15 by default. <b>0 turns registration off.</b> A run reads what is published \u2014 forward and reverse \u2014 before writing anything, so a node whose addresses have not changed sends two queries per name and nothing else.</div></div>'));
+    const ivInp = $('<input type="number" min="0" step="1" style="width:80px">');
+    ivInp.value = b.interval_minutes || 0;
+    ivInp.onchange = async () => {
+      const v = parseInt(ivInp.value, 10);
+      if (isNaN(v) || v < 0){ await noticeModal('Enter 0 or a positive whole number of minutes.'); ivInp.value = b.interval_minutes || 0; return; }
+      if (await edit('/api/ddns', { interval_minutes: v })) b.interval_minutes = v; else ivInp.value = b.interval_minutes || 0;
+    };
+    ivRow.appendChild(ivInp);
+    ddWrap.appendChild(ivRow);
+
+    const ttlRow = $('<div class="settings-row" id="ddns-ttl-row"></div>');
+    ttlRow.appendChild($('<div><div class="settings-label">Record TTL</div><div class="settings-desc">Seconds a published record may be cached by other resolvers, 900 by default. <b>0 means zero</b> \u2014 resolvers are told not to cache it at all, which is occasionally what you want for an address that moves often and is otherwise a lot of extra queries.</div></div>'));
+    const ttlInp = $('<input type="number" min="0" step="1" style="width:80px">');
+    ttlInp.value = b.ttl || 0;
+    ttlInp.onchange = async () => {
+      const v = parseInt(ttlInp.value, 10);
+      if (isNaN(v) || v < 0){ await noticeModal('Enter 0 or a positive whole number of seconds.'); ttlInp.value = b.ttl || 0; return; }
+      if (await edit('/api/ddns', { ttl: v })) b.ttl = v; else ttlInp.value = b.ttl || 0;
+    };
+    ttlRow.appendChild(ttlInp);
+    ddWrap.appendChild(ttlRow);
+
+    const revRow = $('<div class="settings-row" id="ddns-reverse-row"></div>');
+    revRow.appendChild($('<div><div class="settings-label">Publish reverse (PTR) records</div><div class="settings-desc">Also point the address back at the name, for the primary name only. A reverse lookup has one answer and it should be the name a person would use. Harmless to leave on where the reverse zone is not delegated here \u2014 the failure is reported and the forward record is unaffected.</div></div>'));
+    const revSw = $('<label class="sw"><input type="checkbox" id="ddns-reverse-cb"><span class="sw-slider"></span></label>');
+    const revCb = revSw.querySelector('input');
+    revCb.checked = !!b.reverse;
+    revCb.onchange = async () => { if (!await edit('/api/ddns', { reverse: revCb.checked })) revCb.checked = !revCb.checked; };
+    revRow.appendChild(revSw);
+    ddWrap.appendChild(revRow);
+
+    // The key. Never sent back to the browser \u2014 the field says whether one
+    // is set, and typing replaces it.
+    const keyRow = $('<div class="settings-row" id="ddns-tsig-row"></div>');
+    keyRow.appendChild($('<div><div class="settings-label">TSIG key</div><div class="settings-desc">Signs the updates, if the zone requires it. Either the path to a BIND-style key file, or <code>name:base64secret</code> (optionally <code>:algorithm</code>, default hmac-sha256). '
+      + 'Leave empty to send unsigned updates, which works where the zone is set to accept them from this node\u2019s address. '
+      + 'A file path is the better answer where you have the choice: it keeps the secret out of this node\u2019s config, which is snapshotted into the history and included in support bundles. '
+      + 'The key is never sent back to this page, so the box reads <b>key set</b> or <b>unsigned</b> rather than showing one; typing replaces whatever is there. '
+      + 'To remove a key, use <code>gravinet settings ddns key -</code>.</div></div>'));
+    // Two words, because a placeholder is clipped at the width of its box and
+    // the box is 260px. It said "none \u2014 updates are sent unsigned",
+    // which arrived on screen as "none \u2014 updates are sent unsig" \u2014 a
+    // sentence that stops mid-word tells the reader less than the one word it
+    // was trying to get to. What it was explaining now lives in the
+    // description above, where there is room for it.
+    const keyState = () => b.tsig_configured ? 'key set' : 'unsigned';
+    const keyInp = $('<input type="text" style="width:260px">');
+    keyInp.placeholder = keyState();
+    keyInp.onchange = async () => {
+      const v = keyInp.value.trim();
+      if (await edit('/api/ddns', { tsig_key: v })){ b.tsig_configured = v !== ''; keyInp.value = ''; keyInp.placeholder = keyState(); }
+    };
+    keyRow.appendChild(keyInp);
+    ddWrap.appendChild(keyRow);
+
+  })();
 }
 
 // secSettingsSecurity: everything that gates access — logging in, this

@@ -479,7 +479,7 @@ func (d *Device) Name() string { return d.name }
 func (d *Device) IfIndex() (int32, error) {
 	return ifIndexByName(d.name)
 }
-func (d *Device) MTU() int     { return d.mtu }
+func (d *Device) MTU() int { return d.mtu }
 
 // Close closes the device file and explicitly destroys the cloned interface.
 // Unlike macOS's utun, FreeBSD's tun(4) interfaces aren't documented as

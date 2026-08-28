@@ -151,6 +151,7 @@ esac`)
 		t.Fatalf("Sync with nothing to apply should not error: %v", err)
 	}
 }
+
 // TestRunTimesOutInsteadOfHangingForever locks in the fix for the FreeBSD
 // install hang: a wedged control socket (e.g. local-unbound installed but
 // never enabled) must not block its caller past controlTimeout, since Sync/
@@ -179,7 +180,7 @@ func TestRunTimesOutInsteadOfHangingForever(t *testing.T) {
 // every startup and shutdown, so it must never itself become the hang.
 func TestSyncToleratesUnreachableDaemonWhenClearing(t *testing.T) {
 	withTempStateDir(t)
-	withConfiguredUnbound(t) // isolate from the not-configured guard; this test is about the daemon being unreachable specifically
+	withConfiguredUnbound(t)        // isolate from the not-configured guard; this test is about the daemon being unreachable specifically
 	withFakeControlBin(t, "exit 1") // binary present, daemon unreachable
 	if err := Sync("deadbeef", "", nil, nil); err != nil {
 		t.Fatalf("Sync with no entries should tolerate an unreachable daemon, got: %v", err)

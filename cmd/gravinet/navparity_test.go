@@ -252,6 +252,14 @@ func TestSettingsGroupCoversSettingsPage(t *testing.T) {
 		"listen-addrs":         "listen-addrs",
 		"socket-buffer":        "socket-buffer",
 		"udp-gso":              "udp-gso",
+		// The four dynamic DNS rows all map to one leaf. Three of them are
+		// meaningless alone — a TTL on a node with no interval set changes
+		// nothing — so the CLI prints and edits the block as a unit rather
+		// than splitting it four ways to satisfy a one-to-one rule.
+		"ddns-interval": "ddns",
+		"ddns-ttl":      "ddns",
+		"ddns-reverse":  "ddns",
+		"ddns-tsig":     "ddns",
 	}
 	// The two rows with no CLI form, each for a stated reason — see
 	// settingsGroup's doc comment. Listed explicitly so adding a third

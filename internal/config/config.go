@@ -411,6 +411,10 @@ type Config struct {
 	// (see internal/config/history.go) are kept, FIFO — oldest pruned first
 	// once the count exceeds this. 0 uses the default (250).
 	ConfigHistoryLimit int `json:"config_history_limit,omitempty"`
+	// DDNS is dynamic DNS registration: this node publishing its own name and
+	// addresses into the zone it searches, on a timer. Off unless an interval
+	// is set. See DDNSConfig.
+	DDNS DDNSConfig `json:"ddns,omitempty"`
 
 	// WebAdmin is the hot-config administration interface.
 	WebAdmin WebAdmin `json:"web_admin"`
@@ -2648,6 +2652,11 @@ func Default() *Config {
 		EnableIPv6:    true,
 		WorkerThreads: 0,
 		AuthBan:       BanPolicy{MaxFailures: 3, WindowSeconds: 60, BanSeconds: 900, CoalesceSeconds: 3},
+		// On by default from v993. A node that publishes its own name is the
+		// behaviour somebody setting up a gateway wants without having to know
+		// this page exists; set the interval to 0 to switch it off, which the
+		// unmarshaller preserves because the field is written out explicitly.
+		DDNS: DDNSConfig{IntervalMinutes: DefaultDDNSInterval, TTL: DefaultDDNSTTL},
 		// Deliberately left empty rather than set to DefaultControlSocket: writing
 		// the current platform default into the scaffolded file freezes it there,
 		// so a later correction to the default (as in v393) can never reach an
@@ -3031,6 +3040,9 @@ func (c *Config) Validate() error {
 	// that served was carrying before anything validates it: ValidDHCPMode
 	// refuses it, and this runs on every Load, so an unhandled "server" would
 	// stop the daemon rather than the server. See migrateServerMode.
+	if err := c.DDNS.Validate(); err != nil {
+		return fmt.Errorf("ddns: %v", err)
+	}
 	c.DHCP.migrateServerMode()
 	// The relay grew from one global interface list to a list of links in
 	// v949. Fold any legacy shape in before validating, so nothing downstream
@@ -3872,6 +3884,108 @@ func (h HostSettings) Validate() error {
 				return fmt.Errorf("dns server %q: %v", d, err)
 			}
 		}
+	}
+	return nil
+}
+
+// --- Dynamic DNS registration ----------------------------------------------
+
+// DDNSConfig is this node registering its own name in DNS.
+//
+// A host that takes its address from DHCP is registered by whatever hands out
+// the lease. A gateway is not: its addresses are static, so nothing on the
+// network announces them, and its name resolves only if somebody typed it into
+// a zone by hand and remembered to change it afterwards. This is the node doing
+// it for itself, which is also the only vantage point that knows what addresses
+// it currently has.
+//
+// There is no enable flag, deliberately. What this needs — a hostname, a search
+// domain, and somewhere to send the update — is exactly what System > Resolver
+// already holds, and a fourth switch that can disagree with those three is a
+// way to have the feature configured and silently off. The interval is the
+// switch: zero means never, which is the default.
+type DDNSConfig struct {
+	// IntervalMinutes is how often to re-register. 0 is off; Default() sets
+	// DefaultDDNSInterval.
+	//
+	// A period rather than an event because the failure modes are all silent:
+	// a server that was down when this node booted, a zone that was created
+	// afterwards, a record somebody deleted by hand. Re-asserting on a timer
+	// converges from every one of those without anything having to notice.
+	// Re-asserting costs nothing when nothing changed — the run reads both
+	// the forward and the reverse record first and writes only on a difference.
+	//
+	// No omitempty, and that is load-bearing rather than a style choice. The
+	// default is non-zero, and Load starts from Default() before unmarshalling
+	// over it — so a 0 omitted from the file would come back as 15 on the
+	// next read, and switching registration off would silently undo itself at
+	// the next restart. Written out, 0 stays 0.
+	IntervalMinutes int `json:"interval_minutes"`
+
+	// TTL is the record lifetime in seconds, and 0 means zero: resolvers are
+	// told not to cache the record at all.
+	//
+	// That is a real answer rather than a missing one, which is why it is not
+	// spent as a stand-in for "unset". Default() sets DefaultDDNSTTL, and the
+	// field is written out unconditionally for the same reason
+	// IntervalMinutes is \u2014 Load starts from Default(), so a 0 dropped by
+	// omitempty would come back as 900 and an operator who asked for an
+	// uncached record would silently get a fifteen-minute one.
+	TTL int `json:"ttl"`
+
+	// TSIGKey signs the updates. Empty sends them unsigned, which is a real
+	// configuration rather than a broken one: a zone can equally be set to
+	// accept updates from a list of addresses, and on a private network that
+	// is a choice an operator has already made in their DNS server.
+	//
+	// Either a path to a BIND-style key file, or the inline "name:base64secret"
+	// or "name:base64secret:algorithm" form. A path is preferred where there is
+	// a choice, because it keeps the secret out of this file — which is
+	// snapshotted into the config history and exported in support bundles. Both
+	// are redacted on the way out (the field name carries "key", which is what
+	// the redactor matches), but a path is not a secret at all.
+	TSIGKey string `json:"tsig_key,omitempty"`
+
+	// Reverse also publishes a PTR for the primary name. On by default —
+	// this is a pointer rather than a bool so an operator can turn it off and
+	// have that survive, which a plain false could not be told from unset.
+	Reverse *bool `json:"reverse,omitempty"`
+}
+
+// DefaultDDNSInterval is how often a node re-registers when nothing says
+// otherwise. Fifteen minutes: short enough that a gateway which came up with a
+// new address is findable by name within one coffee, long enough that the
+// steady-state cost — two queries per name, no writes — stays invisible on a
+// server also answering a LAN's worth of ordinary traffic.
+const DefaultDDNSInterval = 15
+
+// DefaultDDNSTTL is the lifetime a published record gets when nothing says
+// otherwise, in seconds. Fifteen minutes, matching the default registration
+// interval: a record is re-asserted about as often as it expires, so a resolver
+// that cached the old address during a renumber holds it for roughly one cycle
+// rather than indefinitely.
+const DefaultDDNSTTL = 900
+
+// Active reports whether this node should be registering itself.
+func (d DDNSConfig) Active() bool { return d.IntervalMinutes > 0 }
+
+// Interval is the configured period as a duration.
+func (d DDNSConfig) Interval() time.Duration {
+	return time.Duration(d.IntervalMinutes) * time.Minute
+}
+
+// ReverseEnabled reports whether PTRs are published, defaulting to yes.
+func (d DDNSConfig) ReverseEnabled() bool { return d.Reverse == nil || *d.Reverse }
+
+// Validate checks the block. The TSIG key is parsed rather than pattern-matched
+// so a secret that is not valid base64, or an algorithm nothing implements, is
+// refused at the moment it is typed instead of once an hour in the log.
+func (d DDNSConfig) Validate() error {
+	if d.IntervalMinutes < 0 || d.IntervalMinutes > 10080 {
+		return fmt.Errorf("interval %d: must be between 0 (off) and 10080 minutes (a week)", d.IntervalMinutes)
+	}
+	if d.TTL < 0 || d.TTL > 604800 {
+		return fmt.Errorf("ttl %d: must be between 0 (do not cache) and 604800 seconds (a week)", d.TTL)
 	}
 	return nil
 }

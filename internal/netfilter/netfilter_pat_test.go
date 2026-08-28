@@ -129,7 +129,7 @@ func TestWinNATScriptDNATSinglePortRemapSupported(t *testing.T) {
 func TestWinNATScriptDNATStillUnsupportedCases(t *testing.T) {
 	rules := []Rule{
 		{Kind: DNAT, Dest: mustP("203.0.113.5/32"), To: netip.MustParseAddr("10.0.0.5"), Proto: "tcp", DPortLo: 8000, DPortHi: 8010}, // range
-		{Kind: DNAT, Dest: mustP("203.0.113.5/32"), To: netip.MustParseAddr("10.0.0.6")},                                            // address-only, no port at all
+		{Kind: DNAT, Dest: mustP("203.0.113.5/32"), To: netip.MustParseAddr("10.0.0.6")},                                             // address-only, no port at all
 		{Kind: DNAT, Dest: mustP("203.0.113.0/24"), To: netip.MustParseAddr("10.0.0.7"), Proto: "tcp", DPortLo: 80, DPortHi: 80},     // Dest isn't a /32
 	}
 	_, unsupported := winNATScript(rules)

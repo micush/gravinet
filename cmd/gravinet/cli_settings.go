@@ -28,6 +28,8 @@ import (
 	"strings"
 
 	"gravinet/internal/config"
+	"gravinet/internal/ddns"
+	"gravinet/internal/service"
 )
 
 // settingsLogLevels mirrors internal/webadmin/loglevel.go's logLevels.
@@ -695,4 +697,118 @@ func validateListenAddrList(in []string) ([]string, error) {
 		return nil, fmt.Errorf("give at least one address, or \"default\" for loopback + mesh")
 	}
 	return out, nil
+}
+
+// cmdSettingsDDNS is "gravinet settings ddns" — dynamic DNS self-registration.
+//
+// One leaf for the whole block rather than four, which is the exception to how
+// the rest of this group is arranged, and the reason is that three of the four
+// fields are meaningless alone: a TTL on a node with no interval set changes
+// nothing, and an interval with the wrong key set is the failure this is
+// supposed to make visible. Printing them together is what lets a read at 3am
+// answer "is this node registering, and if not why not" in one line.
+//
+// The key is written but never printed. It is a shared secret, and a terminal
+// is a place things get pasted into tickets.
+func cmdSettingsDDNS(args []string) {
+	cfg, path, rest := openCfg(args)
+	d := &cfg.DDNS
+
+	if len(rest) == 0 {
+		state := "off"
+		if d.Active() {
+			state = fmt.Sprintf("every %d minute(s)", d.IntervalMinutes)
+		}
+		fmt.Printf("dynamic dns registration: %s\n", state)
+		fmt.Printf("  ttl:      %s\n", orDash(ttlLabel(d.TTL)))
+		fmt.Printf("  reverse:  %s\n", onOff(d.ReverseEnabled()))
+		fmt.Printf("  tsig key: %s\n", tsigLabel(d.TSIGKey))
+		// The three inputs the run needs, read from the host rather than from
+		// this file — the same values System > Resolver shows, and the reason
+		// a node with an interval set can still be publishing nothing.
+		info := service.HostResolver()
+		fmt.Printf("  name:     %s\n", orDash(info.Hostname))
+		fmt.Printf("  domain:   %s\n", orDash(info.SearchDomain))
+		fmt.Printf("  servers:  %s\n", orDash(joinComma(info.DNSServers)))
+		if d.Active() && (info.Hostname == "" || info.SearchDomain == "" || len(info.DNSServers) == 0) {
+			fmt.Println("\nnote: registration is on, but this host is missing one of the three things it needs.")
+			fmt.Println("      Set them under System > Resolver, or with `gravinet system resolver`.")
+		}
+		return
+	}
+
+	switch rest[0] {
+	case "interval":
+		if len(rest) < 2 {
+			fatal("usage: gravinet settings ddns interval <minutes|0>")
+		}
+		d.IntervalMinutes = mustAtoi(rest[1], "interval")
+	case "ttl":
+		if len(rest) < 2 {
+			fatal("usage: gravinet settings ddns ttl <seconds|0>")
+		}
+		d.TTL = mustAtoi(rest[1], "ttl")
+	case "reverse":
+		if len(rest) < 2 {
+			fatal("usage: gravinet settings ddns reverse <on|off>")
+		}
+		v := rest[1] == "on"
+		d.Reverse = &v
+	case "key":
+		if len(rest) < 2 {
+			fatal("usage: gravinet settings ddns key <path|name:base64secret[:algorithm]|->")
+		}
+		if rest[1] == "-" {
+			d.TSIGKey = ""
+		} else {
+			// Parsed before it is stored, so a bad secret is refused here
+			// rather than once an interval in a log nobody is reading.
+			if _, err := ddns.ParseKey(rest[1]); err != nil {
+				fatal("%v", err)
+			}
+			d.TSIGKey = rest[1]
+		}
+	default:
+		fatal("usage: gravinet settings ddns [interval <minutes>|ttl <seconds>|reverse <on|off>|key <spec|->]")
+	}
+
+	if err := cfg.Validate(); err != nil {
+		fatal("invalid config after change: %v", err)
+	}
+	if err := cfg.SaveTo(path); err != nil {
+		fatal("save config: %v", err)
+	}
+	fmt.Println("saved")
+	if reloadDaemon(cfg.ControlSocket) {
+		fmt.Println("daemon reloaded")
+	}
+}
+
+// ttlLabel renders a record lifetime. Zero is spelled out rather than printed
+// bare: "ttl: 0" reads as a field nobody filled in, when it is in fact an
+// instruction to every resolver on the network.
+func ttlLabel(n int) string {
+	if n == 0 {
+		return "0 (resolvers are told not to cache)"
+	}
+	return fmt.Sprintf("%ds", n)
+}
+
+// tsigLabel says whether a key is set, and never what it is.
+func tsigLabel(spec string) string {
+	if strings.TrimSpace(spec) == "" {
+		return "none (updates are sent unsigned)"
+	}
+	if k, err := ddns.ParseKey(spec); err == nil {
+		return fmt.Sprintf("%s (%s)", k.Name, k.Algorithm)
+	}
+	return "set, but unreadable — check it"
+}
+
+func mustAtoi(s, what string) int {
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil || n < 0 {
+		fatal("%s: want a non-negative whole number, got %q", what, s)
+	}
+	return n
 }

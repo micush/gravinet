@@ -120,21 +120,21 @@ type ipAddressPrefix struct {
 // winipcfg's own struct, so as not to introduce a mismatch by guessing
 // wrong about where padding belongs.
 type mibIPforwardRow2 struct {
-	interfaceLUID      uint64 // NET_LUID: an 8-byte union, opaque here — always left zero (see addGatewayRoute's comment on why InterfaceIndex is used instead)
-	interfaceIndex     uint32
-	destinationPrefix  ipAddressPrefix
-	nextHop            sockaddrInet
-	sitePrefixLength   uint8
-	validLifetime      uint32
-	preferredLifetime  uint32
-	metric             uint32
-	protocol           uint32
-	loopback           uint8
-	autoconfigAddress  uint8
-	publish            uint8
-	immortal           uint8
-	age                uint32
-	origin             uint32
+	interfaceLUID     uint64 // NET_LUID: an 8-byte union, opaque here — always left zero (see addGatewayRoute's comment on why InterfaceIndex is used instead)
+	interfaceIndex    uint32
+	destinationPrefix ipAddressPrefix
+	nextHop           sockaddrInet
+	sitePrefixLength  uint8
+	validLifetime     uint32
+	preferredLifetime uint32
+	metric            uint32
+	protocol          uint32
+	loopback          uint8
+	autoconfigAddress uint8
+	publish           uint8
+	immortal          uint8
+	age               uint32
+	origin            uint32
 }
 
 // mibIPforwardTable2Header mirrors just the fixed-size head of

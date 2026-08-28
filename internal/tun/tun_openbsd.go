@@ -342,7 +342,7 @@ func (d *Device) Name() string { return d.name }
 func (d *Device) IfIndex() (int32, error) {
 	return ifIndexByName(d.name)
 }
-func (d *Device) MTU() int     { return d.mtu }
+func (d *Device) MTU() int { return d.mtu }
 
 // Close closes the device file and destroys the cloned interface. Closing the
 // fd drops the tun's data channel; the explicit destroy then removes the

@@ -51,7 +51,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "991"
+	version = "1000"
 	commit  = "none"
 )
 
@@ -957,6 +957,26 @@ func cmdRun(args []string) {
 		if err := webadmin.StartDHCPRelay(cfg.DHCP); err != nil {
 			logx.Warnf("dhcp relay: %v", err)
 		}
+
+		// Dynamic DNS self-registration, if an interval is set. Started here
+		// rather than earlier because it publishes this node's addresses, and
+		// engine.Start above is what settles which devices exist — a run
+		// before that would register whatever the host looked like mid-boot.
+		//
+		// The overlay devices are handed over as the skip list rather than
+		// baked into the registrar: it is gravinet that knows which interfaces
+		// are its own, and an overlay address published into LAN DNS answers
+		// queries from hosts that cannot reach it.
+		ddnsStop := make(chan struct{})
+		webadmin.StartDDNS(*cfgPath, func() []string {
+			var out []string
+			for _, ifc := range engine.Interfaces() {
+				if ifc.Iface != "" {
+					out = append(out, ifc.Iface)
+				}
+			}
+			return out
+		}, ddnsStop)
 
 		// Turn off host acceptance (and, where the platform exposes it,
 		// sending) of ICMP IPv4/IPv6 redirects — an unauthenticated redirect
@@ -1909,6 +1929,10 @@ func cmdRun(args []string) {
 			// below: the relay holds port 67, and whether it needs releasing
 			// has nothing to do with whether this node was asked to forward.
 			webadmin.StopDHCPRelay()
+			// The registrar holds nothing the OS needs back, but it does make
+			// outbound queries, and a run starting during teardown would log
+			// failures about a node on its way down.
+			close(ddnsStop)
 			if cfg.ForwardingEnabled() {
 				ipfwd.Restore(fwdState)
 			}

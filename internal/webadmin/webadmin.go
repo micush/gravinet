@@ -531,6 +531,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/api/config", s.authed(s.handleConfig))
 	mux.HandleFunc("/api/radvd", s.authed(s.handleRouterAdvert))
 	mux.HandleFunc("/api/dhcp", s.authed(s.handleDHCP))
+	mux.HandleFunc("/api/ddns", s.authed(s.handleDDNS)) // dynamic DNS self-registration (Settings > General)
 	mux.HandleFunc("/api/system/interfaces", s.authed(s.handleSystemInterfaces))
 	mux.HandleFunc("/api/system/vlans", s.authed(s.handleSystemVLANs))
 	mux.HandleFunc("/api/system/interface-edit", s.authed(s.handleSystemInterfaceEdit))

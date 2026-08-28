@@ -2,6 +2,240 @@
 
 ---
 
+## v1000 — 2026-08-27
+
+**Settings › General no longer reports what the last dynamic DNS run did.** A settings page says what this node is configured to do; what it actually did belongs in the log.
+
+The panel had grown a status block: the timestamp of the last run, how many names it published, how many changed, and the full text of any failure. In practice that meant a settings card ending in three lines of red about a reverse zone that does not exist, which is a real thing to know and the wrong place to learn it.
+
+Nothing is lost. Every outcome was already going to the log and still is — a failure at warn carrying the server's own reason, a change at info naming what moved, and the steady state at debug so a healthy node does not write a line an hour forever. The page was a second copy of that, kept in memory, shown to whoever happened to open Settings.
+
+So `ddnsState` is gone with it, along with the `last` field on `/api/ddns`. There is no longer anything recording run outcomes anywhere but the log, which is the point.
+
+### What stays
+
+Two lines, both about the configuration rather than about a run: what this node *would* register — the name, zone and servers it takes from System › Resolver — and, when one of those is missing, a note saying which. The first is the effective value of settings defined on another page; the second is why the settings on this one cannot work. Both are properties of the configuration, which is what the page is for.
+
+### Consequences
+
+The dynamic DNS card's last row is now genuinely the last element in it, so `:last-child` covers its separator and v997's rule is no longer what keeps that card tidy. The test that named both cards as "ends with a note" now names only Config history.
+
+This also removes the last of what v992 put on that panel beyond its settings: the register-now button went in v996, and the report it sat beside has followed it. The two came from the same instinct — that a page about a feature should also be a window onto the feature — and neither belonged.
+
+`TestEveryRunOutcomeIsLogged` is the counterpart: with the display gone, the log is the only place a run's outcome is written, so every branch has to reach it and the failure line has to carry the reason rather than just the count.
+
+---
+
+## v999 — 2026-08-27
+
+**The TSIG key field's placeholder no longer runs off the end of its box.** It reads `unsigned`, or `key set` when there is one.
+
+It said *none — updates are sent unsigned* in a 260px input, and arrived on screen as *none — updates are sent unsig*. A sentence that stops mid-word tells the reader less than the single word it was reaching for, and this one stopped one character short of the only word that mattered.
+
+The explanation it was attempting moved up into the description, which has room for it: the box says `key set` or `unsigned` rather than showing a key, because the key is never sent back to this page, and typing replaces whatever is there.
+
+While writing that sentence it became clear the page has **no way to remove a key** — the field starts empty, so leaving it empty changes nothing and fires no event. The description now points at `gravinet settings ddns key -`, which does clear it. That is a stopgap: a setting that can be set from a page and only unset from a terminal is a gap, not a design, and it should get a proper answer rather than a footnote.
+
+`TestTSIGPlaceholderFitsItsBox` checks both states, since they come from one expression and only the unset one was ever visible in the report.
+
+---
+
+## v998 — 2026-08-27
+
+**Config history rendered as a number box with nothing saying what the number was for**, and four lines of the dynamic DNS card were invisible for the same underlying reason.
+
+### The rule that was being broken
+
+`.settings-desc` is help text and is hidden unless help mode is on — which is the default. The label above it always stays. `.hint` is the other one: errors, loading lines, empty states and live status, none of which may ever be hidden. The CSS comment beside those rules says exactly this; what was missing was anything that noticed when it stopped being true.
+
+Both classes look identical with help mode *on*, which is the condition anyone working on a card tends to be in.
+
+### Config history
+
+The row was built with a description and no label at all. With help off there was nothing left: a card headed CONFIG HISTORY, a stretch of empty space, and an unlabelled `250`. The row now has a label — **Snapshots to keep** — which is the part that survives.
+
+The snapshot count underneath it (*Currently holding 3 of 250 snapshots*) was also marked as help text. It is not help, it is what the node currently holds, so it is a `.hint` now and always shows.
+
+### Dynamic DNS
+
+Same mistake, four times, all mine from v992: the `loading…` placeholder, the *could not read this node's registration settings* error, the line saying which name and zone and servers it would actually use, and the last-run outcome. All four were `.settings-desc`, so with help off the card showed nothing at all while loading and nothing about what it had done afterwards.
+
+That last one matters more than it looks. v996's note said the panel "still shows what the last run published and what failed" as the justification for removing the register-now button — and by default it showed neither. All four are `.hint` now.
+
+### Guards
+
+`TestEverySettingsRowHasALabel` looks for the shape that causes it — a row's label block whose first child is the description — rather than for the one row that had it. `TestLiveStatusIsNotMarkedAsHelpText` pins the five status lines across both cards.
+
+---
+
+## v997 — 2026-08-27
+
+**Settings cards no longer end on a rule with nothing under it.**
+
+A settings row draws a bottom border, and that border is a separator *between* rows — the last one in a card should not have it. `.settings-row:last-child` was meant to handle that, and does, right up until something follows the final row. Two cards do exactly that: Config history puts a snapshot count beneath its only row, and the dynamic DNS card puts the last run's outcome beneath its last one. In both, `:last-child` stopped matching, the separator came back, and the card ended on a line drawn across it with only a stray note below.
+
+The fix says the same thing structurally rather than positionally: a row with no following row draws no separator. `:last-child` is kept alongside it rather than replaced, so the ordinary case does not come to depend on `:has()`.
+
+`TestLastSettingsRowHasNoDanglingSeparator` pins the rule, and a second test pins the two cards that provoked it — the gap is easy to reintroduce, because adding a note under a card's last row looks like a change to that card alone.
+
+---
+
+## v996 — 2026-08-27
+
+**The "register now" button is gone from Settings › General.** It was the wrong kind of control for that panel.
+
+Everything else on Settings is a preference: a value that takes effect the next time something runs. This was an action, and one that reached out to another organisation's DNS server the moment it was clicked and wrote records into a zone — sitting in the same visual row as a dark-mode switch. The `op: "register"` endpoint went with it, so a page left open from v995 cannot still fire one.
+
+The reporting stays. What the last run published, what it changed, and what failed is exactly what a settings panel should say about the settings it holds, and removing the button should not have taken that with it — there is a guard for both halves, because the obvious mistake when deleting a control is deleting the display next to it.
+
+Nothing replaces the button, deliberately. The interval is fifteen minutes by default, so the wait to see a change take effect is short. `RunDDNSOnce` stays exported with the timer loop as its only caller; it is the seam an on-demand run would attach to if one turns out to be wanted, somewhere it belongs.
+
+---
+
+## v995 — 2026-08-27
+
+**The record TTL default is a value in the config now, not a zero the code reinterprets.** `Default()` sets 900, and `0` means what it means in DNS.
+
+Two number fields sat next to each other on the same card, both plain integers, disagreeing about what zero meant: the interval switched registration *off* with it, the TTL switched a *default on*. Nothing but the description text distinguished them. That is the kind of thing that is fine while you are reading the field and wrong at 3am.
+
+It also spent a value that has a meaning. A TTL of zero tells resolvers not to cache the record at all, which is occasionally exactly what is wanted for an address that moves often — and it was unreachable, because zero had been given a second job.
+
+So `DefaultDDNSTTL` is 900, `Default()` sets it, and `ddns.Register` now publishes `Params.TTL` as given. The default lives where every other gravinet default lives and is written into the config file, where an operator can see the number that is actually being published rather than a zero that stands for one.
+
+`ttl` is written out unconditionally, the same care `interval_minutes` needed in v993 and for the same reason: `Load` starts from `Default()`, so a `0` dropped by `omitempty` would read back as 900, and an operator who asked for an uncached record would quietly get a fifteen-minute one.
+
+### Nobody's records change lifetime
+
+A config written by v992 through v994 cannot contain an explicit `ttl: 0` — `omitempty` dropped it, so the value was never written. An absent key is therefore the only pre-v995 shape, and it now picks up 900, which is precisely what the old "0 means default" resolved to. Anyone who had set a real TTL keeps it. `TestUpgradeDoesNotChangeAnyPublishedTTL` pins that, because "we changed what zero means" is the sort of change that quietly rewrites a zone if the migration is wrong.
+
+The CLI spells the value out rather than printing it bare — `ttl: 0` reads as a field nobody filled in, when it is in fact an instruction to every resolver on the network.
+
+---
+
+## v994 — 2026-08-27
+
+**AAAA records were being published, but the primary name was only getting one address family — and a second address on one interface silently replaced the first.** Both are fixed by writing a name's records as a set rather than one address at a time.
+
+### The primary name and dual-stack
+
+`hostname.domain` was claimed by the first usable address found on the host, and claimed once. Whichever family the kernel happened to enumerate first won: a dual-stack gateway published either an A or an AAAA under its bare name, never both, and which one it got could change between boots. The per-interface aliases were fine — those did publish both families — so the symptom was a node that resolved correctly as `node-eth0.corp.internal` and half-correctly as `node.corp.internal`.
+
+The claim is now per record type. A dual-stack node's bare name gets one A and one AAAA; a v4-only node is unchanged.
+
+Still the *first* address of each family, deliberately, not all of them. On a gateway with three LAN interfaces, publishing all three under one name hands clients a round-robin across networks most of them cannot reach. The per-interface alias is where the rest live.
+
+### One update per name and type
+
+A name with two addresses of the same family was written as two separate updates, and each began with a delete-RRset. The second update's delete threw away what the first had just published, so an interface with two IPv4 addresses ended up publishing only whichever was enumerated last — and consistently so, run after run, with nothing reported as wrong.
+
+Addresses are now grouped into sets by name and type, and a set is one delete followed by every add, in one message. The name never resolves to nothing in between, and it ends up with all of them.
+
+### Comparison is now a set comparison
+
+Following from the above: a record is correct when it holds exactly the addresses this host has of that type — not when it holds one of them. A subset match would leave a stale third address published forever, since every later run would agree the record was fine.
+
+Order is disregarded. DNS answers arrive in whatever order the server chose, quite often deliberately rotated, so comparing positionally would rewrite a correct record on most runs and undo v993's whole point.
+
+`NXDOMAIN` on the read-back is now a normal answer meaning "no records yet" rather than a failure. It is exactly the state a first run is in, and treating it as an error made every record look broken in the moment before it was created.
+
+### Reverse records follow
+
+One PTR per primary address, which on a dual-stack node means one in `in-addr.arpa` and one in `ip6.arpa`, both pointing at the same name. Previously there was at most one, for whichever family had won the primary claim.
+
+### Tests
+
+`TestPrimaryNameGetsOneRecordPerFamily` and `TestOneUpdatePerNameAndType` pin the two bugs above. `TestSameAddrSetIgnoresOrder` covers the comparison, including that a subset is *not* a match — the case that would leave stale addresses published indefinitely. The reverse-pass tests from v993 were rewritten against the new structure, since the reverse work is now a second pass over the record sets rather than a branch inside the forward loop.
+
+---
+
+## v993 — 2026-08-27
+
+**Registration is on by default, every 15 minutes, and the reverse record is now maintained on its own terms.**
+
+### On by default
+
+`DefaultDDNSInterval` is 15 minutes, and `Default()` sets it. Fifteen is short enough that a gateway which came up with a new address is findable by name within one coffee, and long enough that the steady-state cost — two queries per name and no writes — stays invisible on a server also answering a LAN's worth of ordinary traffic.
+
+A config written before v992 has no `ddns` key at all, so it picks the default up on upgrade. That is the intent, and it is worth saying plainly: **this is the one change in this series that alters what a node does to somebody else's zone without being asked.** A gateway upgrading to v993 with a hostname, a search domain and DNS servers configured will start publishing itself into that zone within a quarter of an hour. Set the interval to 0 before upgrading on any node where that is not wanted.
+
+Turning it off had to be made to stick, which took one non-obvious change. `Load` starts from `Default()` and unmarshals the file over it, so a `0` that `omitempty` had dropped from the file would come back as 15 on the next read — registration would switch itself back on at the next restart, with nothing in the config to explain why. `interval_minutes` is therefore written out unconditionally. `TestDDNSOffSurvivesARoundTrip` pins it, because the field looks like every other `omitempty` int in the struct and the reason it is not one is invisible at the point of editing.
+
+### The reverse record
+
+Two bugs, both from the PTR being treated as an afterthought of the forward record rather than a record in its own right.
+
+**It was only attempted when the forward record had just changed.** A node whose A record was already correct never looked at its PTR at all — so a PTR deleted by hand, or one that failed on the same run that created the A record, stayed missing forever. Nothing would ever retry it, because the condition for retrying was the one thing that was no longer going to happen. The two records live in different zones, quite often on different servers, and the state of one is not evidence about the other. The reverse check now runs every interval regardless.
+
+**And when it was reached, it was written unconditionally.** No read first, unlike the forward half. Every run that touched a PTR bumped the reverse zone's serial and, on a secondary, triggered a transfer, to write a value that was almost always already there. `syncPTR` now reads the published pointer and returns without writing when it already names this host — comparing on the name rather than an address, and ignoring a trailing dot, since the wire form carries none.
+
+A forward record that failed to land still gets no PTR: a pointer at a name that does not resolve is worse than no pointer.
+
+### Read before write, stated once
+
+Both halves now follow the same rule, and the rule has an edge worth naming: a lookup that *failed* counts as unknown, not as absent, and the update is sent. Asserting on no information is the safe direction — the cost of a redundant write is one update, where the cost of assuming the record is fine would be a node whose name never resolves because a single query timed out.
+
+### Tests
+
+`TestPTRIsNotConditionalOnTheForwardRecordChanging` checks the control flow rather than the wire, deliberately: what went wrong was a block nested one level too deep, and standing up a fake authoritative server to demonstrate that would mostly test the fake. It pins that the reverse block sits at the loop's own level, that `syncPTR` reads before it writes, and that it has a path which reports "already correct, wrote nothing". `TestNoPTRWhenTheForwardRecordFailed` and `TestForwardRecordIsReadBeforeItIsWritten` cover the other two edges. `TestPreDDNSConfigPicksUpTheDefault` makes the upgrade behaviour a decision rather than an accident.
+
+---
+
+## v992 — 2026-08-27
+
+**This node can register its own name in DNS.** Dynamic updates (RFC 2136), signed with TSIG where the zone wants it, on a timer set in Settings › General.
+
+A host that takes its address from DHCP is registered by whatever hands out the lease. A gateway is not: its addresses are static, so nothing on the network ever announces them, and its name resolves only if somebody typed it into a zone by hand and remembered to change it afterwards. This closes that from the node's own side, which is also the only side that knows what addresses it currently has.
+
+### What it needs, and where that comes from
+
+A hostname, a search domain, and somewhere to send the update — which is exactly what System › Resolver already holds. Those three are read live from the host on every run, not copied into a second place, so the page and the registration cannot end up describing different nodes.
+
+There is no enable switch. **The interval is the switch**, and it is zero by default. A fourth toggle that could disagree with the three inputs above would be a way to have the feature fully configured and silently doing nothing, which is the state the whole card is arranged to make visible: it shows the name, domain and servers it would use, and says plainly which one is missing when it cannot run.
+
+### What it publishes
+
+Each address gets two names: the first usable address is published as `hostname.domain`, and every address including that one as `hostname-interface.domain`. A multi-homed gateway therefore has one name meaning "this node" and one per link meaning "this node, on that link" — which is the distinction somebody tracing a path actually needs. An interface name is sanitised into a label first, so a tagged interface (`eth1.22`) becomes `node-eth1-22` rather than a name in a subdomain that does not exist.
+
+**Mesh devices are never published.** An overlay address in LAN DNS answers queries from hosts that cannot route to it, while adding nothing for the hosts that can — they already resolve each other through the hosts-file sync. The daemon passes its own overlay device list in as the skip list rather than the registrar guessing, because gravinet is what knows which interfaces are its own.
+
+A PTR is published for the primary name only, and only when reverse records are on (they are by default). A reverse lookup has one answer and it should be the name a person would use. The reverse zone gets its own SOA lookup, since it is very often served by something else — or by nothing, which is why a PTR failure is reported and never fails the forward record that matters.
+
+### Convergent, not additive
+
+Every name is a **delete-RRset then add** in one message. That is what makes a node that changed address end up with one A record rather than two, one of which is a lie, and the pair travels together so the name never resolves to nothing in between. The delete removes every record of that type at the name rather than the specific old value: this node does not reliably know what it published last — it may have been restarted, restored or renumbered since — and deleting only what it remembers would leave the stale record behind in precisely the case this exists to handle.
+
+Nothing is sent when the record is already right. Each run reads the published value from the authoritative server first, which costs one query and means a node with stable addresses writes nothing on every run after the first. That is also why re-asserting on a timer is cheap enough to be the design: it converges from a server that was down at boot, a zone created afterwards, or a record somebody deleted by hand, without anything having to notice that happened.
+
+Updates go to the zone's **primary master**, found from its SOA, not to whichever resolver the host uses — a forwarder with no authority answers `REFUSED` or `NOTAUTH`, and that difference is the whole of the "it works from my laptop" confusion this avoids. Runs are jittered by 30%, so a rack of gateways that rebooted together does not arrive at the DNS server in the same millisecond every interval.
+
+### TSIG
+
+Optional, because a zone can equally be set to accept updates from a list of addresses, and on a private network that is a choice an operator has already made in their DNS server. Where a key is wanted it is either a path to a BIND-style key file or the inline `name:base64secret[:algorithm]` form, defaulting to hmac-sha256. A path is the better answer where there is a choice — it keeps the secret out of a config that is snapshotted into the history and included in support bundles.
+
+The key is parsed when it is typed, not when it is first used, so a secret that is not base64 or an algorithm nothing implements is refused while the operator is looking at the field. It is never sent back to the browser: the field says whether one is set, and typing replaces it.
+
+hmac-md5 is deliberately not supported. RFC 8945 lists it as optional, everything that does dynamic updates does SHA-256, and this project has no reason to be what keeps it alive.
+
+Every rcode an operator will actually hit explains itself rather than arriving as a number — `REFUSED` names the zone's update policy, `NOTAUTH` and `BADSIG` name the key, `BADTIME` names the clock.
+
+### The wire format
+
+Hand-rolled in `internal/ddns`, no dependency, the same way `internal/dhcrelay` builds DHCP frames — and `internal/mesh` already carried a hand-rolled DNS response *parser* for its wildcard firewall objects, so this is the write half of a format already in the tree.
+
+Names are never compressed. Compression is legal in most of these positions, but a TSIG MAC covers the bytes actually sent, and a name compressed differently from how it was measured would sign one message and transmit another. The cost is a few bytes in a packet far inside one datagram.
+
+UDP with a TCP fallback on truncation, and every reply's id is checked against the query's — a late reply to the previous tick arriving on a fresh socket would otherwise be read as the answer to this one.
+
+### Also on the page
+
+`gravinet settings ddns` prints the block and edits it, and prints the three live inputs beside it so a read at 3am answers "is this node registering, and if not why not" in one line. It never prints the key. There is a **register now** button, because the alternative to waiting up to an interval and then reading the log is not a diagnostic loop worth being in.
+
+### Tests
+
+`internal/ddns` is tested at the wire level, which is where the failures are silent: the UPDATE header's opcode and its four section counts (updates belong in the section counted by NSCOUNT, and putting them in ANCOUNT is the classic way to write an update every server ignores), the delete-RRset being class ANY with no rdata, and TSIG — that ARCOUNT counts the appended record, that the signed message body is byte-identical to the unsigned one ahead of it, that signing is deterministic for a fixed time, and that two different messages do not produce the same MAC. Plus the reverse-name arithmetic, label sanitising, key parsing in both forms, and that the response parser survives truncated input and a compression-pointer loop.
+
+---
+
 ## v991 — 2026-08-27
 
 **The search domain field on System › Resolver lost focus the moment you entered it.** Type a DNS server, tab or click into Search domain, and the caret was gone — the field had to be clicked a second time before it would take a character.

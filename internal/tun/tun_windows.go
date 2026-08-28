@@ -351,7 +351,7 @@ func (d *Device) IfIndex() (int32, error) {
 	return idx, nil
 }
 
-func (d *Device) MTU() int     { return d.mtu }
+func (d *Device) MTU() int { return d.mtu }
 
 // Close ends the Wintun session and closes the adapter. Idempotent (safe to
 // call more than once) since it's reached from both a live "remove this
