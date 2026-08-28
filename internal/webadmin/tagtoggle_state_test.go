@@ -23,7 +23,8 @@ import (
 //
 // Three tables shipped that way — DHCP subnets, IPv6 RA interfaces, and
 // tagged interfaces — because nothing tied the markup to the helper that reads
-// it. toggleTagState now falls back to the tag's own on/off class, so a
+// it. (The subnet table itself went with the DHCP server in v988; the relay
+// links below are what is left of that page.) toggleTagState now falls back to the tag's own on/off class, so a
 // missing attribute is no longer fatal, but the attribute is still the
 // documented contract and the other three data-* readers of it (the edit
 // gating in the routes, seeds and QoS tables) have no such fallback. So this
@@ -37,7 +38,6 @@ func TestTagToggleRowsCarryEnabledState(t *testing.T) {
 	// the row is given, which is also what makes the failure message name the
 	// table an operator would recognise.
 	rows := map[string]string{
-		"dhrow":  "DHCP subnets (System > DHCP)",
 		"dlrow":  "DHCP relay links (System > DHCP)",
 		"rarow":  "IPv6 RA interfaces (Traffic > IPv6 RA)",
 		"vlrow":  "tagged interfaces (System > Interfaces)",

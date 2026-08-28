@@ -11,7 +11,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"time"
 
 	"gravinet/internal/config"
 	"gravinet/internal/control"
@@ -251,7 +250,6 @@ var monitorGroup = []groupLeaf{
 	{"route-table", "the live kernel routing table on this host", cmdMonitorRouteTable},
 	{"bgp-peers", "live BGP peer sessions reported by FRR", cmdMonitorBGPPeers},
 	{"l2-peers", "live LLDP/CDP neighbors seen on this host's interfaces", cmdMonitorL2Peers},
-	{"dhcp-leases", "current DHCP leases this node has handed out", cmdMonitorDHCPLeases},
 	{"hosts-file", "the live contents of this host's hosts file", cmdMonitorHostsFile},
 	{"dns-state", "what's actually registered with this host's OS resolver", cmdMonitorDNSState},
 	{"logs", "the daemon's recent log output", cmdMonitorLogs},
@@ -719,80 +717,6 @@ func cmdMonitorL2Peers(args []string) {
 	}
 	if hint != "" {
 		fmt.Printf("note: %s\n", hint)
-	}
-}
-
-// cmdMonitorDHCPLeases is "gravinet monitor dhcp-leases" — the leases Kea has
-// actually handed out, read back from its lease database. Read-only, and the
-// read-only half of a pair exactly like monitor l2-peers above: the pools and
-// the server/relay role are edited by "gravinet dhcp", mirroring the rail.
-//
-// Goes through webadmin.DHCPLeases rather than parsing the file here, so the
-// CLI and the web page cannot disagree about what a lease is — the journal
-// rules that decide it are subtle enough that a second implementation would
-// drift (see internal/webadmin/dhcp_leases.go).
-func cmdMonitorDHCPLeases(args []string) {
-	fs := flag.NewFlagSet("monitor dhcp-leases", flag.ExitOnError)
-	cfgPath := fs.String("config", defaultConfigPath, "config path")
-	fs.Parse(args)
-
-	mode := ""
-	if cfg, err := config.Load(*cfgPath); err == nil {
-		mode = string(cfg.DHCP.Mode)
-	}
-	leases, hint, err := webadmin.DHCPLeases(mode)
-	if err != nil {
-		fatal("dhcp-leases: %s", err)
-	}
-	if len(leases) == 0 {
-		fmt.Println("no DHCP leases held on this node")
-		if hint != "" {
-			fmt.Printf("note: %s\n", hint)
-		}
-		return
-	}
-	fmt.Printf("%-16s %-20s %-18s %-9s %s\n", "ADDRESS", "HOSTNAME", "MAC", "STATE", "EXPIRES")
-	for _, l := range leases {
-		// A declined lease carries no client — Kea blanks those fields — so
-		// print dashes rather than empty columns, and say what its time
-		// means: when the address returns to the pool, not when a lease ends.
-		host, mac, state := l.Hostname, l.HWAddr, "leased"
-		when := humanUntil(l.Expire)
-		if l.Declined {
-			host, mac, state = "-", "-", "declined"
-			when += " (back to pool)"
-		}
-		if host == "" {
-			host = "-"
-		}
-		if mac == "" {
-			mac = "-"
-		}
-		fmt.Printf("%-16s %-20s %-18s %-9s %s\n", l.Address, host, mac, state, when)
-	}
-	if hint != "" {
-		fmt.Printf("note: %s\n", hint)
-	}
-}
-
-// humanUntil renders a unix expiry as a short duration from now.
-func humanUntil(unix int64) string {
-	if unix == 0 {
-		return "-"
-	}
-	d := time.Until(time.Unix(unix, 0))
-	if d <= 0 {
-		return "expired"
-	}
-	switch {
-	case d < time.Minute:
-		return fmt.Sprintf("%ds", int(d.Seconds()))
-	case d < time.Hour:
-		return fmt.Sprintf("%dm", int(d.Minutes()))
-	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh%dm", int(d.Hours()), int(d.Minutes())%60)
-	default:
-		return fmt.Sprintf("%dd%dh", int(d.Hours())/24, int(d.Hours())%24)
 	}
 }
 

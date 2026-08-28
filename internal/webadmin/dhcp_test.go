@@ -1,181 +1,11 @@
 package webadmin
 
 import (
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"gravinet/internal/config"
 )
-
-func dhcpSubnet() config.DHCPSubnet {
-	return config.DHCPSubnet{
-		Iface: "eth1", Subnet: "10.1.1.0/24",
-		PoolStart: "10.1.1.100", PoolEnd: "10.1.1.200", Router: "10.1.1.1",
-		DNS: []string{"10.1.1.1", "9.9.9.9"}, Search: []string{"lan.example"},
-		LeaseSeconds: 7200,
-	}
-}
-
-func renderKeaMap(t *testing.T, c config.DHCPConfig) map[string]any {
-	t.Helper()
-	b, err := renderKea(c)
-	if err != nil {
-		t.Fatalf("render: %v", err)
-	}
-	var m map[string]any
-	if err := json.Unmarshal(b, &m); err != nil {
-		t.Fatalf("rendered config is not valid JSON: %v\n%s", err, b)
-	}
-	return m
-}
-
-// The ordinary case, and the properties that make it a working scope rather
-// than merely valid JSON.
-func TestRenderKeaSubnet(t *testing.T) {
-	m := renderKeaMap(t, config.DHCPConfig{Mode: config.DHCPServer, Subnets: []config.DHCPSubnet{dhcpSubnet()}})
-	d, _ := m["Dhcp4"].(map[string]any)
-	if d == nil {
-		t.Fatal("no Dhcp4 object")
-	}
-	subs, _ := d["subnet4"].([]any)
-	if len(subs) != 1 {
-		t.Fatalf("want 1 subnet, got %d", len(subs))
-	}
-	s, _ := subs[0].(map[string]any)
-	if s["subnet"] != "10.1.1.0/24" {
-		t.Errorf("subnet = %v", s["subnet"])
-	}
-	if s["interface"] != "eth1" {
-		t.Errorf("interface = %v", s["interface"])
-	}
-	// Kea reserves subnet id 0.
-	if id, _ := s["id"].(float64); id < 1 {
-		t.Errorf("subnet id = %v, must be 1 or greater", s["id"])
-	}
-	pools, _ := s["pools"].([]any)
-	if len(pools) != 1 {
-		t.Fatalf("want 1 pool, got %d", len(pools))
-	}
-	if p, _ := pools[0].(map[string]any); p["pool"] != "10.1.1.100 - 10.1.1.200" {
-		t.Errorf("pool = %v", p["pool"])
-	}
-	// Kea listens only on the interfaces it is named, which is what keeps a
-	// DHCP server off every other link on the host.
-	ic, _ := d["interfaces-config"].(map[string]any)
-	ifs, _ := ic["interfaces"].([]any)
-	if len(ifs) != 1 || ifs[0] != "eth1" {
-		t.Errorf("interfaces-config = %v, must name exactly the served links", ifs)
-	}
-	opts := map[string]string{}
-	for _, o := range s["option-data"].([]any) {
-		om := o.(map[string]any)
-		opts[om["name"].(string)] = om["data"].(string)
-	}
-	if opts["routers"] != "10.1.1.1" {
-		t.Errorf("routers = %q", opts["routers"])
-	}
-	if opts["domain-name-servers"] != "10.1.1.1, 9.9.9.9" {
-		t.Errorf("domain-name-servers = %q", opts["domain-name-servers"])
-	}
-	if opts["domain-search"] != "lan.example" {
-		t.Errorf("domain-search = %q", opts["domain-search"])
-	}
-}
-
-// Rendering through encoding/json is the reason this integration has no
-// safeToken guard, unlike the text renderers next door. The property that buys
-// is that a hostile string cannot break out of the field it is written in — it
-// comes back out of the parser as the same string.
-func TestRenderKeaEscapesRatherThanBreakingOut(t *testing.T) {
-	s := dhcpSubnet()
-	nasty := `x", "malicious": {"a":1}, "z":"`
-	s.Search = []string{nasty}
-	m := renderKeaMap(t, config.DHCPConfig{Mode: config.DHCPServer, Subnets: []config.DHCPSubnet{s}})
-	d := m["Dhcp4"].(map[string]any)
-	if _, injected := d["malicious"]; injected {
-		t.Fatal("an operator string escaped its field and became config structure")
-	}
-	sub := d["subnet4"].([]any)[0].(map[string]any)
-	found := false
-	for _, o := range sub["option-data"].([]any) {
-		om := o.(map[string]any)
-		if om["name"] == "domain-search" && om["data"] == nasty {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("the search domain did not round-trip through the marshaller intact")
-	}
-}
-
-// A node in relay mode renders no scopes, and nothing else has to remember to
-// check the mode first — EnabledSubnets is where the exclusion lives.
-func TestRenderKeaServesNothingOutsideServerMode(t *testing.T) {
-	for _, mode := range []config.DHCPMode{config.DHCPOff, config.DHCPRelay} {
-		m := renderKeaMap(t, config.DHCPConfig{Mode: mode, Subnets: []config.DHCPSubnet{dhcpSubnet()}})
-		d := m["Dhcp4"].(map[string]any)
-		if subs, _ := d["subnet4"].([]any); len(subs) != 0 {
-			t.Errorf("mode %q rendered %d subnet(s)", mode, len(subs))
-		}
-	}
-}
-
-// A hand-maintained config is set aside, never clobbered, and a file gravinet
-// wrote is recognised as its own.
-func TestKeaOwnership(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "kea-dhcp4.conf")
-
-	if !keaOwned(p) {
-		t.Error("an absent file should be ours to write")
-	}
-	if err := os.WriteFile(p, []byte(`{"Dhcp4":{"subnet4":[]}}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if keaOwned(p) {
-		t.Error("a hand-written config was claimed as gravinet's")
-	}
-	if err := os.WriteFile(p, []byte("not json at all"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if keaOwned(p) {
-		t.Error("an unparseable file was claimed as gravinet's — this must fail safe")
-	}
-
-	out, err := renderKea(config.DHCPConfig{Mode: config.DHCPServer, Subnets: []config.DHCPSubnet{dhcpSubnet()}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(p, out, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if !keaOwned(p) {
-		t.Error("gravinet does not recognise its own output")
-	}
-
-	// Setting aside preserves what was there, and a second takeover does not
-	// overwrite the first backup.
-	to, err := setAsideKeaConf(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(to); err != nil {
-		t.Errorf("the displaced config is not at %s: %v", to, err)
-	}
-	if err := os.WriteFile(p, []byte("second hand-written file"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	to2, err := setAsideKeaConf(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if to2 == to {
-		t.Error("a second takeover overwrote the first backup")
-	}
-}
 
 // fakeRelay stands in for the real one so the apply path can be exercised
 // without binding port 67, which a test cannot do and should not.
@@ -190,6 +20,8 @@ type fakeRelay struct {
 }
 
 func (f *fakeRelay) Apply(c config.DHCPConfig) error {
+	f.stopped++ // liveRelay.Apply stops before it starts
+	f.links = nil
 	if !c.RelayActive() {
 		return nil
 	}
@@ -210,43 +42,25 @@ func (f *fakeRelay) Listening() []string {
 	return out
 }
 
-// The mutual exclusion at the point it actually has to hold: an apply. Leaving
-// the previous role running is how a node ends up both serving and relaying,
-// which is the failure the single Mode field exists to prevent — but the model
-// only makes it unrepresentable in the config, not on the host. This is the
-// half that tears the other role down.
-func TestApplyDHCPStopsTheRoleThatIsNotSelected(t *testing.T) {
-	prev := dhcpRelay
-	t.Cleanup(func() { dhcpRelay = prev })
-
-	// Switching to server must stop the relay.
+// Switching the relay off has to stop it, not merely stop starting it. The
+// apply is the only thing between a stored mode and a socket still bound to
+// port 67 on a link the operator has just told the node to leave alone.
+func TestApplyDHCPStopsTheRelayWhenItIsOff(t *testing.T) {
 	f := &fakeRelay{}
-	dhcpRelay = f
-	// No subnets, so nothing is written and no service is driven — the point
-	// here is the teardown, not the render.
-	if _, err := applyDHCP(config.DHCPConfig{Mode: config.DHCPServer}); err != nil {
-		t.Fatalf("apply: %v", err)
-	}
-	if f.stopped == 0 {
-		t.Error("switching to server mode left the relay running")
-	}
-	if f.started != 0 {
-		t.Error("server mode started the relay")
-	}
-
-	// Switching to off must stop it too.
-	f = &fakeRelay{}
-	dhcpRelay = f
+	withFakeRelay(t, f)
 	if _, err := applyDHCP(config.DHCPConfig{}); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
 	if f.stopped == 0 {
 		t.Error("switching DHCP off left the relay running")
 	}
+	if f.started != 0 {
+		t.Error("the off mode started a relay")
+	}
 
-	// Relay mode starts it, and does not stop it on the way through.
+	// And relay mode starts it.
 	f = &fakeRelay{}
-	dhcpRelay = f
+	withFakeRelay(t, f)
 	c := config.DHCPConfig{Mode: config.DHCPRelay, Relay: config.DHCPRelayConfig{
 		Links: []config.DHCPRelayLink{{Iface: "eth1", Servers: []string{"10.0.0.5"}}},
 	}}
@@ -256,23 +70,12 @@ func TestApplyDHCPStopsTheRoleThatIsNotSelected(t *testing.T) {
 	if f.started != 1 {
 		t.Errorf("relay mode started the relay %d times, want 1", f.started)
 	}
-	if f.stopped != 0 {
-		t.Error("relay mode stopped the relay it had just been asked to run")
-	}
 }
 
-// The apply path drives the Kea unit whenever the node is not serving. Checked
-// against the source because the alternative is stopping a real service on the
-// machine running the tests.
-func TestApplyDHCPStopsKeaWhenNotServing(t *testing.T) {
+// The apply reports the preflight rather than swallowing it, so the same class
+// of silent failure v942 fixed for radvd is reported here too.
+func TestApplyDHCPReportsThePreflight(t *testing.T) {
 	src := mustRead("dhcp_apply.go")
-	i := strings.Index(src, "if c.Mode != config.DHCPServer {")
-	j := strings.Index(src, `keaService("stop")`)
-	if i < 0 || j < 0 || j < i {
-		t.Error("the apply no longer stops Kea when the node is not in server mode")
-	}
-	// And the preflight is folded into the note, so the same class of silent
-	// failure v942 fixed for radvd is reported here too.
 	if !strings.Contains(src, "dhcpProblemNote(c)") {
 		t.Error("the apply no longer reports the DHCP preflight")
 	}
@@ -281,41 +84,71 @@ func TestApplyDHCPStopsKeaWhenNotServing(t *testing.T) {
 	}
 }
 
-// The preflight itself: an interface whose address is outside the subnet it is
-// set to serve gets a Kea that starts, runs, and never answers.
-func TestDHCPProblemsOnlyCheckTheActiveMode(t *testing.T) {
+// Nothing in this package drives a DHCP server any more. Checked as text
+// because the failure it guards against is a reintroduction, and a
+// reintroduction compiles.
+//
+// Identifiers rather than the word: StartDHCPRelay's own warning has to say
+// "Kea" out loud, because naming the daemon still running is the whole of what
+// that sentence is for. What must not come back is anything that renders its
+// config, installs it, or drives its unit.
+func TestNoDHCPServerIsDrivenFromHere(t *testing.T) {
+	for _, gone := range []string{
+		"renderKea(", "keaService(", "keaInstalled(", "installKea(", "keaActive(",
+		"keaOwned(", "keaConfPath", "keaLeasePath", "keaStopAndDisable(",
+		"config.DHCPSubnet", "EnabledSubnets(", "subnet4", "dhcp-socket-type",
+	} {
+		for _, f := range []string{"dhcp_apply.go", "dhcp_runtime.go", "dhcp_preflight.go", "tshoot.go"} {
+			if strings.Contains(mustRead(f), gone) {
+				t.Errorf("%s still reaches for %s; gravinet stopped serving DHCP in v988", f, gone)
+			}
+		}
+	}
+	// And the endpoints that only the server half had are gone from the mux,
+	// so a stale page cannot still reach a handler that no longer means
+	// anything.
+	mux := mustRead("webadmin.go")
+	for _, gone := range []string{"/api/dhcp-leases", "/api/dhcp/relay-iface"} {
+		if strings.Contains(mux, gone) {
+			t.Errorf("%s is still routed", gone)
+		}
+	}
+}
+
+// The preflight is about the links actually in service. A parked link, or a
+// whole relay configuration sitting unused while the mode is off, is not
+// supposed to be doing anything — reporting that it is not would hand the
+// operator their own request back as a fault.
+func TestDHCPProblemsOnlyCheckLinksInService(t *testing.T) {
 	c := config.DHCPConfig{
-		Mode:    config.DHCPRelay,
-		Subnets: []config.DHCPSubnet{{Iface: "definitely-not-a-nic", Subnet: "10.1.1.0/24", PoolStart: "10.1.1.10", PoolEnd: "10.1.1.20"}},
-		Relay:   config.DHCPRelayConfig{Links: []config.DHCPRelayLink{{Iface: "definitely-not-a-nic", Servers: []string{"10.0.0.5"}}}},
+		Mode:  config.DHCPRelay,
+		Relay: config.DHCPRelayConfig{Links: []config.DHCPRelayLink{{Iface: "definitely-not-a-nic", Servers: []string{"10.0.0.5"}}}},
 	}
 	probs := dhcpProblems(c)
 	if len(probs) != 1 {
 		t.Fatalf("want the relay interface reported once, got %v", probs)
 	}
 	if !strings.Contains(probs["definitely-not-a-nic"], "relayed") {
-		t.Errorf("relay mode reported a server problem: %q", probs["definitely-not-a-nic"])
-	}
-
-	c.Mode = config.DHCPServer
-	probs = dhcpProblems(c)
-	if !strings.Contains(probs["definitely-not-a-nic"], "served") {
-		t.Errorf("server mode reported a relay problem: %q", probs["definitely-not-a-nic"])
-	}
-
-	c.Mode = config.DHCPOff
-	if len(dhcpProblems(c)) != 0 {
-		t.Error("a node doing nothing reported problems with not doing it")
+		t.Errorf("the reason does not say what is not happening: %q", probs["definitely-not-a-nic"])
 	}
 
 	// The note is ordered and carries noteworthy's separator.
-	c.Mode = config.DHCPServer
 	n := dhcpProblemNote(c)
 	if n == "" || !strings.HasSuffix(n, "; ") {
 		t.Errorf("note = %q, want a non-empty note ending in the separator", n)
 	}
 	if got := noteworthy(n); strings.HasSuffix(got, "; ") {
 		t.Errorf("noteworthy did not trim the trailing separator: %q", got)
+	}
+
+	c.Mode = config.DHCPOff
+	if len(dhcpProblems(c)) != 0 {
+		t.Error("a node doing nothing reported problems with not doing it")
+	}
+	c.Mode = config.DHCPRelay
+	c.Relay.Links[0].Disabled = true
+	if len(dhcpProblems(c)) != 0 {
+		t.Error("a parked link was reported as failing to relay")
 	}
 }
 
@@ -339,6 +172,28 @@ func TestDHCPRelayRowOpsAreHandled(t *testing.T) {
 	if strings.Contains(src, `case "relay":`) {
 		t.Error("the handler still accepts the pre-v949 whole-form relay op")
 	}
+	// The subnet ops went with the server in v988. A stale page still posting
+	// one must be answered with "unknown op" rather than quietly editing
+	// something.
+	for _, op := range []string{`case "add"`, `case "update"`, `case "delete"`, `case "enable"`} {
+		if strings.Contains(src, op) {
+			t.Errorf("the handler still implements the server-side op %s", op)
+		}
+	}
+}
+
+// Asking for the retired server mode is refused, and refused before it is
+// stored. Config.Validate would fold it to off on the way past, so a handler
+// that validated only on the way out would answer somebody selecting a role
+// that no longer exists with a silent success.
+func TestDHCPHandlerRefusesTheRetiredServerMode(t *testing.T) {
+	src := mustRead("dhcp_apply.go")
+	i := strings.Index(src, `case "mode":`)
+	j := strings.Index(src, "config.ValidDHCPMode(m)")
+	k := strings.Index(src, "d.Mode = m")
+	if i < 0 || j < 0 || k < 0 || !(i < j && j < k) {
+		t.Error("the mode op no longer validates before it stores, so a retired mode would be silently accepted")
+	}
 }
 
 // A link with no server is stored rather than refused: the row exists so the
@@ -355,9 +210,7 @@ func TestDHCPRelayHalfWrittenLinkIsStoredButNotRun(t *testing.T) {
 		t.Error("a link with nowhere to forward to started a relay")
 	}
 	f := &fakeRelay{}
-	old := dhcpRelay
-	dhcpRelay = f
-	defer func() { dhcpRelay = old }()
+	withFakeRelay(t, f)
 	if _, err := applyDHCP(c); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
@@ -377,9 +230,7 @@ func TestDHCPRelayParkedLinkIsExcluded(t *testing.T) {
 		},
 	}}
 	f := &fakeRelay{}
-	old := dhcpRelay
-	dhcpRelay = f
-	defer func() { dhcpRelay = old }()
+	withFakeRelay(t, f)
 	if _, err := applyDHCP(c); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
@@ -392,5 +243,26 @@ func TestDHCPRelayParkedLinkIsExcluded(t *testing.T) {
 	// Each link carries its own hop limit now, rather than sharing one.
 	if f.links[0].MaxHops != 8 {
 		t.Errorf("the link's own hop limit was lost: %d", f.links[0].MaxHops)
+	}
+}
+
+// The one thing v988 says out loud. A node that was serving keeps its Kea
+// running — gravinet does not reach out to stop a daemon during an upgrade —
+// so the log line is the only evidence left that a server nothing in the
+// console admits to is still handing out leases.
+func TestRetiredServerModeIsAnnouncedAtStartup(t *testing.T) {
+	src := mustRead("dhcp_apply.go")
+	i := strings.Index(src, "func StartDHCPRelay(")
+	if i < 0 {
+		t.Fatal("StartDHCPRelay is gone")
+	}
+	body := src[i:]
+	if !strings.Contains(body, "RetiredServerMode()") {
+		t.Error("startup no longer checks for a config that was serving, so the upgrade is silent")
+	}
+	for _, want := range []string{"still running", "kea-dhcp4.conf"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the startup warning does not mention %q, so it does not say what is still serving", want)
+		}
 	}
 }

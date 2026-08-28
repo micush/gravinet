@@ -10,12 +10,11 @@ import (
 // every web-admin page has a CLI counterpart, and a page reachable only in a
 // browser is a page an operator cannot script or inspect over ssh.
 //
-// Read and mode-switch only, deliberately, the same split cmdIPv6RA draws.
-// Adding a subnet needs an interface, a CIDR, both pool boundaries and a
-// gateway that has to sit inside one and outside the other; reproducing that
-// as flags would be a second, weaker implementation of a form the editor
-// already validates. What is worth having on a terminal at 3am is seeing what
-// this node is doing and being able to stop it.
+// Read and switch only, deliberately, the same split cmdIPv6RA draws. What is
+// worth having on a terminal at 3am is seeing what this node is set to do and
+// being able to stop it; a link needs an interface and at least one upstream
+// server, and reproducing the editor as flags would be a second, weaker
+// implementation of a form that already validates them.
 func cmdSystemDHCP(args []string) {
 	if len(args) == 0 {
 		args = []string{"list"}
@@ -35,22 +34,7 @@ func cmdSystemDHCP(args []string) {
 		// cannot see its sockets and would have to guess. The web admin asks
 		// the daemon and reports both (see dhcp_runtime.go); guessing here
 		// would put a confident wrong answer on a terminal.
-		fmt.Printf("dhcp role (configured): %s\n", mode)
-		fmt.Println("  server subnets:")
-		if len(d.Subnets) == 0 {
-			fmt.Println("    (none)")
-		}
-		for _, s := range d.Subnets {
-			// The relay column is printed for every row rather than only the
-			// relayed ones. A dash saying "this subnet is on that interface"
-			// is the answer to a question an operator reading a mixed list
-			// has to ask about each line, and a column that appears only
-			// sometimes is one they have to notice is missing.
-			fmt.Printf("    %-10s %-8s %-18s via=%s pool=%s-%s router=%s dns=%s lease=%s\n",
-				s.Iface, onOff(!s.Disabled), s.Subnet, orDash(joinComma(s.RelayAddrs())),
-				s.PoolStart, s.PoolEnd,
-				orDash(s.Router), orDash(joinComma(s.DNS)), orDash(leaseLabel(s.LeaseSeconds)))
-		}
+		fmt.Printf("dhcp relay (configured): %s\n", mode)
 		fmt.Println("  relay links:")
 		if len(d.Relay.Links) == 0 {
 			fmt.Println("    (none)")
@@ -59,18 +43,28 @@ func cmdSystemDHCP(args []string) {
 			fmt.Printf("    %-10s %-8s servers=%s max_hops=%s\n",
 				l.Iface, onOff(!l.Disabled), orDash(joinComma(l.Servers)), hopsLabel(l.MaxHops))
 		}
-		// Both halves are listed whichever is running, because both are
-		// stored whichever is running — switching to relay for an afternoon
-		// does not discard the pools. Which one is live is the role above.
+		// Parked links are listed with the rest, because they are stored with
+		// the rest: switching a link off for an afternoon does not discard
+		// where it forwarded to. The state column is what says which is live.
+		if d.RetiredServerMode() {
+			fmt.Println()
+			fmt.Println("note: this config still has this node serving DHCP through Kea, a role removed in v988.")
+			fmt.Println("      gravinet has not touched the Kea service — if it was running it still is, still")
+			fmt.Println("      enabled at boot, and serving a config nothing manages now. The served subnets are")
+			fmt.Println("      in this node's config history if they are worth recreating elsewhere.")
+		}
 
 	case "mode":
 		if len(rest) == 0 {
-			fatal("usage: gravinet system dhcp mode <off|server|relay>")
+			fatal("usage: gravinet system dhcp mode <off|relay>")
 		}
 		m := config.DHCPMode(rest[0])
 		if rest[0] == "off" {
 			m = config.DHCPOff
 		}
+		// Checked before it is stored, not after. cfg.Validate would quietly
+		// fold the retired server mode to off, so validating only on the way
+		// out would answer somebody asking for "server" with a silent success.
 		if err := config.ValidDHCPMode(m); err != nil {
 			fatal("%v", err)
 		}
@@ -81,24 +75,15 @@ func cmdSystemDHCP(args []string) {
 		if err := cfg.SaveTo(path); err != nil {
 			fatal("save config: %v", err)
 		}
-		fmt.Printf("dhcp role set to %s\n", rest[0])
-		// Selecting one role deselects the other by construction: Mode is a
-		// single field, so there is no second switch left on behind this.
+		fmt.Printf("dhcp relay set to %s\n", rest[0])
 		if reloadDaemon(cfg.ControlSocket) {
 			fmt.Println("daemon reloaded")
 		}
-		fmt.Println("note: subnets and relay servers are edited through the web admin's System > DHCP page")
+		fmt.Println("note: relay links are edited through the web admin's System > DHCP page")
 
 	default:
-		fatal("usage: gravinet system dhcp <list|mode> [off|server|relay]")
+		fatal("usage: gravinet system dhcp <list|mode> [off|relay]")
 	}
-}
-
-func leaseLabel(n int) string {
-	if n <= 0 {
-		return ""
-	}
-	return fmt.Sprintf("%ds", n)
 }
 
 // hopsLabel renders a relay hop limit, naming the default rather than printing

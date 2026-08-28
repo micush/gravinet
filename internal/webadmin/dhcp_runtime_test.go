@@ -90,50 +90,6 @@ func TestDHCPRuntimeExplainsARelayThatIsNotRelaying(t *testing.T) {
 	}
 }
 
-// Server selected with nothing servable. Kea refuses to start with no subnet4,
-// so the apply stops it — and through v949 the page went on saying "server"
-// with no indication the node had stopped.
-func TestDHCPRuntimeExplainsAServerThatIsNotServing(t *testing.T) {
-	withFakeRelay(t, &fakeRelay{})
-	sub := func(iface string) config.DHCPSubnet {
-		return config.DHCPSubnet{Iface: iface, Subnet: "10.1.1.0/24",
-			PoolStart: "10.1.1.100", PoolEnd: "10.1.1.200", Router: "10.1.1.1"}
-	}
-	parked := sub("eth1")
-	parked.Disabled = true
-
-	for name, tc := range map[string]struct {
-		subnets []config.DHCPSubnet
-		want    string
-	}{
-		"none configured": {nil, "no subnet is configured"},
-		"all disabled":    {[]config.DHCPSubnet{parked}, "every subnet is disabled"},
-		// servableSubnets drops a subnet naming an interface this host does
-		// not have, because Kea refuses the whole file for one it cannot find.
-		// Dropping every subnet leaves server mode with nothing to serve.
-		"interface absent": {[]config.DHCPSubnet{sub("definitely-not-a-nic")}, "does not have"},
-	} {
-		c := config.DHCPConfig{Mode: config.DHCPServer, Subnets: tc.subnets}
-		r := dhcpRuntime(c)
-		if r.Role != "" {
-			t.Errorf("%s: reported a running server (%q) when none is", name, r.Role)
-		}
-		// Kea is not installed in this container, so that reason wins and is
-		// itself correct — the assertion is that *some* reason is given and
-		// that a reachable one is right.
-		if r.Why == "" {
-			t.Errorf("%s: a server that is not serving explained nothing", name)
-			continue
-		}
-		if !keaInstalled() && !strings.Contains(r.Why, "not installed") {
-			t.Errorf("%s: want the missing-Kea reason on a host without it, got %q", name, r.Why)
-		}
-		if keaInstalled() && !strings.Contains(r.Why, tc.want) {
-			t.Errorf("%s: explanation %q does not mention %q", name, r.Why, tc.want)
-		}
-	}
-}
-
 // The report has to reach the page, or none of the above is visible.
 func TestDHCPRuntimeIsServedAndRendered(t *testing.T) {
 	if !strings.Contains(mustRead("dhcp_apply.go"), `"running":`) {
@@ -142,116 +98,73 @@ func TestDHCPRuntimeIsServedAndRendered(t *testing.T) {
 	if !strings.Contains(indexHTML, "b.running") {
 		t.Error("the page no longer reads the running state")
 	}
-	// Each card's pill must keep showing the configured state, not the running
-	// one: it is how a role gets enabled before it can possibly be running, so
-	// driving it from reality would make an unconfigured role impossible to
+	// The pill must keep showing the configured state, not the running one:
+	// it is how the relay gets enabled before it can possibly be running, so
+	// driving it from reality would make an unconfigured relay impossible to
 	// turn on. The running state goes beside the pill, never into it.
-	for _, role := range []string{"server", "relay"} {
-		call := between(t, indexHTML, "sectionCardHead('DHCP "+strings.ToUpper(role)+"'", "\n")
-		if !strings.Contains(call, ", en,") {
-			t.Errorf("the %s card's pill is not driven from the configured state: %s", role, call)
-		}
-		if strings.Contains(call, "run.") {
-			t.Errorf("the %s card's pill is being driven from the running state: %s", role, call)
-		}
+	call := between(t, indexHTML, "sectionTitlePill(c,", "\n")
+	if !strings.Contains(call, ", en,") {
+		t.Errorf("the pill is not driven from the configured state: %s", call)
+	}
+	if strings.Contains(call, "run.") {
+		t.Errorf("the pill is being driven from the running state: %s", call)
 	}
 }
 
-// The role dropdown is gone: two cards, each with the standard pill, and the
-// exclusion coming from Mode being one field rather than from anything the
-// page has to keep in step.
-func TestDHCPUsesTwoCardsNotARolePicker(t *testing.T) {
+// One card, so the switch belongs by the page title — the spot every other
+// single-switch page uses. It sat on the card only because there were two of
+// them, a server and a relay, and one pill on the title could not have said
+// which half it governed; v988 removed the server and with it the exception.
+func TestDHCPPutsItsSwitchOnTheTitle(t *testing.T) {
 	if strings.Contains(indexHTML, "dh-mode") {
 		t.Error("the DHCP role dropdown is back")
 	}
-	for _, want := range []string{"sectionCardHead('DHCP SERVER'", "sectionCardHead('DHCP RELAY'"} {
-		if !strings.Contains(indexHTML, want) {
-			t.Errorf("missing %s — the two-card layout is not intact", want)
-		}
+	sec := between(t, indexHTML, "function secDHCP(c){", "\nfunction secQoS")
+	if !strings.Contains(sec, "sectionTitlePill(c,") {
+		t.Error("the DHCP page has no title pill, so the relay cannot be switched on")
 	}
-	// Both cards render on every load, whichever is enabled, so a
-	// configuration that is not currently in service is still visible and
-	// editable. Rendering only the enabled one is what made "off" look like
-	// the configuration had been deleted.
-	body := between(t, indexHTML, "function render(b){\n    const d = b.dhcp || {};", "\n  }")
-	if strings.Contains(body, "if (mode === 'server') renderServer") {
-		t.Error("the page renders only the selected role's card again")
+	if !strings.Contains(sec, "'/api/dhcp'") {
+		t.Error("the DHCP title pill does not post to /api/dhcp")
 	}
-	for _, want := range []string{"renderServer(d, probs, mode === 'server'", "renderRelay(d, probs, mode === 'relay'"} {
-		if !strings.Contains(body, want) {
-			t.Errorf("render() no longer draws both cards unconditionally: missing %q", want)
+	// The card headings went with the second card. A card headed DHCP RELAY
+	// one line under a page headed DHCP is the restated title v968 took off
+	// five other pages.
+	if strings.Contains(sec, "sectionCardHead(") {
+		t.Error("the DHCP page still labels a card with a heading of its own")
+	}
+	// Nothing on the page renders a server table any more.
+	for _, gone := range []string{"renderServer", "DHCP SERVER", "dhrow", "dhe-subnet", "dhe-relays"} {
+		if strings.Contains(sec, gone) {
+			t.Errorf("the DHCP page still carries %q from the removed server card", gone)
 		}
 	}
 }
 
-// Adding a row must not enable the card it was added to. The pill is the
-// control, as it is on every other card, and auto-enabling would flip a switch
-// sitting visibly on the same card — or, with the other half running, have to
-// choose between silently stopping it and silently doing nothing.
-func TestDHCPAddingARowDoesNotEnableTheCard(t *testing.T) {
-	src := mustRead("dhcp_apply.go")
-	add := between(t, src, `case "add", "update":`, `case "delete", "remove":`)
-	if strings.Contains(add, "d.Mode = config.DHCPServer") {
-		t.Error("adding a subnet silently enables the server card")
+// The run tag sits beside the pill and must not be mistaken for it. Both are
+// pills on the same <h2>, and sectionTitlePill clears the previous one by
+// hunting for .tag-toggle — so if the run tag carried that class too, a
+// redraw would remove whichever came first and stack the rest.
+func TestDHCPRunTagIsNotMistakenForThePill(t *testing.T) {
+	sec := between(t, indexHTML, "function dhRunTag(en, run){", "\n  }")
+	if !strings.Contains(sec, "dh-runtag") {
+		t.Error("the run tag has no class of its own to be cleared by")
 	}
+	if strings.Contains(sec, "tag-toggle") {
+		t.Error("the run tag carries tag-toggle, so sectionTitlePill would clear the wrong pill on a redraw")
+	}
+	if !strings.Contains(sec, "old.remove()") {
+		t.Error("the run tag is not cleared before being re-added, so redraws would stack them")
+	}
+}
+
+// Adding a row must not enable the relay. The pill is the control, as it is on
+// every other page, and auto-enabling would flip a switch sitting visibly on
+// the same screen.
+func TestDHCPAddingARowDoesNotEnableTheRelay(t *testing.T) {
+	src := mustRead("dhcp_apply.go")
 	relayAdd := between(t, src, `case "relay-add", "relay-update":`, `case "relay-delete", "relay-remove":`)
 	if strings.Contains(relayAdd, "d.Mode = config.DHCPRelay") {
-		t.Error("adding a relay link silently enables the relay card")
-	}
-}
-
-// The mutual exclusion was enforced at apply time against a service whose boot
-// behaviour gravinet set and never unset, so it did not survive a reboot.
-//
-//	role = server, add a subnet   -> Kea started, and `systemctl enable`d
-//	role = relay                  -> Kea stopped now; still enabled
-//	reboot                        -> systemd starts Kea; gravinet starts the
-//	                                 relay from the stored mode
-//
-// and the node comes back doing both at once on the same links — the exact
-// state config.DHCPMode exists to make unrepresentable.
-//
-// Checked against the source, because the alternative is enabling and
-// rebooting a real systemd unit on the machine running the tests.
-func TestKeaIsDisabledWheneverItIsStopped(t *testing.T) {
-	src := mustRead("dhcp_apply.go")
-	// Every teardown goes through the helper that does both.
-	if !strings.Contains(src, "func keaStopAndDisable()") {
-		t.Fatal("keaStopAndDisable is gone — the stop no longer survives a reboot")
-	}
-	body := between(t, src, "func keaStopAndDisable() {", "\n}")
-	if !strings.Contains(body, `keaService("stop")`) || !strings.Contains(body, `keaService("disable")`) {
-		t.Errorf("keaStopAndDisable must both stop and disable, got:%s", body)
-	}
-	// And nothing reintroduces a bare stop: a stop without a disable is the
-	// bug, and it looks completely reasonable on the line it is written on.
-	fn := between(t, src, "func applyDHCP(", "\n// handleDHCP")
-	if strings.Contains(fn, `keaService("stop")`) {
-		t.Error("applyDHCP stops Kea without disabling it, so the stop will not survive a reboot")
-	}
-	// The exclusion is re-asserted at daemon start, which is what heals a node
-	// that was already left with an enabled unit before this existed.
-	boot := between(t, src, "func StartDHCPRelay(", "\n}")
-	if !strings.Contains(boot, "keaStopAndDisable()") {
-		t.Error("daemon startup no longer re-asserts the role exclusion, so an already-affected node stays broken until someone re-saves the page")
-	}
-	if !strings.Contains(boot, "c.Mode != config.DHCPServer") {
-		t.Error("startup teardown is not conditioned on the selected role")
-	}
-}
-
-// If the two ever do overlap, the page has to say so rather than reporting the
-// relay as healthy — which it is, and which is not the point.
-func TestDHCPRuntimeReportsAServerRunningBesideTheRelay(t *testing.T) {
-	src := mustRead("dhcp_runtime.go")
-	if !strings.Contains(src, "keaActive()") {
-		t.Fatal("the runtime report no longer asks whether Kea is running")
-	}
-	relay := between(t, src, "case config.DHCPRelay:", "// whyNotServing")
-	if i := strings.Index(relay, "return dhcpRunning{Why: whyNotRelaying(c)}"); i < 0 {
-		t.Fatal("relay branch not found")
-	} else if !strings.Contains(relay[:i], "keaActive()") {
-		t.Error("the relay branch reports the relay as healthy without first checking for a server running beside it")
+		t.Error("adding a relay link silently enables the relay")
 	}
 }
 
@@ -525,5 +438,44 @@ func TestShapingRowSaysHowItIsEnforced(t *testing.T) {
 	}
 	if !strings.Contains(sec, "unavailable here") {
 		t.Error("a kernel-shaped entry on a host that cannot program tc renders as if it were in force")
+	}
+}
+
+// The page's own <h2> says what this node does with DHCP, not just which
+// protocol the page is about. Relaying is all it does since v988 took the
+// server out, and a page headed "DHCP" reads as somewhere leases might still
+// be handed out — which is the one thing that release removed. Renamed in
+// v989, once the page had been looked at.
+//
+// The rail keeps the short label, the same split ipv6ra has: a nav rail is
+// narrow, a standalone heading is not.
+func TestDHCPPageIsHeadedRelay(t *testing.T) {
+	head := between(t, indexHTML, "function sectionHeading(s){", "\n}")
+	if !strings.Contains(head, `if (s==='dhcp') return 'DHCP Relay';`) {
+		t.Errorf("the DHCP page heading is not 'DHCP Relay':\n%s", head)
+	}
+}
+
+// Escaped characters in the served page have to be JS escapes, not literal
+// backslashes. '\u2019' is a right single quote; '\\u2019' is six characters
+// of visible garbage in the middle of a sentence, and it renders without
+// erroring, so nothing catches it but a reader.
+//
+// Whole-file rather than DHCP-only: the mistake is a property of how the text
+// was edited rather than of what it says, so the next section to be rewritten
+// is as exposed as this one was.
+func TestUIEscapesAreNotDoubled(t *testing.T) {
+	for _, bad := range []string{`\\u20`, `\\u00`, `\\u2019`, `\\u2014`} {
+		if i := strings.Index(indexHTML, bad); i >= 0 {
+			lo := i - 60
+			if lo < 0 {
+				lo = 0
+			}
+			hi := i + 60
+			if hi > len(indexHTML) {
+				hi = len(indexHTML)
+			}
+			t.Errorf("doubled escape %q renders as literal text on the page:\n  ...%s...", bad, indexHTML[lo:hi])
+		}
 	}
 }

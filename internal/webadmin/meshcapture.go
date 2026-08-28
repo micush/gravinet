@@ -212,9 +212,11 @@ func (j *meshCaptureJob) run(s *Server) {
 // captureOnePeer runs one leg: discover the node's real overlay interface,
 // start capturing on it, sleep until the shared deadline, stop, and pull back
 // the resulting pcap bytes. self is handled with direct in-process calls
-// (same path handleCaptureStart/Stop/Pcap use); a remote peer is handled with
-// the same overlay dial handleProxy uses, just made directly from this
-// goroutine instead of round-tripping through the browser.
+// (its own captureState, deliberately not the Capture tab's — see below); a
+// remote peer is handled with the same overlay dial handleProxy uses, just
+// made directly from this goroutine instead of round-tripping through the
+// browser — which does still go through that peer's own /api/capture/start,
+// and so does still disturb its Capture tab. Only this node is spared.
 //
 // setIface is called the moment the interface name is known — which is
 // within the first round trip, well before the (multi-second, up to a
@@ -236,22 +238,40 @@ func captureOnePeer(s *Server, nodeID string, self bool, deadline time.Time, set
 		if err != nil {
 			return nil, iface, fmt.Errorf("interface %s: %v", iface, err)
 		}
-		ep, _ := s.capture.begin(ifi.Name, linktypeForIface(ifi))
+		// A private captureState, not s.capture.
+		//
+		// s.capture is the one the Capture tab is bound to, and this used it
+		// for convenience — the same in-process path handleCaptureStart uses.
+		// The convenience was not free. begin() resets the buffer, points
+		// iface at the overlay device and sets running, so a mesh-wide
+		// capture reached into the operator's own capture tab and took it
+		// over: whatever they had running was killed, whatever they had
+		// captured was discarded, and the tab was left sitting on a mesh0
+		// capture nobody started there. What the fan-out needs from that
+		// state is a buffer and a pcap writer, neither of which has any
+		// reason to be the shared one.
+		//
+		// So there can now be two captures open on this host at once, where
+		// begin() previously guaranteed one: the operator's, and this. Two
+		// handles and two buffers, each independently bounded by capMaxBytes,
+		// which is the price of not stealing the first one.
+		cs := newCaptureState()
+		ep, _ := cs.begin(ifi.Name, linktypeForIface(ifi))
 		h, lt, err := startCapture(ifi.Name, capSnaplen, func(t time.Time, d []byte) {
-			s.capture.addEpoch(ep, t, d)
+			cs.addEpoch(ep, t, d)
 		})
 		if err != nil {
-			s.capture.failStart(ep)
+			cs.failStart(ep)
 			return nil, iface, err
 		}
-		s.capture.setLinktype(ep, reconcileLinktype(ifi, lt))
-		s.capture.setHandle(ep, h)
+		cs.setLinktype(ep, reconcileLinktype(ifi, lt))
+		cs.setHandle(ep, h)
 
 		sleepUntil(deadline)
-		s.capture.stop()
+		cs.stop()
 
 		var buf bytes.Buffer
-		s.capture.writePcap(&buf)
+		cs.writePcap(&buf)
 		return buf.Bytes(), iface, nil
 	}
 

@@ -51,7 +51,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "985"
+	version = "990"
 	commit  = "none"
 )
 
@@ -944,10 +944,16 @@ func cmdRun(args []string) {
 		}
 
 		// Bring the DHCP relay back up if this node is configured to relay.
-		// It runs inside this process rather than as a unit of its own, so
-		// unlike Kea it does not come back on its own after a restart. A
-		// failure is a warning rather than fatal: a node that cannot relay
-		// should still carry its mesh.
+		// It runs inside this process rather than as a unit of its own, so it
+		// does not come back on its own after a restart. A failure is a warning
+		// rather than fatal: a node that cannot relay should still carry its
+		// mesh.
+		//
+		// Took the overlay interfaces too until v988, when gravinet still drove
+		// a Kea server: a Kea already running held each device this startup had
+		// just recreated by a stale kernel index, and needed restarting to look
+		// again. Nothing here drives Kea now, and the relay opens its own
+		// sockets in this process, so there is no stale handle to correct.
 		if err := webadmin.StartDHCPRelay(cfg.DHCP); err != nil {
 			logx.Warnf("dhcp relay: %v", err)
 		}

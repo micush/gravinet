@@ -62,11 +62,6 @@
 #                  host, it's installed so Traffic > IPv6 RA can advertise this node
 #                  as a router on a LAN. The page is hidden entirely until radvd is
 #                  present, so skipping this hides the feature.
-#   --no-kea       don't install the Kea DHCPv4 server. By default it's installed
-#                  so System > DHCP can hand out leases. Unlike radvd this doesn't
-#                  hide the page: the relay half is gravinet's own code and needs
-#                  no daemon, so skipping this leaves a working relay and a server
-#                  that offers to install kea the first time you apply a subnet.
 set -euo pipefail
 
 PREFIX=/usr/local
@@ -81,7 +76,6 @@ INSTALL_FRR=1
 INSTALL_SNMP=1
 INSTALL_LLDP=1
 INSTALL_RADVD=1
-INSTALL_KEA=1
 UNDERLAY_PORT_DEFAULT=65432 # config.DefaultUDPPort
 WEB_PORT_DEFAULT=8443       # config.Default()'s web_admin.listen
 REPO="$(cd "$(dirname "$0")/.." && pwd)" # repo root (parent of install/)
@@ -121,9 +115,7 @@ while [ $# -gt 0 ]; do
     --lldp) INSTALL_LLDP=1 ;;
     --no-radvd) INSTALL_RADVD=0 ;;
     --radvd) INSTALL_RADVD=1 ;;
-    --no-kea) INSTALL_KEA=0 ;;
-    --kea) INSTALL_KEA=1 ;;
-    -h|--help) sed -n '2,60p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,64p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -684,54 +676,6 @@ NOTE
 }
 
 
-# kea_installed / ensure_kea mirror the radvd pair above, with one difference
-# that shapes both this and the flag's help text: the package is named
-# differently by distro family. Debian and Ubuntu split the DHCPv4 server into
-# kea-dhcp4-server; Fedora, RHEL and Arch ship one "kea" package with every
-# server in it. So this cannot go through a single pkg_install the way radvd
-# does, and tries both names in turn.
-#
-# The sbin sweep is there for the same reason it is for radvd and lldpd: kea
-# installs to a directory that is not always on a non-login root PATH.
-kea_installed() {
-  command -v kea-dhcp4 >/dev/null 2>&1 && return 0
-  local p
-  for p in /usr/sbin/kea-dhcp4 /sbin/kea-dhcp4 /usr/bin/kea-dhcp4 /usr/local/sbin/kea-dhcp4 /usr/local/bin/kea-dhcp4; do
-    [ -x "$p" ] && return 0
-  done
-  return 1
-}
-
-# ensure_kea installs the Kea DHCPv4 server so System > DHCP's server half is
-# usable. Unlike radvd, declining this does not hide the page: the relay half
-# is gravinet's own code and needs no package at all, so --no-kea leaves a
-# working relay and a server that says it has no daemon. That is the reason
-# the page is not gated on this the way Traffic > IPv6 RA is gated on radvd.
-ensure_kea() {
-  if kea_installed; then
-    echo "    kea (DHCPv4 server) is already installed"
-    return 0
-  fi
-  echo "    kea (DHCPv4 server) is not installed; installing it"
-  if pkg_install kea-dhcp4-server && kea_installed; then
-    echo "    installed kea-dhcp4-server"
-    return 0
-  fi
-  if pkg_install kea && kea_installed; then
-    echo "    installed kea"
-    return 0
-  fi
-  cat <<'NOTE' >&2
-    warning: could not install the Kea DHCPv4 server automatically on this
-             host. gravinet's System > DHCP page still works for relay mode,
-             which needs no daemon; server mode will report the missing
-             daemon and try to install it again on the next apply. The
-             package is "kea-dhcp4-server" on Debian/Ubuntu and "kea" on
-             Fedora/RHEL/Arch.
-NOTE
-}
-
-
 # NEW_VER is what this run would actually install: an explicit --bin's own
 # version if one was given (no need to build anything to find that out), or
 # else the source tree's version, which is exactly what building it now would
@@ -1144,15 +1088,6 @@ if [ "$INSTALL_RADVD" = 1 ]; then
 else
   echo "    --no-radvd passed; leaving radvd alone. gravinet's Traffic > IPv6 RA page is"
   echo "    hidden until radvd is installed, so the feature stays unavailable."
-fi
-
-echo "==> DHCPv4 server (kea)"
-if [ "$INSTALL_KEA" = 1 ]; then
-  ensure_kea
-else
-  echo "    --no-kea passed; leaving kea alone. gravinet's System > DHCP page still"
-  echo "    works in relay mode, which is gravinet's own code and needs no daemon;"
-  echo "    server mode will offer to install kea the first time you apply one."
 fi
 
 # Last on purpose. This is the only step here that can take the host's DNS away,

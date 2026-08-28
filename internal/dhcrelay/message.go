@@ -19,6 +19,7 @@ package dhcrelay
 import (
 	"encoding/binary"
 	"fmt"
+	"net"
 	"net/netip"
 )
 
@@ -64,11 +65,22 @@ const (
 // whole parser: there is no framing to walk and no length prefix to trust.
 const (
 	offOp     = 0
+	offHtype  = 1
+	offHlen   = 2
 	offHops   = 3
 	offFlags  = 10
 	offCiaddr = 12
 	offYiaddr = 16
 	offGiaddr = 24
+	offChaddr = 28
+)
+
+// htypeEthernet is ARP hardware type 1, and ethAddrLen its address length.
+// chaddr is a 16-byte field carrying an address of whatever type htype names,
+// so both have to agree before the first six bytes can be read as a MAC.
+const (
+	htypeEthernet = 1
+	ethAddrLen    = 6
 )
 
 // flagBroadcast is the B flag in the `flags` field. A client that cannot
@@ -126,6 +138,42 @@ func (m msg) broadcastWanted() bool {
 
 func (m msg) ciaddr() netip.Addr { return addr4(m.b[offCiaddr:]) }
 
+// clientMAC returns the client's hardware address from chaddr, and whether it
+// is one a frame can actually be addressed to.
+//
+// Three ways it is not. A htype/hlen pair that is not Ethernet means the first
+// six bytes of chaddr are not a MAC and reading them as one would put the
+// reply somewhere arbitrary. An all-zero chaddr is what a client sends when it
+// is identifying itself by client-id alone, and is not an address at all. A
+// group address — the multicast bit in the first octet, which covers broadcast
+// — is never a single client's own address, and a reply sent to one would go
+// to the whole link while claiming to be a unicast.
+//
+// The caller broadcasts instead when this returns false. That is the honest
+// fallback: it reaches the client, at the cost of reaching everyone else too.
+func (m msg) clientMAC() (net.HardwareAddr, bool) {
+	if m.b[offHtype] != htypeEthernet || m.b[offHlen] != ethAddrLen {
+		return nil, false
+	}
+	raw := m.b[offChaddr : offChaddr+ethAddrLen]
+	if raw[0]&0x01 != 0 {
+		return nil, false
+	}
+	zero := true
+	for _, c := range raw {
+		if c != 0 {
+			zero = false
+			break
+		}
+	}
+	if zero {
+		return nil, false
+	}
+	mac := make(net.HardwareAddr, ethAddrLen)
+	copy(mac, raw)
+	return mac, true
+}
+
 // yiaddr is the address the server is handing the client. Zero on anything
 // that is not an offer or an acknowledgement.
 func (m msg) yiaddr() netip.Addr { return addr4(m.b[offYiaddr:]) }
@@ -178,14 +226,24 @@ func prepareRequest(m msg, self netip.Addr, maxHops int) error {
 	return nil
 }
 
+// reply is where a server's answer goes on the client link and how it has to
+// be put there.
+type reply struct {
+	// to is the IPv4 destination.
+	to netip.Addr
+	// direct is set when to is an address the client does not hold yet, so
+	// the frame must be addressed to its hardware address rather than
+	// resolved. See frame.go for what goes wrong otherwise.
+	direct bool
+}
+
 // replyTarget decides where a server's reply goes on the client link, and
 // reports whether this relay should deliver it at all.
 //
-// Returns the address to send to; the caller sends from ServerPort to
-// ClientPort. RFC 1542 §4.1.2 sets the order: honour the B flag first, then
-// unicast to yiaddr if the server assigned one, then ciaddr for a client that
-// already had an address, and broadcast only when there is nothing else to
-// aim at.
+// The caller sends from ServerPort to ClientPort. RFC 1542 §4.1.2 sets the
+// order: honour the B flag first, then unicast to yiaddr if the server
+// assigned one, then ciaddr for a client that already had an address, and
+// broadcast only when there is nothing else to aim at.
 //
 // yiaddr before ciaddr is the part worth stating. Through the whole initial
 // exchange the client has no address, so ciaddr is zero and yiaddr holds the
@@ -194,28 +252,42 @@ func prepareRequest(m msg, self netip.Addr, maxHops int) error {
 // client RENEWING already holds its address and puts it there, leaving yiaddr
 // as a confirmation of the same value.
 //
+// Which is exactly why yiaddr is marked direct and ciaddr is not, and why
+// that distinction is the whole point of this returning a struct. Reaching an
+// address the client already holds is ordinary IP: it answers ARP for it, and
+// the kernel's UDP stack does the rest. Reaching an address the server has
+// only just chosen is not — nobody on the link answers for it yet. Both are
+// "unicast to a client on this link" and only one of them can go through a
+// socket.
+//
+// An ACK sets both fields, so a REBINDING client that does hold its address
+// still takes the direct path. That is not a mistake: addressing a frame to
+// the hardware address a client just wrote into its own request is correct
+// whether or not it also holds the IP, and having one path for every assigned
+// address is worth more than saving a resolution that would have succeeded.
+//
 // A broadcast reply goes to the limited broadcast address rather than the
 // subnet broadcast: the client has no address and no netmask yet, so
 // 255.255.255.255 is the only one it is listening for.
-func replyTarget(m msg, self netip.Addr) (netip.Addr, error) {
+func replyTarget(m msg, self netip.Addr) (reply, error) {
 	if m.op() != opReply {
-		return netip.Addr{}, fmt.Errorf("not a server reply")
+		return reply{}, fmt.Errorf("not a server reply")
 	}
 	// A reply whose giaddr is not this relay belongs to a different relay in
 	// the path. Delivering it anyway would put two copies on the link.
 	if m.giaddr() != self {
-		return netip.Addr{}, fmt.Errorf("reply is for relay %s, not %s", m.giaddr(), self)
+		return reply{}, fmt.Errorf("reply is for relay %s, not %s", m.giaddr(), self)
 	}
 	if m.broadcastWanted() {
-		return bcast, nil
+		return reply{to: bcast}, nil
 	}
 	if y := m.yiaddr(); y != netip.AddrFrom4([4]byte{}) {
-		return y, nil
+		return reply{to: y, direct: true}, nil
 	}
 	if c := m.ciaddr(); c != netip.AddrFrom4([4]byte{}) {
-		return c, nil
+		return reply{to: c}, nil
 	}
-	return bcast, nil
+	return reply{to: bcast}, nil
 }
 
 // bcast is the limited broadcast address, 255.255.255.255.

@@ -467,10 +467,10 @@ type Config struct {
 	// then, so installing gravinet on a host already running radvd by hand
 	// changes nothing until an operator opts in.
 	RouterAdvert RAConfig `json:"router_advert,omitempty"`
-	// DHCP is this node's DHCP role — serving leases through Kea, relaying
-	// to somebody else's server, or neither. Node-global like BGP above, and
-	// one role at a time: see DHCPMode for why that is a single field rather
-	// than two enable flags.
+	// DHCP is this node's DHCP relay: which client-facing links it forwards
+	// from, and to which servers. Node-global like BGP above. gravinet also
+	// served leases of its own through Kea until v988; see DHCPMode for what
+	// is left of that field.
 	DHCP DHCPConfig `json:"dhcp,omitempty"`
 	// HostInterfaces is host addressing gravinet has been told to own, so it
 	// travels with the configuration: back it up, restore it, and the node's
@@ -3027,6 +3027,11 @@ func (c *Config) Validate() error {
 	if err := c.ValidateHostVLANs(); err != nil {
 		return err
 	}
+	// gravinet stopped serving DHCP itself in v988. Retire the mode a node
+	// that served was carrying before anything validates it: ValidDHCPMode
+	// refuses it, and this runs on every Load, so an unhandled "server" would
+	// stop the daemon rather than the server. See migrateServerMode.
+	c.DHCP.migrateServerMode()
 	// The relay grew from one global interface list to a list of links in
 	// v949. Fold any legacy shape in before validating, so nothing downstream
 	// ever sees the old fields — see migrateRelay.
@@ -3555,7 +3560,7 @@ type HostVLAN struct {
 	// The field stays, and stays honoured, for two cases that have no other
 	// answer. A configuration written before names were derived carries one,
 	// and its device is referenced by name from the addressing records, the
-	// DHCP subnets and the firewall — re-deriving it would rename a live
+	// DHCP relay links and the firewall — re-deriving it would rename a live
 	// interface out from under all of them. And parent.id does not always
 	// fit: IFNAMSIZ leaves 15 characters, which a predictable name like
 	// enp0s20f0u3u1 exhausts before the tag is appended. Such a host can set
@@ -3617,10 +3622,10 @@ func (v HostVLAN) Validate() error {
 // producing the same tag on the same parent, are both configurations the
 // kernel would accept one of and silently drop the other.
 //
-// Disabled entries are checked too, for the same reason the DHCP halves are:
-// a definition broken during an edit and then parked saves cleanly and fails
-// at the moment somebody re-enables it, which is the moment they least want to
-// be reading a validation error.
+// Disabled entries are checked too, for the same reason the DHCP relay links
+// are: a definition broken during an edit and then parked saves cleanly and
+// fails at the moment somebody re-enables it, which is the moment they least
+// want to be reading a validation error.
 func (c *Config) ValidateHostVLANs() error {
 	names := map[string]bool{}
 	tags := map[string]bool{}
@@ -3875,23 +3880,26 @@ func (h HostSettings) Validate() error {
 
 // DHCPMode is what this node does about DHCP on its LANs.
 //
-// The three values are exclusive by construction rather than by validation,
-// and that is the point. A node is either handing out leases or forwarding
-// somebody else's, never both: a relay that answers locally would shadow the
-// central server for the subnets it relays, and hosts would get addresses
-// from whichever raced first. Modelling it as one mode makes that
-// unrepresentable, where two independent enable flags would make it a rule
-// somebody has to remember to check — and, eventually, forget.
+// Two values now: off, and relay. gravinet served leases of its own through
+// Kea until v988, and this field is what made that role exclusive with this
+// one — a node could not both hand out addresses and forward somebody else's
+// requests, because the two would shadow each other on any link they shared
+// and clients would take whichever reply raced first.
+//
+// With one role left the exclusion has nothing to exclude, and this could have
+// become a bool. It stays a mode for two reasons. The value on disk is
+// unchanged, so a node that was relaying before the upgrade is still relaying
+// after it, with no migration touching the half that still works. And it is
+// still a real control: parking every link one at a time is not the same
+// gesture as switching the relay off, and the card's pill needs something to
+// write.
 type DHCPMode string
 
 const (
-	// DHCPOff is the default: gravinet writes no Kea config, runs no relay,
-	// and touches no service. A host already running its own DHCP server is
-	// untouched until an operator opts in.
+	// DHCPOff is the default: gravinet runs no relay and touches nothing. A
+	// host already dealing with DHCP its own way is left alone until an
+	// operator opts in.
 	DHCPOff DHCPMode = ""
-	// DHCPServer hands out leases from pools defined here, rendered into
-	// Kea's config and applied by driving kea-dhcp4.
-	DHCPServer DHCPMode = "server"
 	// DHCPRelay forwards client traffic to upstream servers. Implemented in
 	// gravinet itself (internal/dhcrelay) rather than by a daemon: a relay is
 	// a few hundred lines of well-specified forwarding, and every packaged
@@ -3900,79 +3908,49 @@ const (
 	DHCPRelay DHCPMode = "relay"
 )
 
+// dhcpModeRetiredServer is what v987 and earlier wrote for a node serving its
+// own leases through Kea. Not a mode anyone can select any more; named here
+// only so migrateServerMode can recognise one on disk.
+//
+// Recognising it is not optional. ValidDHCPMode refuses an unknown mode and
+// Config.Validate runs on every Load, so leaving "server" unhandled would not
+// retire the feature — it would stop the daemon starting at all, on precisely
+// the nodes this release affects most.
+const dhcpModeRetiredServer DHCPMode = "server"
+
 // DHCPConfig is this node's DHCP configuration. Node-global, like BGP and the
-// router advertisements: one DHCP role per host.
+// router advertisements.
 type DHCPConfig struct {
-	// Mode selects server, relay, or neither. See DHCPMode.
+	// Mode selects relay, or neither. See DHCPMode.
 	Mode DHCPMode `json:"mode,omitempty"`
-	// Subnets are the pools served in server mode. Ignored in relay mode —
-	// kept rather than cleared, so an operator can switch to relay for an
-	// afternoon and switch back without retyping their pools.
-	Subnets []DHCPSubnet `json:"subnets,omitempty"`
-	// Relay is the forwarding configuration used in relay mode. Kept in the
-	// same way when the mode is something else.
+	// Relay is the forwarding configuration. Kept while the mode is off
+	// rather than cleared, so switching the relay off for an afternoon does
+	// not cost an operator the addresses they typed in.
 	Relay DHCPRelayConfig `json:"relay,omitempty"`
+
+	// retiredServer records that this configuration arrived with v987's
+	// server mode set, so the daemon can say so once at startup.
+	//
+	// Unexported, and therefore never marshalled: it is a fact about the file
+	// that was read, not a setting, and it stops being true the moment the
+	// configuration is written back out.
+	retiredServer bool
 }
 
-// DHCPSubnet is one served pool.
-type DHCPSubnet struct {
-	// Iface is the interface this subnet is served over, and it means
-	// something slightly different depending on Relays.
-	//
-	// Directly attached (Relays empty): the link the clients are on. Kea
-	// works out which subnet a request belongs to from the receiving
-	// interface's address, but naming it here is what lets gravinet check
-	// the pairing before Kea has to, and what the interface picker writes.
-	//
-	// Relayed (Relays set): the link the *relay agent* reaches this host
-	// over, which is not the client's link and is usually not addressed
-	// inside Subnet at all. Kea only listens on interfaces it is named, so
-	// this is still required — it is what puts the interface into
-	// interfaces-config so the forwarded unicast is received at all.
-	Iface string `json:"iface"`
-	// Relays are the relay agent addresses (giaddr) that reach this subnet,
-	// and their presence is what makes a subnet remote rather than local.
-	//
-	// A DHCP server is not limited to the links it sits on: a relay agent on
-	// a distant segment forwards its clients' broadcasts here as unicast,
-	// stamping its own address on each one, and the server answers on behalf
-	// of a LAN it has no interface on. Kea selects the scope for such a
-	// request by matching that stamp against these addresses, so a remote
-	// subnet is identified by who forwarded it rather than by where it
-	// arrived — which is exactly why the interface rules below relax for
-	// one, and why nothing here is checked against the interface's address.
-	//
-	// Usually one address per subnet: the relay's own address on the client
-	// link, since that is what an RFC 1542 agent puts in giaddr. More than
-	// one is for a segment with two relays on it, a pair of routers running
-	// VRRP being the ordinary case — each forwards under its own address,
-	// and both have to land in the same scope or a client gets a different
-	// answer depending on which router was master when it asked.
-	Relays []string `json:"relays,omitempty"`
-	// Subnet is the CIDR being served, e.g. 10.1.1.0/24.
-	Subnet string `json:"subnet"`
-	// PoolStart and PoolEnd bound the range of addresses handed out. Both
-	// required: a pool that defaults to "the whole subnet" would hand out
-	// the router's own address, and the first symptom is an operator losing
-	// the box they are configuring it from.
-	PoolStart string `json:"pool_start"`
-	PoolEnd   string `json:"pool_end"`
-	// Router is the default gateway offered to clients (option 3). Empty
-	// means offer none, which is a thing an operator can mean on a segment
-	// that routes through something else.
-	Router string `json:"router,omitempty"`
-	// DNS are the name servers offered (option 6), Search the domain search
-	// list (option 119).
-	DNS    []string `json:"dns,omitempty"`
-	Search []string `json:"search,omitempty"`
-	// LeaseSeconds is the lease time. 0 means Kea's own default.
-	LeaseSeconds int `json:"lease_seconds,omitempty"`
-	// Disabled parks a subnet without deleting it, the same convention every
-	// other table here uses.
-	Disabled bool `json:"disabled,omitempty"`
-}
+// RetiredServerMode reports whether this configuration was loaded from a file
+// that had this node serving DHCP through Kea, a role removed in v988.
+//
+// Worth saying out loud at startup rather than passing over in silence,
+// because removing the code does not stop the server. gravinet enabled the Kea
+// unit when an operator saved a subnet, and nothing here disables it now: the
+// code that could is gone, and a release that reached out to stop a daemon
+// during an upgrade would take a working LAN down for people who never asked
+// for that. So Kea keeps serving from the file gravinet last wrote it, while
+// the page it was configured from no longer exists — which is a state an
+// operator has to be told about before they can act on it.
+func (c DHCPConfig) RetiredServerMode() bool { return c.retiredServer }
 
-// DHCPRelayConfig is the relay half.
+// DHCPRelayConfig is the relay configuration.
 //
 // A list of links rather than one global setting, from v949. The relay was
 // always one socket per interface — the address bound on each is the giaddr
@@ -4012,39 +3990,10 @@ type DHCPRelayLink struct {
 	Disabled bool `json:"disabled,omitempty"`
 }
 
-// Relayed reports whether this subnet is reached through a relay agent rather
-// than being on one of this host's own links.
-//
-// One predicate rather than each caller testing the slice, because it is the
-// question the renderer, the preflight and the duplicate rules all branch on,
-// and they have to branch the same way. A subnet that renders as relayed but
-// is preflighted as attached gets a red row under a scope that works.
-func (s DHCPSubnet) Relayed() bool { return len(trimStrings(s.Relays)) > 0 }
-
-// RelayAddrs is the relay agent addresses with the blanks and whitespace taken
-// out — what to render and compare, as against what was typed.
-func (s DHCPSubnet) RelayAddrs() []string { return trimStrings(s.Relays) }
-
-// EnabledSubnets returns the served subnets actually in service. Empty unless
-// the mode is server, so every caller gets the mutual exclusion for free
-// rather than each having to remember to check the mode first.
-func (c DHCPConfig) EnabledSubnets() []DHCPSubnet {
-	if c.Mode != DHCPServer {
-		return nil
-	}
-	var out []DHCPSubnet
-	for _, s := range c.Subnets {
-		if !s.Disabled && strings.TrimSpace(s.Iface) != "" {
-			out = append(out, s)
-		}
-	}
-	return out
-}
-
 // EnabledLinks returns the relay links actually in service: not parked, naming
 // an interface, and having somewhere to forward to. Empty unless the mode is
-// relay, so every caller gets the mutual exclusion for free — the same shape
-// as EnabledSubnets and for the same reason.
+// relay, so every caller gets the off switch for free rather than each having
+// to remember to check the mode first.
 //
 // A link with no server is dropped here rather than rejected on save. It is
 // half-written, not wrong: the row exists so the operator can fill the rest in,
@@ -4063,169 +4012,46 @@ func (c DHCPConfig) EnabledLinks() []DHCPRelayLink {
 }
 
 // RelayActive reports whether the relay should be running. Same shape as
-// EnabledSubnets and for the same reason.
+// EnabledLinks and for the same reason.
 func (c DHCPConfig) RelayActive() bool {
 	return len(c.EnabledLinks()) > 0
 }
 
 // ValidDHCPMode checks a mode string.
+//
+// The retired server value gets its own sentence rather than falling into the
+// "unknown mode" case. By the time this is reached, a configuration read from
+// disk has already been through migrateServerMode, so a "server" still
+// arriving here is one typed at the CLI or posted to the API just now — and
+// telling that operator their value is unrecognised, when it was the
+// documented answer one release ago, explains nothing about what happened to
+// it.
 func ValidDHCPMode(m DHCPMode) error {
 	switch m {
-	case DHCPOff, DHCPServer, DHCPRelay:
+	case DHCPOff, DHCPRelay:
 		return nil
+	case dhcpModeRetiredServer:
+		return fmt.Errorf("gravinet no longer serves DHCP itself (removed in v988): this node can relay to a server elsewhere, or leave DHCP off")
 	}
-	return fmt.Errorf("unknown DHCP mode %q: want server, relay, or empty for off", string(m))
+	return fmt.Errorf("unknown DHCP mode %q: want relay, or empty for off", string(m))
 }
 
-// Validate checks the whole DHCP configuration, including the parts not
+// Validate checks the whole DHCP configuration, including the links not
 // currently in service.
 //
-// Both halves are checked whichever mode is selected. The alternative —
-// validating only the active half — means a subnet that has been broken since
-// an edit made in relay mode saves cleanly and fails at the moment somebody
-// switches back to server, which is the moment they least want to be
-// debugging a pool boundary.
+// Every link is checked whether the relay is on or off, and parked ones are
+// checked too. The alternative — validating only what is running — means a
+// link left broken by an edit made while the relay was off saves cleanly and
+// fails at the moment somebody switches it on, which is the moment they least
+// want to be debugging an address.
 func (c DHCPConfig) Validate() error {
 	if err := ValidDHCPMode(c.Mode); err != nil {
 		return err
 	}
-	seen := map[string]bool{}
-	giaddr := map[string]string{}
-	for _, s := range c.Subnets {
-		if err := s.Validate(); err != nil {
-			return err
-		}
-		// Two attached pools on one interface is not a second scope, it is
-		// two answers to the same question. Kea matches an attached request
-		// to a scope by the receiving interface's address, so both rows
-		// claim every request that arrives there and it would take one.
-		//
-		// Relayed subnets are deliberately outside this rule, and that is
-		// the whole of what makes serving a non-attached network possible.
-		// Every relayed subnet on a node arrives over whichever link the
-		// relays reach it on — commonly one uplink for all of them — so
-		// one-per-interface would cap a node at a single remote LAN. What
-		// disambiguates them is not the interface, it is the giaddr, which
-		// is what the second rule below keeps unique.
-		if !s.Relayed() {
-			k := strings.ToLower(strings.TrimSpace(s.Iface))
-			if seen[k] {
-				return fmt.Errorf("interface %s has more than one directly attached subnet configured", s.Iface)
-			}
-			seen[k] = true
-		}
-		// The relayed equivalent of that rule, one field over. Kea picks the
-		// scope for a forwarded request by matching giaddr, so an address
-		// listed on two subnets is two answers to one question again — and a
-		// worse one to diagnose, because both scopes are valid and the
-		// clients of one remote LAN quietly get the other's addresses.
-		//
-		// Kea does not refuse this: 2.4.1 loads such a file without comment
-		// and picks one of the two. That is the argument for catching it
-		// here rather than leaving it to the parser the way the duplicate
-		// interface in interfaces-config is left to it — nothing downstream
-		// will ever mention it, and the symptom is addresses from the wrong
-		// branch appearing on a LAN whose own configuration looks right.
-		for _, a := range s.RelayAddrs() {
-			k := strings.ToLower(a)
-			if prev, dup := giaddr[k]; dup {
-				return fmt.Errorf("relay address %s is listed on both %s and %s: a request forwarded from it could be answered from either subnet",
-					a, prev, strings.TrimSpace(s.Subnet))
-			}
-			giaddr[k] = strings.TrimSpace(s.Subnet)
-		}
-	}
 	return c.Relay.Validate()
 }
 
-// Validate checks one served subnet.
-func (s DHCPSubnet) Validate() error {
-	if strings.TrimSpace(s.Iface) == "" {
-		return fmt.Errorf("interface name is required")
-	}
-	net, err := netip.ParsePrefix(strings.TrimSpace(s.Subnet))
-	if err != nil {
-		return fmt.Errorf("subnet %q: %v", s.Subnet, err)
-	}
-	// DHCPv4 only in this release. DHCPv6 addressing is reached through the
-	// router advertisement's M flag and is a different scope shape in Kea; a
-	// v6 subnet accepted here would render into a v4 server that ignores it.
-	if !net.Addr().Is4() {
-		return fmt.Errorf("subnet %q: DHCP is IPv4 here — IPv6 addressing comes from Traffic > IPv6 RA", s.Subnet)
-	}
-	if net.Addr() != net.Masked().Addr() {
-		return fmt.Errorf("subnet %q: has host bits set, did you mean %s?", s.Subnet, net.Masked())
-	}
-	lo, err := netip.ParseAddr(strings.TrimSpace(s.PoolStart))
-	if err != nil || !lo.Is4() {
-		return fmt.Errorf("pool start %q: must be an IPv4 address", s.PoolStart)
-	}
-	hi, err := netip.ParseAddr(strings.TrimSpace(s.PoolEnd))
-	if err != nil || !hi.Is4() {
-		return fmt.Errorf("pool end %q: must be an IPv4 address", s.PoolEnd)
-	}
-	if hi.Less(lo) {
-		return fmt.Errorf("pool %s-%s: ends before it starts", lo, hi)
-	}
-	// A pool outside its own subnet is the error that produces a server which
-	// starts, runs, and hands out addresses nothing on the link can use.
-	for _, a := range []netip.Addr{lo, hi} {
-		if !net.Contains(a) {
-			return fmt.Errorf("pool address %s is outside subnet %s", a, net)
-		}
-	}
-	if s.Router != "" {
-		r, err := netip.ParseAddr(strings.TrimSpace(s.Router))
-		if err != nil || !r.Is4() {
-			return fmt.Errorf("router %q: must be an IPv4 address", s.Router)
-		}
-		if !net.Contains(r) {
-			return fmt.Errorf("router %s is outside subnet %s, so no client could reach it", r, net)
-		}
-		// A gateway inside the pool gets handed to a client as its own
-		// address, and then two hosts answer for it.
-		if !r.Less(lo) && !hi.Less(r) {
-			return fmt.Errorf("router %s is inside the pool %s-%s, so it could be leased to a client", r, lo, hi)
-		}
-	}
-	for _, d := range s.DNS {
-		if a, err := netip.ParseAddr(strings.TrimSpace(d)); err != nil || !a.Is4() {
-			return fmt.Errorf("dns %q: must be an IPv4 address", d)
-		}
-	}
-	// A relay agent address is a single host — the address the forwarding
-	// router puts in giaddr — so it is checked the way the relay half checks
-	// where it forwards to, and for the same reason. Kea compares giaddr for
-	// equality; a broadcast or multicast address here matches nothing that
-	// can ever arrive, which is a scope that is never selected rather than a
-	// scope that is wrong, and silence is the hardest fault to find.
-	//
-	// Not checked against Subnet, deliberately. A relay's giaddr is usually
-	// its own address on the client link and so usually inside the subnet,
-	// but it is only *usually*: an agent may be configured to source from a
-	// loopback or a management address, and RFC 1542 does not require
-	// otherwise. Refusing that would refuse a working network.
-	for _, r := range s.RelayAddrs() {
-		a, err := netip.ParseAddr(r)
-		if err != nil || !a.Is4() {
-			return fmt.Errorf("relay address %q: must be an IPv4 address", r)
-		}
-		if a.IsMulticast() || a.IsUnspecified() || a == netip.AddrFrom4([4]byte{255, 255, 255, 255}) {
-			return fmt.Errorf("relay address %q: must be the unicast address a relay agent forwards under", r)
-		}
-	}
-	if s.LeaseSeconds < 0 || s.LeaseSeconds > 315360000 {
-		return fmt.Errorf("lease seconds %d: must be between 0 and 315360000 (ten years), or 0 for the default", s.LeaseSeconds)
-	}
-	return nil
-}
-
-// Validate checks the relay half.
-//
-// Every link is checked, parked ones included, for the reason DHCPConfig's own
-// Validate gives: a link left broken by an edit made while the node was
-// serving should not save cleanly and fail at the moment somebody switches
-// back to relaying.
+// Validate checks the relay links as a set.
 func (r DHCPRelayConfig) Validate() error {
 	seen := map[string]bool{}
 	for _, l := range r.Links {
@@ -4265,6 +4091,29 @@ func (l DHCPRelayLink) Validate() error {
 		return fmt.Errorf("max hops %d: must be between 0 and 16, or 0 for the default of 4", l.MaxHops)
 	}
 	return nil
+}
+
+// migrateServerMode retires v987's server role.
+//
+// The mode becomes off rather than relay, and that is the whole of the care
+// needed here. A node that served its own leases has relay links only if
+// somebody configured them and then switched away, so turning those on during
+// an upgrade would start forwarding this LAN's requests to whatever address
+// was typed in months ago. Off is the one answer that cannot surprise
+// anybody, and the relay is one pill away for an operator who wants it.
+//
+// The served subnets go with it, quietly, because there is no longer a field
+// for them to land in: encoding/json drops a key with no destination, so they
+// are gone on read and gone from the file at the next save. They are not lost
+// — the config history and any backup predating the upgrade still hold them,
+// which is where to look for a pool worth recreating on whatever serves that
+// LAN next. Keeping a dead field on the struct to carry them would mean
+// shipping a shape nothing reads, forever, so the file can go on describing a
+// feature the binary does not have.
+func (c *DHCPConfig) migrateServerMode() {
+	if c.Mode == dhcpModeRetiredServer {
+		c.Mode, c.retiredServer = DHCPOff, true
+	}
 }
 
 // migrateRelay folds the pre-v949 relay shape — one interface list sharing one

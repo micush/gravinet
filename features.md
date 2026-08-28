@@ -83,11 +83,13 @@ point of a mesh.
   mesh.
 - **Names, not just numbers.** Hostnames sync into each machine's hosts file
   automatically.
-- **DHCP, serving or relaying** — hand out leases on your LANs through Kea, or
-  forward requests to a server elsewhere. A serving node is not limited to the
-  links it sits on: point a remote segment's relay agent (an `ip helper-address`
-  on most gear) at it and that segment gets its addresses from here too, any
-  number of them over one interface.
+- **DHCP relay** — forward requests from your LANs to a DHCP server somewhere
+  else. One row per client-facing link, each with its own upstream servers and
+  hop limit, so one LAN can relay somewhere different from another; every
+  server on a row gets a copy and the client takes whichever reply arrives
+  first, which is how a relay does redundancy without a failover to configure.
+  Linux only. (gravinet served leases itself through Kea until v988; it no
+  longer does.)
 - **BGP and BFD** for anyone running dynamic routing (through FRR), including a
   live view of BGP peer sessions, selective redistribution in and out of the
   mesh, and per-neighbor inbound/outbound route filtering.

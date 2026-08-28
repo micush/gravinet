@@ -21,6 +21,37 @@ func setAddr(b []byte, off int, s string) {
 	copy(b[off:off+4], a[:])
 }
 
+// setChaddr writes an Ethernet client hardware address, which is what a reply
+// carrying a not-yet-held address has to be framed to.
+func setChaddr(b []byte, mac string) {
+	hw, err := net.ParseMAC(mac)
+	if err != nil {
+		panic(err)
+	}
+	b[offHtype] = htypeEthernet
+	b[offHlen] = ethAddrLen
+	copy(b[offChaddr:offChaddr+ethAddrLen], hw)
+}
+
+// directRecorder stands in for the packet socket, keeping what would have gone
+// on the link so the direct path can be asserted without CAP_NET_RAW.
+type directRecorder struct {
+	macs  []string
+	dsts  []string
+	srcs  []string
+	calls int
+}
+
+func (d *directRecorder) sendDirect(mac net.HardwareAddr, srcIP, dstIP netip.Addr, _ []byte) error {
+	d.calls++
+	d.macs = append(d.macs, mac.String())
+	d.srcs = append(d.srcs, srcIP.String())
+	d.dsts = append(d.dsts, dstIP.String())
+	return nil
+}
+
+func (d *directRecorder) Close() error { return nil }
+
 var self = netip.MustParseAddr("10.1.1.1")
 
 // A datagram that is not a DHCP message is dropped rather than forwarded. This
@@ -123,9 +154,9 @@ func TestReplyTarget(t *testing.T) {
 	b := pkt(opReply)
 	setAddr(b, offGiaddr, self.String())
 	m, _ := parse(b)
-	to, err := replyTarget(m, self)
-	if err != nil || to != bcast {
-		t.Errorf("addressless client: got %s (%v), want %s", to, err, bcast)
+	rp, err := replyTarget(m, self)
+	if err != nil || rp.to != bcast {
+		t.Errorf("addressless client: got %s (%v), want %s", rp.to, err, bcast)
 	}
 
 	// Has an address: unicast to it.
@@ -133,9 +164,14 @@ func TestReplyTarget(t *testing.T) {
 	setAddr(b, offGiaddr, self.String())
 	setAddr(b, offCiaddr, ciaddr.String())
 	m, _ = parse(b)
-	to, err = replyTarget(m, self)
-	if err != nil || to != ciaddr {
-		t.Errorf("addressed client: got %s (%v), want %s", to, err, ciaddr)
+	rp, err = replyTarget(m, self)
+	if err != nil || rp.to != ciaddr {
+		t.Errorf("addressed client: got %s (%v), want %s", rp.to, err, ciaddr)
+	}
+	// A client that already holds the address answers ARP for it, so this
+	// one goes through the socket like any other unicast.
+	if rp.direct {
+		t.Error("a reply to an address the client already holds was marked for direct delivery")
 	}
 
 	// Has an address but asked for broadcast anyway.
@@ -144,9 +180,9 @@ func TestReplyTarget(t *testing.T) {
 	setAddr(b, offCiaddr, ciaddr.String())
 	b[offFlags] = 0x80
 	m, _ = parse(b)
-	to, err = replyTarget(m, self)
-	if err != nil || to != bcast {
-		t.Errorf("B flag set: got %s (%v), want %s", to, err, bcast)
+	rp, err = replyTarget(m, self)
+	if err != nil || rp.to != bcast {
+		t.Errorf("B flag set: got %s (%v), want %s", rp.to, err, bcast)
 	}
 }
 
@@ -211,12 +247,17 @@ func TestReplyTargetUnicastsOfferToYiaddr(t *testing.T) {
 	setAddr(b, offGiaddr, self.String())
 	setAddr(b, offYiaddr, yiaddr.String())
 	m, _ := parse(b)
-	to, err := replyTarget(m, self)
+	rp, err := replyTarget(m, self)
 	if err != nil {
 		t.Fatalf("offer refused: %v", err)
 	}
-	if to != yiaddr {
-		t.Errorf("offer went to %s, want a unicast to %s", to, yiaddr)
+	if rp.to != yiaddr {
+		t.Errorf("offer went to %s, want a unicast to %s", rp.to, yiaddr)
+	}
+	// And it must not go through a socket: the client does not hold this
+	// address yet and cannot answer ARP for it. See TestOfferIsDeliveredToChaddr.
+	if !rp.direct {
+		t.Error("an offer was left to ordinary routing; it will be dropped in the ARP queue")
 	}
 
 	// An offer to a client that set the B flag is still broadcast.
@@ -225,8 +266,8 @@ func TestReplyTargetUnicastsOfferToYiaddr(t *testing.T) {
 	setAddr(b, offYiaddr, yiaddr.String())
 	b[offFlags] = 0x80
 	m, _ = parse(b)
-	if to, err = replyTarget(m, self); err != nil || to != netip.MustParseAddr("255.255.255.255") {
-		t.Errorf("B flag set: got %s (%v), want a broadcast", to, err)
+	if rp, err = replyTarget(m, self); err != nil || rp.to != netip.MustParseAddr("255.255.255.255") {
+		t.Errorf("B flag set: got %s (%v), want a broadcast", rp.to, err)
 	}
 
 	// Renewing: both are set to the same address, and either answer is the
@@ -236,8 +277,8 @@ func TestReplyTargetUnicastsOfferToYiaddr(t *testing.T) {
 	setAddr(b, offYiaddr, yiaddr.String())
 	setAddr(b, offCiaddr, ciaddr.String())
 	m, _ = parse(b)
-	if to, err = replyTarget(m, self); err != nil || to != yiaddr {
-		t.Errorf("renewal: got %s (%v), want %s", to, err, yiaddr)
+	if rp, err = replyTarget(m, self); err != nil || rp.to != yiaddr {
+		t.Errorf("renewal: got %s (%v), want %s", rp.to, err, yiaddr)
 	}
 }
 
@@ -266,20 +307,22 @@ func (c *recorder) SetWriteDeadline(time.Time) error       { return nil }
 // already on the client's link — the one topology needing no relay at all.
 func TestHandleForwardsOnTheOppositeSocket(t *testing.T) {
 	server := netip.MustParseAddr("10.1.1.1")
-	newLink := func() (*link, *recorder, *recorder) {
+	newLink := func() (*link, *recorder, *recorder, *directRecorder) {
 		cl, sv := &recorder{name: "client"}, &recorder{name: "server"}
+		dr := &directRecorder{}
 		return &link{
 			cfg:    Link{Iface: "eth1", Servers: []netip.Addr{server}},
 			self:   self,
 			client: cl,
 			server: sv,
-		}, cl, sv
+			direct: dr,
+		}, cl, sv, dr
 	}
 	r := &Relay{log: func(string, ...any) {}}
 
 	// A client's request leaves by the server-facing socket, aimed at the
 	// upstream server on port 67.
-	lk, cl, sv := newLink()
+	lk, cl, sv, _ := newLink()
 	r.handle(lk, fromClient, pkt(opRequest))
 	if len(cl.sent) != 0 {
 		t.Errorf("request went back out the client-facing socket, to %v", cl.sent)
@@ -291,20 +334,27 @@ func TestHandleForwardsOnTheOppositeSocket(t *testing.T) {
 		t.Errorf("request went to %s, want %s", got, want)
 	}
 
-	// The server's reply arrives on the server-facing socket and leaves by
-	// the client-facing one, aimed at the client's port.
-	lk, cl, sv = newLink()
+	// The server's reply arrives on the server-facing socket and never goes
+	// back out by it. It carries an address the client does not hold yet, so
+	// it leaves on the client link by the packet socket rather than the UDP
+	// one — see TestOfferIsFramedToChaddr for why that is the only path that
+	// reaches the client.
+	lk, cl, sv, dr := newLink()
 	b := pkt(opReply)
 	setAddr(b, offGiaddr, self.String())
 	setAddr(b, offYiaddr, "10.4.4.37")
+	setChaddr(b, "0c:e5:21:3f:00:00")
 	r.handle(lk, fromServer, b)
 	if len(sv.sent) != 0 {
 		t.Errorf("reply went back out the server-facing socket, to %v", sv.sent)
 	}
-	if len(cl.sent) != 1 {
-		t.Fatalf("reply out the client-facing socket: %d datagrams, want 1", len(cl.sent))
+	if len(cl.sent) != 0 {
+		t.Errorf("reply went out the UDP client socket, to %v — it would be dropped resolving an address the client does not hold", cl.sent)
 	}
-	if got, want := cl.sent[0].String(), "10.4.4.37:68"; got != want {
+	if dr.calls != 1 {
+		t.Fatalf("reply out the packet socket: %d frames, want 1", dr.calls)
+	}
+	if got, want := dr.dsts[0], "10.4.4.37"; got != want {
 		t.Errorf("reply went to %s, want %s", got, want)
 	}
 }

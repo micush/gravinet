@@ -41,24 +41,41 @@ type Link struct {
 
 // Relay is a running relay agent. Start returns one; Stop shuts it down.
 type Relay struct {
-	cfg  Config
-	log  Logf
-	mu   sync.Mutex
-	pcs  []net.PacketConn
-	live []string // links that actually bound, for Listening
-	done chan struct{}
-	wg   sync.WaitGroup
+	cfg     Config
+	log     Logf
+	mu      sync.Mutex
+	pcs     []net.PacketConn
+	directs []directSender
+	live    []string // links that actually bound, for Listening
+	done    chan struct{}
+	wg      sync.WaitGroup
 }
 
-// link is one link's running state: the two sockets it needs and the config
-// they serve. Paired in a struct because the two are useless apart — a request
-// read on client is forwarded from server, and the reply read on server is
-// returned from client.
+// directSender puts a reply on the client link addressed to a hardware
+// address, for the replies that cannot go through a socket. Implemented by
+// rawSender on Linux and by nothing elsewhere; see frame.go for why it exists
+// and rawsend_linux.go for how.
+//
+// An interface rather than the concrete type so relay.go stays free of build
+// tags and so a test can record what would have gone on the wire.
+type directSender interface {
+	sendDirect(dstMAC net.HardwareAddr, srcIP, dstIP netip.Addr, payload []byte) error
+	Close() error
+}
+
+// link is one link's running state: the sockets it needs and the config they
+// serve. Paired in a struct because they are useless apart — a request read on
+// client is forwarded from server, and the reply read on server is returned
+// from client.
 type link struct {
 	cfg    Link
 	self   netip.Addr
 	client net.PacketConn // wildcard, confined to cfg.Iface: hears clients
 	server net.PacketConn // bound to self: talks to the upstream servers
+	// direct delivers replies addressed to an address the client does not
+	// hold yet. nil when the packet socket could not be opened, in which
+	// case those replies are broadcast instead — see handle.
+	direct directSender
 }
 
 // Listening reports the links this relay actually bound, which is not always
@@ -126,9 +143,22 @@ func Start(cfg Config, log Logf) (*Relay, error) {
 			log("dhcp relay: %s: %v", l.Iface, err)
 			continue
 		}
-		lk := &link{cfg: l, self: self, client: client, server: server}
+		// The packet socket is opened alongside the two sockets but does not
+		// gate the link the way they do. A link missing one of its sockets
+		// cannot answer at all; a link missing this one answers by
+		// broadcasting, which every client on the LAN hears including the
+		// right one. Degraded is not broken, so it is logged and carried
+		// rather than being allowed to take the link down.
+		direct, derr := newRawSender(l.Iface)
+		if derr != nil {
+			log("dhcp relay: %s: %v; replies to clients without an address will be broadcast instead", l.Iface, derr)
+		}
+		lk := &link{cfg: l, self: self, client: client, server: server, direct: direct}
 		r.mu.Lock()
 		r.pcs = append(r.pcs, client, server)
+		if direct != nil {
+			r.directs = append(r.directs, direct)
+		}
 		r.live = append(r.live, l.Iface)
 		r.mu.Unlock()
 		r.wg.Add(2)
@@ -170,10 +200,18 @@ func (r *Relay) Stop() {
 		close(r.done)
 	}
 	pcs := r.pcs
-	r.pcs, r.live = nil, nil
+	directs := r.directs
+	r.pcs, r.directs, r.live = nil, nil, nil
 	r.mu.Unlock()
 	for _, pc := range pcs {
 		_ = pc.Close()
+	}
+	// After the readers are told to stop but before waiting on them: a
+	// send in flight on one of these holds no lock and closing under it is
+	// no worse than closing a socket under a blocked ReadFrom, which is
+	// how the loop above already ends.
+	for _, d := range directs {
+		_ = d.Close()
 	}
 	r.wg.Wait()
 }
@@ -230,15 +268,32 @@ func (r *Relay) handle(lk *link, s side, b []byte) {
 		}
 	case s == fromServer && m.op() == opReply:
 		// The server's answer, addressed to this link's giaddr and delivered
-		// regardless of which interface it arrived on. It goes back out the
-		// client-facing socket, because that is the one confined to the LAN
-		// the client is on.
-		to, err := replyTarget(m, lk.self)
+		// regardless of which interface it arrived on. It goes back out on
+		// the client link, by one of two paths.
+		rp, err := replyTarget(m, lk.self)
 		if err != nil {
 			return
 		}
-		if err := sendTo(lk.client, b, netip.AddrPortFrom(to, ClientPort)); err != nil {
-			r.log("dhcp relay: %s: returning reply to %s: %v", lk.cfg.Iface, to, err)
+		// A reply carrying an address the client does not hold yet cannot be
+		// sent through a socket: the kernel would ARP for a neighbour that
+		// by definition cannot answer, and drop the datagram in the queue
+		// without reporting anything. Frame it to the client's own chaddr
+		// instead.
+		if rp.direct {
+			if mac, ok := m.clientMAC(); ok && lk.direct != nil {
+				if err := lk.direct.sendDirect(mac, lk.self, rp.to, b); err != nil {
+					r.log("dhcp relay: %s: returning reply to %s (%s): %v", lk.cfg.Iface, rp.to, mac, err)
+				}
+				return
+			}
+			// No usable hardware address, or no packet socket on this link.
+			// Broadcast rather than falling through to a unicast that would
+			// be silently dropped: the client hears it either way, and the
+			// cost is that the rest of the link hears it too.
+			rp.to = bcast
+		}
+		if err := sendTo(lk.client, b, netip.AddrPortFrom(rp.to, ClientPort)); err != nil {
+			r.log("dhcp relay: %s: returning reply to %s: %v", lk.cfg.Iface, rp.to, err)
 		}
 	}
 	// Anything else is traffic this relay has no part in: a reply on the LAN

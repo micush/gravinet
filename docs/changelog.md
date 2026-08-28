@@ -2,6 +2,196 @@
 
 ---
 
+## v990 — 2026-08-27
+
+**The DHCP Relay help no longer explains what happened to the DHCP server.** One paragraph removed and nothing else changed.
+
+v988's help text ended with a paragraph on the server that release had removed: that it was gone, that a node which had been serving was not stopped by the upgrade, that its Kea was still installed and enabled and serving an unmanaged file, and where to look for the subnets. All true, and none of it belongs on this page.
+
+Help text describes the page it is attached to. This page relays; the paragraph was about a feature that is not on it, addressed to operators of a version that is no longer this one, and every reader of the relay's help paid for it — a page about forwarding requests ended on three sentences about a daemon most of them have never had installed. A migration note is not documentation of a feature, and the place for it is the release notes, which is where it still is: v988 says all of it, at length.
+
+The notice itself is unchanged where it is actually needed. A node whose stored configuration still has it serving is told at daemon startup, in `gravinet system dhcp list`, and in the troubleshooting bundle — the three places a reader is looking at *that node* rather than at a page about relaying. Those fire only while the retired mode is still on disk, so they stop on their own once the configuration is written back out, and an operator who never served never sees any of them. The help text had no such condition: it was shown to everyone, forever.
+
+`ui.go` no longer mentions Kea at all.
+
+---
+
+## v989 — 2026-08-27
+
+**The DHCP page is called DHCP Relay, and its help text renders as English again.** Both are follow-ups to v988, which removed the DHCP server; one is what that release should have done to the heading, and the other is a defect it introduced.
+
+### The heading
+
+v988 left the page headed "DHCP" while taking away everything on it except relaying. A page named for a protocol reads as somewhere any part of that protocol might be configured, so the one heading a reader saw first still implied leases could be handed out here — the single thing that release had just removed.
+
+The page's own `<h2>` says **DHCP Relay** now. The rail button stays "DHCP": a nav rail is narrow, and the abbreviation is unambiguous the moment the page it opens says the rest. That split is not new — `ipv6ra` has had it since the rail read "v6 ra" over a page headed "IPv6 Router Advertisements", and `lldp` had it until v892, when the acronym turned out to be short enough to serve as both. `sectionHeading` is where it lives, and this is the second entry in it.
+
+The help topic opened by restating the same sentence one line under the heading. With the heading saying it, the topic now leads with what a relay actually *is* — the segment whose clients need a server that is not on their link — and the "acts on the node you're currently managing" note moves to the end of that paragraph, where the other System topics keep it.
+
+### The escapes
+
+v988's rewritten DHCP help shipped with fourteen occurrences of `\\u2019` and `\\u2014` where `\u2019` and `\u2014` were meant.
+
+The difference is one backslash and it is not cosmetic. `\u2019` is a JS escape for a right single quote; `\\u2019` is an escaped backslash *followed by five ordinary characters*, so the page renders "this node\u2019s LANs" in the middle of a sentence. Nothing errors. The page loads, the topic opens, the text is there — and the only thing that can tell the two apart is somebody reading it, which is exactly what nobody does to help text they have just written.
+
+All fourteen are corrected, and checked byte-for-byte against untouched lines elsewhere in the same file rather than by eye.
+
+`TestUIEscapesAreNotDoubled` is the guard. It scans the whole served page, not the DHCP section, because the mistake belongs to how the text was edited rather than to what it said: any section rewritten the same way next month is exposed the same way. The baseline had none of these, which is the property worth keeping.
+
+`TestDHCPPageIsHeadedRelay` pins the heading, so the page cannot quietly fall back to the protocol name if `sectionHeading`'s special cases are ever tidied up.
+
+---
+
+## v988 — 2026-08-27
+
+**gravinet no longer serves DHCP.** The relay stays and is unchanged; the Kea integration behind the server card is gone, along with the lease table that read it back.
+
+### What went
+
+The server half was a Kea integration: gravinet owned `/etc/kea/kea-dhcp4.conf`, rendered it whole from the subnet table on every apply, drove `kea-dhcp4-server` through systemd, installed the package on first save, reconciled the file at every boot, and read the memfile lease database back for Monitor › DHCP Leases. All of that is removed — fifteen files, and the `--no-kea` flag from the Linux installer, which no longer installs Kea at all.
+
+The relay is untouched. It was never Kea's: it is a few hundred lines of forwarding in `internal/dhcrelay`, running inside the daemon, and nothing in this release changes a packet it sends. A node that was relaying before the upgrade relays exactly the same links to exactly the same servers after it, and the value in its config file is byte-for-byte what it was.
+
+### The mode field
+
+`DHCPMode` existed to make the two roles exclusive. A node could not both hand out addresses and forward somebody else's requests, because the two would shadow each other on any link they shared and clients would take whichever reply raced first; modelling it as one field made that unrepresentable rather than a rule somebody had to remember.
+
+With one role left the exclusion has nothing to exclude, and the field could have become a bool. It stays a mode. The value on disk is then unchanged, so the half that still works needs no migration touching it at all — and it is still a real control: parking every link one at a time is not the same gesture as switching the relay off, and the pill needs something to write.
+
+So `"relay"` and `""` remain, and `"server"` is retired rather than merely deleted. That distinction is the whole of the upgrade risk. `ValidDHCPMode` refuses an unknown mode and `Config.Validate` runs on every `Load`, so a `"server"` left unhandled would not retire the feature — **it would stop the daemon starting at all**, on precisely the nodes this release affects most. `migrateServerMode` folds it away before anything validates it.
+
+It folds to **off**, never to relay. A node that served its own leases has relay links only if somebody configured them and then switched away, so turning those on during an upgrade would start forwarding that LAN's requests to whatever address was typed in months ago. Off is the one answer that cannot surprise anybody, and the links are kept, so an operator who does want the relay is one pill away rather than retyping it.
+
+The served subnets go quietly, because there is no longer a field for them to land in: `encoding/json` drops a key with no destination, so they are gone on read and gone from the file at the next save. They are not lost — the config history and any backup predating the upgrade still hold them, which is where to look for a pool worth recreating on whatever serves that LAN next. Keeping a dead field to carry them would mean shipping a shape nothing reads, forever, so the file could go on describing a feature the binary does not have.
+
+Typing `server` at the CLI or posting it to the API is refused by name rather than as an unknown value — it was the documented answer one release ago, and "unknown DHCP mode" explains nothing about what happened to it. Both call sites validate before storing, since `Config.Validate` would otherwise fold the value to off on the way past and answer the request with a silent success.
+
+### What is still running, and is not stopped
+
+**A node that was serving comes back from this upgrade still serving.** gravinet ran `systemctl enable` on the Kea unit when an operator saved a subnet, and nothing here disables it: the code that could is gone, and a release that reached out to stop a daemon during an upgrade would take a working LAN down for people who never asked for that. Kea keeps handing out the leases in the file gravinet last wrote for it, now unmanaged by anything.
+
+That is the right outcome and a bad thing to leave unsaid, because the page it was configured from no longer exists — without a line somewhere, the only evidence left is a DHCP server nothing in the console admits to. So it is said three times: once in the daemon log at startup, in `gravinet system dhcp list`, and in the troubleshooting bundle. Each names the unit, says it was not touched, and points at the config history for the subnets.
+
+The signal is an unexported flag set by the migration and never marshalled — it is a fact about the file that was read, not a setting, so it stops being true the moment the configuration is written back out. That is the right lifetime for it: the warning is about an upgrade, not a standing condition, and an operator who has since edited anything on this node has been past the page and seen the server card missing.
+
+### The page
+
+One card, so the switch moves to the page title, which is where every other single-switch page in the console keeps it. It sat on the card only because there were two of them and one pill could not have said which half it governed; a card headed DHCP RELAY one line under a page headed DHCP is the restated title v968 took off five other pages.
+
+Mesh devices leave the interface picker. They were listed there since v978 for a relayed *server* row, where the interface column meant the link this node answered a remote relay across rather than the clients' link — a case where an overlay device was often the correct answer. No row on the page means that any more, so the exception goes with the card that needed it, and a mesh device is refused on save as it always was for everything else.
+
+The run tag beside the pill carries its own class rather than reusing `tag-toggle`. Both are pills on the same `<h2>`, and `sectionTitlePill` clears the previous one by hunting for that class — two of them and a redraw would remove whichever came first.
+
+`/api/dhcp-leases` and `/api/dhcp/relay-iface` are gone from the mux, as is `gravinet monitor dhcp-leases`. The remaining `/api/dhcp` ops are the five relay row ops and `mode`; the subnet ops are answered with "unknown op", so a stale page cannot quietly edit something.
+
+### Startup
+
+`StartDHCPRelay` no longer takes the overlay interface list. It took one because a Kea already running held each device this startup had just recreated by a stale kernel index — its receive path survived that and its send path did not, so it accepted every request, allocated a lease, and threw away every reply (v986). Nothing here drives Kea now, and the relay opens its own sockets in this process, so there is no stale handle to correct.
+
+### Tests
+
+- `TestServerModeConfigStillLoads` parses a literal v987 config — a mode this release does not have, a subnets array with nowhere to land — and checks it validates, lands on off, keeps its relay links, and does not start relaying by itself. This is the one that would have caught a daemon that will not boot.
+- `TestSelectingServerModeIsRefusedByName` and `TestDHCPHandlerRefusesTheRetiredServerMode`: the retired value is recognised at the file and refused at the keyboard, and refused *before* it is stored.
+- `TestRetiredServerStateIsNotWrittenBack` — neither the mode, the subnets, nor the flag survives into a written config.
+- `TestNoDHCPServerIsDrivenFromHere` scans for the identifiers that mean driving a server — rendering its config, installing it, driving its unit — rather than for the word "Kea", which the startup warning has to say out loud. Also checks the two removed endpoints are off the mux.
+- `TestRetiredServerModeIsAnnouncedAtStartup` — the upgrade is not silent.
+- `TestDHCPPutsItsSwitchOnTheTitle` and `TestDHCPNoLongerNeedsPerCardHeads` assert the opposite of what their predecessors did. `TestDHCPKeepsItsPerCardHeads` was correct while there were two cards and is not a guard that should have survived the reason for it.
+
+### Also
+
+The Linux installer's `--help` printed lines 2–60 of its own header while the header ran to 69, so the last two flags' documentation had never been reachable. Now bounded to the block.
+
+---
+
+## v987 — 2026-08-27
+
+**A mesh-wide capture no longer takes over this node's own Capture tab**, and five more buttons are reachable from the header search box.
+
+### The capture takeover
+
+Clicking "Capture all peers" started a capture on mesh0 that appeared on the single-node Capture card above it, unasked, once the .tgz came down.
+
+The local leg of the fan-out ran through `s.capture` — the one active capture the Capture tab is bound to — because that was the same in-process path `handleCaptureStart` already used. `begin()` resets the buffer, repoints `iface` at the overlay device and sets `running`, so the fan-out reached up into the card above it: a capture running there was killed, anything captured there was discarded, and the tab was left sitting on a mesh0 capture nobody started on it.
+
+Nothing about the fan-out needs that state. What it wants is a buffer and a pcap writer, and `captureState` was already written as an independent type — `newCaptureState()` exists and `writePcap`'s own comment says "a capture was never started on *this* captureState". The local leg now opens its own and leaves the shared one alone.
+
+So two captures can be open on this host at once where `begin()` previously guaranteed one: the operator's, and the fan-out's. Two handles and two buffers, each independently bounded by `capMaxBytes`. That is the price of not stealing the first one.
+
+The card's description had this backwards — it named the takeover as intended behaviour, so anyone who noticed it had been told not to report it. It now says this node's own tab is left alone, and stays honest that a *remote* peer's is not: reaching one goes through that peer's own `/api/capture/start`, so anything running there still ends.
+
+### Five more buttons in search
+
+On the same terms as tshoot in v985 — a control worth finding by name without already knowing the page.
+
+| type | finds | where |
+|---|---|---|
+| `unban`, `unblock`, `lift` | Unban | Mesh › Bans |
+| `generate`, `rotate`, `key` | Generate | Mesh › Keys |
+| `token`, `join`, `invite` | join token (`●`) | Mesh › Networks |
+| `info`, `detail`, `inspect` | info (`🛈`) | Monitor › Mesh Peers |
+| `shell`, `console`, `terminal` | shell (`■`) | Monitor › Mesh Peers |
+
+Three of the five are glyphs with no text on them at all, so there was nothing to search for even in principle — "token" existed only in a tooltip and in the modal it opens.
+
+Four sit inside per-network cards, so a node with six networks renders six Unban buttons. One index entry each rather than one per network: it is the same control in every card, six copies of "Unban" would be six ways to say one thing, and the result list has a scannable cap that per-network duplicates would eat. The hit lands on the first card's, which is the top of the section either way.
+
+The peer info and shell entries point at Monitor › Mesh Peers rather than the identical pair under Mesh › Peers — somebody with a peer in front of them who wants to look at it or get onto it is already reading the monitoring page.
+
+Still flashed rather than clicked, and more obviously right than it was for tshoot: two of these five are Unban and a shell prompt.
+
+### Tests
+
+- `TestMeshCaptureDoesNotTouchTheSharedCaptureState` scans the local leg for any remaining reach at `s.capture`, and checks all six calls are on the private state — one stray `s.capture.stop()` would still kill the operator's capture. Pinned at the source because the fault is a shared pointer being reached for, not a value that comes out wrong; the alternative is a test that opens real capture handles on interfaces the test host does not have.
+- `TestMeshCaptureHintSaysTheLocalTabIsLeftAlone` — the description matches the behaviour, in both directions.
+- `TestSearchableButtonsAreWiredEndToEnd` walks all six action entries: the key exists on a button, the index asks for that exact key in that exact section, and each word someone would plausibly type is a substring of the entry's haystack — the same question `searchIndexQuery` asks.
+
+---
+
+## v986 — 2026-08-27
+
+**Relayed clients never received their leases.** Three fixes, from one diagnosis: two independent faults in series, and one reporting bug that made the diagnosis slower.
+
+### The relay dropped every reply to a client without an address
+
+A DHCPOFFER is addressed to `yiaddr` — an address the server has just picked out for a client that does not hold it and will not answer ARP for it. `replyTarget` returned that address and `sendTo` handed it to the client-facing UDP socket, so the kernel tried to resolve a neighbour that by definition cannot answer: ARP request out, nothing back, datagram dropped in the queue.
+
+Nothing fails loudly anywhere along that path. `WriteTo` returned success long before the drop, so the relay logged nothing; the client re-sent its DISCOVER on backoff forever. Observed as four relays retrying against a server that was answering every single one of them, with `listening on 1 interface(s)` as the only relay log line on any of them.
+
+`replyTarget` now returns where *and how*. A reply carrying an address the client does not hold yet is marked `direct` and framed to the client's own `chaddr` over an `AF_PACKET` socket, which skips resolution entirely. A reply to an address the client already holds — `ciaddr`, a renewal — still goes through the socket, because that client does answer ARP for it.
+
+`SOCK_DGRAM` rather than `SOCK_RAW`, so the kernel builds the Ethernet header from the address given to each `Sendto` and only the IP and UDP headers are built here (`frame.go`). The socket's protocol argument is 0, not `ETH_P_IP`: that argument selects what a packet socket *receives*, and binding it would queue a copy of every IP frame on the link into a buffer nothing reads.
+
+An ACK sets both `yiaddr` and `ciaddr`, so a REBINDING client that does hold its address takes the direct path too. Addressing a frame to the hardware address a client just wrote into its own request is correct either way, and one path for every assigned address is worth more than skipping a resolution that would have succeeded.
+
+Falls back to broadcast — never to a unicast — when there is no usable hardware address (`htype`/`hlen` not Ethernet, an all-zero `chaddr`, a group address) or when the packet socket could not be opened. Broadcast reaches the client at the cost of reaching the rest of the link; a unicast reaches nothing and says so nowhere. For the same reason a link whose packet socket fails to open is logged and carried rather than dropped: degraded is not broken, unlike a link missing one of its two UDP sockets, which accepts requests and silently never answers.
+
+UDP checksums are computed rather than left zero. IPv4 permits zero and it would be less code, but embedded DHCP clients are not uniformly conforming and NIC offload has historically been unkind to zero-checksum UDP.
+
+### A restart left Kea holding an interface that no longer existed
+
+Kea caches every interface it serves on by kernel index at startup and re-reads that list only on restart. Each gravinet start destroys and recreates its overlay devices, so a Kea already running is left holding an index pointing at nothing.
+
+Its receive path survives this and its send path does not — the socket is bound to an address rather than to the device, so requests keep arriving. The result is a server that accepts every request, selects the right subnet, allocates a lease, and throws away every reply. `IfaceMgr::getIface` looks the interface up by index when the packet has one, and `IP_PKTINFO` supplies the live index while the cached name is left alone, so the error names an interface that resolves perfectly well. On the affected node this ran to 40 out of 40 sends over four subnets, with `ip link` showing indices 1, 2, 3 and 7 — the 4/5/6 gap being three earlier incarnations of `mesh0` consumed by three restarts.
+
+v985's `reconcileKeaAtBoot` compared bytes and the bytes agreed, so it correctly did nothing. Matching says Kea has been handed the right configuration; it says nothing about whether Kea can still act on it. `keaBootDecision` gains `keaBootRestartStale` for a running Kea serving on an interface this startup rebuilt. It writes nothing — the file is already right — and restarts only when the unit is actually active, so a Kea an operator stopped on purpose stays stopped. A stale file still outranks it, since the rewrite path restarts anyway.
+
+`main.go` passes `engine.Interfaces()` because only that point in the startup knows those devices were just created. The intersection with served subnets is what counts: a node serving DHCP on an ordinary NIC has nothing here.
+
+### The runtime report listed one interface per subnet
+
+`"ifaces": ["mesh0","mesh0","mesh0","mesh0"]` for four subnets on one device. `renderKea` has always deduplicated for `interfaces-config`, so the bundle disagreed with the file Kea was parsing about something neither was wrong about, and cost time during the diagnosis above looking for a second interface that never existed. Now deduplicated in first-appearance order, matching the page. `whyNotServing` takes the subnet count separately, so "4 subnets are configured" does not become "2 subnets are".
+
+### Tests
+
+- `TestOfferIsFramedToChaddr` — the offer goes to the client's hardware address, sourced from the giaddr its request was stamped with, and not out the UDP socket.
+- `TestUndeliverableDirectReplyFallsBackToBroadcast` — all three unusable-`chaddr` shapes broadcast rather than unicast.
+- `TestLinkWithoutPacketSocketBroadcasts` and `TestReplyToHeldAddressUsesTheSocket` — the degraded path answers, and the direct path does not quietly become the only one.
+- `TestIP4UDPFraming` verifies both checksums the way a receiver does, by summing to zero over what they cover. A wrong checksum is discarded silently, which is the same class of failure as the bug above.
+- `TestKeaBootRestartsWhenServedIfaceWasRecreated` covers the four corners: recreated and running, recreated and stopped, running and untouched, and a stale file outranking all of it.
+- `TestKeaBootRestartStaleWritesNothing` pins that the restart path never renders, writes, installs or sets aside.
+
+---
+
 ## v985 — 2026-08-27
 
 **Typing `tshoot` or `troubleshoot` in the header search box now lands on the tshoot button.**

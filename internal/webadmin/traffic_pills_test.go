@@ -52,15 +52,21 @@ func TestTrafficSectionsDoNotRestateTheirName(t *testing.T) {
 	}
 }
 
-// DHCP is the deliberate exception and must keep its two card heads: the page
-// has a server card and a relay card, and a single title pill could not say
-// which half it governed.
-func TestDHCPKeepsItsPerCardHeads(t *testing.T) {
+// DHCP was the deliberate exception through v987: a server card and a relay
+// card on one page, where a single title pill could not have said which half
+// it governed. v988 removed the server, and with it the reason — so the page
+// now follows the same rule as the five above, and the guard is that it does
+// rather than that it does not.
+//
+// sectionCardHead itself stays. Nothing on this page uses it now, but the
+// per-network cards elsewhere still do, and it is their helper too.
+func TestDHCPNoLongerNeedsPerCardHeads(t *testing.T) {
 	sec := between(t, indexHTML, "function secDHCP(c)", "\nfunction ")
-	for _, want := range []string{"sectionCardHead('DHCP SERVER'", "sectionCardHead('DHCP RELAY'"} {
-		if !strings.Contains(sec, want) {
-			t.Errorf("DHCP lost %s; with two cards on one page each needs its own switch", want)
-		}
+	if strings.Contains(sec, "sectionCardHead(") {
+		t.Error("DHCP labels a card with a heading again; with one card the switch belongs on the title")
+	}
+	if !strings.Contains(sec, "sectionTitlePill(c,") {
+		t.Error("DHCP has no title pill, so the relay cannot be switched on at all")
 	}
 }
 
