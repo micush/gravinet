@@ -36,7 +36,6 @@ import (
 	"gravinet/internal/logx"
 	"gravinet/internal/mesh"
 	"gravinet/internal/ratelimit"
-	"gravinet/internal/service"
 	"gravinet/internal/tcshape"
 )
 
@@ -1243,9 +1242,10 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			DNS: n.DNSAdvertise, DNSRej: n.DNSReject, Keys: keys,
 		})
 	}
-	snmpSupported, _ := service.SNMPSupported()
-	lldpSupported, _ := service.LLDPSupported()
-	syslogSupported, _ := service.SyslogSupported()
+	// One probe of the host's capabilities, shared with internal/tui's rail
+	// gating — see Capabilities' doc comment for why these two clients read
+	// the same function rather than each deciding for themselves.
+	caps := Capabilities()
 	// tlsSource/tlsCN/tlsNotAfter describe whichever certificate Start()
 	// actually loaded (s.tlsCert), not just whether tls_cert is set in
 	// config — see that field's own comment for why those always agree in
@@ -1262,7 +1262,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		tlsNotAfter = s.tlsCert.NotAfter.UTC().Format(time.RFC3339)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"nets": out, "udp_ports": cfg.UDPPortList(), "tcp_ports": cfg.TCPPortList(), "nat_state_timeout": cfg.NATStateTimeout, "nat": cfg.NAT, "qos": cfg.QoS, "shaping": cfg.Shaping, "shaping_enabled": cfg.ShapingEnabled(), "shaping_kinds": shapingKinds(cfg), "shaping_kernel": kernelShapingBackend(), "firewall": cfg.Firewall, "geoip_lookup": s.cfg.GeoIPEnabled(), "enable_upnp": cfg.EnableUPnP, "ip_forwarding": cfg.ForwardingEnabled(), "disable_redirects": cfg.RedirectsDisabled(), "allow_remote_shell": s.cfg.AllowRemoteShell, "login_ban_max_failures": s.cfg.LoginBan.EffectiveMaxFailures(), "login_ban_seconds": s.cfg.LoginBan.EffectiveBanSeconds(), "tls_source": tlsSource, "tls_common_name": tlsCN, "tls_not_after": tlsNotAfter, "config_history_limit": cfg.EffectiveConfigHistoryLimit(), "config_history_count": config.Count(s.configPath), "shell_supported": ptySupported, "bgp_supported": bgpSupported(), "ipv6ra_supported": ipv6RASupported(), "dhcp_supported": dhcpSupported(), "snmp_supported": snmpSupported, "lldp_supported": lldpSupported, "syslog_supported": syslogSupported, "log_level": s.be.LogLevel(), "log_max_size": cfg.LogMaxSizeString(),
+		"nets": out, "udp_ports": cfg.UDPPortList(), "tcp_ports": cfg.TCPPortList(), "nat_state_timeout": cfg.NATStateTimeout, "nat": cfg.NAT, "qos": cfg.QoS, "shaping": cfg.Shaping, "shaping_enabled": cfg.ShapingEnabled(), "shaping_kinds": shapingKinds(cfg), "shaping_kernel": kernelShapingBackend(), "firewall": cfg.Firewall, "geoip_lookup": s.cfg.GeoIPEnabled(), "enable_upnp": cfg.EnableUPnP, "ip_forwarding": cfg.ForwardingEnabled(), "disable_redirects": cfg.RedirectsDisabled(), "allow_remote_shell": s.cfg.AllowRemoteShell, "login_ban_max_failures": s.cfg.LoginBan.EffectiveMaxFailures(), "login_ban_seconds": s.cfg.LoginBan.EffectiveBanSeconds(), "tls_source": tlsSource, "tls_common_name": tlsCN, "tls_not_after": tlsNotAfter, "config_history_limit": cfg.EffectiveConfigHistoryLimit(), "config_history_count": config.Count(s.configPath), "shell_supported": ptySupported, "bgp_supported": caps.BGP, "ipv6ra_supported": caps.IPv6RA, "dhcp_supported": caps.DHCP, "snmp_supported": caps.SNMP, "lldp_supported": caps.LLDP, "syslog_supported": caps.Syslog, "log_level": s.be.LogLevel(), "log_max_size": cfg.LogMaxSizeString(),
 		"worker_threads": cfg.WorkerThreads, "tun_queues": cfg.TunQueues, "tun_queues_supported": tunMultiQueueSupported, "udp_gso": cfg.UDPGSOEnabled(), "udp_gso_supported": udpGSOSupported, "socket_buffer_mb": cfg.SocketBufferMB(), "socket_buffer_max_mb": config.SocketBufferMaxBytes >> 20,
 		// Node-global firewall object/service catalog (see Config.FirewallObjects'
 		// doc comment) — shared by every network above, not nested under any one

@@ -286,9 +286,21 @@ The **Monitor** group is read-only — Metrics, Mesh Peers, Capture, Speedtest, 
 
 ---
 
+## 19. The same console over ssh
+
+`gravinet tui` is this sidebar in a terminal — the same groups, the same pages, in the same order, reading the same config and the same control socket. It's for a host with no browser reachable from wherever you're sitting: ssh in and run
+
+```sh
+gravinet tui
+```
+
+Mesh — Networks, Keys, Seeds, Peers, Bans — can be edited right there: `a` adds, `e` edits, `d` deletes (with a confirmation first), `space` toggles enabled, shown at the bottom of each page for whatever the cursor is on. Every other group is still read-only for now and names the exact command that edits it at the bottom of the page, so the answer to "how do I change this" is on the page asking the question. `/` searches every page by name, `r` re-reads everything, `?` lists the keys.
+
+---
+
 ## For scripting: the CLI
 
-Everything above also has a CLI equivalent (`gravinet network`, `route`, `host`, `nat`, `qos`, `bandwidth`, `key`, `seed`, `fw`, ...) — useful for automation, or a headless box you'd rather not tunnel into. Run `gravinet -h` for the full list. The one exception is DNS forwarding, which right now is GUI-only.
+Everything above also has a CLI equivalent (`gravinet network`, `route`, `host`, `nat`, `qos`, `bandwidth`, `key`, `seed`, `fw`, `naming dns`, ...) — useful for automation, or a headless box you'd rather not tunnel into. Run `gravinet -h` for the full list.
 
 ---
 

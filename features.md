@@ -117,6 +117,11 @@ Open an HTTPS page served by the node itself — no extra software to install.
 - **Light and dark themes.**
 - **Everything the UI does, a JSON API does too** — automate anything.
   See `docs/API.md` for the full reference.
+- **The same console, without a browser.** `gravinet tui` draws the same
+  sidebar and the same pages in a terminal, for a host you're reaching over
+  ssh with nothing else available. Mesh (networks, keys, seeds, peers, bans)
+  can be added, edited, deleted, and toggled right there; other pages are
+  still read-only and say which command reaches them.
 
 ## Manage a whole fleet from one place
 

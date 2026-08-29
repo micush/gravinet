@@ -51,7 +51,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "1009"
+	version = "1012"
 	commit  = "none"
 )
 
@@ -100,7 +100,7 @@ func main() {
 	// ("gravinet mon ..." => "gravinet monitor ..."); see prefix.go. The
 	// candidate list mirrors this switch's case arms — extend both together.
 	cmd := os.Args[1]
-	if m, cands := matchPrefixGroups(cmd, [][]string{{"run"}, {"genkey"}, {"genpass"}, {"quickstart"}, {"ban"}, {"unban"}, {"list"}, {"status"}, {"latency"}, {"mesh"}, {"traffic"}, {"naming"}, {"monitor"}, {"system"}, {"info"}, {"settings"}, {"network", "net"}, {"key"}, {"route"}, {"seed"}, {"nat"}, {"host", "hosts"}, {"qos"}, {"bandwidth", "bw"}, {"fw"}, {"managed"}, {"manager"}, {"service"}, {"upgrade"}, {"selftest"}, {"version"}, {"help"}}); m != "" {
+	if m, cands := matchPrefixGroups(cmd, [][]string{{"run"}, {"genkey"}, {"genpass"}, {"quickstart"}, {"ban"}, {"unban"}, {"list"}, {"status"}, {"latency"}, {"mesh"}, {"traffic"}, {"naming"}, {"monitor"}, {"system"}, {"info"}, {"settings"}, {"network", "net"}, {"key"}, {"route"}, {"seed"}, {"nat"}, {"host", "hosts"}, {"qos"}, {"bandwidth", "bw"}, {"fw"}, {"managed"}, {"manager"}, {"service"}, {"upgrade"}, {"selftest"}, {"tui"}, {"version"}, {"help"}}); m != "" {
 		cmd = m
 	} else if len(cands) > 1 {
 		fmt.Fprintf(os.Stderr, "gravinet: %q is ambiguous: %s\n", cmd, strings.Join(cands, ", "))
@@ -165,6 +165,8 @@ func main() {
 		cmdService(os.Args[2:])
 	case "upgrade":
 		cmdUpgrade(os.Args[2:])
+	case "tui":
+		cmdTUI(os.Args[2:])
 	case "selftest":
 		// Not advertised in the usage banner: this exists for the upgrade
 		// preflight to run against a *candidate* binary before it replaces
@@ -217,6 +219,11 @@ it, the second wants two PEM files pasted in and is safer done where the
 browser you'd lock out is the one asking.
 
 other commands (not tied to a web admin page):
+  tui        the web admin's own layout in a terminal: the same groups, the
+             same pages, in the same order, over the same config file and
+             control socket this CLI reads. Mesh (networks, keys, seeds,
+             peers, bans) can be edited inline; other groups are read-only
+             for now and name the command that edits them. "gravinet tui -h"
   run        run the daemon
   quickstart start a mesh (or join one) and install the service, in one shot:
                gravinet quickstart NAME [subnet CIDR] [subnet6 CIDR] [addr HOST:PORT]

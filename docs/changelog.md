@@ -2,6 +2,60 @@
 
 ---
 
+## v1012 — 2026-08-29
+
+**`gravinet tui`: Mesh (Networks, Keys, Seeds, Peers, Bans) can now be edited from the console, not just read.**
+
+The console launched read-only, on the reasoning that a second implementation of the web admin's validation was worse than not having one. That reasoning was sound about *validation* and wrong about the conclusion drawn from it: an edit here doesn't need a second implementation of anything, because it can call the first one. Every mutation now either builds the exact argv a person would type and runs the real `gravinet` binary as a subprocess — the same command, the same validation, the same persistence, the same audit trail, because it *is* that command — or, for the handful of fields that exist as validated `config.Config` setters with no CLI verb yet (this node's own address on a network, its relay/self-seed/mesh-mode settings, a peer's enabled state), calls the setter directly and runs this package's own save-and-reload, mirroring `cmd/gravinet`'s own `commitCfg` orchestration without touching the validation inside it. Nothing in `internal/tui` decides what a valid firewall rule or a valid subnet is; it collects the fields a form asks for and hands them to the function that already knows.
+
+Which path a given mutation takes was not a judgment call — it was read off the actual code. Firewall rules turned out to be live control-socket state persisted as a side effect, not a config-file field the CLI edits and saves; guessing that shape instead of checking it is exactly the kind of thing that would have made an edit here silently do nothing, or contend with the daemon over the same file. That's also *why* Mesh landed first and the rest didn't yet: getting each subsystem's actual storage model right, rather than assumed, takes as long as the editing UI itself.
+
+`a` adds, `e` edits, `d` deletes with a confirmation dialog first, `space` toggles enabled — on the row the cursor is on, shown in the footer as exactly the actions that row supports right now (a ban this node didn't issue offers no delete; an empty key slot offers generate/import instead of edit). New: a two-cell selection gutter and cursor on tables that support it, row navigation that keeps the selection on screen as it moves, and three modal overlays — a form, a yes/no confirmation, and a result screen showing the mutation's own output verbatim.
+
+Building this surfaced a real bug in how the console read live state, independent of editing: the control socket's `peers`/`bans`/`routes` commands resolve to exactly one network when no `-net` is given, and error — "multiple networks; specify -net" — on any node running more than one. The console's live pages had never actually been exercised against a multi-network node, and would have shown that error as "daemon not reachable" on every one of them. Live state is now gathered once per network the daemon actually reports (`gravinet mesh nets`, not the locally-loaded config, so this keeps working even when this process's own config read failed), and every peer, ban, and route now carries which network it came from — which a multi-network edit also needs, to target the right `-net`.
+
+Two genuine gaps, not glossed over: `network address`/`allow-relay`/`self-seed`/`mesh-mode` and a peer's enabled state have no CLI verb at all today — only the web admin can set them, and now this console, through the direct-setter path described above. And label-only key edits (changing a slot's label without also rotating the key) have no verb either; the console says so rather than silently doing something adjacent. Both are the CLI's gap, not this console's — worth closing there, at which point the workaround here deletes itself.
+
+Traffic, Naming, System, and Settings are still read-only, with each page naming the command that edits it — the same treatment Mesh had until this release, and the next thing this gets extended to.
+
+---
+
+## v1011 — 2026-08-29
+
+**`gravinet tui`: arrow keys navigate the rail immediately on open, and the rail's keyboard cursor is visible when it lands on the page already showing.**
+
+Reported as "up/down arrow keys don't work for navigation at all." They worked — the console just opened with the content pane focused rather than the rail, and most pages fit inside the terminal with nothing to scroll. So the first several arrow-key presses somebody sent right after opening produced no visible reaction whatsoever, which reads exactly like broken keys rather than like "there is nothing to scroll yet on this page." `Tab` moved focus to the rail and fixed it, but nothing on screen said that was the problem, or that `Tab` was the way out of it.
+
+The console now opens with the rail focused, so the first press has to move the cursor — the same convention a file manager or `htop` uses: you can move before you've chosen to look at anything in particular.
+
+That surfaced a second, smaller version of the same bug once fixed: the rail's cursor landing on the page already open — which is where it sits right after opening, and after every `Enter` or search hit — drew identically whether or not the rail actually had focus. Active-page styling (the accent fill) took precedence over the focus highlight (the hover fill) with no way to combine them, so `Tab`-ing onto your own current page looked like nothing had happened either. The active-and-focused row now keeps the accent fill and adds an underline, so the rail's keyboard focus is visible on every row, including the one that was already highlighted for an unrelated reason.
+
+Both were caught by writing the fix backwards from a real pty: driving the built binary with actual escape sequences over a Python-forked terminal and reading back the literal bytes written, rather than trusting the model-level tests alone — which had encoded the broken default as the expected one, since `TestTabMovesFocus` asserted focus started on the content pane. That assertion is what a test suite looks like when it's checking that the code matches itself rather than that the code matches what a person sitting at a keyboard experiences; it's fixed alongside the bug, and two new tests pin the visible behavior directly — one for the first keypress after opening, one for the focus indicator on the active row.
+
+---
+
+## v1010 — 2026-08-29
+
+**`gravinet tui`: the web admin's own layout, in a terminal.**
+
+The web admin has a rail of forty-two pages across six groups; the CLI mirrors it, leaf for leaf, checked at test time against `ui.go`'s own `NAV_GROUPS` so the two cannot drift apart silently. There was no third way to see that layout without a browser reachable from wherever the operator happens to be sitting — which, on the night something is actually broken, is frequently a terminal over ssh and nothing else.
+
+`internal/tui` is that third way: the same groups, the same pages, in the same order, drawn as a top bar, a collapsible left rail, and a card-based content pane — the browser's own shell in character cells. It reads through the same paths the CLI already does (`internal/config` for the file, `internal/control` for the running daemon, the exported host readers under `internal/webadmin` and `internal/service`), so a page here and its CLI counterpart cannot report two different answers to the same question; there is one implementation of each read, reached three ways now instead of two.
+
+It does not edit. The web admin's editors are `internal/webadmin/edit.go` and the validation behind every save, and reproducing that as a second implementation in a terminal is how two implementations of the same rule come to disagree — discovered by whichever config a diverging validator let through. This is the same split the CLI's own read-only leaves already draw and document (`cmdSystemDHCP`, `cmdSystemVLANs`), so it is not a new trade-off, just a new page it applies to. Every page that has an editor names the exact command that reaches it, at the foot of the page — checked in tests against the CLI's own leaf tables, the same way the rail itself is checked against `ui.go`.
+
+Two pages say plainly why they are thin rather than pretending otherwise. Speedtest needs an active, coordinated throughput test between two live peers that only the running daemon can start, which needs an asynchronous start-job/poll-status control-socket protocol nothing here has built yet — the same gap the CLI already has, named for the same reason. Packet Capture runs `tcpdump` for you rather than reimplementing a capture pipeline, exactly as `gravinet monitor capture` already does.
+
+Nothing sensitive is ever drawn: key material, SNMP community strings, and admin credentials are withheld on their pages for the same reason they are withheld from the CLI's own default output — this screen is exactly the kind that ends up in a scrollback buffer, or a terminal recording.
+
+Terminal handling is dependency-free on every platform this project ships: `termios`-based raw mode on Linux/Darwin/FreeBSD/OpenBSD (`TCGETS`/`TCSETS` on Linux, `TIOCGETA`/`TIOCSETA` on the BSDs — both are exported `syscall` constants, correct per architecture, so this covers every Linux arch Go supports and not only the three this project builds for), and Windows Console API raw mode plus `GetConsoleScreenBufferInfo` resolved from `kernel32.dll` via `syscall.NewLazyDLL`, matching the approach `internal/webadmin`'s ConPTY backend already takes. `ISIG` is cleared deliberately, so Ctrl-C arrives as an ordinary key and exits through the same path `q` does — a signal-delivered interrupt would skip the deferred terminal restore and leave the calling shell in raw mode with no echo, which is a worse failure than anything this trade avoids.
+
+Rendering diffs each frame against the last rather than repainting, since a full redraw is tens of kilobytes of escape sequences and this is frequently running over the same slow link that is the reason the console is open. The eleven-colour palette is transcribed from `ui.go`'s own `:root` blocks, both themes (`t` toggles), with a 256-colour fallback for terminals that don't advertise truecolor; the page background is deliberately left unset rather than painted, so the console sits inside whatever background and transparency the operator's own terminal is already using, the way every other terminal program does.
+
+Reachable as `gravinet tui`, or `gravinet tui -h` for the flags. `/` searches every page by name or description, `n`/`N` cycle results, `r` re-reads the config and the daemon and clears every cached slow read, `?` lists every key. Live pages (peers, bans, routes, mesh routes, metrics) refresh on a timer on their own; slow reads (the one-second CPU/throughput sample, `vtysh`, `lldpcli`, log tails, the on-disk documents) are fetched off the draw path and the page shows "reading…" rather than freezing the console while they run.
+
+---
+
 ## v1009 — 2026-08-28
 
 **DNS transaction IDs come from `crypto/rand`. gosec G404.**

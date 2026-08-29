@@ -308,6 +308,33 @@ which the daemon now warns about at startup with the exact command to create it.
 The installers verify the binary actually links libpam and rebuild a PAM-enabled
 one when needed, warning loudly if they can't.
 
+## TUI
+
+`gravinet tui` is the web admin's own layout, in a terminal: the same left
+sidebar — Mesh, Traffic, Naming, Monitor, System, Info, plus Settings pinned
+at the bottom — reading the same config file and the same control socket the
+CLI reads, for when the box you need to look at has no browser reachable from
+wherever you're sitting.
+
+**Mesh (Networks, Keys, Seeds, Peers, Bans) can be edited from here** — `a`
+adds, `e` edits, `d` deletes with a confirmation first, `space` toggles
+enabled, all shown in the footer for whichever row the cursor is on. Every
+edit either runs the same `gravinet` command a person would type, or calls
+the same validated setter the web admin uses — there's one implementation of
+what a valid change is, reached a third way. Every other group is still
+read-only for now, and each of those pages names the exact command that
+edits it at the bottom of the page. `/` searches every page by name, `n`/`N`
+jump between hits, `r` re-reads everything, `t` swaps the light/dark
+palette, `?` lists every key.
+
+```sh
+gravinet tui
+```
+
+No flags are required — it finds the same config `gravinet run` would, the
+same way every other CLI command does (`$GRAVINET_CONFIG`, then the platform
+default). Over ssh: `ssh user@your-server -t gravinet tui`.
+
 ## Quick start
 
 For the full walkthrough — installing, then almost everything else from the
