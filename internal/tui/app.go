@@ -697,9 +697,18 @@ func (m *model) handleRune(r rune) bool {
 	case 'd':
 		m.dispatchRowAction('d')
 	case ' ':
-		if !m.railFocus && len(m.currentRows()) > 0 {
+		switch {
+		case m.railFocus:
+			// Expand/collapse the highlighted group, or open the
+			// highlighted page — the same thing Enter does. A page-step
+			// jump here (what moveDown would otherwise do) has no sensible
+			// meaning on a 20-some-item rail and previously made space feel
+			// broken on the one pane where an operator would reach for it
+			// first: toggling a collapsed group open.
+			m.activate()
+		case len(m.currentRows()) > 0:
 			m.dispatchRowAction(' ')
-		} else {
+		default:
 			m.moveDown(m.pageStep(), false)
 		}
 	default:

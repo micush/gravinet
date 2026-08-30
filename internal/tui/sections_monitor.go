@@ -694,9 +694,8 @@ func pageSNMP(c pageCtx) []card {
 	return []card{
 		{title: "snmp", items: items},
 		card{title: "note", items: []item{para{
-			text: "community strings are credentials and are not printed here. a add  d delete, on the selected " +
-				"community. There is no individual enable/disable for one \u2014 remove it and add it back.",
-			tone: "mut"}}},
+			text: "Community strings are credentials and are not printed here. There is no individual " +
+				"enable/disable for one \u2014 remove it and add it back.", tone: "mut"}}},
 	}
 }
 
@@ -759,9 +758,9 @@ func pageLLDP(c pageCtx) []card {
 	return []card{
 		{title: "lldp", items: items},
 		card{title: "note", items: []item{para{
-			text: "a add an interface  d remove. Adding turns on both LLDP and CDP together \u2014 there is no CLI verb " +
-				"for one without the other on an existing entry, remove and re-add to change that. The neighbors " +
-				"found are under Monitor \u203a L2 Peers.", tone: "mut"}}},
+			text: "Adding turns on both LLDP and CDP together \u2014 there is no CLI verb for one without the other " +
+				"on an existing entry, remove and re-add to change that. The neighbors found are under " +
+				"Monitor \u203a L2 Peers.", tone: "mut"}}},
 	}
 }
 
@@ -780,8 +779,7 @@ func pageSyslog(c pageCtx) []card {
 	return []card{
 		{title: "syslog", items: items},
 		card{title: "note", items: []item{para{
-			text: "a add  d remove, on the selected collector. There is no individual enable/disable \u2014 remove " +
-				"it and add it back.", tone: "mut"}}},
+			text: "There is no individual enable/disable for a collector \u2014 remove it and add it back.", tone: "mut"}}},
 	}
 }
 
@@ -842,9 +840,8 @@ func pageUsers(c pageCtx) []card {
 	return []card{
 		{title: "users", items: items},
 		card{title: "note", items: []item{para{
-			text: "a add  e set expiry  d delete, on the selected user. Credentials are never printed \u2014 " +
-				"\"gravinet genpass\" produces a new one, and a password is always asked for here, never blank.",
-			tone: "mut"}}},
+			text: "Credentials are never printed \u2014 \"gravinet genpass\" produces a new one, and a password is " +
+				"always asked for here, never blank.", tone: "mut"}}},
 	}
 }
 
@@ -883,8 +880,7 @@ func pageConfigHistory(c pageCtx) []card {
 	return []card{
 		{title: "config history", items: items},
 		card{title: "note", items: []item{para{
-			text: "a snapshot now  e view diff against the config on disk  d restore (overwrites the current " +
-				"config), on the selected snapshot.", tone: "mut"}}},
+			text: "Restoring overwrites the current config \u2014 it isn't a preview.", tone: "warn"}}},
 	}
 }
 

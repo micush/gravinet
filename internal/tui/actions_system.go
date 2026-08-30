@@ -38,7 +38,7 @@ var lldpActions = sectionActionSet{
 	},
 	row: func(m *model, row selRow) map[rune]rowAction {
 		return map[rune]rowAction{
-			'd': {confirm: "Stop discovery on " + row.id + "?",
+			'd': {label: "remove", confirm: "Stop discovery on " + row.id + "?",
 				run: func(m *model, row selRow) mutationResult {
 					return runLeaf(m.cliArgs("system", "lldp", "iface", "del", row.id)...)
 				}},
@@ -74,7 +74,7 @@ var syslogActions = sectionActionSet{
 	},
 	row: func(m *model, row selRow) map[rune]rowAction {
 		return map[rune]rowAction{
-			'd': {confirm: "Remove syslog collector " + row.id + "?",
+			'd': {label: "remove", confirm: "Remove syslog collector " + row.id + "?",
 				run: func(m *model, row selRow) mutationResult {
 					return runLeaf(m.cliArgsBare("system", "syslog", "del", row.id)...)
 				}},
@@ -116,8 +116,8 @@ var usersActions = sectionActionSet{
 	},
 	row: func(m *model, row selRow) map[rune]rowAction {
 		return map[rune]rowAction{
-			'e': {edit: func(m *model, row selRow) formSpec { return userExpiryForm(row.id) }},
-			'd': {confirm: "Delete console user " + row.id + "?",
+			'e': {label: "expiry", edit: func(m *model, row selRow) formSpec { return userExpiryForm(row.id) }},
+			'd': {label: "delete", confirm: "Delete console user " + row.id + "?",
 				run: func(m *model, row selRow) mutationResult {
 					return runLeaf(m.cliArgsBare("system", "users", "del", row.id)...)
 				}},
@@ -164,10 +164,10 @@ var configHistoryActions = sectionActionSet{
 	},
 	row: func(m *model, row selRow) map[rune]rowAction {
 		return map[rune]rowAction{
-			'e': {run: func(m *model, row selRow) mutationResult {
+			'e': {label: "diff", run: func(m *model, row selRow) mutationResult {
 				return runLeaf(m.cliArgs("system", "config-history", "diff", row.id)...)
 			}},
-			'd': {confirm: "Restore snapshot " + row.id + "? This overwrites the current config.",
+			'd': {label: "restore", confirm: "Restore snapshot " + row.id + "? This overwrites the current config.",
 				run: func(m *model, row selRow) mutationResult {
 					return runLeaf(m.cliArgs("system", "config-history", "restore", row.id)...)
 				}},

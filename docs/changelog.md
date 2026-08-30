@@ -2,6 +2,18 @@
 
 ---
 
+## v1014 — 2026-08-30
+
+**`gravinet tui`: the footer and every page's "note" card were rendering with blank, jumbled action labels — a real bug, not a display quirk. Space now expands a rail group instead of jumping the cursor by a page-step.**
+
+Every row action built as `{edit: ...}` or `{confirm: ..., run: ...}` — which is to say nearly every edit and delete action across Mesh, Traffic, Naming, and System — was missing its `label` field. Only the hand-written toggle actions ever set one. The footer's action legend prints a key followed by its label with no fallback for an empty one, so the result was exactly what got reported: `e   space disable  d   ·  tab rail/page ...`, a key letter with nothing after it. `dispatchRowAction` and the confirm dialog both still worked correctly — neither one reads `label` at all — so nothing failed until a person actually looked at the footer, which a plain "does the action run" test cannot catch. Fixed by adding a real label to all ~25 affected actions (`edit`, `delete`, `notes`, `ban`, `unban`, `advanced`, `set rates`, `expiry`, `diff`, `restore`, and so on), and by adding a systemic test that walks every registered action on a populated fixture for every group and fails if any label is empty — confirmed against the exact reported case (Peers) and confirmed to actually catch the bug by deliberately reintroducing it.
+
+The same underlying gap showed up a second way: nearly every page's "note" card hand-wrote a plain-prose repeat of its own key bindings — `"e notes  space enable/disable (allowed to connect at all)  d ban. Disabling stops this node dialing it but does not force a disconnect..."` — and prose wrapping has no notion of "this word is a key, this phrase is its description," so the key letters ran straight into the description with nothing to separate them. Now that the footer renders correctly and reflects exactly what the selected row supports, that repetition was mostly pure duplication anyway. Went through all ~30 note cards: removed outright wherever a card said nothing but the key list (Seeds, the empty states of Networks and Bans, QoS, Bandwidth, Routes — the footer already covers these), trimmed everywhere else to keep only the context the footer genuinely can't carry — a semantic distinction (Peers: disabling doesn't force a disconnect, ban does), a consequence a short label doesn't convey (Config History: restoring overwrites the current config, it isn't a preview), or a cross-reference to another page or command.
+
+Space bar on the rail used to fall through into `moveDown`'s own rail-focus branch, which jumps the cursor by a full page-step — not what pressing space on a collapsed group looks like it should do, and not a meaningful action on a rail this short. Space and Enter now both call the same `activate()` on the rail: expand or collapse the highlighted group, or open the highlighted page and move focus to it — the ordinary tree-view convention, and the behavior asked for directly.
+
+---
+
 ## v1013 — 2026-08-30
 
 **`gravinet tui`: Traffic, Naming, System, and Settings can now be edited from the console — and every editable page gets a one-key mnemonic shortcut to its fields.**

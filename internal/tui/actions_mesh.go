@@ -57,9 +57,9 @@ var networksActions = sectionActionSet{
 	row: func(m *model, row selRow) map[rune]rowAction {
 		n := findNetwork(m, row.id)
 		out := map[rune]rowAction{
-			'e': {edit: networkEditForm},
-			'E': {edit: networkAdvancedForm},
-			'd': {confirm: "Delete network " + row.id + "? This removes it from the config; any live sessions on it drop.",
+			'e': {label: "edit", edit: networkEditForm},
+			'E': {label: "advanced", edit: networkAdvancedForm},
+			'd': {label: "delete", confirm: "Delete network " + row.id + "? This removes it from the config; any live sessions on it drop.",
 				run: func(m *model, row selRow) mutationResult {
 					return runLeaf(m.cliArgs("network", "delete", row.id)...)
 				}},
@@ -273,16 +273,16 @@ var keysActions = sectionActionSet{
 		}
 		k := findKeySlot(m, netName, slot)
 		out := map[rune]rowAction{
-			'd': {confirm: "Delete key slot " + strconv.Itoa(slot) + " on " + netName + "? Peers still using it will fail to authenticate.",
+			'd': {label: "delete", confirm: "Delete key slot " + strconv.Itoa(slot) + " on " + netName + "? Peers still using it will fail to authenticate.",
 				run: func(m *model, row selRow) mutationResult {
 					return runLeaf(m.cliArgs("key", "delete", strconv.Itoa(slot), "-net", netName)...)
 				}},
 		}
 		if k == nil || k.Key == "" {
-			out['e'] = rowAction{edit: func(m *model, row selRow) formSpec { return keyGenerateForm(netName, slot) }}
+			out['e'] = rowAction{label: "generate", edit: func(m *model, row selRow) formSpec { return keyGenerateForm(netName, slot) }}
 			delete(out, 'd') // nothing to delete in an empty slot
 		} else {
-			out['e'] = rowAction{edit: func(m *model, row selRow) formSpec { return keyEditForm(m, netName, slot) }}
+			out['e'] = rowAction{label: "edit", edit: func(m *model, row selRow) formSpec { return keyEditForm(m, netName, slot) }}
 			label := "disable"
 			if !k.Enabled {
 				label = "enable"
@@ -409,8 +409,8 @@ var seedsActions = sectionActionSet{
 		}
 		sd := findSeed(m, netName, addr)
 		out := map[rune]rowAction{
-			'e': {edit: func(m *model, row selRow) formSpec { return seedEditForm(m, netName, addr) }},
-			'd': {confirm: "Remove seed " + addr + " from " + netName + "?",
+			'e': {label: "notes", edit: func(m *model, row selRow) formSpec { return seedEditForm(m, netName, addr) }},
+			'd': {label: "remove", confirm: "Remove seed " + addr + " from " + netName + "?",
 				run: func(m *model, row selRow) mutationResult {
 					return runLeaf(m.cliArgs("seed", "remove", addr, "-net", netName)...)
 				}},
@@ -507,11 +507,11 @@ var peersActions = sectionActionSet{
 			label = "enable"
 		}
 		return map[rune]rowAction{
-			'e': {edit: func(m *model, row selRow) formSpec { return peerNotesForm(m, netName, nodeID) }},
+			'e': {label: "notes", edit: func(m *model, row selRow) formSpec { return peerNotesForm(m, netName, nodeID) }},
 			' ': {label: label, run: func(m *model, row selRow) mutationResult {
 				return setPeerEnabled(m, netName, nodeID, isPeerDisabled(m, netName, nodeID))
 			}},
-			'd': {confirm: "Ban " + shortID(nodeID) + "? This blocks it from joining or reconnecting on any network, not just " + netName + ".",
+			'd': {label: "ban", confirm: "Ban " + shortID(nodeID) + "? This blocks it from joining or reconnecting on any network, not just " + netName + ".",
 				run: func(m *model, row selRow) mutationResult {
 					return runLeaf(m.cliArgsSock("ban", nodeID, "-net", netName)...)
 				}},
@@ -621,7 +621,7 @@ var bansActions = sectionActionSet{
 			return nil
 		}
 		return map[rune]rowAction{
-			'd': {confirm: "Unban " + shortID(target) + " on " + netName + "?",
+			'd': {label: "unban", confirm: "Unban " + shortID(target) + " on " + netName + "?",
 				run: func(m *model, row selRow) mutationResult {
 					return runLeaf(m.cliArgsSock("unban", target, "-net", netName)...)
 				}},

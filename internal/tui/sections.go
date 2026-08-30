@@ -272,7 +272,6 @@ func pageNetworks(c pageCtx) []card {
 	if len(s.cfg.Networks) == 0 {
 		return []card{
 			{title: "networks", items: []item{empty{"no overlay networks are configured"}}},
-			card{title: "note", items: []item{para{text: "a add a network", tone: "mut"}}},
 		}
 	}
 
@@ -319,9 +318,10 @@ func pageNetworks(c pageCtx) []card {
 			para{text: "the iface column reads ? because the daemon is not reachable — everything else here is from the config file", tone: "warn"})
 	}
 	return append(cards, card{title: "note", items: []item{para{
-		text: "e edit  E advanced (address/mesh mode/relay/self-seed — needs a restart)  space enable/disable  d delete. " +
-			"Joining an existing network onto a new node, or minting an invite token for one, is a separate flow from " +
-			"editing a row here: \"gravinet network join\" / \"gravinet network token\".", tone: "mut"}}})
+		text: "The advanced form (E) changes this node's address, mesh mode, relay willingness, and self-seeding \u2014 " +
+			"those need a restart to take effect. Joining an existing network onto a new node, or minting an invite " +
+			"token for one, is a separate flow from editing a row here: \"gravinet network join\" / \"gravinet network token\".",
+		tone: "mut"}}})
 }
 
 func pageKeys(c pageCtx) []card {
@@ -366,8 +366,7 @@ func pageKeys(c pageCtx) []card {
 	}
 	return append(cards,
 		card{title: "note", items: []item{para{
-			text: "e generate/import an empty slot, or edit label/notes on a populated one \u2014 space enable/disable \u2014 " +
-				"d delete. Key material is never displayed here; \"gravinet mesh keys reveal\" prints one deliberately, " +
+			text: "Key material is never displayed here; \"gravinet mesh keys reveal\" prints one deliberately, " +
 				"which is the right shape for something that ends up in a scrollback buffer, and \"gravinet mesh keys " +
 				"distribute\" pushes a rotated key to every current member over the live mesh.", tone: "mut"}}})
 }
@@ -404,8 +403,7 @@ func pageSeeds(c pageCtx) []card {
 	if len(cards) == 0 {
 		cards = append(cards, card{title: "seeds", items: []item{empty{"no networks are configured"}}})
 	}
-	return append(cards, card{title: "note", items: []item{para{
-		text: "a add  e edit notes  space enable/disable  d remove", tone: "mut"}}})
+	return cards
 }
 
 func pagePeers(c pageCtx) []card {
@@ -442,8 +440,8 @@ func pagePeers(c pageCtx) []card {
 	return []card{
 		{title: "peers", items: []item{t}},
 		card{title: "note", items: []item{para{
-			text: "e notes  space enable/disable (allowed to connect at all)  d ban. Disabling stops this node dialing " +
-				"it but does not force a disconnect if it's the one that reconnects — ban for that.", tone: "mut"}}},
+			text: "Disabling stops this node dialing a peer but does not force a disconnect if the peer is the one " +
+				"that reconnects \u2014 ban for that.", tone: "mut"}}},
 	}
 }
 
@@ -455,7 +453,6 @@ func pageBans(c pageCtx) []card {
 	if len(s.bans) == 0 {
 		return []card{
 			{title: "bans", items: []item{empty{"no nodes are banned"}}},
-			card{title: "note", items: []item{para{text: "a add", tone: "mut"}}},
 		}
 	}
 	t := table{selectKey: "bans", head: []string{"target", "network", "hostname", "issued by", "mine", "when", "notes"}}
@@ -470,8 +467,8 @@ func pageBans(c pageCtx) []card {
 	return []card{
 		{title: "bans", items: []item{t}},
 		card{title: "note", items: []item{para{
-			text: "a add  d unban (only bans this node issued — \"mine\" yes — can be lifted here; a ban another node " +
-				"issued is lifted on that node).", tone: "mut"}}},
+			text: "Only bans this node issued (\"mine\" yes) can be lifted here; a ban another node issued is " +
+				"lifted on that node.", tone: "mut"}}},
 	}
 }
 
@@ -539,8 +536,8 @@ func pageFirewall(c pageCtx) []card {
 		}
 	}
 	return append(cards, card{title: "note", items: []item{para{
-		text: "a add  d delete, on the selected rule. \"scope\" is which network a rule applies to — blank means every " +
-			"network. Rules are node-global; there is no per-network rulebase to switch between.", tone: "mut"}}})
+		text: "\"scope\" is which network a rule applies to — blank means every network. Rules are node-global; " +
+			"there is no per-network rulebase to switch between.", tone: "mut"}}})
 }
 
 // negate renders a rule field that may be inverted, marking the inversion
@@ -615,8 +612,8 @@ func pageNAT(c pageCtx) []card {
 		cards = append(cards, card{title: "rules", items: []item{empty{"no NAT rules configured"}}})
 	}
 	return append(cards, card{title: "note", items: []item{para{
-		text: "a add  d delete  space enable/disable, on the selected rule. \"add\" takes either a bare interface " +
-			"(masquerade shorthand) or source/dest/translate keywords — see \"gravinet nat add -h\".", tone: "mut"}}})
+		text: "\"add\" takes either a bare interface (masquerade shorthand) or source/dest/translate keywords — " +
+			"see \"gravinet nat add -h\".", tone: "mut"}}})
 }
 
 func natTimeout(secs int) string {
@@ -682,8 +679,7 @@ func pageQoS(c pageCtx) []card {
 			add("qos \u2014 "+n.Name, n.QoS)
 		}
 	}
-	return append(cards, card{title: "note", items: []item{para{
-		text: "a add  d delete  space enable/disable, on the selected rule.", tone: "mut"}}})
+	return cards
 }
 
 func pageIPv6RA(c pageCtx) []card {
@@ -721,9 +717,8 @@ func pageIPv6RA(c pageCtx) []card {
 	return []card{
 		{title: "ipv6 router advertisements", items: items},
 		card{title: "note", items: []item{para{
-			text: "space enable/disable, on the selected interface. Adding or editing a full entry (prefix, DNS, " +
-				"search list) needs the web admin's validation and isn't reproduced here \u2014 the same boundary " +
-				"\"gravinet traffic ipv6ra\" itself draws.", tone: "mut"}}},
+			text: "Adding or editing a full entry (prefix, DNS, search list) needs the web admin's validation and " +
+				"isn't reproduced here \u2014 the same boundary \"gravinet traffic ipv6ra\" itself draws.", tone: "mut"}}},
 	}
 }
 
@@ -759,8 +754,6 @@ func pageBandwidth(c pageCtx) []card {
 	}
 	return []card{
 		{title: "shaping", items: items},
-		card{title: "note", items: []item{para{
-			text: "a add  e set rates  d remove  space enable/disable, on the selected interface.", tone: "mut"}}},
 	}
 }
 
@@ -825,8 +818,7 @@ func pageRoutes(c pageCtx) []card {
 		cards = append(cards, card{title: "learned (live)", items: []item{
 			para{text: "needs the daemon; not reachable", tone: "warn"}}})
 	}
-	return append(cards, card{title: "note", items: []item{para{
-		text: "a add  d delete  space enable/disable, on the selected advertised route.", tone: "mut"}}})
+	return cards
 }
 
 func pageBGP(c pageCtx) []card {
@@ -864,9 +856,9 @@ func pageBGP(c pageCtx) []card {
 	return []card{
 		{title: "bgp", items: items},
 		card{title: "note", items: []item{para{
-			text: "e edit  d remove, on the selected neighbor. This is the configuration gravinet writes into FRR; " +
-				"live session state is under Monitor \u203a BGP Peers. Advertised networks and the redistribute pickers " +
-				"need the web admin or \"gravinet traffic bgp advertise\"/\"-h\" for now.", tone: "mut"}}},
+			text: "This is the configuration gravinet writes into FRR; live session state is under Monitor \u203a " +
+				"BGP Peers. Advertised networks and the redistribute pickers need the web admin or " +
+				"\"gravinet traffic bgp advertise\"/\"-h\" for now.", tone: "mut"}}},
 	}
 }
 
@@ -976,8 +968,7 @@ func pageDNS(c pageCtx) []card {
 		cards = append(cards, card{title: "dns", items: []item{empty{"no networks are configured"}}})
 	}
 	return append(cards, card{title: "note", items: []item{para{
-		text: "a add a forward  e edit servers  d remove  space enable/disable, on the selected row. Rejected " +
-			"domains (refused from peers) are added with \"gravinet naming dns reject -h\".", tone: "mut"}}})
+		text: "Rejected domains (refused from peers) are added with \"gravinet naming dns reject -h\".", tone: "mut"}}})
 }
 
 func pageHosts(c pageCtx) []card {
@@ -1013,8 +1004,8 @@ func pageHosts(c pageCtx) []card {
 		cards = append(cards, card{title: "hosts", items: []item{empty{"no networks are configured"}}})
 	}
 	return append(cards, card{title: "note", items: []item{para{
-		text: "a add  e edit address  d remove  space enable/disable, on the selected record. This is what this " +
-			"node advertises; what actually landed in the host's file is under Monitor \u203a Hosts File.", tone: "mut"}}})
+		text: "This is what this node advertises; what actually landed in the host's file is under Monitor \u203a " +
+			"Hosts File.", tone: "mut"}}})
 }
 
 // hostSnapshotItems renders a metrics reading. Shared by the Metrics page and

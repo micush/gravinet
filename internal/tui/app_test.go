@@ -151,6 +151,53 @@ func TestEnterOnAGroupExpandsIt(t *testing.T) {
 	}
 }
 
+// TestSpaceOnAGroupExpandsItTheSameAsEnter is a regression test: space used
+// to fall through to moveDown's rail branch, which jumps the rail cursor by
+// a full page-step — a meaningless action on a rail this short, and not what
+// pressing space on a collapsed group looks like it should do. Space and
+// Enter now do the same thing on the rail (activate()), matching the
+// tree-view convention where both expand a branch.
+func TestSpaceOnAGroupExpandsItTheSameAsEnter(t *testing.T) {
+	m := testModel()
+	m.railFocus = true
+	for i, e := range m.railEntries() {
+		if e.kind == "group" && e.group == "traffic" {
+			m.railIdx = i
+			break
+		}
+	}
+	m.handleKey(key{t: keyRune, r: ' '})
+	if m.expanded != "traffic" {
+		t.Fatalf("space did not expand traffic; expanded = %q", m.expanded)
+	}
+	// The cursor stays on the header it expanded — which may be a different
+	// *index* now that mesh collapsed and the rail re-flowed above it; the
+	// invariant is which entry the cursor is on, not its position, the same
+	// distinction TestEnterOnAGroupExpandsIt already draws.
+	e := m.railEntries()[m.railIdx]
+	if e.kind != "group" || e.group != "traffic" {
+		t.Errorf("cursor moved off the header it expanded: %+v", e)
+	}
+}
+
+func TestSpaceOnAPageOpensItTheSameAsEnter(t *testing.T) {
+	m := testModel()
+	m.railFocus = true
+	for i, e := range m.railEntries() {
+		if e.sec == "seeds" {
+			m.railIdx = i
+			break
+		}
+	}
+	m.handleKey(key{t: keyRune, r: ' '})
+	if m.section != "seeds" {
+		t.Fatalf("space did not open seeds; section = %q", m.section)
+	}
+	if m.railFocus {
+		t.Error("focus should have moved to the content pane, same as Enter")
+	}
+}
+
 func TestEnterOnAPageOpensItAndReturnsFocus(t *testing.T) {
 	m := testModel()
 	m.railFocus = true

@@ -83,7 +83,7 @@ var natActions = sectionActionSet{
 			label = "enable"
 		}
 		return map[rune]rowAction{
-			'd': {confirm: "Delete NAT rule [" + row.id + "]?",
+			'd': {label: "delete", confirm: "Delete NAT rule [" + row.id + "]?",
 				run: func(m *model, row selRow) mutationResult {
 					return runLeaf(m.cliArgs("nat", "delete", row.id)...)
 				}},
@@ -146,7 +146,7 @@ var qosActions = sectionActionSet{
 			label = "enable"
 		}
 		return map[rune]rowAction{
-			'd': {confirm: "Delete QoS rule " + qosRuleDisplayLabel(*r) + "?",
+			'd': {label: "delete", confirm: "Delete QoS rule " + qosRuleDisplayLabel(*r) + "?",
 				run: func(m *model, row selRow) mutationResult {
 					args := append([]string{"qos", "delete"}, matchArgs...)
 					if r.Scope != "" {
@@ -254,8 +254,8 @@ var bandwidthActions = sectionActionSet{
 			label = "enable"
 		}
 		return map[rune]rowAction{
-			'e': {edit: func(m *model, row selRow) formSpec { return bandwidthEditForm(m, row.id) }},
-			'd': {confirm: "Remove the shaping entry for " + row.id + "? It becomes unshaped, not just disabled.",
+			'e': {label: "set rates", edit: func(m *model, row selRow) formSpec { return bandwidthEditForm(m, row.id) }},
+			'd': {label: "remove", confirm: "Remove the shaping entry for " + row.id + "? It becomes unshaped, not just disabled.",
 				run: func(m *model, row selRow) mutationResult {
 					return runLeaf(m.cliArgs("bandwidth", "del", "-iface", row.id)...)
 				}},
@@ -363,7 +363,7 @@ var routesActions = sectionActionSet{
 			label = "enable"
 		}
 		return map[rune]rowAction{
-			'd': {confirm: "Stop advertising " + cidr + " on " + netName + "?",
+			'd': {label: "delete", confirm: "Stop advertising " + cidr + " on " + netName + "?",
 				run: func(m *model, row selRow) mutationResult {
 					return runLeaf(m.cliArgs("route", "delete", cidr, "-net", netName)...)
 				}},
@@ -404,8 +404,8 @@ var bgpActions = sectionActionSet{
 			label = "bring up"
 		}
 		return map[rune]rowAction{
-			'e': {edit: func(m *model, row selRow) formSpec { return bgpNeighborEditForm(m, row.id) }},
-			'd': {confirm: "Remove BGP neighbor " + row.id + "?",
+			'e': {label: "edit", edit: func(m *model, row selRow) formSpec { return bgpNeighborEditForm(m, row.id) }},
+			'd': {label: "remove", confirm: "Remove BGP neighbor " + row.id + "?",
 				run: func(m *model, row selRow) mutationResult {
 					return runLeaf(m.cliArgs("traffic", "bgp", "neighbor", "del", row.id)...)
 				}},
@@ -522,7 +522,7 @@ var firewallActions = sectionActionSet{
 	row: func(m *model, row selRow) map[rune]rowAction {
 		r := firewallRuleFor(m, row.id)
 		return map[rune]rowAction{
-			'd': {confirm: "Delete firewall rule [" + row.id + "]?",
+			'd': {label: "delete", confirm: "Delete firewall rule [" + row.id + "]?",
 				run: func(m *model, row selRow) mutationResult {
 					// "fw del" takes the id positionally (splitIDs reads it
 					// off rest directly, no flag) — the one part of this

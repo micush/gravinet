@@ -50,8 +50,8 @@ var dnsActions = sectionActionSet{
 				label = "enable"
 			}
 			return map[rune]rowAction{
-				'e': {edit: func(m *model, row selRow) formSpec { return dnsForwardEditForm(m, netName, domain) }},
-				'd': {confirm: "Stop advertising " + domain + " on " + netName + "?",
+				'e': {label: "servers", edit: func(m *model, row selRow) formSpec { return dnsForwardEditForm(m, netName, domain) }},
+				'd': {label: "remove", confirm: "Stop advertising " + domain + " on " + netName + "?",
 					run: func(m *model, row selRow) mutationResult {
 						return runLeaf(m.cliArgs("naming", "dns", "remove", domain, "-net", netName)...)
 					}},
@@ -70,7 +70,7 @@ var dnsActions = sectionActionSet{
 				label = "enable"
 			}
 			return map[rune]rowAction{
-				'd': {confirm: "Stop rejecting " + domain + " on " + netName + "?",
+				'd': {label: "remove", confirm: "Stop rejecting " + domain + " on " + netName + "?",
 					run: func(m *model, row selRow) mutationResult {
 						return runLeaf(m.cliArgs("naming", "dns", "reject-remove", domain, "-net", netName)...)
 					}},
@@ -181,8 +181,8 @@ var hostsActions = sectionActionSet{
 			label = "enable"
 		}
 		return map[rune]rowAction{
-			'e': {edit: func(m *model, row selRow) formSpec { return hostEditForm(m, netName, name) }},
-			'd': {confirm: "Stop advertising " + name + " on " + netName + "?",
+			'e': {label: "address", edit: func(m *model, row selRow) formSpec { return hostEditForm(m, netName, name) }},
+			'd': {label: "remove", confirm: "Stop advertising " + name + " on " + netName + "?",
 				run: func(m *model, row selRow) mutationResult {
 					return runLeaf(m.cliArgs("naming", "hosts", "remove", name, "-net", netName)...)
 				}},
