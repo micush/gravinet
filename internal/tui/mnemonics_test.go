@@ -223,3 +223,4 @@ func TestAdvancedEditKeyIsReachableFromTheRealKeyboardPath(t *testing.T) {
 }
 
 func dummyForm(m *model) formSpec { return formSpec{title: "dummy"} }
+

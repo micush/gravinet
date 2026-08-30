@@ -64,7 +64,7 @@ func TestDNSForwardToggleArgv(t *testing.T) {
 func TestDNSRejectRowsHaveNoEditActionOnlyToggleAndDelete(t *testing.T) {
 	m, _ := namingTestModel(t, "dns")
 	m.selTable, m.selID = "dns-reject", "corp"+idSep+"evil.example"
-	if legend := m.actionLegend(); legend == "" {
+	if legend := m.actionLegendSegments(); len(legend) == 0 {
 		t.Fatal("reject row should offer at least delete/toggle")
 	}
 	m.dispatchRowAction('e')

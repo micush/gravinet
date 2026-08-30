@@ -2,6 +2,50 @@
 
 ---
 
+## v1018 — 2026-08-30
+
+**`gravinet tui`: the footer's "E advanced", "/ search", and "? help" segments were showing their key as a bare, unmarked character sitting next to the word — fixed.**
+
+Two separate mistakes landed in the same footer redesign. First: merging a key into its label only ever checked the label's own *first* letter, so "E"+"advanced" had nowhere to merge into — "advanc**e**d" already contains the letter, six characters in, but the code never looked past position zero, so it fell back to a bare capital "E" floating in front of the word with nothing visually connecting the two. Second, and worse: "/ search" and "? help" were built with no underline position at all — not merged, not marked, just a punctuation character sitting to the side of a word with zero styling, which is the "characters off to the side" the report named directly.
+
+Both fixed at once. `footerKeySegment` now searches the *entire* label for the key's letter, not only its first character, so "advanced" absorbs 'E' as the 'e' already inside it — one word, no separate token, underline six characters in. And the fallback path — reached now only when the key genuinely doesn't appear anywhere in its label (Peers' 'd' bans, and there's no 'd' anywhere in "ban") or isn't a letter at all ('?', '/') — always underlines the key token itself; a key shown with nothing distinguishing it from plain text was the second half of the same bug, not a separate one. Peers' "e notes" reads as plain "notes" now too, for the same reason "advanced" does: the 'e' is already the fourth letter of the word it triggers.
+
+Confirmed against the exact reported case: reverting to the old matching logic reproduces the precise broken footer from the report, character for character, and the fix resolves it — checked with a real render call and the underline's exact screen position, not just the text.
+
+---
+
+## v1017 — 2026-08-30
+
+**`gravinet tui`: rail mnemonics are gone. The left sidebar is back to plain labels and the accent highlight bar, nothing else.**
+
+v1015 gave every rail entry its own underlined jump letter, on request; v1016 fixed the worst of how it looked by no longer letting group headers hog the alphabet before the pages actually on screen got a turn. It still wasn't good — a rail crowded with `[c]`, `[h]`, `[l]`-style bracketed placeholders for whichever entries the alphabet ran out on before reaching them reads as debug output, not a finished interface, and improving the letter distribution further wasn't going to fix that. Removed outright rather than continue polishing it: the rail draws plain text again, the chevron and the accent-filled highlight bar for the open page are exactly what they were before any of this started, and pressing a letter no longer jumps to a rail entry.
+
+Field mnemonics are untouched — Settings and every other page built from named, individually-editable rows still underline one character per field and still jump straight to editing it from anywhere. That mechanism was never the complaint; only the rail's own use of the same idea was. The footer's pipe-separated, underline-in-label redesign from v1015 stays too, for the same reason: nobody asked for that back.
+
+---
+
+## v1016 — 2026-08-30
+
+**`gravinet tui`: rail mnemonics no longer waste the alphabet on group headers before the pages actually on screen get a turn.**
+
+Assigning group headers and the pinned Settings foot in their own priority pass — before any page in the expanded group ever got a look — meant six group headers and a foot could burn through most of the usable letters before Mesh's own five pages (the ones actually on screen, group already open) got to pick. On a fresh install that showed up exactly where it looked worst: Seeds and Bans, sitting right there under an expanded Mesh, fell back to bracketed placeholders (`[h] Seeds`, `[l] Bans`) while Settings and the still-collapsed System and Info groups — none of them even in front of the operator — sat on good ones.
+
+The fix removes the priority pass entirely. Every rail entry, group headers included, is assigned in a single pass over natural rail order — top to bottom, the order a reader's eye actually meets them — so the expanded group's own pages, which sit physically above the later collapsed headers, are offered letters first. Nothing here needs to survive between renders: a mnemonic is a letter to glance at and press on the one screen showing it, not a keybinding to memorize across a session, so there was never a real reason group letters needed the priority they had. The trade reverses itself the moment a different group is opened — whichever pages are actually in view keep first claim, and it's always the less-immediately-relevant entries, not the ones on screen, that end up with a bracketed fallback when the alphabet runs short.
+
+---
+
+## v1015 — 2026-08-30
+
+**`gravinet tui`: space no longer strands focus off the rail, every rail entry now has its own one-key jump, and the footer is redrawn to show real trigger keys instead of a flat list.**
+
+Space on a rail page item used to call the exact same path Enter does — open the page and hand focus to the content pane. That meant browsing was self-defeating: arrowing down through five pages, tapping space at each one to see what was there, meant pressing Tab four times just to get back to the rail in between. Space and Enter are now two different functions. Enter still commits — opens the page and moves focus there, for when the browsing is over and the work starts. Space previews — loads the page's content into the pane so it's visible, but leaves focus on the rail, so the very next arrow key keeps moving the cursor rather than scrolling a page nobody asked to switch into. A group under the cursor still toggles open and closed on either key, unchanged; only a page's own behavior needed the split.
+
+Every rail entry — the six groups, the pinned Settings foot, and the pages within whichever group is currently expanded — now carries its own underlined mnemonic, the same one-key jump Settings' fields already had. Press it from anywhere and it goes straight there: a group's letter always expands it (never collapses one already open — a direct-jump shortcut should land you somewhere, not toggle something you may not even be looking at), a page's letter opens it and commits focus, the same landing Enter makes. Only forty-some pages exist against a pool of roughly sixty available letters once the reserved keys and the always-visible group/foot mnemonics are set aside, so page mnemonics are scoped to whichever group is expanded rather than permanently reserved across all of them — different collapsed groups are free to reuse each other's letters, since only one group's pages are ever on screen at once. Rail mnemonics and the field-mnemonic system introduced for Settings now share one reservation pool per keypress, computed once, so a rail letter and a field letter can never land on the same key on the same page.
+
+The footer itself is redrawn: pipe-separated segments in place of the old double-space list, and every segment shows its real trigger key underlined within its own label rather than as a separate leading character — `next` with its own `n` underlined, not `n next`. Where the key doesn't spell the label — a row action's key is fixed by convention (`e` always edits, `d` always deletes or its page's equivalent), and frequently doesn't share a first letter with what it does (Peers' `e` opens "notes") — the key still shows as its own leading, underlined token rather than a letter is invented within the label that isn't actually the trigger.
+
+---
+
 ## v1014 — 2026-08-30
 
 **`gravinet tui`: the footer and every page's "note" card were rendering with blank, jumbled action labels — a real bug, not a display quirk. Space now expands a rail group instead of jumping the cursor by a page-step.**

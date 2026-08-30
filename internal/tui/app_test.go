@@ -180,7 +180,14 @@ func TestSpaceOnAGroupExpandsItTheSameAsEnter(t *testing.T) {
 	}
 }
 
-func TestSpaceOnAPageOpensItTheSameAsEnter(t *testing.T) {
+// TestSpaceOnAPagePreviewsItWithoutLeavingTheRail is the fix for a reported
+// bug: space used to call the exact same path Enter does, which included
+// handing focus to the content pane — so browsing five pages by tapping
+// space at each one meant pressing Tab four times to get back to the rail
+// in between. Space now loads the page (so it's visible) but leaves the
+// rail focused, and a following arrow key has to keep moving the rail
+// cursor, not the page's own scroll.
+func TestSpaceOnAPagePreviewsItWithoutLeavingTheRail(t *testing.T) {
 	m := testModel()
 	m.railFocus = true
 	for i, e := range m.railEntries() {
@@ -191,10 +198,38 @@ func TestSpaceOnAPageOpensItTheSameAsEnter(t *testing.T) {
 	}
 	m.handleKey(key{t: keyRune, r: ' '})
 	if m.section != "seeds" {
-		t.Fatalf("space did not open seeds; section = %q", m.section)
+		t.Fatalf("space did not load seeds; section = %q", m.section)
+	}
+	if !m.railFocus {
+		t.Fatal("space moved focus off the rail — the exact bug this test guards against")
+	}
+	// And the rail cursor must still be able to move: the whole point of
+	// staying focused is that the next arrow key keeps browsing.
+	before := m.railIdx
+	m.handleKey(key{t: keyDown})
+	if m.railIdx == before {
+		t.Error("the rail cursor did not move after previewing a page with space")
+	}
+}
+
+// TestEnterOnAPageStillHandsOverFocus confirms Enter and space diverge on
+// purpose: Enter is "I'm done browsing, let me work here," and still moves
+// focus to the content pane — only space was wrong.
+func TestEnterOnAPageStillHandsOverFocus(t *testing.T) {
+	m := testModel()
+	m.railFocus = true
+	for i, e := range m.railEntries() {
+		if e.sec == "seeds" {
+			m.railIdx = i
+			break
+		}
+	}
+	m.handleKey(key{t: keyEnter})
+	if m.section != "seeds" {
+		t.Fatalf("enter did not open seeds; section = %q", m.section)
 	}
 	if m.railFocus {
-		t.Error("focus should have moved to the content pane, same as Enter")
+		t.Error("enter should still hand focus to the content pane")
 	}
 }
 

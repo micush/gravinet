@@ -18,6 +18,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // railWidth is the rail's fixed width, chosen the way ui.go's 188px was: wide
@@ -494,30 +495,108 @@ func (m *model) drawContent(s *Screen) {
 // drawFooter is the key bar. A terminal has no affordances of its own, so the
 // bindings have to be on screen; this is the one piece of furniture with no
 // counterpart in the browser.
+//
+// Every segment shows its own trigger key underlined — merged into the
+// label when the two start with the same letter ("next", not "n next"),
+// shown as its own leading token when they don't ("e notes", where 'e' is
+// fixed by convention and doesn't spell the label). See footerKeySegment.
 func (m *model) drawFooter(s *Screen) {
 	y := m.h - 1
-	s.Fill(0, y, m.w, 1, ' ', style{}.withFg(m.pal.mut))
+	base := style{}.withFg(m.pal.mut)
+	s.Fill(0, y, m.w, 1, ' ', base)
 	if m.flash != "" {
 		s.Print(1, y, truncate(m.flash, m.w-2), style{}.withFg(m.pal.warn))
 		return
 	}
-	keys := "tab rail/page  \u2191\u2193 move  enter open  / search  n next  r refresh  t theme  ? help  q quit"
-	var parts []string
+
+	var segs []footerSegment
 	if set, ok := sectionActions[m.section]; ok {
 		if set.add != nil {
-			parts = append(parts, "a add")
+			segs = append(segs, footerKeySegment("a", "add"))
 		}
-		if legend := m.actionLegend(); legend != "" {
-			parts = append(parts, legend)
-		}
+		segs = append(segs, m.actionLegendSegments()...)
 	}
 	if m.pageHasMnemonics() {
-		parts = append(parts, "underlined letter: edit that field")
+		segs = append(segs, footerSegment{text: "underlined letter: edit that field", ulPos: -1})
 	}
-	if len(parts) > 0 {
-		keys = joinLegend(parts) + "  \u00b7  " + keys
+	segs = append(segs,
+		footerKeySegment("tab", "rail/page"),
+		footerSegment{text: "\u2191\u2193 move", ulPos: -1},
+		footerKeySegment("enter", "open"),
+		footerKeySegment("/", "search"),
+		footerKeySegment("n", "next"),
+		footerKeySegment("r", "refresh"),
+		footerKeySegment("t", "theme"),
+		footerKeySegment("?", "help"),
+		footerKeySegment("q", "quit"),
+	)
+
+	mnemonicSt := base.withUnderline()
+	x, sep := 1, " \u2502 "
+	for i, seg := range segs {
+		if i > 0 {
+			if x+len(sep) >= m.w-1 {
+				break
+			}
+			x = s.Print(x, y, sep, style{}.withFg(m.pal.line))
+		}
+		if x >= m.w-1 {
+			break
+		}
+		room := m.w - 1 - x
+		text := truncate(seg.text, room)
+		if seg.ulPos < 0 || seg.ulPos >= utf8.RuneCountInString(text) {
+			x = s.Print(x, y, text, base)
+			continue
+		}
+		rs := []rune(text)
+		x = s.Print(x, y, string(rs[:seg.ulPos]), base)
+		x = s.Print(x, y, string(rs[seg.ulPos]), mnemonicSt)
+		x = s.Print(x, y, string(rs[seg.ulPos+1:]), base)
 	}
-	s.Print(1, y, truncate(keys, m.w-2), style{}.withFg(m.pal.mut))
+}
+
+// footerSegment is one word or short phrase in the footer, with the rune
+// index (within text) of the character to underline — its actual trigger
+// key, wherever that's a single letter — or -1 for a segment with nothing
+// to underline (a symbol-only key like / or ?, or a plain descriptive line).
+type footerSegment struct {
+	text  string
+	ulPos int
+}
+
+// footerKeySegment builds one key-hinted segment. When keyDisplay is a
+// single rune and label starts with the same letter (case-insensitively),
+// the key folds into the label — "n"+"next" becomes "next" with its own 'n'
+// underlined, dropping the redundant separate character. Otherwise the key
+// is shown as its own leading token with its first rune underlined —
+// "tab"+"rail/page" becomes "tab rail/page" with 't' underlined (naming the
+// Tab key, not spelling out a letter to type), and "e"+"notes" becomes
+// "e notes" with 'e' underlined (a row-action key fixed by convention, which
+// doesn't happen to spell the label it triggers).
+// footerKeySegment builds one key-hinted segment. When keyDisplay is a
+// single letter that appears anywhere in label — not only as label's own
+// first letter — the key folds into the label at that occurrence and the
+// separate key token disappears entirely: "E"+"advanced" becomes "advanced"
+// with the 'e' inside "advanc(e)d" underlined, not a floating capital
+// letter with nothing to visually connect it to the word after it. Only
+// once no occurrence exists at all — a multi-rune key name (tab, enter,
+// space), a symbol key (?, /), or a letter genuinely absent from the label
+// — does the key show as its own leading token, and even then its own
+// first rune is always underlined: a token with nothing distinguishing it
+// from plain text reads as a stray character sitting to the side, not a key,
+// which was the second half of the same bug ("/ search" and "? help" were
+// being built with no underline position at all).
+func footerKeySegment(keyDisplay, label string) footerSegment {
+	if utf8.RuneCountInString(keyDisplay) == 1 {
+		kr := []rune(keyDisplay)[0]
+		if unicodeToLower(kr) >= 'a' && unicodeToLower(kr) <= 'z' {
+			if p := runeIndexFold(label, kr); p >= 0 {
+				return footerSegment{text: label, ulPos: p}
+			}
+		}
+	}
+	return footerSegment{text: keyDisplay + " " + label, ulPos: 0}
 }
 
 // pageHasMnemonics reports whether the current page has at least one
@@ -538,20 +617,6 @@ func (m *model) pageHasMnemonics() bool {
 		}
 	}
 	return false
-}
-
-// joinLegend joins the per-page action hints with the same two-space
-// separator the static key list uses, so the footer reads as one continuous
-// legend rather than two differently-spaced halves.
-func joinLegend(parts []string) string {
-	out := ""
-	for i, p := range parts {
-		if i > 0 {
-			out += "  "
-		}
-		out += p
-	}
-	return out
 }
 
 // drawSearch paints the search overlay: an input line and the matches under
@@ -699,13 +764,7 @@ func (m *model) handleRune(r rune) bool {
 	case ' ':
 		switch {
 		case m.railFocus:
-			// Expand/collapse the highlighted group, or open the
-			// highlighted page — the same thing Enter does. A page-step
-			// jump here (what moveDown would otherwise do) has no sensible
-			// meaning on a 20-some-item rail and previously made space feel
-			// broken on the one pane where an operator would reach for it
-			// first: toggling a collapsed group open.
-			m.activate()
+			m.railPeek()
 		case len(m.currentRows()) > 0:
 			m.dispatchRowAction(' ')
 		default:
@@ -845,22 +904,59 @@ func (m *model) activate() {
 	e := entries[m.railIdx]
 	switch e.kind {
 	case "group":
-		if m.expanded == e.group {
-			m.expanded = ""
-		} else {
-			m.expanded = e.group
-		}
-		// The cursor stays on the header it was on, which after an expand is
-		// the row above the pages that just appeared.
-		for i, en := range m.railEntries() {
-			if en.kind == "group" && en.group == e.group {
-				m.railIdx = i
-				break
-			}
-		}
+		m.toggleRailGroup(e.group)
 	default:
 		m.setSection(e.sec)
 		m.railFocus = false
+	}
+}
+
+// railPeek is what space does on the rail — deliberately not the same thing
+// Enter does. Enter commits: it opens the page and hands focus to it, since
+// pressing Enter means "I'm done browsing, let me work here." Space is for
+// browsing itself: it loads the highlighted page's content into the pane, so
+// it's visible, but leaves focus on the rail, so the very next key can be
+// another arrow press moving to the next item — an operator arrowing down
+// through five pages, tapping space at each one to see what's there, never
+// needs Tab in between. It used to call the same path Enter does, which
+// meant the first space press silently switched focus out of the rail —
+// browsing five pages meant pressing Tab four times to get back, which is
+// the opposite of what space is for.
+//
+// A group still toggles the same way space or Enter: there is only one
+// sensible thing space could mean for a group, so this doesn't diverge for
+// that case.
+func (m *model) railPeek() {
+	if !m.railFocus {
+		return
+	}
+	entries := m.railEntries()
+	if m.railIdx < 0 || m.railIdx >= len(entries) {
+		return
+	}
+	e := entries[m.railIdx]
+	if e.kind == "group" {
+		m.toggleRailGroup(e.group)
+		return
+	}
+	m.setSection(e.sec) // focus deliberately stays on the rail
+}
+
+// toggleRailGroup is activate/railPeek's shared group-toggle step: expand or
+// collapse group, and keep the cursor on the header it was on — which after
+// an expand may be at a different index, since the group that just
+// collapsed above it changes how many rows come before it.
+func (m *model) toggleRailGroup(group string) {
+	if m.expanded == group {
+		m.expanded = ""
+	} else {
+		m.expanded = group
+	}
+	for i, en := range m.railEntries() {
+		if en.kind == "group" && en.group == group {
+			m.railIdx = i
+			break
+		}
 	}
 }
 

@@ -10,8 +10,6 @@ package tui
 // here simply has no add/edit/delete/toggle, and the footer legend reflects
 // exactly that rather than showing a key that would do nothing.
 
-import "fmt"
-
 // rowAction is one thing that can be done to a selected row. Exactly one of
 // edit or run is set: edit opens a form (for anything that collects values),
 // run performs the action immediately, optionally behind a confirm dialog
@@ -91,26 +89,34 @@ func (m *model) dispatchRowAction(r rune) {
 	}
 }
 
-// actionLegend builds the footer's per-row action hint for the current
-// selection, e.g. "e edit  d delete  space disable" — only the actions that
+// actionLegendSegments builds the footer's per-row action hint for the
+// current selection as underline-ready segments — only the actions that
 // actually apply to the row under the cursor right now, so the footer never
 // advertises a key that would report "no such action here" if pressed.
-func (m *model) actionLegend() string {
+//
+// A row action's key is fixed by convention (e always edits, d always
+// deletes or its page's equivalent — ban, restore, remove) rather than
+// derived from its label, and the two frequently don't share a first
+// letter: Peers' 'e' opens "notes", not "edit". footerKeySegment handles
+// that split on its own — merging the key into the label when they do align
+// (Networks' 'e' opens "edit"), showing the key as its own underlined token
+// when they don't.
+func (m *model) actionLegendSegments() []footerSegment {
 	set, ok := sectionActions[m.section]
 	if !ok || set.row == nil {
-		return ""
+		return nil
 	}
 	row, ok := m.selectedRow()
 	if !ok {
-		return ""
+		return nil
 	}
 	actions := set.row(m, row)
 	if len(actions) == 0 {
-		return ""
+		return nil
 	}
 	// Fixed order rather than map iteration order, so the legend doesn't
 	// visibly shuffle itself between frames.
-	var out string
+	var segs []footerSegment
 	for _, k := range []rune{'e', 'E', ' ', 'd'} {
 		act, ok := actions[k]
 		if !ok {
@@ -120,10 +126,7 @@ func (m *model) actionLegend() string {
 		if k == ' ' {
 			keyName = "space"
 		}
-		if out != "" {
-			out += "  "
-		}
-		out += fmt.Sprintf("%s %s", keyName, act.label)
+		segs = append(segs, footerKeySegment(keyName, act.label))
 	}
-	return out
+	return segs
 }

@@ -49,6 +49,16 @@ func assignMnemonicsInPlace(cards []card) {
 	for r := range reservedKeys {
 		used[r] = true
 	}
+	assignFieldMnemonics(cards, used)
+}
+
+// assignFieldMnemonics is assignMnemonicsInPlace's real body, taking the
+// "used" set as a parameter rather than building its own. Kept separate from
+// assignMnemonicsInPlace (below) only so a caller with its own pre-seeded
+// reservations has somewhere to plug in — nothing in this package currently
+// needs that split, but the two are cheap to keep apart and cheap to
+// recombine later if something does.
+func assignFieldMnemonics(cards []card, used map[rune]bool) {
 	for ci := range cards {
 		for ii := range cards[ci].items {
 			t, ok := cards[ci].items[ii].(editableKV)

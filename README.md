@@ -333,6 +333,10 @@ page itself. `/` searches every page by name, `n`/`N` jump between hits,
 `r` re-reads everything, `t` swaps the light/dark palette, `?` lists every
 key.
 
+`space` on a highlighted rail row previews it without leaving the rail, so
+arrowing down through several pages to see what's on each one never needs
+`tab` in between — `enter` is the one that commits and hands focus over.
+
 ```sh
 gravinet tui
 ```
