@@ -513,7 +513,7 @@ var peersActions = sectionActionSet{
 			}},
 			'd': {confirm: "Ban " + shortID(nodeID) + "? This blocks it from joining or reconnecting on any network, not just " + netName + ".",
 				run: func(m *model, row selRow) mutationResult {
-					return runLeaf(m.cliArgs("ban", nodeID, "-net", netName)...)
+					return runLeaf(m.cliArgsSock("ban", nodeID, "-net", netName)...)
 				}},
 		}
 	},
@@ -592,7 +592,7 @@ var bansActions = sectionActionSet{
 				if v["notes"] != "" {
 					args = append(args, "-notes", v["notes"])
 				}
-				return runLeaf(m.cliArgs(args...)...)
+				return runLeaf(m.cliArgsSock(args...)...)
 			},
 		}
 	},
@@ -623,7 +623,7 @@ var bansActions = sectionActionSet{
 		return map[rune]rowAction{
 			'd': {confirm: "Unban " + shortID(target) + " on " + netName + "?",
 				run: func(m *model, row selRow) mutationResult {
-					return runLeaf(m.cliArgs("unban", target, "-net", netName)...)
+					return runLeaf(m.cliArgsSock("unban", target, "-net", netName)...)
 				}},
 		}
 	},

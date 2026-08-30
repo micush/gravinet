@@ -58,7 +58,7 @@ func syslogTable(info service.SyslogInfo) item {
 	if len(info.Targets) == 0 {
 		return nil
 	}
-	t := table{head: []string{"collector", "port", "protocol", "state"}}
+	t := table{selectKey: "syslog", head: []string{"collector", "port", "protocol", "state"}}
 	for _, tg := range info.Targets {
 		row := tableRow{cells: []string{
 			tg.Remote, strconv.Itoa(tg.Port), dash(tg.Protocol), onOff(!tg.Disabled),
@@ -67,6 +67,7 @@ func syslogTable(info service.SyslogInfo) item {
 			row.tone = "dim"
 		}
 		t.rows = append(t.rows, row)
+		t.ids = append(t.ids, tg.Remote)
 	}
 	return t
 }

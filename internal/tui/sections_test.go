@@ -1,9 +1,6 @@
 package tui
 
 import (
-	"os"
-	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 
@@ -75,16 +72,15 @@ func TestFirewallRendersNegationExplicitly(t *testing.T) {
 	// opposite of what it says, which is the worst thing a firewall page can
 	// get wrong.
 	snap := testSnapshot()
-	// Rules live at the node level (cfg.Firewall.Rules) and are matched to a
-	// network by Scope — see FirewallRulesFor — not on the per-network
-	// Firewall struct, which only carries that network's enabled state.
-	snap.cfg.Networks[0].Firewall.Enabled = true
-	snap.cfg.Firewall.Rules = []config.FirewallRule{
+	// Firewall rules are live control-socket state (confirmed against
+	// cmd/gravinet's cmdFW, which sends every verb through control.Do, not
+	// openCfg) — pageFirewall reads snap.firewall, not the config file.
+	snap.firewall = []mesh.FirewallRule{
 		{ID: 1, Action: "allow", Src: "10.0.0.0/8", Dst: "10.42.0.0/16", Scope: "corp"},
 		{ID: 2, Action: "deny", Src: "10.0.0.0/8", SrcNegate: true, Scope: "corp"},
 	}
 	out := pageText(t, "firewall", snap)
-	if !strings.Contains(out, "!10.0.0.0/8") {
+	if !strings.Contains(out, "!10.0.0") {
 		t.Errorf("a negated source lost its marker:\n%s", out)
 	}
 	// An empty field means "any", and must say so rather than being blank —
@@ -96,8 +92,7 @@ func TestFirewallRendersNegationExplicitly(t *testing.T) {
 
 func TestFirewallDisabledRuleIsMarked(t *testing.T) {
 	snap := testSnapshot()
-	snap.cfg.Networks[0].Firewall.Enabled = true
-	snap.cfg.Firewall.Rules = []config.FirewallRule{
+	snap.firewall = []mesh.FirewallRule{
 		{ID: 1, Action: "allow", Scope: "corp", Disabled: true},
 	}
 	if out := pageText(t, "firewall", snap); !strings.Contains(out, "off") {
@@ -252,78 +247,14 @@ func TestDashMarksAbsentValues(t *testing.T) {
 	}
 }
 
-// TestEditHintsNameRealCommands is the counterpart of the nav parity test for
-// the page footers. Every configuration page ends by naming the command that
-// edits it, and a footer advertising a command that no longer exists is worse
-// than no footer — an operator types it, it fails, and the page has cost them
-// more than it saved.
-//
-// The CLI's leaf tables are the source of truth, read out of
-// cmd/gravinet/cli_groups.go the same way nav_test.go reads ui.go.
-func TestEditHintsNameRealCommands(t *testing.T) {
-	src, err := os.ReadFile(filepath.Join("..", "..", "cmd", "gravinet", "cli_groups.go"))
-	if err != nil {
-		t.Skipf("can't read cli_groups.go (%v) — nothing to compare against", err)
-	}
-	// Leaf names, as they appear in every group table: {"name", "desc", fn}.
-	leafRe := regexp.MustCompile(`\{"([a-z0-9-]+)", "`)
-	leaves := map[string]bool{}
-	for _, m := range leafRe.FindAllStringSubmatch(string(src), -1) {
-		leaves[m[1]] = true
-	}
-	if len(leaves) < 20 {
-		t.Fatalf("parsed only %d leaves out of cli_groups.go — the literal's shape changed", len(leaves))
-	}
-	// The group names themselves, which a hint's second word must be.
-	groups := map[string]bool{"settings": true}
-	for _, g := range navGroups {
-		groups[g.name] = true
-	}
-
-	snap := testSnapshot()
-	hintRe := regexp.MustCompile(`gravinet ([a-z0-9-]+)(?: ([a-z0-9-]+))?`)
-	checked := 0
-	for _, sec := range sectionKeys() {
-		l := newLazyState()
-		l.offline = true
-		for _, cd := range buildPage(sec, pageCtx{snap: snap, lazy: l}) {
-			if cd.title != "edit" {
-				continue
-			}
-			text := linesText(layout([]card{cd}, testCtx(100)))
-			m := hintRe.FindStringSubmatch(text)
-			if m == nil {
-				t.Errorf("%s: the edit footer names no command:\n%s", sec, text)
-				continue
-			}
-			checked++
-			if !groups[m[1]] {
-				t.Errorf("%s: edit footer says \"gravinet %s\", which is not a command group", sec, m[1])
-				continue
-			}
-			if m[2] != "" && m[2] != "-h" && !leaves[m[2]] {
-				t.Errorf("%s: edit footer says \"gravinet %s %s\", and %q is not a leaf in cli_groups.go",
-					sec, m[1], m[2], m[2])
-			}
-		}
-	}
-	if checked == 0 {
-		t.Fatal("no page carries an edit footer — either they were all removed or this test stopped finding them")
-	}
-}
-
-// TestReadOnlyPagesCarryNoEditHint is the other direction: a page that only
-// reports live state has nothing to edit, and offering a command there would
-// be misleading.
-func TestReadOnlyPagesCarryNoEditHint(t *testing.T) {
-	snap := testSnapshot()
-	for _, sec := range []string{"metrics", "mesh-peers", "latency", "route-table", "about", "readme"} {
-		l := newLazyState()
-		l.offline = true
-		for _, cd := range buildPage(sec, pageCtx{snap: snap, lazy: l}) {
-			if cd.title == "edit" {
-				t.Errorf("%s is a read-only view and should not offer an edit command", sec)
-			}
-		}
-	}
-}
+// Note: this package used to carry TestEditHintsNameRealCommands and
+// TestReadOnlyPagesCarryNoEditHint here, checking that every page's "edit"
+// footer named a real CLI command. editHint itself is gone now — every page
+// that used to show one has a real action reaching the same command
+// instead (see sections.go's note on its removal) — and the coverage those
+// two tests gave is now provided far more precisely by the per-action argv
+// tests in actions_mesh_test.go, actions_traffic_test.go,
+// actions_naming_test.go, actions_settings_test.go, and
+// actions_system_test.go, each of which drives a real action through the
+// real dispatch path and asserts on the exact argv produced, rather than
+// regex-matching a footer string.

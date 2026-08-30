@@ -119,9 +119,10 @@ Open an HTTPS page served by the node itself — no extra software to install.
   See `docs/API.md` for the full reference.
 - **The same console, without a browser.** `gravinet tui` draws the same
   sidebar and the same pages in a terminal, for a host you're reaching over
-  ssh with nothing else available. Mesh (networks, keys, seeds, peers, bans)
-  can be added, edited, deleted, and toggled right there; other pages are
-  still read-only and say which command reaches them.
+  ssh with nothing else available. Mesh, Traffic, Naming, System, and
+  Settings can all be edited right there — lists get add/edit/delete/toggle,
+  and every named setting gets a one-key underlined shortcut straight to
+  editing it.
 
 ## Manage a whole fleet from one place
 

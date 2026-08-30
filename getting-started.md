@@ -294,7 +294,7 @@ The **Monitor** group is read-only — Metrics, Mesh Peers, Capture, Speedtest, 
 gravinet tui
 ```
 
-Mesh — Networks, Keys, Seeds, Peers, Bans — can be edited right there: `a` adds, `e` edits, `d` deletes (with a confirmation first), `space` toggles enabled, shown at the bottom of each page for whatever the cursor is on. Every other group is still read-only for now and names the exact command that edits it at the bottom of the page, so the answer to "how do I change this" is on the page asking the question. `/` searches every page by name, `r` re-reads everything, `?` lists the keys.
+Mesh, Traffic, Naming, System, and Settings can all be edited right there, two ways depending on what's on the page. Lists — networks, firewall rules, BGP neighbors, users, and the like — work like Mesh always did: `a` adds, `e` edits, `d` deletes (with a confirmation first), `space` toggles enabled, shown at the bottom of the page for whatever the cursor is on. A page of named settings instead — Settings itself, a hostname, an enabled flag — underlines one character in each editable field's own label; press it from anywhere on the page and that field opens for editing immediately, without arrowing over to it first. Monitor and Info stay read-only, since there's nothing to edit on a live reading, and a few individual fields elsewhere do too — each one says why, right on the page. `/` searches every page by name, `r` re-reads everything, `?` lists the keys.
 
 ---
 

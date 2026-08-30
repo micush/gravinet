@@ -103,11 +103,15 @@ var pageBuilders = map[string]func(pageCtx) []card{
 // editHint is the footer every configuration page carries. Phrased as what
 // to run rather than as an apology for not being a form: the operator is
 // already at a shell, and the command is the useful half of the sentence.
-func editHint(cmd string) card {
-	return card{title: "edit", items: []item{
-		para{text: "This console reads; it does not write. To change what is on this page:\n\n    " + cmd, tone: "mut"},
-	}}
-}
+// editHint used to be the footer every still-read-only config page carried
+// ("this console reads; it does not write — to change this, run: ..."). It
+// has no callers left: every page that used to show it now has a real
+// action reaching the same command instead. Removed rather than left as
+// dead code, so its disappearance is itself the signal that the read/write
+// migration finished — a future page that goes back to read-only for a
+// documented reason (the same boundary IPv6RA and DHCP relay links already
+// draw) writes its own explanatory note card instead of resurrecting a
+// generic one.
 
 // noConfig is what every config-backed page shows when the file could not be
 // read. Names the path and the error, because "no networks" and "I could not
@@ -268,7 +272,7 @@ func pageNetworks(c pageCtx) []card {
 	if len(s.cfg.Networks) == 0 {
 		return []card{
 			{title: "networks", items: []item{empty{"no overlay networks are configured"}}},
-			editHint("gravinet mesh networks add NAME -subnet 10.42.0.0/16"),
+			card{title: "note", items: []item{para{text: "a add a network", tone: "mut"}}},
 		}
 	}
 
@@ -475,70 +479,68 @@ func pageBans(c pageCtx) []card {
 
 func pageFirewall(c pageCtx) []card {
 	s := c.snap
-	if s.cfg == nil {
-		return []card{noConfig(s)}
+	if !s.daemonUp() {
+		return []card{noDaemon(s)}
 	}
 	var cards []card
-	for _, n := range s.cfg.Networks {
-		rules := s.cfg.FirewallRulesFor(n)
-		fw := n.Firewall
-		items := []item{kv{rows: []kvRow{
-			{"state", onOff(fw.Enabled), enabledTone(fw.Enabled)},
-			{"rules", strconv.Itoa(len(rules)), ""},
-		}}}
-		if len(rules) > 0 {
-			t := table{head: []string{"#", "state", "action", "dir", "proto", "source", "destination", "ports", "services", "log", "notes"}}
-			for i, r := range rules {
-				tone := ""
-				if r.Disabled {
-					tone = "dim"
-				}
-				actTone := "ok"
-				if strings.EqualFold(r.Action, "deny") || strings.EqualFold(r.Action, "drop") || strings.EqualFold(r.Action, "reject") {
-					actTone = "danger"
-				}
-				cellTone := map[int]string{2: actTone}
-				if r.Disabled {
-					cellTone = nil
-				}
-				t.rows = append(t.rows, tableRow{cells: []string{
-					strconv.Itoa(i + 1), onOff(!r.Disabled), r.Action, dash(r.Direction), dash(r.Proto),
-					negate(r.Src, r.SrcNegate), negate(r.Dst, r.DstNegate),
-					portRange(r.DstPortMin, r.DstPortMax),
-					negate(joinOr(r.Services, ""), r.ServicesNegate),
-					yesNo(r.Log), dash(r.Notes),
-				}, tone: tone, cellTone: cellTone})
-			}
-			items = append(items, t)
-		} else {
-			items = append(items, empty{"no rules on this network"})
-		}
-		cards = append(cards, card{title: "firewall \u2014 " + n.Name, items: items})
-	}
-	if len(cards) == 0 {
-		cards = append(cards, card{title: "firewall", items: []item{empty{"no networks are configured"}}})
-	}
 
-	if ex := s.cfg.EffectiveFirewallExempt(); len(ex) > 0 {
-		t := table{head: []string{"name", "proto", "port", "management", "state"}}
-		for _, e := range ex {
-			port := "\u2014"
-			if e.Port != 0 {
-				port = strconv.Itoa(e.Port)
-			}
-			row := tableRow{cells: []string{e.Name, dash(e.Proto), port, yesNo(e.Mgmt), onOff(!e.Disabled)},
-				cellTone: map[int]string{4: enabledTone(!e.Disabled)}}
-			if e.Disabled {
-				row.tone = "dim"
-			}
-			t.rows = append(t.rows, row)
+	t := table{selectKey: "firewall", head: []string{
+		"id", "state", "action", "dir", "proto", "source", "destination", "ports", "services", "scope", "hits", "log", "notes"}}
+	for _, r := range s.firewall {
+		tone := ""
+		if r.Disabled {
+			tone = "dim"
 		}
-		cards = append(cards, card{title: "exemptions", items: []item{
-			para{text: "traffic allowed regardless of the rules above — the ports that keep this node manageable", tone: "mut"},
-			t,
-		}})
+		actTone := "ok"
+		if strings.EqualFold(r.Action, "deny") || strings.EqualFold(r.Action, "drop") || strings.EqualFold(r.Action, "reject") {
+			actTone = "danger"
+		}
+		cellTone := map[int]string{2: actTone}
+		if r.Disabled {
+			cellTone = nil
+		}
+		t.rows = append(t.rows, tableRow{cells: []string{
+			strconv.FormatUint(r.ID, 10), onOff(!r.Disabled), r.Action, dash(r.Direction), dash(r.Proto),
+			negate(r.Src, r.SrcNegate), negate(r.Dst, r.DstNegate),
+			portRange(r.DstPortMin, r.DstPortMax),
+			negate(joinOr(r.Services, ""), r.ServicesNegate),
+			dash(r.Scope), formatBytes(r.Bytes), yesNo(r.Log), dash(r.Notes),
+		}, tone: tone, cellTone: cellTone})
+		t.ids = append(t.ids, strconv.FormatUint(r.ID, 10))
 	}
-	return append(cards, editHint("gravinet traffic firewall -h"))
+	items := []item{}
+	if len(t.rows) > 0 {
+		items = append(items, t)
+	} else {
+		items = append(items, empty{"no firewall rules"})
+	}
+	cards = append(cards, card{title: "firewall", items: items})
+
+	if s.cfg != nil {
+		if ex := s.cfg.EffectiveFirewallExempt(); len(ex) > 0 {
+			et := table{head: []string{"name", "proto", "port", "management", "state"}}
+			for _, e := range ex {
+				port := "\u2014"
+				if e.Port != 0 {
+					port = strconv.Itoa(e.Port)
+				}
+				row := tableRow{cells: []string{e.Name, dash(e.Proto), port, yesNo(e.Mgmt), onOff(!e.Disabled)},
+					cellTone: map[int]string{4: enabledTone(!e.Disabled)}}
+				if e.Disabled {
+					row.tone = "dim"
+				}
+				et.rows = append(et.rows, row)
+			}
+			cards = append(cards, card{title: "exemptions", items: []item{
+				para{text: "traffic allowed regardless of the rules above — the ports that keep this node manageable " +
+					"(edit with \"gravinet fw exempt -h\")", tone: "mut"},
+				et,
+			}})
+		}
+	}
+	return append(cards, card{title: "note", items: []item{para{
+		text: "a add  d delete, on the selected rule. \"scope\" is which network a rule applies to — blank means every " +
+			"network. Rules are node-global; there is no per-network rulebase to switch between.", tone: "mut"}}})
 }
 
 // negate renders a rule field that may be inverted, marking the inversion
@@ -573,24 +575,30 @@ func pageNAT(c pageCtx) []card {
 	if s.cfg == nil {
 		return []card{noConfig(s)}
 	}
-	cards := []card{{title: "nat", items: []item{kv{rows: []kvRow{
-		{"state", onOff(s.cfg.NAT.Enabled), enabledTone(s.cfg.NAT.Enabled)},
-		{"state timeout", natTimeout(s.cfg.NATStateTimeout), ""},
-		{"observed class", dash(s.natClass), natClassTone(s.natClass)},
-		{"public address", dash(s.natPublic), ""},
+	cards := []card{{title: "nat", items: []item{editableKV{rows: []editableKVRow{
+		{k: "state", v: onOff(s.cfg.NAT.Enabled), tone: enabledTone(s.cfg.NAT.Enabled),
+			edit: func(m *model) formSpec { return verbBoolForm("nat", []string{"nat"}, "enable", "disable", s.cfg.NAT.Enabled) }},
+		{k: "state timeout", v: natTimeout(s.cfg.NATStateTimeout),
+			edit: func(m *model) formSpec {
+				return intSettingForm("NAT state timeout (seconds)", "nat-state", s.cfg.NATStateTimeout, "0 = default 120s")
+			}},
+		{k: "observed class", v: dash(s.natClass), tone: natClassTone(s.natClass)},
+		{k: "public address", v: dash(s.natPublic)},
 	}}}}}
 	if !s.daemonUp() {
 		cards[0].items = append(cards[0].items,
 			para{text: "observed class and public address are live readings and need the daemon", tone: "warn"})
 	}
 
+	// NAT rules live at the node level only (cfg.NAT.Rules) as of v953 —
+	// the same source "gravinet nat list" reads, and the only one worth
+	// matching: a per-network NAT.Rules field still exists on the struct
+	// for old config migration, but the running daemon and every CLI verb
+	// ignore it, so showing it here would show rules that are not in force.
 	rules := s.cfg.NAT.Rules
-	for _, n := range s.cfg.Networks {
-		rules = append(rules, n.NAT.Rules...)
-	}
 	if len(rules) > 0 {
-		t := table{head: []string{"state", "dir", "proto", "source", "destination", "dport", "translate", "iface"}}
-		for _, r := range rules {
+		t := table{selectKey: "nat", head: []string{"state", "dir", "proto", "source", "destination", "dport", "translate", "iface"}}
+		for i, r := range rules {
 			row := tableRow{cells: []string{
 				onOff(r.Enabled), dash(r.Direction), dash(r.Proto),
 				negate(r.Source, r.SourceNegate), negate(r.Dest, r.DestNegate),
@@ -600,12 +608,15 @@ func pageNAT(c pageCtx) []card {
 				row.tone = "dim"
 			}
 			t.rows = append(t.rows, row)
+			t.ids = append(t.ids, strconv.Itoa(i))
 		}
 		cards = append(cards, card{title: "rules", items: []item{t}})
 	} else {
 		cards = append(cards, card{title: "rules", items: []item{empty{"no NAT rules configured"}}})
 	}
-	return append(cards, editHint("gravinet traffic nat -h"))
+	return append(cards, card{title: "note", items: []item{para{
+		text: "a add  d delete  space enable/disable, on the selected rule. \"add\" takes either a bare interface " +
+			"(masquerade shorthand) or source/dest/translate keywords — see \"gravinet nat add -h\".", tone: "mut"}}})
 }
 
 func natTimeout(secs int) string {
@@ -643,7 +654,7 @@ func pageQoS(c pageCtx) []card {
 			{"default class", strconv.Itoa(q.DefaultClass), ""},
 		}}}
 		if len(q.Rules) > 0 {
-			t := table{head: []string{"state", "proto", "ports", "services", "dscp", "class", "scope"}}
+			t := table{selectKey: "qos", head: []string{"state", "proto", "ports", "services", "dscp", "class", "scope"}}
 			for _, r := range q.Rules {
 				dscp := "\u2014"
 				if r.DSCP != nil {
@@ -657,6 +668,7 @@ func pageQoS(c pageCtx) []card {
 					row.tone = "dim"
 				}
 				t.rows = append(t.rows, row)
+				t.ids = append(t.ids, qosRuleID(r))
 			}
 			items = append(items, t)
 		} else {
@@ -670,7 +682,8 @@ func pageQoS(c pageCtx) []card {
 			add("qos \u2014 "+n.Name, n.QoS)
 		}
 	}
-	return append(cards, editHint("gravinet traffic qos -h"))
+	return append(cards, card{title: "note", items: []item{para{
+		text: "a add  d delete  space enable/disable, on the selected rule.", tone: "mut"}}})
 }
 
 func pageIPv6RA(c pageCtx) []card {
@@ -681,7 +694,7 @@ func pageIPv6RA(c pageCtx) []card {
 	ra := s.cfg.RouterAdvert
 	items := []item{kv{rows: []kvRow{{"state", onOff(ra.Enabled), enabledTone(ra.Enabled)}}}}
 	if len(ra.Interfaces) > 0 {
-		t := table{head: []string{"iface", "state", "prefixes", "managed", "other", "lifetime", "pref", "dns", "search"}}
+		t := table{selectKey: "ipv6ra", head: []string{"iface", "state", "prefixes", "managed", "other", "lifetime", "pref", "dns", "search"}}
 		for _, i := range ra.Interfaces {
 			life := "default"
 			if i.DefaultLifetime != 0 {
@@ -699,6 +712,7 @@ func pageIPv6RA(c pageCtx) []card {
 				row.tone = "dim"
 			}
 			t.rows = append(t.rows, row)
+			t.ids = append(t.ids, i.Iface)
 		}
 		items = append(items, t)
 	} else {
@@ -706,7 +720,10 @@ func pageIPv6RA(c pageCtx) []card {
 	}
 	return []card{
 		{title: "ipv6 router advertisements", items: items},
-		editHint("gravinet traffic ipv6ra -h"),
+		card{title: "note", items: []item{para{
+			text: "space enable/disable, on the selected interface. Adding or editing a full entry (prefix, DNS, " +
+				"search list) needs the web admin's validation and isn't reproduced here \u2014 the same boundary " +
+				"\"gravinet traffic ipv6ra\" itself draws.", tone: "mut"}}},
 	}
 }
 
@@ -715,11 +732,14 @@ func pageBandwidth(c pageCtx) []card {
 	if s.cfg == nil {
 		return []card{noConfig(s)}
 	}
-	items := []item{kv{rows: []kvRow{
-		{"feature", onOff(s.cfg.ShapingEnabled()), enabledTone(s.cfg.ShapingEnabled())},
+	items := []item{editableKV{rows: []editableKVRow{
+		{k: "feature", v: onOff(s.cfg.ShapingEnabled()), tone: enabledTone(s.cfg.ShapingEnabled()),
+			edit: func(m *model) formSpec {
+				return verbBoolForm("shaping (node-wide switch)", []string{"bandwidth"}, "on", "off", s.cfg.ShapingEnabled())
+			}},
 	}}}
 	if len(s.cfg.Shaping) > 0 {
-		t := table{head: []string{"iface", "kind", "state", "up", "down", "burst", "queue"}}
+		t := table{selectKey: "bandwidth", head: []string{"iface", "kind", "state", "up", "down", "burst", "queue"}}
 		for _, sh := range s.cfg.Shaping {
 			th := s.cfg.ShapingThrottle(sh.Iface)
 			row := tableRow{cells: []string{
@@ -731,6 +751,7 @@ func pageBandwidth(c pageCtx) []card {
 				row.tone = "dim"
 			}
 			t.rows = append(t.rows, row)
+			t.ids = append(t.ids, sh.Iface)
 		}
 		items = append(items, t)
 	} else {
@@ -738,7 +759,8 @@ func pageBandwidth(c pageCtx) []card {
 	}
 	return []card{
 		{title: "shaping", items: items},
-		editHint("gravinet traffic shaping -h (the flat form is \"gravinet bandwidth\")"),
+		card{title: "note", items: []item{para{
+			text: "a add  e set rates  d remove  space enable/disable, on the selected interface.", tone: "mut"}}},
 	}
 }
 
@@ -761,7 +783,7 @@ func pageRoutes(c pageCtx) []card {
 	var cards []card
 
 	if s.cfg != nil {
-		t := table{head: []string{"network", "cidr", "metric", "state"}}
+		t := table{selectKey: "routes", head: []string{"network", "cidr", "metric", "state"}}
 		for _, n := range s.cfg.Networks {
 			for _, r := range n.Routes {
 				row := tableRow{cells: []string{n.Name, r.CIDR, strconv.Itoa(r.Metric), onOff(r.Enabled)},
@@ -770,6 +792,7 @@ func pageRoutes(c pageCtx) []card {
 					row.tone = "dim"
 				}
 				t.rows = append(t.rows, row)
+				t.ids = append(t.ids, n.Name+idSep+r.CIDR)
 			}
 		}
 		items := []item{}
@@ -787,9 +810,9 @@ func pageRoutes(c pageCtx) []card {
 	// is a different list from what it advertises and is the one that answers
 	// "is the other end's route reaching me".
 	if s.daemonUp() {
-		t := table{head: []string{"cidr", "via", "metric"}}
+		t := table{head: []string{"network", "cidr", "via", "metric"}}
 		for _, r := range s.routes {
-			t.rows = append(t.rows, tableRow{cells: []string{r.CIDR, dash(r.Via), strconv.Itoa(r.Metric)}})
+			t.rows = append(t.rows, tableRow{cells: []string{r.net, r.CIDR, dash(r.Via), strconv.Itoa(r.Metric)}})
 		}
 		items := []item{}
 		if len(t.rows) > 0 {
@@ -802,7 +825,8 @@ func pageRoutes(c pageCtx) []card {
 		cards = append(cards, card{title: "learned (live)", items: []item{
 			para{text: "needs the daemon; not reachable", tone: "warn"}}})
 	}
-	return append(cards, editHint("gravinet traffic routes -h"))
+	return append(cards, card{title: "note", items: []item{para{
+		text: "a add  d delete  space enable/disable, on the selected advertised route.", tone: "mut"}}})
 }
 
 func pageBGP(c pageCtx) []card {
@@ -811,16 +835,18 @@ func pageBGP(c pageCtx) []card {
 		return []card{noConfig(s)}
 	}
 	b := s.cfg.BGP
-	items := []item{kv{rows: []kvRow{
-		{"state", onOff(b.Enabled), enabledTone(b.Enabled)},
-		{"local AS", asnOrDash(b.ASN), ""},
-		{"router id", dash(b.RouterID), ""},
-		{"auto bgp", onOff(b.AutoBGP), enabledTone(b.AutoBGP)},
-		{"networks", joinOr(b.Networks, "\u2014"), ""},
-		{"timers", fmt.Sprintf("keepalive %s, hold %s", secsOrDefault(b.KeepaliveTime), secsOrDefault(b.HoldTime)), ""},
+	items := []item{editableKV{rows: []editableKVRow{
+		{k: "state", v: onOff(b.Enabled), tone: enabledTone(b.Enabled),
+			edit: func(m *model) formSpec { return verbBoolForm("bgp", []string{"traffic", "bgp"}, "enable", "disable", b.Enabled) }},
+		{k: "local AS", v: asnOrDash(b.ASN), edit: bgpSetForm(s)},
+		{k: "router id", v: dash(b.RouterID), edit: bgpSetForm(s)},
+		{k: "auto bgp", v: onOff(b.AutoBGP), tone: enabledTone(b.AutoBGP), edit: bgpSetForm(s)},
+		{k: "networks", v: joinOr(b.Networks, "\u2014")},
+		{k: "timers", v: fmt.Sprintf("keepalive %s, hold %s", secsOrDefault(b.KeepaliveTime), secsOrDefault(b.HoldTime)),
+			edit: bgpSetForm(s)},
 	}}}
 	if len(b.Neighbors) > 0 {
-		t := table{head: []string{"peer", "remote AS", "state", "bfd", "description"}}
+		t := table{selectKey: "bgp-neighbors", head: []string{"peer", "remote AS", "state", "bfd", "description"}}
 		for _, n := range b.Neighbors {
 			st, tone := "configured", ""
 			if n.Shutdown {
@@ -829,6 +855,7 @@ func pageBGP(c pageCtx) []card {
 			t.rows = append(t.rows, tableRow{cells: []string{
 				n.Peer, asnOrDash(n.RemoteAS), st, yesNo(n.BFD), dash(n.Description),
 			}, tone: tone})
+			t.ids = append(t.ids, n.Peer)
 		}
 		items = append(items, t)
 	} else {
@@ -837,9 +864,54 @@ func pageBGP(c pageCtx) []card {
 	return []card{
 		{title: "bgp", items: items},
 		card{title: "note", items: []item{para{
-			text: "this is the configuration gravinet writes into FRR. Live session state is under Monitor \u203a BGP Peers.",
-			tone: "mut"}}},
-		editHint("gravinet traffic bgp -h"),
+			text: "e edit  d remove, on the selected neighbor. This is the configuration gravinet writes into FRR; " +
+				"live session state is under Monitor \u203a BGP Peers. Advertised networks and the redistribute pickers " +
+				"need the web admin or \"gravinet traffic bgp advertise\"/\"-h\" for now.", tone: "mut"}}},
+	}
+}
+
+// bgpSetForm covers "gravinet traffic bgp set", the four fields that share
+// one CLI verb (each flag left at its zero value means "leave unchanged" —
+// cmdTrafficBGPSet's own convention, matched here by only passing a flag
+// when its field actually differs from what the form opened with).
+func bgpSetForm(s *snapshot) func(m *model) formSpec {
+	return func(m *model) formSpec {
+		b := s.cfg.BGP
+		asn, routerID := strconv.FormatUint(uint64(b.ASN), 10), b.RouterID
+		keepalive, hold := strconv.FormatUint(uint64(b.KeepaliveTime), 10), strconv.FormatUint(uint64(b.HoldTime), 10)
+		autoBGP := onOffBool(b.AutoBGP)
+		return formSpec{
+			title: "bgp settings",
+			fields: []formField{
+				{key: "asn", label: "local AS", kind: fieldText, value: asn, help: "0 leaves it unchanged"},
+				{key: "router_id", label: "router id", kind: fieldText, value: routerID},
+				{key: "keepalive", label: "keepalive (seconds)", kind: fieldText, value: keepalive, help: "0 leaves it unchanged"},
+				{key: "hold", label: "hold (seconds)", kind: fieldText, value: hold, help: "0 leaves it unchanged"},
+				{key: "auto_bgp", label: "auto bgp", kind: fieldBool, value: autoBGP},
+			},
+			submit: func(m *model, v map[string]string) mutationResult {
+				args := []string{"traffic", "bgp", "set"}
+				if v["asn"] != asn && v["asn"] != "0" && v["asn"] != "" {
+					args = append(args, "-asn", v["asn"])
+				}
+				if v["router_id"] != routerID && v["router_id"] != "" {
+					args = append(args, "-router-id", v["router_id"])
+				}
+				if v["keepalive"] != keepalive && v["keepalive"] != "0" && v["keepalive"] != "" {
+					args = append(args, "-keepalive", v["keepalive"])
+				}
+				if v["hold"] != hold && v["hold"] != "0" && v["hold"] != "" {
+					args = append(args, "-hold", v["hold"])
+				}
+				if v["auto_bgp"] != autoBGP {
+					args = append(args, "-auto-bgp="+v["auto_bgp"])
+				}
+				if len(args) == 3 {
+					return mutationResult{ok: true, detail: "nothing changed"}
+				}
+				return runLeaf(m.cliArgs(args...)...)
+			},
+		}
 	}
 }
 
@@ -872,7 +944,7 @@ func pageDNS(c pageCtx) []card {
 			{"search domains", onOff(!n.DNSSync.DisableSearchDomains), ""},
 		}}}
 		if len(n.DNSAdvertise) > 0 {
-			t := table{head: []string{"domain", "servers", "state"}}
+			t := table{selectKey: "dns-fwd", head: []string{"domain", "servers", "state"}}
 			for _, f := range n.DNSAdvertise {
 				row := tableRow{cells: []string{f.Domain, joinOr(f.Servers, "\u2014"), onOff(!f.Disabled)},
 					cellTone: map[int]string{2: enabledTone(!f.Disabled)}}
@@ -880,15 +952,21 @@ func pageDNS(c pageCtx) []card {
 					row.tone = "dim"
 				}
 				t.rows = append(t.rows, row)
+				t.ids = append(t.ids, n.Name+idSep+f.Domain)
 			}
 			items = append(items, t)
 		} else {
 			items = append(items, empty{"no domains advertised"})
 		}
 		if len(n.DNSReject) > 0 {
-			rt := table{head: []string{"rejected domain"}}
+			rt := table{selectKey: "dns-reject", head: []string{"rejected domain", "state"}}
 			for _, r := range n.DNSReject {
-				rt.rows = append(rt.rows, tableRow{cells: []string{fmt.Sprint(r)}, tone: "warn"})
+				row := tableRow{cells: []string{r.Domain, onOff(!r.Disabled)}, cellTone: map[int]string{1: enabledTone(!r.Disabled)}}
+				if r.Disabled {
+					row.tone = "dim"
+				}
+				rt.rows = append(rt.rows, row)
+				rt.ids = append(rt.ids, n.Name+idSep+r.Domain)
 			}
 			items = append(items, rt)
 		}
@@ -897,7 +975,9 @@ func pageDNS(c pageCtx) []card {
 	if len(cards) == 0 {
 		cards = append(cards, card{title: "dns", items: []item{empty{"no networks are configured"}}})
 	}
-	return append(cards, editHint("gravinet naming dns -h"))
+	return append(cards, card{title: "note", items: []item{para{
+		text: "a add a forward  e edit servers  d remove  space enable/disable, on the selected row. Rejected " +
+			"domains (refused from peers) are added with \"gravinet naming dns reject -h\".", tone: "mut"}}})
 }
 
 func pageHosts(c pageCtx) []card {
@@ -913,7 +993,7 @@ func pageHosts(c pageCtx) []card {
 			{"hosts file", dash(n.HostsSync.Path), "mut"},
 		}}}
 		if len(n.HostsAdvertise) > 0 {
-			t := table{head: []string{"name", "address", "state"}}
+			t := table{selectKey: "hosts", head: []string{"name", "address", "state"}}
 			for _, h := range n.HostsAdvertise {
 				row := tableRow{cells: []string{h.Name, h.IP, onOff(!h.Disabled)},
 					cellTone: map[int]string{2: enabledTone(!h.Disabled)}}
@@ -921,6 +1001,7 @@ func pageHosts(c pageCtx) []card {
 					row.tone = "dim"
 				}
 				t.rows = append(t.rows, row)
+				t.ids = append(t.ids, n.Name+idSep+h.Name)
 			}
 			items = append(items, t)
 		} else {
@@ -931,11 +1012,9 @@ func pageHosts(c pageCtx) []card {
 	if len(cards) == 0 {
 		cards = append(cards, card{title: "hosts", items: []item{empty{"no networks are configured"}}})
 	}
-	return append(cards,
-		card{title: "note", items: []item{para{
-			text: "this is what this node advertises. What actually landed in the host's file is under Monitor \u203a Hosts File.",
-			tone: "mut"}}},
-		editHint("gravinet naming hosts -h"))
+	return append(cards, card{title: "note", items: []item{para{
+		text: "a add  e edit address  d remove  space enable/disable, on the selected record. This is what this " +
+			"node advertises; what actually landed in the host's file is under Monitor \u203a Hosts File.", tone: "mut"}}})
 }
 
 // hostSnapshotItems renders a metrics reading. Shared by the Metrics page and

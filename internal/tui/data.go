@@ -102,6 +102,14 @@ type snapshot struct {
 	ifaces    []mesh.IfaceInfo
 	natClass  string
 	natPublic string
+	// firewall is fetched once, not per network like peers/bans/routes:
+	// the rulebase is node-global (control.go's own comment on the "fw"
+	// command says so), and calling "fw list" with no -net at all still
+	// works even on a multi-network node — it falls back to an id-0,
+	// counters-only-approximate view rather than erroring, unlike
+	// peers/bans/routes' stricter resolveNet requirement. One fetch, no
+	// per-network duplication of the same rules under different hit counts.
+	firewall []mesh.FirewallRule
 
 	caps  caps
 	taken time.Time
@@ -199,6 +207,9 @@ func (s *snapshot) loadLive() {
 	}
 	if r, err := control.Do(s.sockPath, control.Request{Cmd: "ifaces"}); err == nil && r.OK {
 		s.ifaces = r.Ifaces
+	}
+	if r, err := control.Do(s.sockPath, control.Request{Cmd: "fw", FWOp: "list"}); err == nil && r.OK {
+		s.firewall = r.FW
 	}
 }
 

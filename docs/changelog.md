@@ -2,6 +2,26 @@
 
 ---
 
+## v1013 — 2026-08-30
+
+**`gravinet tui`: Traffic, Naming, System, and Settings can now be edited from the console — and every editable page gets a one-key mnemonic shortcut to its fields.**
+
+Two things landed together because they're the same underlying capability seen two ways. Mesh's row-based editing (`a` add, `e` edit, `d` delete, `space` toggle) now covers Firewall, NAT, QoS, Bandwidth, Routes, and BGP in Traffic; DNS and Hosts in Naming; LLDP interfaces, Syslog targets, Users, and Config History in System. And a new mechanism reaches the console's other shape of content — a page of named settings rather than a list of similar rows: every directly-editable field gets a unique, underlined character assigned from its own label (`k`eepalive, `l`isten, and so on, falling back to a shared pool only once a label's own letters are all taken), and pressing it from anywhere on the page opens that field's edit form immediately, no row navigation first. Settings — 27 rows across seven categories — is the page this was built for, and now has it end to end.
+
+Both mechanisms share the same rule they've had since Mesh: never a second implementation of what a valid value is. A mutation either builds the exact argv a person would type and runs the real `gravinet` binary as a subprocess, or — for the handful of fields that exist only as validated `config.Config` setters with no CLI verb — calls the setter directly through the same save-and-reload helper introduced for Mesh.
+
+**A critical bug caught before it could ship widely.** Every mutation was appending both `-config` and `-sock` to its argv, unconditionally. That's wrong for most of what this release adds: config-editing leaves (the majority) parse arguments with manual scanning that recognizes `-config` and nothing else, and an unrecognized `-sock` either aborts immediately on a leaf using Go's real flag parser or, worse, silently corrupts the positional argument count on one that scans manually — failing with a generic usage message that gives no hint the TUI itself was the cause. Control-socket-only leaves (`ban`, `unban`, `fw`, `upgrade`) are the reverse. Several System leaves accept neither. Every existing test had passed anyway, because the test helper only checked that specific tokens were *present* in an argv, never that the argv was *exactly* right — so a stray extra flag was invisible to the entire suite built for Mesh, Traffic, Naming, and Settings. Fixed at the root: three explicit, separately-documented functions (`cliArgs`, `cliArgsSock`, `cliArgsBare`) replace the single one, each verified by reading the real leaf's own argument parser rather than inferred from a neighbor, with new negative tests confirming the *wrong* flag never appears — and confirmed by deliberately reintroducing the bug and watching the new tests catch it.
+
+Three more accuracy bugs, caught the same way — by reading the actual CLI source before writing a line against it, not by pattern-matching a neighboring command: `fw add`'s action is a flag (`-action allow|deny`), not positional; QoS's `scope` is a bare keyword token, not a flag; and the bandwidth rate parser expects bits-per-second with a unit suffix (`10Mbps`), while the config stores raw bytes-per-second, so pre-filling a rate field with the stored integer would have silently landed every unedited value 8x too small. Two read-side bugs fixed alongside: NAT is confirmed node-global, so the earlier page was reading a stale, unused per-network config field; and System > Users now reads live OS group membership instead of a config-side cache that could lag behind an account added or removed some other way.
+
+Three deliberate, stated boundaries, not oversights: IPv6RA's full interface entries and DHCP's relay links need validation only the web admin's form performs, with no reusable setter behind either — the same limits `cmd/gravinet`'s own CLI already draws for the identical reason, named in its own comments. `upgrade apply` runs a full build that can take minutes; this console's mutations are built around commands that answer in seconds, and forcing that mismatch under time pressure risked corrupting an in-progress binary swap, which is a worse outcome than leaving it out — `rollback` and `clear`, the fast operations, are wired. Every one of these says so on the page in question rather than a control that quietly does nothing.
+
+System > Power, previously deliberately unbound "because a keystroke that takes the host down doesn't belong on a screen somebody is scrolling through," is now wired — restart, shutdown, and cancel, each requiring a field-level confirmation *and* the same y/n dialog every destructive action here already requires, which is a real safety margin the original single-keystroke concern didn't have to reason about.
+
+The now-unused `editHint` footer ("this console reads; it does not write") is gone — every page that showed one has a real action reaching the same command instead, and its retirement is itself the signal that this migration finished.
+
+---
+
 ## v1012 — 2026-08-29
 
 **`gravinet tui`: Mesh (Networks, Keys, Seeds, Peers, Bans) can now be edited from the console, not just read.**

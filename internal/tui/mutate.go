@@ -18,6 +18,29 @@ package tui
 // implementation of "how does this mutation take effect," reached a third
 // way, with zero new code making that decision.
 //
+// Running the right binary with the right words is not the whole job,
+// though: which flags belong on the end of that argv is its own decision,
+// and it is per-leaf, not global. A config-editing leaf (network, key,
+// seed, nat, qos, route, traffic bgp, naming, settings, and the system
+// leaves that call openCfg) parses its arguments with extractOpt's manual
+// scanning, which recognizes -config and nothing else — it resolves the
+// control socket to reload from cfg.ControlSocket, the value already
+// sitting in the file it just loaded, never from a flag. A control-socket
+// leaf (ban, unban, fw, upgrade) never calls config.Load at all and
+// registers -sock on its own flag.FlagSet, never -config. And a bare-host
+// leaf (System > Resolver/Time/Syslog/Users/Power, which call
+// internal/service directly) registers neither, each with its own tiny
+// flag.FlagSet holding only the fields that one operation needs. Sending
+// the wrong flag to the wrong shape is not a warning: on a leaf using a real
+// flag.FlagSet it is an immediate "flag provided but not defined" exit, and
+// on a leaf using extractOpt's manual scanning it is worse — a silently
+// corrupted positional argument count that fails with a generic usage
+// message giving no hint the TUI itself is the cause. cliArgs/cliArgsSock/
+// cliArgsBare below are three named functions rather than one with a
+// parameter precisely so a call site's choice is visible at a glance, and
+// every one of the three is verified per leaf by reading its own argument
+// parsing before being used, not inferred from what neighboring leaves do.
+//
 // The exception is a short, explicit list: a few fields exist as validated
 // config.Config setters (the same ones a person auditing this tree would
 // find KeySetDistributed, PeerSetEnabled, and the like) that the CLI has
@@ -129,23 +152,57 @@ func runLeaf(args ...string) mutationResult {
 	return mutationResult{ok: true, detail: out}
 }
 
-// cliArgs builds the common prefix every shelled-out leaf needs: this
-// console's own config and control-socket paths, so the subprocess acts on
-// the exact node being viewed rather than whatever this platform's bare
-// defaults would resolve to. Appended rather than prepended — extractOpt on
-// the CLI side (cmd/gravinet/cli_config.go) scans the whole argument list
-// regardless of position, so where these land doesn't matter to it, and
-// putting them last keeps every call site below reading as the command a
-// person would actually type, with the paths as an inv isible suffix.
+// cliArgs builds the argv for a config-file-editing leaf: everything under
+// network/key/seed/nat/qos/route/traffic bgp/naming/settings (and the
+// system leaves that call openCfg — snmp, lldp, dhcp mode, config-history).
+// These leaves parse arguments with extractOpt/openCfg's manual scanning,
+// which recognizes -config and nothing else; they resolve the control
+// socket to reload from cfg.ControlSocket, the value already sitting in the
+// file they just loaded via -config, never from a command-line flag. Only
+// -config is appended here — see cliArgsSock and cliArgsBare for the other
+// two shapes, and mutate.go's own package comment for why getting this
+// split wrong is not a cosmetic bug: an unrecognized flag on a leaf that
+// uses a real flag.FlagSet (as several of these do — cmdTrafficBGPShow and
+// friends each register their own bare -config) is an immediate parse
+// error, and on a leaf that uses manual extractOpt scanning instead, a
+// stray -sock/-config pair that nothing consumes silently corrupts the
+// positional argument count instead, which is worse: it fails with a
+// generic usage message that gives no hint the TUI itself is the cause.
 func (m *model) cliArgs(args ...string) []string {
 	out := append([]string{}, args...)
 	if m.cfgPath != "" {
 		out = append(out, "-config", m.cfgPath)
 	}
+	return out
+}
+
+// cliArgsSock builds the argv for a control-socket-only leaf: ban, unban,
+// fw (every subcommand except "exempt", which is config-based and uses
+// cliArgs instead), and upgrade. Confirmed per leaf by reading each one's
+// own flag.NewFlagSet call — every one of these registers -sock and never
+// -config, because none of them ever call config.Load at all; there is
+// nothing for -config to mean to them.
+func (m *model) cliArgsSock(args ...string) []string {
+	out := append([]string{}, args...)
 	if m.sockPath != "" {
 		out = append(out, "-sock", m.sockPath)
 	}
 	return out
+}
+
+// cliArgsBare returns args completely unchanged, for the leaves that touch
+// neither a config file nor the control socket: System > Resolver's
+// hostname/dns, Time's timezone/ntp/clock, Syslog's add/del/clear, Users'
+// add/passwd/expiry/del, and Power's reboot/shutdown/cancel. Each of these
+// operates directly on host OS state (internal/service) and registers its
+// own tiny flag.FlagSet with only the fields that operation needs — no
+// -config, no -sock — so appending either would be exactly the immediate
+// parse error cliArgs's own comment describes. This exists as a named
+// function rather than callers just passing args directly so every call
+// site reads the same way and the choice is visibly deliberate, not an
+// omission.
+func (m *model) cliArgsBare(args ...string) []string {
+	return args
 }
 
 // ---- the direct-config fallback -----------------------------------------

@@ -97,10 +97,54 @@ func TestRunLeafCouldNotStartTheProcess(t *testing.T) {
 	}
 }
 
-func TestCliArgsAppendsConfigAndSockPaths(t *testing.T) {
+func TestCliArgsAppendsOnlyConfigPath(t *testing.T) {
+	// cliArgs is for config-file-editing leaves, which parse arguments with
+	// extractOpt/openCfg — manual scanning that recognizes -config and
+	// nothing else. It must never append -sock: these leaves resolve the
+	// control socket to reload from cfg.ControlSocket (the value already in
+	// the file they just loaded), never from a command-line flag, and on a
+	// leaf using a real flag.FlagSet an unrecognized -sock is an immediate
+	// parse error.
 	m := &model{cfgPath: "/etc/gravinet/config.json", sockPath: "/run/gravinet/control.sock"}
 	got := m.cliArgs("network", "add", "corp")
-	want := []string{"network", "add", "corp", "-config", "/etc/gravinet/config.json", "-sock", "/run/gravinet/control.sock"}
+	want := []string{"network", "add", "corp", "-config", "/etc/gravinet/config.json"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("arg %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestCliArgsSockAppendsOnlySockPath(t *testing.T) {
+	// cliArgsSock is for control-socket-only leaves (ban, unban, fw, upgrade)
+	// — confirmed per leaf by reading its own flag.NewFlagSet call, every
+	// one of which registers -sock and never -config, because none of them
+	// call config.Load. Appending -config there is the same class of bug in
+	// the other direction.
+	m := &model{cfgPath: "/etc/gravinet/config.json", sockPath: "/run/gravinet/control.sock"}
+	got := m.cliArgsSock("ban", "deadbeef")
+	want := []string{"ban", "deadbeef", "-sock", "/run/gravinet/control.sock"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("arg %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestCliArgsBareAppendsNeither(t *testing.T) {
+	// cliArgsBare is for leaves that touch neither a config file nor the
+	// control socket (System > Resolver/Time/Syslog/Users/Power) — each
+	// registers its own tiny flag.FlagSet with only the fields that one
+	// operation needs, so either flag would be an immediate parse error.
+	m := &model{cfgPath: "/etc/gravinet/config.json", sockPath: "/run/gravinet/control.sock"}
+	got := m.cliArgsBare("system", "resolver", "hostname", "gn1")
+	want := []string{"system", "resolver", "hostname", "gn1"}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}

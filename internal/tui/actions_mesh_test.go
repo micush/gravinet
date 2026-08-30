@@ -80,6 +80,10 @@ func TestNetworksAddArgv(t *testing.T) {
 	if strings.Contains(strings.Join(got, " "), "subnet6") {
 		t.Errorf("an empty subnet6 should not appear in the argv at all: %v", got)
 	}
+	// Regression: network is config-file-only (extractOpt/openCfg manual
+	// parsing) and never registers -sock — a stray one silently corrupts
+	// the positional argument count instead of erroring cleanly.
+	hasNotArgs(t, got, "-sock")
 }
 
 func TestNetworksAddRequiresAName(t *testing.T) {
@@ -328,6 +332,17 @@ func TestPeersToggleUsesDirectConfigNotExec(t *testing.T) {
 	}
 }
 
+func hasNotArgs(t *testing.T, got []string, forbidden ...string) {
+	t.Helper()
+	for _, f := range forbidden {
+		for _, g := range got {
+			if g == f {
+				t.Errorf("forbidden arg %q found in: %v", f, got)
+			}
+		}
+	}
+}
+
 func TestPeersBanArgv(t *testing.T) {
 	f := installFakeGravinet(t)
 	m := testModel()
@@ -338,10 +353,14 @@ func TestPeersBanArgv(t *testing.T) {
 	}
 	m.handleKey(key{t: keyRune, r: 'y'})
 	got := lastCall(f)
-	hasArgs(t, got, "ban")
+	hasArgs(t, got, "ban", "-sock")
 	if net, ok := argAfter(got, "-net"); !ok || net != "corp" {
 		t.Errorf("-net = %q, ok=%v, want corp", net, ok)
 	}
+	// Regression: ban is control-socket-only (control.Do directly) and its
+	// own flag.FlagSet never registers -config — an unrecognized flag would
+	// be an immediate parse error, not a silently-ignored one.
+	hasNotArgs(t, got, "-config")
 }
 
 func TestBansAddArgv(t *testing.T) {
@@ -351,7 +370,8 @@ func TestBansAddArgv(t *testing.T) {
 	m.dispatchAdd()
 	submitCurrentForm(t, m, map[string]string{"net": "corp", "node": "deadbeef", "notes": "compromised"})
 	got := lastCall(f)
-	hasArgs(t, got, "ban", "deadbeef", "-net", "corp", "-notes", "compromised")
+	hasArgs(t, got, "ban", "deadbeef", "-net", "corp", "-notes", "compromised", "-sock")
+	hasNotArgs(t, got, "-config")
 }
 
 func TestBansUnbanOnlyOffersDeleteForOwnBans(t *testing.T) {
@@ -375,7 +395,9 @@ func TestBansUnbanOnlyOffersDeleteForOwnBans(t *testing.T) {
 		t.Fatal("deleting this node's own ban should ask for confirmation")
 	}
 	m.handleKey(key{t: keyRune, r: 'y'})
-	hasArgs(t, lastCall(f), "unban", "mine", "-net", "corp")
+	got := lastCall(f)
+	hasArgs(t, got, "unban", "mine", "-net", "corp", "-sock")
+	hasNotArgs(t, got, "-config")
 }
 
 // formFieldValue reads a field's current value out of an open form, for

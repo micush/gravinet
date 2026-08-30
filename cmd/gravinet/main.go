@@ -51,7 +51,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "1012"
+	version = "1013"
 	commit  = "none"
 )
 
@@ -221,9 +221,10 @@ browser you'd lock out is the one asking.
 other commands (not tied to a web admin page):
   tui        the web admin's own layout in a terminal: the same groups, the
              same pages, in the same order, over the same config file and
-             control socket this CLI reads. Mesh (networks, keys, seeds,
-             peers, bans) can be edited inline; other groups are read-only
-             for now and name the command that edits them. "gravinet tui -h"
+             control socket this CLI reads. Mesh, Traffic, Naming, System,
+             and Settings can all be edited inline — lists get add/edit/
+             delete/toggle, named settings get a one-key underlined
+             mnemonic. "gravinet tui -h"
   run        run the daemon
   quickstart start a mesh (or join one) and install the service, in one shot:
                gravinet quickstart NAME [subnet CIDR] [subnet6 CIDR] [addr HOST:PORT]

@@ -36,13 +36,26 @@ same config file and the same control socket the rest of the CLI reads. Live
 pages (peers, bans, routes, metrics, logs) refresh on a timer; r re-reads
 everything, / searches every page, ? lists the keys, q quits.
 
-Mesh (Networks, Keys, Seeds, Peers, Bans) has full editing: a adds, e edits,
-d deletes, space toggles enabled — a add  e edit  d delete  space toggle,
-shown at the bottom of each page. Every mutation runs through the same
-gravinet leaf a person would type, or the same validated config setter the
-web admin uses, so there is one implementation of what a valid change is,
-never a second one here that could disagree with it. Every other group is
-read-only for now; those pages name the command that edits them instead.
+Mesh, Traffic, Naming, System, and Settings can be edited from here. Two
+patterns, both shown at the bottom of the page they apply to:
+
+  - Lists (networks, firewall rules, users, BGP neighbors, and the like):
+    a adds, e edits, d deletes, space toggles enabled, on whichever row the
+    cursor is on.
+  - Named settings (Settings itself, a hostname, an enabled flag): one
+    character in the field's own label is underlined — press it, from
+    anywhere on the page, to edit that field immediately.
+
+Every mutation runs through the same gravinet leaf a person would type, or
+the same validated config setter the web admin uses, so there is one
+implementation of what a valid change is, never a second one here that
+could disagree with it. Monitor and Info are read-only by nature (there is
+nothing to edit); a handful of individual fields elsewhere stay read-only
+for a stated reason (e.g. IPv6RA's full interface entries and DHCP's relay
+links need validation only the web admin's form does, and "upgrade apply"
+runs a multi-minute build this console's short-lived mutations aren't built
+for) — each of those says so on its own page rather than pretending
+otherwise.
 
 flags:
 `)

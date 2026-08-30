@@ -316,16 +316,22 @@ at the bottom — reading the same config file and the same control socket the
 CLI reads, for when the box you need to look at has no browser reachable from
 wherever you're sitting.
 
-**Mesh (Networks, Keys, Seeds, Peers, Bans) can be edited from here** — `a`
-adds, `e` edits, `d` deletes with a confirmation first, `space` toggles
-enabled, all shown in the footer for whichever row the cursor is on. Every
-edit either runs the same `gravinet` command a person would type, or calls
-the same validated setter the web admin uses — there's one implementation of
-what a valid change is, reached a third way. Every other group is still
-read-only for now, and each of those pages names the exact command that
-edits it at the bottom of the page. `/` searches every page by name, `n`/`N`
-jump between hits, `r` re-reads everything, `t` swaps the light/dark
-palette, `?` lists every key.
+**Mesh, Traffic, Naming, System, and Settings can all be edited from here**,
+two ways depending on the page's shape. Lists — networks, firewall rules,
+BGP neighbors, users — get `a` add, `e` edit, `d` delete with a confirmation
+first, `space` toggle enabled, all shown in the footer for whichever row
+the cursor is on. Named settings — Settings itself, a hostname, an enabled
+flag — get a one-key shortcut instead: every editable field has a unique
+underlined character in its own label, and pressing it from anywhere on
+the page opens that field for immediate editing, no navigating to it first.
+Every edit either runs the same `gravinet` command a person would type, or
+calls the same validated setter the web admin uses — there's one
+implementation of what a valid change is, reached a third way. Monitor and
+Info stay read-only (there's nothing to edit on a live reading), and a few
+individual fields elsewhere do too, each for a stated reason shown on the
+page itself. `/` searches every page by name, `n`/`N` jump between hits,
+`r` re-reads everything, `t` swaps the light/dark palette, `?` lists every
+key.
 
 ```sh
 gravinet tui

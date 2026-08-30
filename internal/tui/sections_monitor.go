@@ -9,7 +9,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"time"
 
 	"gravinet/internal/config"
 	"gravinet/internal/service"
@@ -372,20 +371,52 @@ func pageUpgrade(c pageCtx) []card {
 		{"platform", runtime.GOOS + "/" + runtime.GOARCH, ""},
 	}}}
 	if s.cfg != nil {
-		items = append(items, kv{rows: []kvRow{
-			{"state dir", dash(s.cfg.UpgradeStateDir()), "mut"},
-			{"confirm window", strconv.Itoa(s.cfg.UpgradeConfirmSeconds()) + "s", ""},
-			{"accept pushes from a manager", onOff(s.cfg.Upgrade.AcceptManagerUpgrades),
-				enabledTone(s.cfg.Upgrade.AcceptManagerUpgrades)},
+		items = append(items, editableKV{rows: []editableKVRow{
+			{k: "state dir", v: dash(s.cfg.UpgradeStateDir()), tone: "mut"},
+			{k: "confirm window", v: strconv.Itoa(s.cfg.UpgradeConfirmSeconds()) + "s"},
+			{k: "accept pushes from a manager", v: onOff(s.cfg.Upgrade.AcceptManagerUpgrades),
+				tone: enabledTone(s.cfg.Upgrade.AcceptManagerUpgrades),
+				edit: func(m *model) formSpec {
+					return boolSettingForm("accept manager upgrades", "accept-mgr-upgrades", s.cfg.Upgrade.AcceptManagerUpgrades)
+				}},
+			{k: "rollback to the previous binary", v: "\u2014", edit: func(m *model) formSpec { return upgradeRollbackForm() }},
+			{k: "clear saved rollback state", v: "\u2014", edit: func(m *model) formSpec { return upgradeClearForm() }},
 		}})
 	}
 	return []card{
 		{title: "upgrade", items: items},
 		card{title: "note", items: []item{para{
-			text: "Checking for and applying a new binary replaces the running process and restarts the service. " +
-				"That is not something to do from a screen that is only meant to be read, so it is not wired to a " +
-				"key here: \"gravinet upgrade check\" and \"gravinet upgrade apply\" are the same operations the web " +
-				"admin's buttons call.", tone: "mut"}}},
+			text: "Checking for and applying a new binary is not wired to a key here: it runs a full build that " +
+				"can take minutes, and this console's mutations are built around commands that answer in seconds — " +
+				"forcing that mismatch under time pressure risked corrupting an in-progress binary swap, which is a " +
+				"worse outcome than leaving it out. \"gravinet upgrade ARCHIVE.tgz\" and \"gravinet upgrade status\" " +
+				"are the same operations the web admin's buttons call.", tone: "mut"}}},
+	}
+}
+
+func upgradeRollbackForm() formSpec {
+	return formSpec{
+		title:  "rollback to the previous binary",
+		fields: []formField{{key: "confirm", label: "roll back now", kind: fieldBool, value: "true"}},
+		submit: func(m *model, v map[string]string) mutationResult {
+			if v["confirm"] != "true" {
+				return mutationResult{ok: true, detail: "nothing changed"}
+			}
+			return runLeaf(m.cliArgsSock("upgrade", "rollback")...)
+		},
+	}
+}
+
+func upgradeClearForm() formSpec {
+	return formSpec{
+		title:  "clear saved rollback state",
+		fields: []formField{{key: "confirm", label: "clear it", kind: fieldBool, value: "true"}},
+		submit: func(m *model, v map[string]string) mutationResult {
+			if v["confirm"] != "true" {
+				return mutationResult{ok: true, detail: "nothing changed"}
+			}
+			return runLeaf(m.cliArgsSock("upgrade", "clear")...)
+		},
 	}
 }
 
@@ -426,10 +457,10 @@ func pageResolver(c pageCtx) []card {
 		return []card{{title: "resolver", items: []item{reading("hostname and DNS servers")}}}
 	}
 	info, _ := v.(service.ResolverInfo)
-	live := kv{rows: []kvRow{
-		{"hostname", dash(info.Hostname), ""},
-		{"dns servers", joinOr(info.DNSServers, "\u2014"), ""},
-		{"search domain", dash(info.SearchDomain), ""},
+	live := editableKV{rows: []editableKVRow{
+		{k: "hostname", v: dash(info.Hostname), edit: func(m *model) formSpec { return resolverHostnameForm(info.Hostname) }},
+		{k: "dns servers", v: joinOr(info.DNSServers, "\u2014"), edit: func(m *model) formSpec { return resolverDNSForm(info) }},
+		{k: "search domain", v: dash(info.SearchDomain), edit: func(m *model) formSpec { return resolverDNSForm(info) }},
 	}}
 	cards := []card{{title: "resolver (live)", items: []item{live}}}
 	if s := c.snap; s.cfg != nil && s.cfg.HostSettings != nil && s.cfg.HostSettings.Resolver != nil {
@@ -440,11 +471,52 @@ func pageResolver(c pageCtx) []card {
 			{"search domain", dash(r.SearchDomain), "mut"},
 		}}}})
 	}
-	return append(cards,
-		card{title: "note", items: []item{para{
-			text: "changing the hostname needs a gravinet restart before mesh peers see the new name: the advertised " +
-				"name is read once at startup.", tone: "mut"}}},
-		editHint("gravinet system resolver -h"))
+	return append(cards, card{title: "note", items: []item{para{
+		text: "changing the hostname needs a gravinet restart before mesh peers see the new name: the advertised " +
+			"name is read once at startup.", tone: "mut"}}})
+}
+
+func resolverHostnameForm(current string) formSpec {
+	return formSpec{
+		title:  "hostname",
+		fields: []formField{{key: "v", label: "hostname", kind: fieldText, value: current}},
+		submit: func(m *model, v map[string]string) mutationResult {
+			if v["v"] == "" {
+				return mutationResult{ok: false, detail: "a hostname is required"}
+			}
+			res := runLeaf(m.cliArgsBare("system", "resolver", "hostname", v["v"])...)
+			if res.ok {
+				res.detail += "\nrestart gravinet for mesh peers to see the new name"
+			}
+			return res
+		},
+	}
+}
+
+func resolverDNSForm(info service.ResolverInfo) formSpec {
+	servers := joinOr(info.DNSServers, "")
+	return formSpec{
+		title: "dns servers",
+		fields: []formField{
+			{key: "servers", label: "servers", kind: fieldText, value: servers, help: "comma-separated"},
+			{key: "search", label: "search domain", kind: fieldText, value: info.SearchDomain},
+		},
+		submit: func(m *model, v map[string]string) mutationResult {
+			if v["servers"] == "" {
+				return mutationResult{ok: false, detail: "at least one server is required"}
+			}
+			args := []string{"system", "resolver", "dns"}
+			for _, s := range strings.Split(v["servers"], ",") {
+				if s = strings.TrimSpace(s); s != "" {
+					args = append(args, s)
+				}
+			}
+			if v["search"] != "" {
+				args = append(args, "-search", v["search"])
+			}
+			return runLeaf(m.cliArgsBare(args...)...)
+		},
+	}
 }
 
 func pageTime(c pageCtx) []card {
@@ -453,9 +525,75 @@ func pageTime(c pageCtx) []card {
 		return []card{{title: "time", items: []item{reading("clock, timezone and NTP state")}}}
 	}
 	info, _ := v.(service.TimeInfo)
+	rows := timeRows(info)
+	erows := make([]editableKVRow, len(rows))
+	for i, r := range rows {
+		erows[i] = editableKVRow{k: r.k, v: r.v, tone: r.tone}
+	}
+	for i := range erows {
+		switch erows[i].k {
+		case "timezone":
+			erows[i].edit = func(m *model) formSpec { return timeTimezoneForm(info) }
+		case "ntp":
+			erows[i].edit = func(m *model) formSpec { return timeNTPForm(info) }
+		case "clock":
+			erows[i].edit = func(m *model) formSpec { return timeClockForm() }
+		}
+	}
 	return []card{
-		{title: "time", items: []item{kv{rows: timeRows(info)}}},
-		editHint("gravinet system time -h"),
+		{title: "time", items: []item{editableKV{rows: erows}}},
+		card{title: "note", items: []item{para{
+			text: "setting the clock by hand only matters while NTP is off — it corrects itself right back the " +
+				"next sync otherwise.", tone: "mut"}}},
+	}
+}
+
+func timeTimezoneForm(info service.TimeInfo) formSpec {
+	return formSpec{
+		title:  "timezone",
+		fields: []formField{{key: "v", label: "timezone", kind: fieldText, value: info.Timezone, help: "e.g. America/Phoenix"}},
+		submit: func(m *model, v map[string]string) mutationResult {
+			if v["v"] == "" {
+				return mutationResult{ok: false, detail: "a timezone is required"}
+			}
+			return runLeaf(m.cliArgsBare("system", "time", "timezone", v["v"])...)
+		},
+	}
+}
+
+func timeNTPForm(info service.TimeInfo) formSpec {
+	return formSpec{
+		title: "ntp",
+		fields: []formField{
+			{key: "on", label: "on", kind: fieldBool, value: onOffBool(info.NTPEnabled)},
+			{key: "servers", label: "servers", kind: fieldText, value: joinOr(info.Servers, ""),
+				help: "comma-separated; only used when turning NTP on"},
+		},
+		submit: func(m *model, v map[string]string) mutationResult {
+			if v["on"] != "true" {
+				return runLeaf(m.cliArgsBare("system", "time", "ntp", "off")...)
+			}
+			args := []string{"system", "time", "ntp", "on"}
+			for _, s := range strings.Split(v["servers"], ",") {
+				if s = strings.TrimSpace(s); s != "" {
+					args = append(args, s)
+				}
+			}
+			return runLeaf(m.cliArgsBare(args...)...)
+		},
+	}
+}
+
+func timeClockForm() formSpec {
+	return formSpec{
+		title:  "set clock",
+		fields: []formField{{key: "v", label: "clock (RFC3339)", kind: fieldText, help: "e.g. 2026-08-02T15:04:05 \u2014 only takes effect while NTP is off"}},
+		submit: func(m *model, v map[string]string) mutationResult {
+			if v["v"] == "" {
+				return mutationResult{ok: false, detail: "a timestamp is required"}
+			}
+			return runLeaf(m.cliArgsBare("system", "time", "clock", v["v"])...)
+		},
 	}
 }
 
@@ -469,7 +607,9 @@ func pageDHCP(c pageCtx) []card {
 	if mode == "" {
 		mode = "off"
 	}
-	items := []item{kv{rows: []kvRow{{"mode (configured)", mode, enabledTone(mode != "off")}}}}
+	items := []item{editableKV{rows: []editableKVRow{
+		{k: "mode (configured)", v: mode, tone: enabledTone(mode != "off"), edit: dhcpModeForm},
+	}}}
 	if len(d.Relay.Links) > 0 {
 		t := table{head: []string{"iface", "state", "servers", "max hops"}}
 		for _, l := range d.Relay.Links {
@@ -499,9 +639,24 @@ func pageDHCP(c pageCtx) []card {
 	return append(cards,
 		card{title: "note", items: []item{para{
 			text: "this is intent, not what is running: the relay lives inside the daemon process, so a separate " +
-				"reader cannot see its sockets and guessing would put a confident wrong answer on the screen.",
-			tone: "mut"}}},
-		editHint("gravinet system dhcp mode <off|relay>"))
+				"reader cannot see its sockets and guessing would put a confident wrong answer on the screen. Relay " +
+				"links themselves need the web admin's validation and aren't editable here — the same boundary " +
+				"\"gravinet system dhcp\" itself draws.",
+			tone: "mut"}}})
+}
+
+func dhcpModeForm(m *model) formSpec {
+	current := "off"
+	if m.snap != nil && m.snap.cfg != nil && string(m.snap.cfg.DHCP.Mode) != "" {
+		current = string(m.snap.cfg.DHCP.Mode)
+	}
+	return formSpec{
+		title:  "dhcp relay mode",
+		fields: []formField{{key: "v", label: "mode", kind: fieldSelect, value: current, options: []string{"off", "relay"}}},
+		submit: func(m *model, v map[string]string) mutationResult {
+			return runLeaf(m.cliArgs("system", "dhcp", "mode", v["v"])...)
+		},
+	}
 }
 
 func pageSNMP(c pageCtx) []card {
@@ -510,32 +665,71 @@ func pageSNMP(c pageCtx) []card {
 		return []card{noConfig(s)}
 	}
 	sn := s.cfg.SNMP
-	items := []item{kv{rows: []kvRow{
-		{"state", onOff(sn.Enabled), enabledTone(sn.Enabled)},
-		{"listen", dash(sn.ListenAddr), ""},
-		{"location", dash(sn.Location), ""},
-		{"contact", dash(sn.Contact), ""},
-		{"runnable", yesNo(sn.IsRunnable()), enabledTone(sn.IsRunnable())},
+	items := []item{editableKV{rows: []editableKVRow{
+		{k: "state", v: onOff(sn.Enabled), tone: enabledTone(sn.Enabled),
+			edit: func(m *model) formSpec { return verbBoolForm("snmp", []string{"system", "snmp"}, "on", "off", sn.Enabled) }},
+		{k: "listen", v: dash(sn.ListenAddr), edit: func(m *model) formSpec { return snmpListenForm(sn) }},
+		{k: "location", v: dash(sn.Location), edit: func(m *model) formSpec { return snmpLocationForm(sn) }},
+		{k: "contact", v: dash(sn.Contact), edit: func(m *model) formSpec { return snmpContactForm(sn) }},
+		{k: "runnable", v: yesNo(sn.IsRunnable()), tone: enabledTone(sn.IsRunnable())},
 	}}}
 	if len(sn.Communities) > 0 {
-		// The community string is a credential and is not printed, for the
-		// same reason key material is not printed on the Keys page: this
-		// screen ends up in a scrollback buffer.
-		t := table{head: []string{"community", "state"}}
+		// The community string is a credential and is never displayed, for
+		// the same reason key material is not printed on the Keys page:
+		// this screen ends up in a scrollback buffer. The real value still
+		// has to be the row's identity (cmdSystemSNMP's community del takes
+		// the string itself, there is no separate name), so it lives only
+		// in the row's id, which is never rendered — only cells are drawn.
+		t := table{selectKey: "snmp-communities", head: []string{"community", "state"}}
 		for _, cm := range sn.Communities {
 			row := tableRow{cells: []string{"(set)", onOff(!cm.Disabled)}, cellTone: map[int]string{1: enabledTone(!cm.Disabled)}}
 			if cm.Disabled {
 				row.tone = "dim"
 			}
 			t.rows = append(t.rows, row)
+			t.ids = append(t.ids, cm.Community)
 		}
 		items = append(items, t)
 	}
 	return []card{
 		{title: "snmp", items: items},
 		card{title: "note", items: []item{para{
-			text: "community strings are credentials and are not printed here.", tone: "mut"}}},
-		editHint("gravinet system snmp -h"),
+			text: "community strings are credentials and are not printed here. a add  d delete, on the selected " +
+				"community. There is no individual enable/disable for one \u2014 remove it and add it back.",
+			tone: "mut"}}},
+	}
+}
+
+func snmpListenForm(sn config.SNMPConfig) formSpec {
+	return formSpec{
+		title:  "snmp listen address",
+		fields: []formField{{key: "v", label: "listen", kind: fieldText, value: sn.ListenAddr, help: "ADDR:PORT"}},
+		submit: func(m *model, v map[string]string) mutationResult {
+			if v["v"] == "" {
+				return mutationResult{ok: false, detail: "a listen address is required"}
+			}
+			return runLeaf(m.cliArgs("system", "snmp", "listen", v["v"])...)
+		},
+	}
+}
+
+func snmpLocationForm(sn config.SNMPConfig) formSpec {
+	return formSpec{
+		title:  "snmp location",
+		fields: []formField{{key: "v", label: "location", kind: fieldText, value: sn.Location}},
+		submit: func(m *model, v map[string]string) mutationResult {
+			return runLeaf(m.cliArgs("system", "snmp", "location", v["v"])...)
+		},
+	}
+}
+
+func snmpContactForm(sn config.SNMPConfig) formSpec {
+	return formSpec{
+		title:  "snmp contact",
+		fields: []formField{{key: "v", label: "contact", kind: fieldText, value: sn.Contact}},
+		submit: func(m *model, v map[string]string) mutationResult {
+			return runLeaf(m.cliArgs("system", "snmp", "contact", v["v"])...)
+		},
 	}
 }
 
@@ -545,16 +739,18 @@ func pageLLDP(c pageCtx) []card {
 		return []card{noConfig(s)}
 	}
 	d := s.cfg.Discovery
-	items := []item{kv{rows: []kvRow{
-		{"state", onOff(!d.Disabled), enabledTone(!d.Disabled)},
-		{"runnable", yesNo(d.IsRunnable()), enabledTone(d.IsRunnable())},
-		{"any cdp", yesNo(d.AnyCDP()), ""},
+	items := []item{editableKV{rows: []editableKVRow{
+		{k: "state", v: onOff(!d.Disabled), tone: enabledTone(!d.Disabled),
+			edit: func(m *model) formSpec { return verbBoolForm("lldp", []string{"system", "lldp"}, "on", "off", !d.Disabled) }},
+		{k: "runnable", v: yesNo(d.IsRunnable()), tone: enabledTone(d.IsRunnable())},
+		{k: "any cdp", v: yesNo(d.AnyCDP())},
 	}}}
 	if len(d.Interfaces) > 0 {
-		t := table{head: []string{"iface", "lldp", "cdp"}}
+		t := table{selectKey: "lldp-iface", head: []string{"iface", "lldp", "cdp"}}
 		for _, i := range d.Interfaces {
 			t.rows = append(t.rows, tableRow{cells: []string{i.Name, onOff(i.LLDP), onOff(i.CDP)},
 				cellTone: map[int]string{1: enabledTone(i.LLDP), 2: enabledTone(i.CDP)}})
+			t.ids = append(t.ids, i.Name)
 		}
 		items = append(items, t)
 	} else {
@@ -563,9 +759,9 @@ func pageLLDP(c pageCtx) []card {
 	return []card{
 		{title: "lldp", items: items},
 		card{title: "note", items: []item{para{
-			text: "this is which interfaces run discovery. The neighbors they find are under Monitor \u203a L2 Peers.",
-			tone: "mut"}}},
-		editHint("gravinet system lldp -h"),
+			text: "a add an interface  d remove. Adding turns on both LLDP and CDP together \u2014 there is no CLI verb " +
+				"for one without the other on an existing entry, remove and re-add to change that. The neighbors " +
+				"found are under Monitor \u203a L2 Peers.", tone: "mut"}}},
 	}
 }
 
@@ -583,7 +779,9 @@ func pageSyslog(c pageCtx) []card {
 	}
 	return []card{
 		{title: "syslog", items: items},
-		editHint("gravinet system syslog -h"),
+		card{title: "note", items: []item{para{
+			text: "a add  d remove, on the selected collector. There is no individual enable/disable \u2014 remove " +
+				"it and add it back.", tone: "mut"}}},
 	}
 }
 
@@ -598,25 +796,55 @@ func pageUsers(c pageCtx) []card {
 			{"allowed OS users", joinOr(wa.AllowUsers, "\u2014"), ""},
 			{"local credentials", strconv.Itoa(len(wa.Users)), ""},
 		}})
-		if s.cfg.HostSettings != nil && len(s.cfg.HostSettings.Users) > 0 {
-			t := table{head: []string{"user", "expires"}}
-			for _, u := range s.cfg.HostSettings.Users {
-				exp := "never"
-				if u.ExpiresUnix > 0 {
-					exp = time.Unix(u.ExpiresUnix, 0).UTC().Format("2006-01-02")
-				}
-				t.rows = append(t.rows, tableRow{cells: []string{u.Name, exp}})
-			}
-			items = append(items, t)
-		}
 	} else {
 		items = append(items, para{text: fmt.Sprintf("could not read %s: %v", s.cfgPath, s.cfgErr), tone: "danger"})
+	}
+
+	// The live OS group membership — what "gravinet system users" actually
+	// lists — not HostSettings.Users, a config-side cache that can lag
+	// behind an account added or removed some other way.
+	v, err, ready := c.lazy.need("sys-users", func() (any, error) { return service.ListSystemUsers(), nil })
+	switch {
+	case !ready:
+		items = append(items, reading("console users"))
+	case err != nil:
+		items = append(items, para{text: err.Error(), tone: "danger"})
+	default:
+		info, _ := v.(service.UsersInfo)
+		if len(info.Users) > 0 {
+			t := table{selectKey: "sys-users", head: []string{"user", "exists", "expires"}}
+			for _, u := range info.Users {
+				exp := "never"
+				switch {
+				case !u.ExpiryKnown:
+					exp = "unknown"
+				case !u.Expires.IsZero():
+					exp = u.Expires.Format("2006-01-02")
+				}
+				if u.Expired {
+					exp += " (expired)"
+				}
+				tone := ""
+				if !u.Exists {
+					tone = "warn"
+				}
+				t.rows = append(t.rows, tableRow{cells: []string{u.Name, yesNo(u.Exists), exp}, tone: tone})
+				t.ids = append(t.ids, u.Name)
+			}
+			items = append(items, t)
+		} else {
+			items = append(items, empty{"no console users"})
+		}
+		if !info.CanManage && info.ManageHint != "" {
+			items = append(items, para{text: info.ManageHint, tone: "warn"})
+		}
 	}
 	return []card{
 		{title: "users", items: items},
 		card{title: "note", items: []item{para{
-			text: "credentials are never printed. \"gravinet genpass\" produces a new one.", tone: "mut"}}},
-		editHint("gravinet system users -h"),
+			text: "a add  e set expiry  d delete, on the selected user. Credentials are never printed \u2014 " +
+				"\"gravinet genpass\" produces a new one, and a password is always asked for here, never blank.",
+			tone: "mut"}}},
 	}
 }
 
@@ -641,11 +869,12 @@ func pageConfigHistory(c pageCtx) []card {
 		{"limit", strconv.Itoa(limit), ""},
 	}}}
 	if len(entries) > 0 {
-		t := table{head: []string{"id", "when", "by", "summary"}}
+		t := table{selectKey: "config-history", head: []string{"id", "when", "by", "summary"}}
 		for _, e := range entries {
 			t.rows = append(t.rows, tableRow{cells: []string{
 				e.ID, dash(e.Stamp), dash(e.User), dash(e.Summary),
 			}})
+			t.ids = append(t.ids, e.ID)
 		}
 		items = append(items, t)
 	} else {
@@ -653,7 +882,9 @@ func pageConfigHistory(c pageCtx) []card {
 	}
 	return []card{
 		{title: "config history", items: items},
-		editHint("gravinet system config-history <list|diff|restore|snapshot>"),
+		card{title: "note", items: []item{para{
+			text: "a snapshot now  e view diff against the config on disk  d restore (overwrites the current " +
+				"config), on the selected snapshot.", tone: "mut"}}},
 	}
 }
 
@@ -667,8 +898,11 @@ func pagePower(c pageCtx) []card {
 		pair, _ := v.([2]any)
 		ok, _ := pair[0].(bool)
 		note, _ := pair[1].(string)
-		items = append(items, kv{rows: []kvRow{
-			{"supported on this host", yesNo(ok), enabledTone(ok)},
+		items = append(items, editableKV{rows: []editableKVRow{
+			{k: "supported on this host", v: yesNo(ok), tone: enabledTone(ok)},
+			{k: "restart host", v: "\u2014", edit: func(m *model) formSpec { return powerForm("reboot", "restart") }},
+			{k: "shutdown host", v: "\u2014", edit: func(m *model) formSpec { return powerForm("shutdown", "shut down") }},
+			{k: "cancel pending action", v: "\u2014", edit: func(m *model) formSpec { return powerCancelForm() }},
 		}})
 		if note != "" {
 			items = append(items, para{text: note, tone: "mut"})
@@ -677,11 +911,41 @@ func pagePower(c pageCtx) []card {
 		items = append(items, reading("power support"))
 	}
 	items = append(items, para{
-		text: "Restarting or shutting down the host is not bound to a key here, deliberately. This page is read " +
-			"from a terminal that is frequently the only way back into the machine, and a keystroke that takes it " +
-			"down does not belong on a screen somebody is scrolling through. \"gravinet system power\" asks first " +
-			"and is where this lives.", tone: "warn"})
+		text: "This takes the whole HOST down, not just the gravinet service — and this console is frequently " +
+			"the only way back into the machine. Each action here still asks for confirmation first, the same as " +
+			"\"gravinet system power\" does, but there is no undo once it runs; a delay gives a window to reach " +
+			"the host another way if this was a mistake.", tone: "warn"})
 	return []card{{title: "power", items: items}}
+}
+
+func powerForm(verb, label string) formSpec {
+	return formSpec{
+		title: label + " host",
+		fields: []formField{
+			{key: "delay", label: "delay (minutes)", kind: fieldText, value: "1",
+				help: "a window to reach the host another way if this was a mistake"},
+		},
+		submit: func(m *model, v map[string]string) mutationResult {
+			delay := strings.TrimSpace(v["delay"])
+			if delay == "" {
+				delay = "0"
+			}
+			return runLeaf(m.cliArgsBare("system", "power", verb, "-delay", delay)...)
+		},
+	}
+}
+
+func powerCancelForm() formSpec {
+	return formSpec{
+		title:  "cancel pending restart/shutdown",
+		fields: []formField{{key: "confirm", label: "cancel it", kind: fieldBool, value: "true"}},
+		submit: func(m *model, v map[string]string) mutationResult {
+			if v["confirm"] != "true" {
+				return mutationResult{ok: true, detail: "nothing changed"}
+			}
+			return runLeaf(m.cliArgsBare("system", "power", "cancel")...)
+		},
+	}
 }
 
 // ---- info ---------------------------------------------------------------
@@ -774,63 +1038,116 @@ func pageSettings(c pageCtx) []card {
 	cfg := s.cfg
 	wa := cfg.WebAdmin
 
-	console := kv{rows: []kvRow{
-		{"web admin", onOff(wa.Enabled), enabledTone(wa.Enabled)},
-		{"listen", joinOr(cfg.ListenAddrsRaw(), "default (loopback + mesh)"), ""},
-		{"login lockout", fmt.Sprintf("%d attempts, %ds", wa.LoginBan.EffectiveMaxFailures(), wa.LoginBan.EffectiveBanSeconds()), ""},
-		{"config history limit", strconv.Itoa(cfg.EffectiveConfigHistoryLimit()), ""},
-		{"remote shell", onOff(wa.AllowRemoteShell), enabledTone(wa.AllowRemoteShell)},
-		{"geoip lookup", onOff(wa.GeoIPEnabled()), enabledTone(wa.GeoIPEnabled())},
+	console := editableKV{rows: []editableKVRow{
+		{k: "web admin", v: onOff(wa.Enabled), tone: enabledTone(wa.Enabled)},
+		{k: "listen", v: joinOr(cfg.ListenAddrsRaw(), "default (loopback + mesh)"),
+			edit: listenAddrsForm},
+		{k: "login lockout", v: fmt.Sprintf("%d attempts, %ds", wa.LoginBan.EffectiveMaxFailures(), wa.LoginBan.EffectiveBanSeconds()),
+			edit: loginBanForm},
+		{k: "config history limit", v: strconv.Itoa(cfg.EffectiveConfigHistoryLimit()),
+			edit: func(m *model) formSpec {
+				return intSettingForm("config history limit", "history-limit", cfg.EffectiveConfigHistoryLimit(), "how many snapshots to keep before pruning")
+			}},
+		{k: "remote shell", v: onOff(wa.AllowRemoteShell), tone: enabledTone(wa.AllowRemoteShell),
+			edit: func(m *model) formSpec {
+				return boolSettingForm("remote shell (needs a restart)", "shell", wa.AllowRemoteShell)
+			}},
+		{k: "geoip lookup", v: onOff(wa.GeoIPEnabled()), tone: enabledTone(wa.GeoIPEnabled()),
+			edit: func(m *model) formSpec {
+				return boolSettingForm("geoip lookup (needs a restart)", "geoip", wa.GeoIPEnabled())
+			}},
 	}}
 
-	cluster := kv{rows: []kvRow{
-		{"managed", onOff(cfg.Managed), enabledTone(cfg.Managed)},
-		{"manager", onOff(cfg.Manager), enabledTone(cfg.Manager)},
-		{"accept manager upgrades", onOff(cfg.Upgrade.AcceptManagerUpgrades), enabledTone(cfg.Upgrade.AcceptManagerUpgrades)},
+	cluster := editableKV{rows: []editableKVRow{
+		{k: "managed", v: onOff(cfg.Managed), tone: enabledTone(cfg.Managed),
+			edit: func(m *model) formSpec { return topLevelBoolForm("managed mode", "managed", cfg.Managed) }},
+		{k: "manager", v: onOff(cfg.Manager), tone: enabledTone(cfg.Manager),
+			edit: func(m *model) formSpec { return topLevelBoolForm("manager mode", "manager", cfg.Manager) }},
+		{k: "accept manager upgrades", v: onOff(cfg.Upgrade.AcceptManagerUpgrades), tone: enabledTone(cfg.Upgrade.AcceptManagerUpgrades),
+			edit: func(m *model) formSpec {
+				return boolSettingForm("accept manager upgrades", "accept-mgr-upgrades", cfg.Upgrade.AcceptManagerUpgrades)
+			}},
 	}}
 
-	logging := kv{rows: []kvRow{
-		{"log level", dash(cfg.LogLevel), ""},
-		{"log size cap", cfg.LogMaxSizeString(), ""},
-		{"log file", dash(cfg.LogFilePath(s.cfgPath)), "mut"},
+	logging := editableKV{rows: []editableKVRow{
+		{k: "log level", v: dash(cfg.LogLevel),
+			edit: func(m *model) formSpec {
+				return textSettingForm("log level", "log-level", cfg.LogLevel, "one of error, warn, info, debug")
+			}},
+		{k: "log size cap", v: cfg.LogMaxSizeString(),
+			edit: func(m *model) formSpec {
+				return textSettingForm("log size cap", "log-size", cfg.LogMaxSizeString(), "e.g. 200M, 1G, or a bare byte count")
+			}},
+		{k: "log file", v: dash(cfg.LogFilePath(s.cfgPath)), tone: "mut"},
 	}}
 
-	mesh := kv{rows: []kvRow{
-		{"udp ports", portsOrOff(cfg.UDPPortList()), portsTone(cfg.UDPPortList())},
-		{"tcp ports", portsOrOff(cfg.TCPPortList()), portsTone(cfg.TCPPortList())},
-		{"keepalive", cfg.KeepaliveDuration().String(), ""},
-		{"peer timeout", cfg.PeerTimeoutDuration().String(), ""},
-		{"route re-advertise", cfg.RouteAdvDuration().String(), ""},
-		{"nat state timeout", natTimeout(cfg.NATStateTimeout), ""},
-		{"upnp", onOff(cfg.EnableUPnP), enabledTone(cfg.EnableUPnP)},
+	meshSettings := editableKV{rows: []editableKVRow{
+		{k: "udp ports", v: portsOrOff(cfg.UDPPortList()), tone: portsTone(cfg.UDPPortList()),
+			edit: func(m *model) formSpec { return portListForm("UDP ports", "udp-port", cfg.UDPPortList()) }},
+		{k: "tcp ports", v: portsOrOff(cfg.TCPPortList()), tone: portsTone(cfg.TCPPortList()),
+			edit: func(m *model) formSpec { return portListForm("TCP ports", "tcp-port", cfg.TCPPortList()) }},
+		{k: "keepalive", v: cfg.KeepaliveDuration().String(),
+			edit: func(m *model) formSpec {
+				return intSettingForm("keepalive interval (seconds)", "keepalive", cfg.KeepaliveInterval, "0..86400; 0 = default")
+			}},
+		{k: "peer timeout", v: cfg.PeerTimeoutDuration().String(),
+			edit: func(m *model) formSpec {
+				return intSettingForm("peer timeout (seconds)", "peer-timeout", cfg.PeerTimeout, "0..86400; 0 = default; raised to at least the keepalive interval")
+			}},
+		{k: "route re-advertise", v: cfg.RouteAdvDuration().String(),
+			edit: func(m *model) formSpec {
+				return intSettingForm("route re-advertisement interval (seconds)", "route-adv", cfg.RouteAdvInterval, "0..86400; 0 = default")
+			}},
+		{k: "nat state timeout", v: natTimeout(cfg.NATStateTimeout),
+			edit: func(m *model) formSpec {
+				return intSettingForm("NAT state timeout (seconds)", "nat-state", cfg.NATStateTimeout, "0 = default 120s")
+			}},
+		{k: "upnp", v: onOff(cfg.EnableUPnP), tone: enabledTone(cfg.EnableUPnP),
+			edit: func(m *model) formSpec { return boolSettingForm("upnp (needs a restart)", "upnp", cfg.EnableUPnP) }},
 	}}
 
-	host := kv{rows: []kvRow{
-		{"ip forwarding", onOff(cfg.ForwardingEnabled()), enabledTone(cfg.ForwardingEnabled())},
-		{"icmp redirects suppressed", onOff(cfg.RedirectsDisabled()), enabledTone(cfg.RedirectsDisabled())},
+	host := editableKV{rows: []editableKVRow{
+		{k: "ip forwarding", v: onOff(cfg.ForwardingEnabled()), tone: enabledTone(cfg.ForwardingEnabled()),
+			edit: func(m *model) formSpec {
+				return boolSettingForm("ip forwarding (needs a restart)", "ip-forwarding", cfg.ForwardingEnabled())
+			}},
+		{k: "icmp redirects suppressed", v: onOff(cfg.RedirectsDisabled()), tone: enabledTone(cfg.RedirectsDisabled()),
+			edit: func(m *model) formSpec {
+				return boolSettingForm("suppress icmp redirects (needs a restart)", "ip-redirects", cfg.RedirectsDisabled())
+			}},
 	}}
 
-	perf := kv{rows: []kvRow{
-		{"worker threads", zeroAsDefault(cfg.WorkerThreads, "per core"), ""},
-		{"tun queues", zeroAsDefault(cfg.TunQueues, "off (single queue)"), ""},
-		{"socket buffer", zeroAsDefault(cfg.SocketBufferMB(), "default") + mbSuffix(cfg.SocketBufferMB()), ""},
-		{"udp gso", onOff(cfg.UDPGSOEnabled()), enabledTone(cfg.UDPGSOEnabled())},
+	perf := editableKV{rows: []editableKVRow{
+		{k: "worker threads", v: zeroAsDefault(cfg.WorkerThreads, "per core"),
+			edit: func(m *model) formSpec {
+				return intSettingForm("worker threads (needs a restart)", "worker-threads", cfg.WorkerThreads, "0 = per core")
+			}},
+		{k: "tun queues", v: zeroAsDefault(cfg.TunQueues, "off (single queue)"),
+			edit: func(m *model) formSpec {
+				return intSettingForm("tun queues (Linux only; needs a restart)", "tun-queues", cfg.TunQueues, "0 = single queue")
+			}},
+		{k: "socket buffer", v: zeroAsDefault(cfg.SocketBufferMB(), "default") + mbSuffix(cfg.SocketBufferMB()),
+			edit: func(m *model) formSpec {
+				return intSettingForm("socket buffer, MB (needs a restart)", "socket-buffer", cfg.SocketBufferMB(), "0 = default")
+			}},
+		{k: "udp gso", v: onOff(cfg.UDPGSOEnabled()), tone: enabledTone(cfg.UDPGSOEnabled()),
+			edit: func(m *model) formSpec { return boolSettingForm("udp gso (needs a restart)", "udp-gso", cfg.UDPGSOEnabled()) }},
 	}}
 
 	ddns := cfg.DDNS
-	ddnsRows := kv{rows: []kvRow{
-		{"dynamic dns", onOff(ddns.Active()), enabledTone(ddns.Active())},
-		{"interval", ddnsInterval(ddns), ""},
-		{"ttl", strconv.Itoa(ddns.TTL) + "s", ""},
-		{"reverse records", onOff(ddns.ReverseEnabled()), enabledTone(ddns.ReverseEnabled())},
-		{"tsig key", tsigState(ddns.TSIGKey), tsigTone(ddns.TSIGKey)},
+	ddnsRows := editableKV{rows: []editableKVRow{
+		{k: "dynamic dns", v: onOff(ddns.Active()), tone: enabledTone(ddns.Active()), edit: ddnsForm},
+		{k: "interval", v: ddnsInterval(ddns), edit: ddnsForm},
+		{k: "ttl", v: strconv.Itoa(ddns.TTL) + "s", edit: ddnsForm},
+		{k: "reverse records", v: onOff(ddns.ReverseEnabled()), tone: enabledTone(ddns.ReverseEnabled()), edit: ddnsForm},
+		{k: "tsig key", v: tsigState(ddns.TSIGKey), tone: tsigTone(ddns.TSIGKey), edit: ddnsKeyForm},
 	}}
 
 	return []card{
 		{title: "console", items: []item{console}},
 		{title: "cluster", items: []item{cluster}},
 		{title: "logging", items: []item{logging}},
-		{title: "mesh", items: []item{mesh}},
+		{title: "mesh", items: []item{meshSettings}},
 		{title: "host", items: []item{host}},
 		{title: "performance", items: []item{perf}},
 		{title: "dynamic dns", items: []item{ddnsRows}},
@@ -839,7 +1156,6 @@ func pageSettings(c pageCtx) []card {
 				"preference with nothing in config.json behind it — this console has its own theme, on the t key. " +
 				"The TLS certificate upload wants two PEM files pasted in, and is safer done where the browser you " +
 				"would lock out is the one asking.", tone: "mut"}}},
-		editHint("gravinet settings -h \u2014 every row above has a leaf under it"),
 	}
 }
 

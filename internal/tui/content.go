@@ -250,6 +250,8 @@ func layoutItem(it item, c layoutCtx) []line {
 	switch v := it.(type) {
 	case kv:
 		return layoutKV(v, c)
+	case editableKV:
+		return layoutEditableKV(v, c)
 	case table:
 		return layoutTable(v, c)
 	case para:
@@ -262,6 +264,9 @@ func layoutItem(it item, c layoutCtx) []line {
 	return nil
 }
 
+// layoutKV renders label/value rows with the labels padded to a common
+// width. The label column is capped at a third of the available space so a
+// single long label cannot push every value off the right edge.
 // layoutKV renders label/value rows with the labels padded to a common
 // width. The label column is capped at a third of the available space so a
 // single long label cannot push every value off the right edge.
@@ -287,6 +292,130 @@ func layoutKV(v kv, c layoutCtx) []line {
 		})
 	}
 	return out
+}
+
+// editableKVRow is one directly-editable field: rendered exactly like a
+// kvRow (an aligned label/value pair) but carrying the mnemonic machinery
+// kvRow deliberately doesn't — see editableKV's own comment for why these
+// are a separate type rather than new fields bolted onto kvRow.
+type editableKVRow struct {
+	k, v, tone string
+
+	// edit marks this row as directly editable: a page-unique mnemonic
+	// character is assigned to it (mnemonics.go) and pressing that key, with
+	// no row navigation first, opens the form edit returns. nil means this
+	// particular row — inside an otherwise-editable block — is informational
+	// only (a read-only status sitting alongside settings it explains) and
+	// gets no mnemonic.
+	edit func(m *model) formSpec
+
+	// mnemonic is written by assignMnemonicsInPlace right before a page is
+	// laid out or a key is dispatched; page builders never set it.
+	mnemonic rune
+}
+
+// editableKV is a block of directly-editable label/value rows — the same
+// aligned-column look kv gives a block of purely informational ones, plus a
+// mnemonic underline on each row's label (see mnemonics.go) that jumps
+// straight to editing it.
+//
+// This is a second type rather than new fields on kv/kvRow on purpose: kv
+// is used in roughly three dozen places across this package already, every
+// one of them a plain positional literal (`kvRow{"cpu", pct, tone}`), and
+// Go's positional composite literals require every field to be given —
+// adding fields to kvRow would have required touching every one of those
+// call sites just to append zero values they don't need. Keeping the two
+// types separate means every existing read-only page is completely
+// unaffected, and a page gains mnemonics only where a builder deliberately
+// reaches for editableKV instead of kv — visible at the call site, not an
+// invisible property every kv block now has to think about.
+type editableKV struct {
+	rows []editableKVRow
+}
+
+func (editableKV) isItem() {}
+
+// layoutEditableKV is layoutKV's column-alignment logic, plus the mnemonic
+// underline. Display labels (a "[x] " prefix for a mnemonic that isn't one
+// of the label's own letters — see pickMnemonic) are computed before the
+// column width, not after, so that prefix is measured the same as any other
+// character rather than silently overflowing the column it's padded to.
+func layoutEditableKV(v editableKV, c layoutCtx) []line {
+	type displayRow struct {
+		label       string
+		mnemonicPos int // rune index of the mnemonic within label, -1 if none
+	}
+	disp := make([]displayRow, len(v.rows))
+	kw := 0
+	for i, r := range v.rows {
+		label, pos := r.k, -1
+		if r.edit != nil && r.mnemonic != 0 {
+			if p := runeIndexFold(r.k, r.mnemonic); p >= 0 {
+				label, pos = r.k, p
+			} else {
+				label = "[" + string(r.mnemonic) + "] " + r.k
+				pos = 1
+			}
+		}
+		disp[i] = displayRow{label: label, mnemonicPos: pos}
+		if n := utf8.RuneCountInString(label); n > kw {
+			kw = n
+		}
+	}
+	if cap := c.width / 3; kw > cap && cap > 0 {
+		kw = cap
+	}
+	keySt := style{}.withFg(c.pal.mut)
+	mnemonicSt := style{}.withFg(c.pal.acc).withBold().withUnderline()
+
+	var out []line
+	for i, r := range v.rows {
+		label := truncate(disp[i].label, kw)
+		pad := kw - utf8.RuneCountInString(label) + 2
+		val := truncate(r.v, max(0, c.width-kw-2))
+
+		var keySpans []span
+		if pos := disp[i].mnemonicPos; pos >= 0 && pos < utf8.RuneCountInString(label) {
+			rs := []rune(label)
+			if before := string(rs[:pos]); before != "" {
+				keySpans = append(keySpans, span{before, keySt})
+			}
+			keySpans = append(keySpans, span{string(rs[pos]), mnemonicSt})
+			if after := string(rs[pos+1:]); after != "" {
+				keySpans = append(keySpans, span{after, keySt})
+			}
+		} else {
+			keySpans = append(keySpans, span{label, keySt})
+		}
+		keySpans = append(keySpans, span{strings.Repeat(" ", pad), keySt})
+
+		row := append(line{}, keySpans...)
+		row = append(row, span{val, c.toneStyle(r.tone)})
+		out = append(out, row)
+	}
+	return out
+}
+
+// runeIndexFold returns the rune index of the first case-insensitive match
+// of target within s, or -1. Used to find where a mnemonic sits in its own
+// label — mnemonics are assigned in lowercase, but the label likely isn't.
+func runeIndexFold(s string, target rune) int {
+	lower := unicodeToLower(target)
+	i := 0
+	for _, r := range s {
+		if unicodeToLower(r) == lower {
+			return i
+		}
+		i++
+	}
+	return -1
+}
+
+func unicodeToLower(r rune) rune {
+	if r >= 'A' && r <= 'Z' {
+		return r + ('a' - 'A')
+	}
+	return r
 }
 
 // layoutTable renders a header, a rule, and the body rows.

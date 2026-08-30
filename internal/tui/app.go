@@ -411,6 +411,7 @@ func (m *model) drawRail(s *Screen) {
 func (m *model) contentLines() []line {
 	inner := m.contentWidth()
 	cards := buildPage(m.section, pageCtx{snap: m.snap, lazy: m.lazy})
+	assignMnemonicsInPlace(cards)
 	head := m.headingLines(inner)
 	return append(head, layout(cards, layoutCtx{pal: m.pal, width: inner})...)
 }
@@ -501,19 +502,42 @@ func (m *model) drawFooter(s *Screen) {
 		return
 	}
 	keys := "tab rail/page  \u2191\u2193 move  enter open  / search  n next  r refresh  t theme  ? help  q quit"
-	if _, ok := sectionActions[m.section]; ok {
-		var parts []string
-		if sectionActions[m.section].add != nil {
+	var parts []string
+	if set, ok := sectionActions[m.section]; ok {
+		if set.add != nil {
 			parts = append(parts, "a add")
 		}
 		if legend := m.actionLegend(); legend != "" {
 			parts = append(parts, legend)
 		}
-		if len(parts) > 0 {
-			keys = joinLegend(parts) + "  \u00b7  " + keys
-		}
+	}
+	if m.pageHasMnemonics() {
+		parts = append(parts, "underlined letter: edit that field")
+	}
+	if len(parts) > 0 {
+		keys = joinLegend(parts) + "  \u00b7  " + keys
 	}
 	s.Print(1, y, truncate(keys, m.w-2), style{}.withFg(m.pal.mut))
+}
+
+// pageHasMnemonics reports whether the current page has at least one
+// directly-editable field, for the footer hint above — a page with none
+// (still most of them, until the remaining rail groups get the same
+// treatment Mesh and part of Settings have) shows the ordinary key list
+// with no claim about underlines that aren't there.
+func (m *model) pageHasMnemonics() bool {
+	for _, cd := range m.currentCards() {
+		for _, it := range cd.items {
+			if t, ok := it.(editableKV); ok {
+				for _, row := range t.rows {
+					if row.edit != nil {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
 }
 
 // joinLegend joins the per-page action hints with the same two-space
@@ -668,6 +692,8 @@ func (m *model) handleRune(r rune) bool {
 		m.dispatchAdd()
 	case 'e':
 		m.dispatchRowAction('e')
+	case 'E':
+		m.dispatchRowAction('E')
 	case 'd':
 		m.dispatchRowAction('d')
 	case ' ':
@@ -677,6 +703,9 @@ func (m *model) handleRune(r rune) bool {
 			m.moveDown(m.pageStep(), false)
 		}
 	default:
+		if spec, ok := m.mnemonicAction(r); ok {
+			m.openForm(spec)
+		}
 		return true
 	}
 	return true
