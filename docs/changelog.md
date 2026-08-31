@@ -2,6 +2,18 @@
 
 ---
 
+## v1019 — 2026-08-30
+
+**`gravinet tui` did not build on Windows at all — `syscall.SetConsoleMode` doesn't exist in Go's standard library, on any platform, ever.**
+
+`term_windows.go`'s own top comment claimed the standard `syscall` package exported both `GetConsoleMode` and `SetConsoleMode`, and called the latter directly. Checked against the actual Go 1.22 source (`syscall/zsyscall_windows.go`) rather than assumed: `GetConsoleMode` is genuinely there, `SetConsoleMode` never was — a real asymmetry in the standard library, not a version regression or a typo. Every build of `gravinet tui` on Windows failed at compile time, for every person who ever tried it.
+
+Fixed the same zero-dependency way this file already resolves `GetConsoleScreenBufferInfo`, two lines below the broken call: `syscall.NewLazyDLL("kernel32.dll")` and `NewProc("SetConsoleMode")`, called directly rather than through a standard-library wrapper that doesn't exist. golang.org/x/sys/windows has `SetConsoleMode` built in, but this tree stays at zero dependencies, so it goes through the same kernel32 resolution pattern already established for the other Win32 call this file needs.
+
+Verified by actually cross-compiling for Windows — `GOOS=windows` amd64, 386, and arm64 all build clean now, where all three failed identically before — rather than trusting a code review of a platform this session can't run. While in the area, checked every other `syscall.X` reference across every `_windows.go` file in the tree against the real standard library source, specifically looking for the same class of mistake (assuming an exported name that isn't). Found none — this was the one.
+
+---
+
 ## v1018 — 2026-08-30
 
 **`gravinet tui`: the footer's "E advanced", "/ search", and "? help" segments were showing their key as a bare, unmarked character sitting next to the word — fixed.**

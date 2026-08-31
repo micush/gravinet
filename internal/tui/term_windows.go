@@ -18,10 +18,14 @@ package tui
 // there is no sensible way to draw this with the pre-VT console API, and a
 // clear error naming the requirement beats a screen of escape sequences.
 //
-// syscall exports GetConsoleMode and SetConsoleMode but not
-// GetConsoleScreenBufferInfo, so that one is resolved from kernel32 directly
-// via syscall.NewLazyDLL — the same zero-dependency approach pty_windows.go
-// takes for the ConPTY entry points.
+// syscall exports GetConsoleMode but, on inspection of the standard
+// library's own source (syscall/zsyscall_windows.go), never exported its
+// write counterpart — a real asymmetry in the standard library, not an
+// oversight here. golang.org/x/sys/windows has SetConsoleMode, but this
+// tree stays at zero dependencies, so it — like GetConsoleScreenBufferInfo,
+// which syscall never exported either — is resolved from kernel32.dll
+// directly via syscall.NewLazyDLL, the same zero-dependency approach
+// pty_windows.go takes for the ConPTY entry points.
 
 import (
 	"fmt"
@@ -31,8 +35,9 @@ import (
 )
 
 var (
-	modKernel32                   = syscall.NewLazyDLL("kernel32.dll")
+	modKernel32                    = syscall.NewLazyDLL("kernel32.dll")
 	procGetConsoleScreenBufferInfo = modKernel32.NewProc("GetConsoleScreenBufferInfo")
+	procSetConsoleMode             = modKernel32.NewProc("SetConsoleMode")
 )
 
 const (
@@ -114,10 +119,22 @@ func enterRaw(f *os.File) (restore func(), err error) {
 	}, nil
 }
 
-// setConsoleMode wraps syscall.SetConsoleMode so both call sites read the
-// same and the error is a plain error rather than a bool.
+// setConsoleMode calls kernel32's SetConsoleMode directly — see this file's
+// own top comment for why that's resolved via syscall.NewLazyDLL rather
+// than syscall.SetConsoleMode, which does not exist. SetConsoleMode returns
+// a Win32 BOOL (nonzero on success); Call's own error return is populated
+// from GetLastError() on every call, successful or not, so r == 0 — the
+// actual failure signal — is checked first, and the error is used only to
+// describe why.
 func setConsoleMode(h syscall.Handle, mode uint32) error {
-	return syscall.SetConsoleMode(h, mode)
+	r, _, e := procSetConsoleMode.Call(uintptr(h), uintptr(mode))
+	if r != 0 {
+		return nil
+	}
+	if e != nil {
+		return e
+	}
+	return syscall.EINVAL
 }
 
 // termSize reports the console window's size in cells — the *window*
