@@ -1,7 +1,5 @@
 # [gravinet]
 
-*Created by micush.*
-
 A single-binary, full-mesh, encrypted overlay VPN. Pure Go, stdlib-only core,
 `CGO_ENABLED=0` static build. Targets Linux, Windows, macOS, FreeBSD, OpenBSD —
 the overlay, routing, firewall, NAT, QoS, bandwidth shaping, and per-network
@@ -10,6 +8,12 @@ needs unbound as the system resolver, which the installer sets up by default —
 pass --no-unbound to skip it.
 
 See `docs/ARCHITECTURE.md` for the full design and the prioritized roadmap.
+
+
+![Mesh networks](snaps/networks.png)
+
+![Mesh node metrics](snaps/metrics.png)
+
 
 ## Features
 
