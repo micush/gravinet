@@ -2,6 +2,12 @@
 
 ---
 
+## v1024 — 2026-10-10
+
+**README: the install section shows just the one-line `get.sh` command.** The example with installer options and `--version` was removed. Text change only; nothing was rebuilt or run beyond `go vet` and the README tests.
+
+---
+
 ## v1023 — 2026-10-10
 
 **Everything from v1020 to v1022 in one clean tree, and a release script that reports failures.** Use this in place of v1022.

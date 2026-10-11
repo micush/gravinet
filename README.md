@@ -41,8 +41,6 @@ See `docs/ARCHITECTURE.md` for the full design and `features.md` for the longer 
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/micush/gravinet/HEAD/get.sh | sudo bash
-# pass installer options after "--", or pick a tag with --version:
-curl -fsSL https://raw.githubusercontent.com/micush/gravinet/HEAD/get.sh | sudo bash -s -- --version v1020
 ```
 
 **From an unpacked release**, run the installer for your system. It puts the program in place, writes a starting config, registers the service and **starts it**. Running it again upgrades in place: it stops the daemon, replaces the program and starts it again.
