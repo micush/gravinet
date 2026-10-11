@@ -2,6 +2,19 @@
 
 ---
 
+## v1023 — 2026-10-10
+
+**Everything from v1020 to v1022 in one clean tree, and a release script that reports failures.** Use this in place of v1022.
+
+- **Fetch from online** (v1020), picking the highest `v<number>` among the release and the tags, and naming the release it downloaded at the top of a push's results (v1022).
+- **`get.sh`** for a one-line install (v1020), and the **README rewrite with screenshots in `snaps/`** (v1021).
+- **`distribute-gravinet` is now part of the tree** (it is left out of the rsync to the peers and to the GitHub repo, as before). It defaults to the git part only (`peers` and `all` are the other modes), gives pushes 120 seconds instead of 10, pushes even when there was nothing new to commit, pushes a tag whenever GitHub does not have it (a tag whose first push failed used to be skipped for ever as "already exists"), and exits non-zero with a plain message when anything failed.
+- **Unpacking this archive over an older tree leaves deleted files behind** (v1019 replaced the Kea-based DHCP code, and the old `kea.go`, `dhcp_egress.go`, `dhcp_prefill.go` and `dhcp_leases.go` break the build if they are still there). Sync it in with `rsync -a --delete --exclude .git` rather than extracting over the top.
+
+Verified: the archive was extracted into a clean directory and built (cgo and static), vetted and tested there; the script was exercised against local bare repos (commit, tag, a tag that existed only locally, both repos). Not verified: the real GitHub, the peers, or the rewritten README rendered in a browser.
+
+---
+
 ## v1022 — 2026-10-10
 
 **Fetch from online picked a stale published release over newer tags, and a push said only "already up to date" without saying which release it had downloaded.**
