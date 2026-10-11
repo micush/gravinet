@@ -10863,23 +10863,22 @@ async function latestGravinetTag(){
   if (state.latestTag !== undefined) return state.latestTag;
   state.latestTag = null;
   try {
+    // The highest v<number> among the newest release and the tag list: a published release that was never updated
+    // must not hide newer tags (the server's Fetch from online picks the same way).
+    let best = null, bestN = -1;
+    const consider = (name) => { const n = tagNumber(name); if (n !== null && n > bestN){ bestN = n; best = name; } };
+    let relName = null;
     const rel = await fetch('https://api.github.com/repos/'+GH_REPO+'/releases/latest', { headers:{ 'Accept':'application/vnd.github+json' } });
     if (rel.ok){
       const j = await rel.json();
-      if (j && j.tag_name) state.latestTag = j.tag_name;
+      if (j && j.tag_name){ relName = j.tag_name; consider(relName); }
     }
-    if (!state.latestTag){
-      const tg = await fetch('https://api.github.com/repos/'+GH_REPO+'/tags?per_page=100', { headers:{ 'Accept':'application/vnd.github+json' } });
-      if (tg.ok){
-        const list = await tg.json();
-        let best = null, bestN = -1;
-        for (const t of (Array.isArray(list) ? list : [])){
-          const n = tagNumber(t && t.name);
-          if (n !== null && n > bestN){ bestN = n; best = t.name; }
-        }
-        state.latestTag = best;
-      }
+    const tg = await fetch('https://api.github.com/repos/'+GH_REPO+'/tags?per_page=100', { headers:{ 'Accept':'application/vnd.github+json' } });
+    if (tg.ok){
+      const list = await tg.json();
+      for (const t of (Array.isArray(list) ? list : [])) consider(t && t.name);
     }
+    state.latestTag = best || relName;
   } catch (_) { /* offline, blocked, or rate-limited — reported by the caller */ }
   return state.latestTag;
 }
@@ -11302,6 +11301,7 @@ async function drawUpgrade(host){
           let obj;
           try { obj = JSON.parse(line); } catch { return; }
           if (obj.keepalive) return; // traffic to keep the connection alive while peers build; carries nothing
+          if (obj.info){ const n = $('<div class="hint" style="margin:3px 0"></div>'); n.textContent = obj.info; resBox.appendChild(n); return; } // e.g. which release "Fetch from online" downloaded
           if (obj.done) return; // the final {"done":true,...} summary line carries nothing the per-peer lines above haven't already shown
           if (obj.ok) applied.push(obj.node);
           addResult(obj);

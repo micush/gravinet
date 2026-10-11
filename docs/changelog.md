@@ -2,6 +2,18 @@
 
 ---
 
+## v1022 — 2026-10-10
+
+**Fetch from online picked a stale published release over newer tags, and a push said only "already up to date" without saying which release it had downloaded.**
+
+The lookup took the newest *published release* first and looked at the tag list only when there was no release. A repository whose last published release is old (say v1019) while newer tags exist (v1020, v1021, made by the release script) therefore fetched the old one, and every peer, already on a newer build, answered "already up to date". It now takes the **highest `v<number>` among the release and the tags** (a release with a non-numeric tag name is still tried first). The version line on the Upgrade page ("The latest version is …") had the same release-first rule in its script and now uses the same highest-number rule.
+
+A push from online now also **names what it downloaded** as the first line of the results ("Downloaded v1021 from GitHub (gravinet 1021)."), so an "already up to date" result can be read against it.
+
+Verified: new test case with a stale release (v1019) and tags v1020 and v1021 (v1021 first); the push test now checks the "Downloaded …" line; the rest of the webadmin tests pass. Not verified: against the real GitHub, and the new line and the version line in a browser.
+
+---
+
 ## v1021 — 2026-10-10
 
 **README rewritten for people, with screenshots of the web admin in `snaps/`.**

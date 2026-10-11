@@ -115,14 +115,29 @@ func candidateTags(ctx context.Context) ([]string, error) {
 		}
 		return nil, fmt.Errorf("cannot reach GitHub: %w", err)
 	}
+	// The highest v<number> wins, whether it came from the release or from the tag list: a published release that
+	// was never updated (say v1019) must not hide newer tags. A release with a non-numeric tag name is still tried first.
+	seen := map[string]bool{}
 	var nums []string
-	for _, t := range tags {
-		if ghNumTagRe.MatchString(t.Name) && (len(out) == 0 || t.Name != out[0]) {
-			nums = append(nums, t.Name)
+	add := func(n string) {
+		if ghNumTagRe.MatchString(n) && !seen[n] {
+			seen[n] = true
+			nums = append(nums, n)
 		}
 	}
+	rel := ""
+	if len(out) > 0 {
+		rel = out[0]
+		add(rel)
+	}
+	for _, t := range tags {
+		add(t.Name)
+	}
 	sort.Slice(nums, func(i, j int) bool { return numericTagLess(nums[j], nums[i]) })
-	out = append(out, nums...)
+	out = nums
+	if rel != "" && !ghNumTagRe.MatchString(rel) {
+		out = append([]string{rel}, nums...)
+	}
 	if len(out) > 10 {
 		out = out[:10]
 	}

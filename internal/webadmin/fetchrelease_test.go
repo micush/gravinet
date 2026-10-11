@@ -88,6 +88,12 @@ func TestCandidateTagsReleaseFirstThenHighestDown(t *testing.T) {
 	if err != nil || strings.Join(got, " ") != "v1020 v1019 v10 v9" {
 		t.Errorf("with a release: %v %v", got, err)
 	}
+	// a stale published release must not hide newer tags
+	fakeGitHub(t, "v1019", []string{"v1019", "v1021", "v1020"}, nil)
+	got, err = candidateTags(context.Background())
+	if err != nil || strings.Join(got, " ") != "v1021 v1020 v1019" {
+		t.Errorf("stale release: %v %v", got, err)
+	}
 	fakeGitHub(t, "", []string{"v9", "junk", "v10", "v2"}, nil)
 	got, err = candidateTags(context.Background())
 	if err != nil || strings.Join(got, " ") != "v10 v9 v2" {
@@ -216,6 +222,9 @@ func TestPushOnlineFetchesOnceAndPushes(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != 200 || !strings.Contains(string(b), `"node":"p1"`) || !strings.Contains(string(b), `"ok":true`) {
 		t.Fatalf("push online: %d %s", resp.StatusCode, b)
+	}
+	if !strings.Contains(string(b), `"info":"Downloaded v1020 from GitHub (gravinet 1020)."`) {
+		t.Errorf("the stream does not say which release was downloaded: %s", b)
 	}
 	if gotBytes < 100 {
 		t.Errorf("the peer received %d bytes; the fetched archive was not pushed", gotBytes)

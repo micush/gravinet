@@ -119,6 +119,7 @@ func (s *Server) handleUpgradePush(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "a non-empty nodes list is required"})
 		return
 	}
+	fetchedTag := ""
 	if online && spooled == "" {
 		// "Fetch from online": download the newest release once here and push those bytes to every peer.
 		path, got, tag, err := fetchRelease(r.Context(), s.upg.StateDir)
@@ -128,6 +129,7 @@ func (s *Server) handleUpgradePush(w http.ResponseWriter, r *http.Request) {
 		}
 		s.log.Infof("upgrade: fetched %s from GitHub (sha256 %s) to push to peers", tag, got[:12])
 		spooled, sum = path, got
+		fetchedTag = tag
 	}
 	if spooled == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "the push carried no source archive"})
@@ -219,6 +221,18 @@ func (s *Server) handleUpgradePush(w http.ResponseWriter, r *http.Request) {
 	// nothing sent.
 	if flusher != nil {
 		flusher.Flush()
+	}
+	// Say which release was downloaded, so "already up to date" can be read against it.
+	if fetchedTag != "" {
+		_ = json.NewEncoder(w).Encode(map[string]any{"info": "Downloaded " + fetchedTag + " from GitHub" + func() string {
+			if wantVersion != "" {
+				return " (gravinet " + wantVersion + ")"
+			}
+			return ""
+		}() + "."})
+		if flusher != nil {
+			flusher.Flush()
+		}
 	}
 
 	// Lift this connection's read deadline for the rest of the rollout.
