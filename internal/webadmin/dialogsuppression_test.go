@@ -89,9 +89,9 @@ func TestUpgradeClearsStaleResultsBeforeReturningEarly(t *testing.T) {
 	// Every early return has to come after the clear, or the stale line
 	// survives that path.
 	for _, guard := range []string{
-		"if (!fileIn.files[0])",
+		"if (!online && !fileIn.files[0])",
 		"confirmModal(msg, { title: allThenLocal",
-		"confirmModal('Build the selected archive",
+		"confirmModal((onlineBox.checked",
 	} {
 		if at := strings.Index(h, guard); at < 0 {
 			t.Errorf("guard %q not found", guard)

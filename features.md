@@ -140,6 +140,9 @@ Open an HTTPS page served by the node itself — no extra software to install.
 - **Build-from-source upgrades** with a preflight self-test and a
   confirm-or-rollback guard: if the new binary can't get its peers back, it
   reverts itself. A bad upgrade doesn't strand a node.
+- **Fetch from online.** Instead of uploading an archive, tick a box and the
+  node downloads the newest release from GitHub itself, then upgrades exactly
+  as it would from an upload — for one node or a whole fleet.
 - **Your configuration always survives.** Every change — from the command line or
   the web UI — is written to the config file and reloaded live, so nothing you
   set is lost on restart. The CLI and the UI edit the same source of truth.

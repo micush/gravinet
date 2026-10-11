@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -137,5 +138,25 @@ func TestHandleLicense(t *testing.T) {
 	json.Unmarshal(rr2.Body.Bytes(), &out2)
 	if out2.Available {
 		t.Error("expected unavailable when no license path set")
+	}
+}
+
+// A line that is only an image must not reach the page as a stray "!" and a broken link: the in-app README cannot serve
+// the files in snaps/. Checked against the shipped source of mdRender, and that the shipped README really has such lines.
+func TestMdRenderSkipsImageLines(t *testing.T) {
+	if !strings.Contains(indexHTML, `if (/^!\[[^\]]*\]\([^)]*\)\s*$/.test(line)){ closeList(); i++; continue; }`) {
+		t.Error("mdRender no longer skips image-only lines")
+	}
+	b, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
+	if err != nil {
+		t.Skip("README.md not found next to the source tree")
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if strings.HasPrefix(line, "![") {
+			p := line[strings.Index(line, "(")+1 : strings.LastIndex(line, ")")]
+			if _, err := os.Stat(filepath.Join("..", "..", p)); err != nil {
+				t.Errorf("README references %s, which is not in the tree", p)
+			}
+		}
 	}
 }

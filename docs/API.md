@@ -1248,6 +1248,13 @@ Response is whatever the daemon's own `apply` control operation returns
 (relayed verbatim), typically including the new phase/version on success,
 or `{"error": "..."}` on a build/preflight failure.
 
+`POST /api/upgrade/source?online=1` (no body) makes this node download the
+newest release of `micush/gravinet` from GitHub itself — the newest published
+release, otherwise the highest `v<number>` tag; a tag whose archive is not a
+gravinet source tree is skipped — and then proceeds exactly as for an upload.
+A lookup or download failure answers `422` with `{"error": "..."}` and nothing
+is built. The node needs outbound HTTPS to `api.github.com` and `github.com`.
+
 ### `POST /api/upgrade/rollback`
 
 Backs out an upgrade that already committed but turned out bad in a way
@@ -1266,7 +1273,9 @@ Distributes one uploaded source archive to several managed peers at once
 — the fleet-wide rollout action. Multipart POST with two parts:
 
 - `nodes` — a JSON array of peer node IDs (must arrive first)
-- `source` — the archive file
+- `source` — the archive file, **or** `online` = `1` instead (no `source`): this
+  node downloads the newest release from GitHub once, as above, and pushes
+  those bytes to every target (`422` if the download fails)
 
 The response is **newline-delimited JSON** (`Content-Type:
 application/x-ndjson`), not one JSON object: each line is written and

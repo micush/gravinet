@@ -72,6 +72,7 @@ func (s *Server) handleUpgradePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var nodes []string
+	online := false
 	spooled, sum := "", ""
 	defer func() {
 		if spooled != "" {
@@ -98,6 +99,9 @@ func (s *Server) handleUpgradePush(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "nodes must be a JSON array of peer names: " + err.Error()})
 				return
 			}
+		case "online":
+			b, _ := io.ReadAll(io.LimitReader(part, 8))
+			online = strings.TrimSpace(string(b)) == "1"
 		case "source":
 			if len(nodes) == 0 {
 				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "the nodes list must arrive before the source archive"})
@@ -114,6 +118,16 @@ func (s *Server) handleUpgradePush(w http.ResponseWriter, r *http.Request) {
 	if len(nodes) == 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "a non-empty nodes list is required"})
 		return
+	}
+	if online && spooled == "" {
+		// "Fetch from online": download the newest release once here and push those bytes to every peer.
+		path, got, tag, err := fetchRelease(r.Context(), s.upg.StateDir)
+		if err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": err.Error()})
+			return
+		}
+		s.log.Infof("upgrade: fetched %s from GitHub (sha256 %s) to push to peers", tag, got[:12])
+		spooled, sum = path, got
 	}
 	if spooled == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "the push carried no source archive"})

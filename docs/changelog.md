@@ -2,6 +2,32 @@
 
 ---
 
+## v1021 — 2026-10-10
+
+**README rewritten for people, with screenshots of the web admin in `snaps/`.**
+
+The README now opens with what gravinet is and what you get, then walks through installing (including the one-line `get.sh`), creating a first network, a page-by-page tour of the web admin (Mesh, Traffic, Naming, Monitor, System, Settings, Info), the terminal screen, the command line, and a short "good to know" section. The engine details that used to open the README moved to a "How it works" section near the end. The technical content (every command, option, port, limit and platform note) is kept; it was reorganised and reworded, not removed. Twenty screenshots in `snaps/` were taken from a running three-node mesh (loopback, demo data) in Chromium: sign-in, networks, keys, seeds, peers (light and dark), bans, firewall, NAT, QoS, shaping, routes, DNS, hosts, metrics, mesh peers, latency, logs, upgrade (with the Fetch from online tick box) and settings.
+
+**The in-app README page skips image-only lines.** It cannot serve the files in `snaps/`, so a line that is only `![alt](path)` showed as a stray `!` and a broken link. `mdRender` now leaves such lines out. New test `TestMdRenderSkipsImageLines` checks that, and that every image the shipped README references exists in the tree.
+
+Not verified: the rewritten README rendered in the in-app Info page (the image-skipping and the tables were checked by reading `mdRender`, and the test above, not in a browser); the screenshots show a demo mesh on loopback, so addresses such as 127.0.0.1 and the 94% disk figure are from the sandbox; the TUI has no screenshot.
+
+---
+
+## v1020 — 2026-10-10
+
+**Upgrade: a "Fetch from online" tick box beside the file picker. Ticked, pressing Upgrade makes this node download the newest release from GitHub itself; everything after that is unchanged.**
+
+On the Upgrade page, ticking **Fetch from online** greys out the file picker, and **Upgrade** then takes the newest published release of `micush/gravinet` — otherwise the highest `v<number>` tag — and downloads its source archive into the same spool file an upload lands in. From there it is the path an upload takes: the version is read from the archive, it is built on this node, preflighted, and applied behind the confirm-or-rollback guard. It works for all three targets: this node (`POST /api/upgrade/source?online=1`), specific peers, and "all peers, then this node" (`POST /api/upgrade/push` with an `online=1` form field instead of a `source` part; the archive is downloaded once here and those bytes are pushed to every peer).
+
+The tags are tried newest first (the release, then up to ten tags from the highest down), and a tag whose archive is not a gravinet source tree is skipped, since a repository's tags are not guaranteed to all be this project's. The repository is fixed in code; nothing typed in the UI reaches the request. The download is capped at the same 128 MB as an upload. A lookup or download failure is a `422` with a plain message and nothing is built.
+
+**New `get.sh` at the repository root** for a one-line install, the same way as for Anyname: `curl -fsSL https://raw.githubusercontent.com/micush/gravinet/HEAD/get.sh | sudo bash`. It finds the newest release (else the highest `v<number>` tag), downloads that tag's source archive, checks it is a gravinet tree (`go.mod` with `module gravinet`, a numeric version in `cmd/gravinet/main.go`) and runs `install/install-<os>.sh` for Linux, macOS, FreeBSD or OpenBSD from it. Anything after `--` goes to the installer, and `--version TAG` picks a tag. The README Install section documents it. `get.sh` was run against a local fake GitHub with a stub installer (latest lookup, `--version`, argument pass-through); it has not been run against the real GitHub or with the real installers.
+
+Verified with tests against a fake GitHub (httptest): release-then-tags ordering, numeric tag order (v9 < v10), the spool file being the downloaded bytes under the state directory, a foreign tag being skipped and its spool file removed, a missing archive and only-foreign tags being refused, the local source endpoint fetching then handing the bytes to the apply op, a failed fetch building nothing, and the push endpoint fetching once and delivering the archive to a peer. Not verified: the `internal/mesh` tests (untouched by this change, but they had not finished after 10 minutes, so the full `go test ./...` was not completed; every other package passed, including `webadmin`, `upgrade` and `cmd/gravinet`), against the real GitHub (the sandbox cannot reach it), a real build of a fetched archive, and in a browser (the page's script was only syntax-checked by the existing UI tests).
+
+---
+
 ## v1019 — 2026-08-30
 
 **`gravinet tui` did not build on Windows at all — `syscall.SetConsoleMode` doesn't exist in Go's standard library, on any platform, ever.**

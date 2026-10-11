@@ -400,14 +400,27 @@ func (s *Server) handleUpgradeSource(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "POST required"})
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, upgrade.MaxSourceUploadSize)
-	path, sum, err := spoolUpload(s.upg.StateDir, r.Body)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-		return
+	var path, sum string
+	var err error
+	if r.URL.Query().Get("online") == "1" {
+		// "Fetch from online": this node downloads the newest release itself instead of receiving an archive.
+		var tag string
+		path, sum, tag, err = fetchRelease(r.Context(), s.upg.StateDir)
+		if err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": err.Error()})
+			return
+		}
+		s.log.Infof("upgrade: fetched %s from GitHub (sha256 %s) from the web admin", tag, sum[:12])
+	} else {
+		r.Body = http.MaxBytesReader(w, r.Body, upgrade.MaxSourceUploadSize)
+		path, sum, err = spoolUpload(s.upg.StateDir, r.Body)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
 	}
 	defer os.Remove(path)
-	s.log.Infof("upgrade: building uploaded source (sha256 %s) from the web admin", sum[:12])
+	s.log.Infof("upgrade: building source (sha256 %s) from the web admin", sum[:12])
 	body, _ := json.Marshal(map[string]any{"src_path": path})
 	s.op(w, "apply", body)
 }

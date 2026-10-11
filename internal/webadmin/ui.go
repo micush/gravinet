@@ -10960,7 +10960,7 @@ async function drawUpgrade(host){
       + esc(peerName) + '\u2019, which is selected above. Disabled here so it can\u2019t look like it\u2019s upgrading that peer when it isn\u2019t. Select \u201cThis node\u201d to use this on the node you\u2019re actually on, or log into '
       + esc(peerName) + '\u2019s own web admin to upgrade it there.</div>'));
   }
-  stCard.appendChild($('<div class="hint help-desc" style="margin:0 0 10px">Select a [gravinet] source archive to deploy.</div>'));
+  stCard.appendChild($('<div class="hint help-desc" style="margin:0 0 10px">Select a [gravinet] source archive to deploy, or tick <b>Fetch from online</b> to get the newest release from GitHub instead.</div>'));
 
   const up = $('<div class="tbar"></div>');
   // No format choice on this side: .tgz/.tar.gz and .zip are both accepted,
@@ -10970,7 +10970,15 @@ async function drawUpgrade(host){
   // filter sensibly.
   const fileIn = $('<input type="file" class="up-file" accept=".tgz,.tar.gz,.zip,application/gzip,application/zip">');
   const upgradeBtn = $('<button class="sm" style="margin-left:16px">Upgrade</button>');
+  // "Fetch from online": the node downloads the newest release from GitHub itself when Upgrade is pressed, instead
+  // of being given a file. The rest of the process (version check, build, push to peers, confirm-or-rollback) is
+  // the same as for an uploaded archive.
+  const onlineBox = $('<input type="checkbox" id="up-online">');
+  const onlineLbl = $('<label for="up-online" style="margin-left:24px;display:inline-flex;align-items:center;gap:6px;cursor:pointer">Fetch from online</label>');
+  onlineLbl.insertBefore(onlineBox, onlineLbl.firstChild);
+  onlineBox.onchange = () => { fileIn.disabled = onlineBox.checked; };
   up.appendChild(fileIn);
+  up.appendChild(onlineLbl);
   up.appendChild(upgradeBtn);
   stCard.appendChild(up);
 
@@ -11086,7 +11094,8 @@ async function drawUpgrade(host){
     // place: the page looked mid-rollout while nothing was running.
     if (resBox) resBox.innerHTML = '';
     host._upgradeResults = '';
-    if (!fileIn.files[0]){ await noticeModal('Pick a source .tgz/.tar.gz or .zip first.'); return; }
+    const online = onlineBox.checked;
+    if (!online && !fileIn.files[0]){ await noticeModal('Pick a source .tgz/.tar.gz or .zip first, or tick Fetch from online.'); return; }
     const sel = peerPicker ? peerPicker.get() : [];
     const allThenLocal = sel.indexOf(ALL_PEERS) !== -1;
     const nodes = allThenLocal ? targets.map(p => p.node_id) : sel;
@@ -11114,7 +11123,7 @@ async function drawUpgrade(host){
         : (nodes.length === 1 ? 'Upgrade this peer?' : 'Upgrade these ' + nodes.length + ' peers? If the first one fails, the rollout stops there \u2014 otherwise every one of them is attempted regardless of failures elsewhere.') + seedNote;
       if (!await confirmModal(msg, { title: allThenLocal ? 'Upgrade the fleet' : 'Upgrade peers', okLabel: 'Upgrade' })) return;
     } else {
-      if (!await confirmModal('Build the selected archive on this node and restart into it?', { title: 'Upgrade this node', okLabel: 'Upgrade' })) return;
+      if (!await confirmModal((onlineBox.checked ? 'Download the newest release from GitHub, build it on this node and restart into it?' : 'Build the selected archive on this node and restart into it?'), { title: 'Upgrade this node', okLabel: 'Upgrade' })) return;
     }
 
     // applyLocal builds+applies on THIS node (/api/upgrade/source) and restarts
@@ -11133,11 +11142,12 @@ async function drawUpgrade(host){
         upgradeBtn.textContent = 'Building' + '.'.repeat(buildDots);
       }, 450);
       try {
-        const src = fileIn.files[0];
-        if (!src){ await noticeModal('The selected file is no longer available. Pick the source archive again.'); return; }
+        const src = online ? null : fileIn.files[0];
+        if (!online && !src){ await noticeModal('The selected file is no longer available. Pick the source archive again.'); return; }
         let resp;
         try {
-          resp = await fetch('/api/upgrade/source', { method:'POST', body: src });
+          resp = online ? await fetch('/api/upgrade/source?online=1', { method:'POST' })
+                        : await fetch('/api/upgrade/source', { method:'POST', body: src });
         } catch (e) {
           // Same failure mode as pushBatch's: a File is a handle to a path,
           // read when the body is streamed rather than when it was picked, so
@@ -11269,7 +11279,7 @@ async function drawUpgrade(host){
         try {
           const fd = new FormData();
           fd.append('nodes', JSON.stringify(batchNodes));
-          fd.append('source', srcFile());
+          if (online) fd.append('online', '1'); else fd.append('source', srcFile());
           resp = await fetch('/api/upgrade/push', { method:'POST', body: fd });
         } catch (e) {
           // Never reached the server, or the archive could not be read off
@@ -14569,6 +14579,9 @@ function mdRender(src){
       html += '<hr style="border:none;border-top:1px solid var(--line);margin:24px 0">';
       i++; continue;
     }
+    // A line that is only an image (![alt](path)) is skipped: this page cannot serve the
+    // files in snaps/, so it would otherwise show up as a stray "!" and a broken link.
+    if (/^!\[[^\]]*\]\([^)]*\)\s*$/.test(line)){ closeList(); i++; continue; }
     const h = line.match(/^(#{1,6})\s+(.*)$/);
     if (h){
       closeList();
