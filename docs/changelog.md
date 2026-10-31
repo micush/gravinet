@@ -2,6 +2,21 @@
 
 ---
 
+## v1026 — 2026-10-31
+
+**New `CLAUDE.md` at the top of the tree: the standing release process and house rules for Claude working on gravinet.** It was adapted from the owner's `dnsdir` file and rewritten for this project, so a future session follows the process without being told.
+
+- **Release process:** do the work; build and test first (`gofmt`, `go build`, `go vet`, `go test`, with `-timeout 60m` for `internal/mesh`); cross-compile every target in `scripts/build-release.sh` with cgo off; bump `version` in `cmd/gravinet/main.go` by one; add an entry here in this file's style; then one commit with the message `see changelog for release info` and a lightweight `vN` tag, not pushed unless asked.
+- **Per-area checks** for the wire protocol (mixed-version meshes during a rollout), the web admin (raw-string page script, no native dialogs, help entries), login (root or the `gravinet` group, then PAM / `login_passwd` / `LogonUser`), the installers, GUI/TUI/CLI parity, the upgrade path and README images. Each names the tests that guard it.
+- **This is the owner's Mac, not a sandbox:** no installers, `sudo`, user/group/PAM changes or daemon restarts without asking. The macOS test failures that predate v1025 are listed so they aren't mistaken for new ones.
+- **House rules carried over:** no banners, no status text between cards, short GUI text with explanations in help, stdlib only, `distribute-gravinet` kept out of the tree.
+
+No code change. The dnsdir-specific parts (election, VIPs, DNS pools, BGP/anycast, the tarball-per-request hand-back) were left out; anything the file says about gravinet was checked against the tree, its tests and this changelog.
+
+Verified: `go build ./...` and the `cmd/gravinet` tests pass with the new version, and all ten release targets cross-compile with cgo off. Not verified: the other test suites (no code changed).
+
+---
+
 ## v1025 — 2026-10-31
 
 **After a fresh install nobody could log in to the web admin.** Web logins are limited to root and members of the `gravinet` OS group, and a fresh install created that group empty. Root has no password on a stock macOS (and often on Ubuntu), and System > Users, the normal way to add members, is behind the login itself. The log said `user "…" is not root and not a member of the gravinet group`.
