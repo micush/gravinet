@@ -662,6 +662,33 @@ if (-not $NoStart) {
   if ($wasRunning) { Write-Host "==> restarted $ServiceName" } else { Write-Host "==> started $ServiceName" }
 }
 
+# Web logins are limited to members of the local gravinet group (see
+# internal/service/groups.go), and a fresh install leaves that group empty, so
+# nobody could sign in to reach System > Users and add themselves. Grant the
+# account that ran the installer. Done with net localgroup directly rather
+# than 'gravinet system users grant': Windows account names can carry capitals
+# and spaces, which that command's Unix-style name check rejects. Exit code
+# 1378 is "already a member". Non-fatal either way.
+Write-Host "==> web admin login"
+$GrantedUser = ""
+$GrantUser = $env:USERNAME
+if ($GrantUser -and $GrantUser -notmatch '\$$' -and $GrantUser -ne "SYSTEM") {
+  # cmd /c keeps net's stderr inside cmd: under Windows PowerShell 5.1 with
+  # $ErrorActionPreference = "Stop", redirecting a native command's stderr
+  # turns it into a terminating error.
+  cmd.exe /c "net localgroup gravinet >nul 2>&1 || net localgroup gravinet /add >nul 2>&1"
+  cmd.exe /c "net localgroup gravinet `"$GrantUser`" /add >nul 2>&1"
+  if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 1378) {
+    $GrantedUser = $GrantUser
+    Write-Host "    $GrantUser may log in to the web admin (member of the gravinet group)"
+  } else {
+    Write-Warning "could not add $GrantUser to the gravinet group; run from an elevated prompt:  net localgroup gravinet `"$GrantUser`" /add"
+  }
+} else {
+  Write-Host "    no interactive installing user detected; to let an account log in, run:"
+  Write-Host "        net localgroup gravinet NAME /add"
+}
+
 Write-Host "==> Desktop shortcut"
 $Desktop = [Environment]::GetFolderPath("Desktop")
 if ($Desktop -and (Test-Path $Desktop)) {
@@ -686,7 +713,7 @@ if ($Desktop -and (Test-Path $Desktop)) {
 gravinet installed and running ($ServiceName).
 
 Web admin:  https://127.0.0.1:$(Get-WebPort)   (self-signed TLS - accept the warning)
-            log in with your Windows account
+            $(if ($GrantedUser) { "log in as $GrantedUser with your Windows password" } else { "log in with a Windows account in the gravinet group" })
             Remote box? tunnel it:  ssh -L $(Get-WebPort):127.0.0.1:$(Get-WebPort) <user>@<host>
 
 Note: Windows needs the Wintun driver at runtime. A release build embeds it; a

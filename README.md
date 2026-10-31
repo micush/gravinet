@@ -232,11 +232,11 @@ ssh -L 8443:127.0.0.1:8443 user@your-server
 # then open https://localhost:8443
 ```
 
-To limit which system users may log in, list them under `web_admin.allow_users` (empty means any account the system accepts). To expose the admin on the network instead of tunnelling, set `web_admin.listen` to `0.0.0.0:8443`, then firewall it and supply a real certificate in `tls_cert` and `tls_key`. Three failed logins in a minute lock the address out for 15 minutes.
+Only root and members of the `gravinet` OS group may log in. The installer adds the account that ran it; add others on System > Users or with `sudo gravinet system users grant NAME` (an existing account; its password is left alone). To expose the admin on the network instead of tunnelling, set `web_admin.listen` to `0.0.0.0:8443`, then firewall it and supply a real certificate in `tls_cert` and `tls_key`. Three failed logins in a minute lock the address out for 15 minutes.
 
 Logins use the system's own accounts: **PAM** on Linux, macOS and FreeBSD, `login_passwd` (BSD auth) on OpenBSD, and `LogonUser` on Windows. That needs a build with system auth, which the installers make. A plain cross-compiled `CGO_ENABLED=0` Linux or macOS binary has no PAM, so the admin falls back to local users. Create one with `gravinet genpass`, set `auth_mode` to `local`, and add it to `web_admin.users`.
 
-**Can't log in?** Check the daemon's startup log. The line `webadmin: listening … (auth=pam)` means PAM is active. `(auth=local)` means PAM wasn't compiled into this binary, so system logins can't work, and the log says so and tells you to reinstall from source or switch to a local user. The other common cause is a missing `/etc/pam.d/gravinet` file, which the daemon warns about at startup with the exact command to create it. The installers check that the binary really links libpam and rebuild a PAM-enabled one when needed, warning loudly if they can't.
+**Can't log in?** Check the daemon's startup log. A line saying the user `is not root and not a member of the gravinet group` means exactly that: run `sudo gravinet system users grant NAME` (on Windows, `net localgroup gravinet NAME /add` from an elevated prompt). The line `webadmin: listening … (auth=pam)` means PAM is active. `(auth=local)` means PAM wasn't compiled into this binary, so system logins can't work, and the log says so and tells you to reinstall from source or switch to a local user. The other common cause is a missing `/etc/pam.d/gravinet` file, which the daemon warns about at startup with the exact command to create it. The installers check that the binary really links libpam and rebuild a PAM-enabled one when needed, warning loudly if they can't.
 
 ---
 

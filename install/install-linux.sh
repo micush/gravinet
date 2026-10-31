@@ -1048,6 +1048,27 @@ fi
 echo "==> web admin PAM service"
 write_pam_service
 
+echo "==> web admin login"
+# Web logins are limited to root and members of the gravinet group (see
+# internal/service/groups.go), and a fresh install leaves that group empty.
+# Root often has no password (stock macOS, Ubuntu), and System > Users, the
+# usual way to add members, needs a login first, so without this step nobody
+# can sign in after a fresh install. Grant the account that ran the installer.
+# Not fatal: a --bin binary older than 'system users grant' just gets the hint.
+GRANTED_USER=""
+if GRANT_U="$(desktop_user)"; then
+  if grant_out="$("$BIN" system users grant "$GRANT_U" 2>&1)"; then
+    GRANTED_USER="$GRANT_U"
+    echo "    $GRANT_U may log in to the web admin (member of the gravinet group)"
+  else
+    echo "    warning: could not grant $GRANT_U web admin access: $grant_out" >&2
+    echo "    grant it by hand:  sudo $BIN system users grant $GRANT_U" >&2
+  fi
+else
+  echo "    no non-root installing user detected; to let an account log in, run:"
+  echo "        sudo $BIN system users grant NAME"
+fi
+
 echo "==> firewalld"
 if [ "$FIREWALL" = 1 ]; then
   open_firewalld
@@ -1185,7 +1206,11 @@ else
 fi
 
 if [ "$PAM_BUILT" = 1 ]; then
-  web_auth="log in with a system account (PAM)"
+  if [ -n "$GRANTED_USER" ]; then
+    web_auth="log in as $GRANTED_USER with its system password (PAM)"
+  else
+    web_auth="log in with a system account in the gravinet group (PAM)"
+  fi
 else
   web_auth="PAM is NOT compiled in — see the warning below"
 fi

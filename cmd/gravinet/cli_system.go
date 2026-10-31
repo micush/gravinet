@@ -421,8 +421,14 @@ func cmdSystemSyslog(args []string) {
 // gravinet group, not config entries, which is why this goes through
 // service.ListSystemUsers/AddSystemUser/... and not openCfg.
 func cmdSystemUsers(args []string) {
-	action, rest := systemAction(args, v("show", "list", "add", "del", "remove", "passwd", "expiry"))
+	action, rest := systemAction(args, v("show", "list", "add", "grant", "del", "remove", "passwd", "expiry"))
 	switch action {
+	case "grant":
+		if len(rest) != 1 {
+			fatal("system users grant NAME  (existing account; password untouched)")
+		}
+		ok, note := service.GrantSystemUser(rest[0])
+		reportHostOp("grant user", ok, note)
 	case "add":
 		fs := flag.NewFlagSet("system users add", flag.ExitOnError)
 		pass := fs.String("pass", "", "password (omit to be prompted)")

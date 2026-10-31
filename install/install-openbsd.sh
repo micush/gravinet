@@ -436,6 +436,27 @@ fi
 echo "==> writing rc.d script $RCSCRIPT"
 "$BIN" service install -config "$CONFIG" >/dev/null
 
+echo "==> web admin login"
+# Web logins are limited to root and members of the gravinet group (see
+# internal/service/groups.go), and a fresh install leaves that group empty.
+# Root often has no password (stock macOS, Ubuntu), and System > Users, the
+# usual way to add members, needs a login first, so without this step nobody
+# can sign in after a fresh install. Grant the account that ran the installer.
+# Not fatal: a --bin binary older than 'system users grant' just gets the hint.
+GRANTED_USER=""
+if GRANT_U="$(desktop_user)"; then
+  if grant_out="$("$BIN" system users grant "$GRANT_U" 2>&1)"; then
+    GRANTED_USER="$GRANT_U"
+    echo "    $GRANT_U may log in to the web admin (member of the gravinet group)"
+  else
+    echo "    warning: could not grant $GRANT_U web admin access: $grant_out" >&2
+    echo "    grant it by hand:  doas $BIN system users grant $GRANT_U" >&2
+  fi
+else
+  echo "    no non-root installing user detected; to let an account log in, run:"
+  echo "        doas $BIN system users grant NAME"
+fi
+
 if [ "$START" = 1 ]; then
   rcctl enable gravinet
   rcctl start gravinet
@@ -606,7 +627,8 @@ cat <<EOF
 Web admin:  https://127.0.0.1:$(cfg_web_port)   (self-signed TLS — accept the warning)
             Log in with a system account — its password is checked via
             login_passwd(8) (BSD auth). The daemon runs as root so it can.
-            Restrict who may log in with web_admin.allow_users.
+            Only root and members of the gravinet group may log in${GRANTED_USER:+;
+            $GRANTED_USER was added to it}. Add more:  doas $BIN system users grant NAME
             Remote box? tunnel it:  ssh -L $(cfg_web_port):127.0.0.1:$(cfg_web_port) <user>@<host>
 
 Firewall (pf): inbound ${UNDERLAY_PORT}/tcp+udp was opened in /etc/pf.conf

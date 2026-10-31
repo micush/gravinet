@@ -271,6 +271,33 @@ func SetSystemUserExpiry(name string, expires time.Time) (bool, string) {
 	return setOSExpiry(name, expires)
 }
 
+// GrantSystemUser lets an existing OS account sign in by adding it to
+// GravinetGroup, leaving its password and everything else alone. This is the
+// installers' bootstrap: a fresh install creates the group empty, root has no
+// password on a stock macOS (and often Ubuntu), and System > Users — the
+// normal way to add members — sits behind the very login nobody can pass
+// yet. So each installer grants the account that ran it (sudo/doas, or the
+// elevated Windows user) through this. Already a member is a no-op success,
+// which also keeps dscl -append from writing a duplicate entry on macOS.
+func GrantSystemUser(name string) (bool, string) {
+	if err := validUsername(name); err != nil {
+		return false, err.Error()
+	}
+	if !sysUserExists(name) {
+		return false, "no such account '" + name + "'"
+	}
+	if ok, hint := EnsureGravinetGroup(); !ok {
+		return false, "the " + GravinetGroup + " group doesn't exist and couldn't be created: " + hint
+	}
+	if IsGroupMember(name) {
+		return true, "'" + name + "' is already a member of the " + GravinetGroup + " group"
+	}
+	if ok, hint := addToGroup(name, GravinetGroup); !ok {
+		return false, "could not add '" + name + "' to the " + GravinetGroup + " group: " + hint
+	}
+	return true, "'" + name + "' added to the " + GravinetGroup + " group"
+}
+
 // DeleteSystemUser removes an OS account entirely. The caller (the HTTP
 // handler) is responsible for refusing to delete the account the caller is
 // currently signed in as — that's a session concern, not an OS one. Deleting
