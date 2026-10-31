@@ -2,6 +2,21 @@
 
 ---
 
+## v1025 — 2026-10-31
+
+**After a fresh install nobody could log in to the web admin.** Web logins are limited to root and members of the `gravinet` OS group, and a fresh install created that group empty. Root has no password on a stock macOS (and often on Ubuntu), and System > Users, the normal way to add members, is behind the login itself. The log said `user "…" is not root and not a member of the gravinet group`.
+
+- **New `gravinet system users grant NAME`.** Adds an existing account to the `gravinet` group (creating the group if needed) and leaves its password alone. Already a member is a no-op, so macOS's `dscl -append` no longer gets a duplicate entry.
+- **The macOS, Linux, FreeBSD and OpenBSD installers grant the account that ran them** (the sudo or doas user) with that command, in a new "web admin login" step, and the closing summary names it ("log in as NAME with its system password"). The OpenBSD summary no longer points at `web_admin.allow_users`, which has not been consulted since the group replaced it.
+- **The Windows installer adds `$env:USERNAME` to the group with `net localgroup`** directly, since Windows account names can carry capitals and spaces that the command's Unix-style name check rejects. It runs through `cmd /c` so `net`'s stderr cannot become a terminating error under Windows PowerShell 5.1.
+- None of this is fatal: when the grant fails, the installer finishes and prints the exact command to run by hand. The README's login section documents the group and the fix.
+
+An existing install that is already locked out does not need to reinstall: `sudo dseditgroup -o edit -a NAME -t user gravinet` on macOS, `sudo gravinet system users grant NAME` with this build, or `net localgroup gravinet NAME /add` on Windows. Membership is read on every login, so no restart is needed.
+
+Verified: builds, `go vet` clean, all `.sh` installers pass `bash -n`; the new command's error paths (unknown account, root, an invalid name, no name) exit 1 with a plain message; the test failures in `internal/service` and `internal/webadmin` on macOS are the same with and without this change (Linux-only group and VLAN tests, and timing tests). Not verified: any installer run end to end, a real grant on a live host, and the Windows installer at all (no Windows host).
+
+---
+
 ## v1024 — 2026-10-10
 
 **README: the install section shows just the one-line `get.sh` command.** The example with installer options and `--version` was removed. Text change only; nothing was rebuilt or run beyond `go vet` and the README tests.
