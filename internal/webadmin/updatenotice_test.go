@@ -119,11 +119,11 @@ func TestUpdateCheckToggleIsInSettingsGeneral(t *testing.T) {
 	// It must sit above the Logging card: everything from there down is node
 	// configuration that gets proxied to the selected peer, and a browser
 	// preference filed among those reads as one of them.
-	dark := strings.Index(src, `id="dark-mode-row"`)
+	theme := strings.Index(src, `id="theme-row"`)
 	upd := strings.Index(src, `id="update-check-row"`)
 	logging := strings.Index(src, "<h3>Logging</h3>")
-	if !(dark < upd && upd < logging) {
-		t.Error("the update-check toggle is not between Dark mode and the Logging card")
+	if !(theme < upd && upd < logging) {
+		t.Error("the update-check toggle is not between Theme and the Logging card")
 	}
 	// Its description is a settings-desc, so v908 hides it with help off.
 	if m := regexp.MustCompile(`Check for updates at login</div>\s*'\s*\+\s*'<div class="([^"]+)"`).FindStringSubmatch(src); m == nil || !strings.Contains(m[1], "settings-desc") {

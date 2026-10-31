@@ -891,12 +891,38 @@ function sectionTitlePill(c, en, apiPath, onToggle){
   return tag;
 }
 
-function theme(){ return document.documentElement.getAttribute('data-theme') || 'dark'; }
-function setTheme(t){ document.documentElement.setAttribute('data-theme', t); try{ localStorage.setItem('gravinet-theme', t); }catch(e){} }
+// Theme: 'auto' (the default) follows this device's light/dark setting, live,
+// through prefers-color-scheme; 'light' and 'dark' pin it. Only an explicit
+// choice is stored. The old 'gravinet-theme' key is dropped unread: the page
+// used to write whatever it detected on first load into it, so every browser
+// that ever opened the admin had a value there that nobody chose, and
+// honouring it would pin the theme exactly the way this replaces.
+const THEME_KEY = 'gravinet-theme-mode';
+const themeMQ = window.matchMedia ? window.matchMedia('(prefers-color-scheme: light)') : null;
+function themeMode(){
+  let m = null;
+  try { m = localStorage.getItem(THEME_KEY); } catch(e){}
+  return (m === 'light' || m === 'dark') ? m : 'auto';
+}
+function applyTheme(){
+  const m = themeMode();
+  const t = m !== 'auto' ? m : (themeMQ && themeMQ.matches ? 'light' : 'dark');
+  document.documentElement.setAttribute('data-theme', t);
+}
+function setThemeMode(m){
+  try {
+    if (m === 'light' || m === 'dark') localStorage.setItem(THEME_KEY, m);
+    else localStorage.removeItem(THEME_KEY);
+  } catch(e){}
+  applyTheme();
+}
 (function(){
-  let t='dark';
-  try { t = localStorage.getItem('gravinet-theme') || (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light':'dark'); } catch(e){}
-  setTheme(t);
+  try { localStorage.removeItem('gravinet-theme'); } catch(e){}
+  applyTheme();
+  if (themeMQ) {
+    if (themeMQ.addEventListener) themeMQ.addEventListener('change', applyTheme);
+    else if (themeMQ.addListener) themeMQ.addListener(applyTheme); // Safari < 14
+  }
 })();
 
 // Update check at login. A browser preference like the theme above, not node
@@ -1641,7 +1667,7 @@ function buildSearchIndex(){
   // behind whichever tab happens to already be showing. See the generic
   // state[r.section+'Tab'] assignment in navigateToSearchResult below.
   const settingsRows = [
-    ['dark-mode-row', 'Dark mode', 'Switch between dark and light interface theme.', 'general'],
+    ['theme-row', 'Theme', 'Light, dark, or follow this device (dark mode).', 'general'],
     ['loginban-attempts-row', 'Lockout attempts', 'How many failed logins from one source before it is locked out.', 'security'],
     ['loginban-duration-row', 'Lockout duration', 'How long a lockout lasts once triggered, in minutes.', 'security'],
     ['listen-addrs-row', 'Admin interface addresses', 'Which IP addresses the admin interface answers on. Defaults to loopback plus this node\u2019s mesh addresses.', 'security'],
@@ -2375,7 +2401,7 @@ async function maybeShowUpdateNotice(brand){
 async function dashboard() {
   if (!(await load())) return;
   app.innerHTML = '';
-  // top bar: brand + peer selector (managed-mode toggle and dark mode moved to Settings)
+  // top bar: brand + peer selector (managed-mode toggle and theme moved to Settings)
   const top = $('<div class="top"><div class="brand">[gravinet]</div></div>');
   maybeShowUpdateNotice(top.querySelector('.brand'));
 
@@ -4282,19 +4308,18 @@ function secSettingsGeneral(c) {
 
   card.appendChild($('<h3>Appearance</h3>'));
 
-  // Dark mode toggle
-  const dm = $('<div class="settings-row" id="dark-mode-row"></div>');
-  const dmLabel = $('<div><div class="settings-label">Dark mode</div><div class="settings-desc">Switch between dark and light interface theme.</div></div>');
-  const dmSw = $('<label class="sw"><input type="checkbox" id="dark-mode-cb"><span class="sw-slider"></span></label>');
-  const dmCb = dmSw.querySelector('input');
-  dmCb.checked = theme() === 'dark';
-  dmCb.onchange = () => { setTheme(dmCb.checked ? 'dark' : 'light'); };
-  dm.appendChild(dmLabel); dm.appendChild(dmSw);
-  card.appendChild(dm);
+  // Theme: Auto follows this device's light/dark setting.
+  const th = $('<div class="settings-row" id="theme-row"></div>');
+  const thLabel = $('<div><div class="settings-label">Theme</div><div class="settings-desc">Auto follows this device.</div></div>');
+  const thSel = $('<select class="sel" id="theme-sel"><option value="auto">Auto</option><option value="light">Light</option><option value="dark">Dark</option></select>');
+  thSel.value = themeMode();
+  thSel.onchange = () => { setThemeMode(thSel.value); };
+  th.appendChild(thLabel); th.appendChild(thSel);
+  card.appendChild(th);
 
   c.appendChild(card); card = $('<div class="card"></div>');
 
-  // Updates card. A browser preference, like Dark mode above and unlike
+  // Updates card. A browser preference, like Theme above and unlike
   // everything in the Logging card below it — nothing here is proxied to a
   // peer, because the request it governs comes from this browser rather than
   // from any node. That is also why it sits in General: it changes what this
@@ -4402,7 +4427,7 @@ function secSettingsGeneral(c) {
   c.appendChild(card); card = $('<div class="card"></div>');
 
   // Dynamic DNS registration. Node configuration rather than a browser
-  // preference, so unlike Dark mode and Updates above it is loaded from and
+  // preference, so unlike Theme and Updates above it is loaded from and
   // saved to the node currently being managed.
   //
   // There is no enable switch: the interval is the switch, and what the

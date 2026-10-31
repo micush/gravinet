@@ -78,7 +78,7 @@ func ddnsParams(cfg *config.Config) (ddns.Params, error) {
 // an on-demand run would attach to if one is ever wanted — but not from the
 // settings page: triggering a registration is an operational action rather
 // than a preference, and a button that reaches out to somebody else's DNS
-// server does not belong beside a dark-mode switch. There was one there
+// server does not belong beside a theme picker. There was one there
 // through v995.
 func RunDDNSOnce(cfg *config.Config) (ddns.Result, error) {
 	p, err := ddnsParams(cfg)

@@ -166,7 +166,7 @@ func TestSettingsCoversTheGearPage(t *testing.T) {
 	}
 	// And it names the two rows that deliberately have nothing behind them
 	// here, matching cmd/gravinet/navparity_test.go's own noCLIForm set.
-	if !strings.Contains(out, "Dark mode") || !strings.Contains(out, "TLS certificate") {
+	if !strings.Contains(out, "Theme") || !strings.Contains(out, "TLS certificate") {
 		t.Errorf("settings does not account for the two rows with no equivalent:\n%s", out)
 	}
 }

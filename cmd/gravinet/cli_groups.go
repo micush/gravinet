@@ -293,7 +293,7 @@ var systemGroup = []groupLeaf{
 // of v553 it carries the whole page, not just cluster mode: every row there
 // with a config field behind it has a leaf here (see cli_settings.go's
 // package comment for the live-vs-restart split and why each setting lands
-// where it does). The one deliberate omission is Dark mode, a per-browser
+// where it does). The one deliberate omission is Theme, a per-browser
 // preference stored client-side with nothing in config.json to set.
 var settingsGroup = []groupLeaf{
 	{"login-ban", "web admin login lockout policy: ATTEMPTS SECONDS; needs a restart", cmdSettingsLoginBan},

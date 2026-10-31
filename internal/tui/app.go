@@ -982,7 +982,7 @@ func (m *model) refresh() {
 }
 
 // toggleTheme switches palettes, the terminal counterpart of the Settings
-// page's Dark mode row — which is the one setting there that this console
+// page's Theme row — which is the one setting there that this console
 // does have, precisely because it is a per-client preference rather than
 // something in config.json.
 func (m *model) toggleTheme() {

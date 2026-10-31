@@ -16,7 +16,7 @@ package tui
 //
 // Two rows on the web admin's Settings page have no CLI form at all, and
 // still don't here, for the same reasons cli_settings.go's own package
-// comment gives: Dark mode is a per-browser preference with nothing in
+// comment gives: Theme is a per-browser preference with nothing in
 // config.json behind it (this console's counterpart is the t key), and the
 // TLS certificate upload wants two pasted PEM blobs and deliberately never
 // auto-restarts, since the browser it could lock out is the one asking.

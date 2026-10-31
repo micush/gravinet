@@ -14,8 +14,8 @@ import (
 // distinction it violated is worth a guard rather than a memory: everything
 // else on Settings is a preference that takes effect when something else next
 // runs, and a control that reaches out to another organisation's DNS server on
-// click is a different kind of thing in the same visual row as a dark-mode
-// switch.
+// click is a different kind of thing in the same visual row as a theme
+// picker.
 func TestSettingsHasNoRegisterAction(t *testing.T) {
 	sec := between(t, indexHTML, "function secSettingsGeneral(c)", "\nfunction secSettingsSecurity")
 	for _, gone := range []string{"register now", "op:'register'", `op: 'register'`} {

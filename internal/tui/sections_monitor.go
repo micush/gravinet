@@ -1148,7 +1148,7 @@ func pageSettings(c pageCtx) []card {
 		{title: "performance", items: []item{perf}},
 		{title: "dynamic dns", items: []item{ddnsRows}},
 		{title: "not shown", items: []item{para{
-			text: "Two rows on the web admin's Settings page have nothing here to show. Dark mode is a per-browser " +
+			text: "Two rows on the web admin's Settings page have nothing here to show. Theme is a per-browser " +
 				"preference with nothing in config.json behind it — this console has its own theme, on the t key. " +
 				"The TLS certificate upload wants two PEM files pasted in, and is safer done where the browser you " +
 				"would lock out is the one asking.", tone: "mut"}}},

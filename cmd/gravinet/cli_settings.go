@@ -16,7 +16,7 @@ package main
 // handleTCPPort, handleNATState (live) and handleShellSetting,
 // handleUPnPSetting, handleGeoIPSetting (restart) in internal/webadmin.
 //
-// Dark mode — the one remaining Settings row — is deliberately absent: it's
+// Theme — the one remaining Settings row — is deliberately absent: it's
 // a per-browser preference stored client-side, not node config; there is
 // nothing in config.json for a CLI to set.
 
@@ -354,7 +354,7 @@ func joinPorts(ports []int) string {
 // here — it's copied from the handler's own editResult(w, err, restart) call,
 // so the two front doors can't drift apart on semantics.
 //
-// Two Settings rows still have no CLI form, both deliberately: Dark mode (a
+// Two Settings rows still have no CLI form, both deliberately: Theme (a
 // per-browser preference; nothing in config.json behind it) and TLS
 // certificate upload/reset (two PEM blobs, and the cert the operator's own
 // browser is trusting — the web handler pointedly refuses to auto-restart for
@@ -820,7 +820,7 @@ func cmdSettingsDDNS(args []string) {
 		// This is the register-now button that came off the web page in v996,
 		// put where it belongs. The objection then was that triggering a
 		// registration is an operational action and does not go beside a
-		// dark-mode switch; a terminal is exactly where operational actions do
+		// theme picker; a terminal is exactly where operational actions do
 		// go, and unlike a button this one prints what happened.
 		p, err := ddnsParamsForCheck(cfg)
 		if err != nil {

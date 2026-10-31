@@ -51,7 +51,7 @@ import (
 
 // Build metadata, overridable via -ldflags.
 var (
-	version = "1026"
+	version = "1027"
 	commit  = "none"
 )
 
@@ -213,7 +213,7 @@ run "gravinet <group>" alone to list what's under it, or
 "gravinet <group> <section> -h" for that command's own flags. Monitor's
 speedtest is the one page with no CLI path (it needs async control-socket
 protocol that doesn't exist yet) and says so rather than pretending to;
-Settings' Dark mode and TLS certificate upload have no CLI form either —
+Settings' Theme and TLS certificate upload have no CLI form either —
 the first is a per-browser preference with nothing in config.json behind
 it, the second wants two PEM files pasted in and is safer done where the
 browser you'd lock out is the one asking.

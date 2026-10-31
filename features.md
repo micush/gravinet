@@ -114,7 +114,7 @@ Open an HTTPS page served by the node itself — no extra software to install.
   DNS state, and daemon logs, and see LLDP/CDP neighbors on the wire.
 - **Remote shell** (off by default): a real terminal on the node, right in the
   browser, for when you need it.
-- **Light and dark themes.**
+- **Light and dark themes**, following the device's setting by default.
 - **Everything the UI does, a JSON API does too** — automate anything.
   See `docs/API.md` for the full reference.
 - **The same console, without a browser.** `gravinet tui` draws the same

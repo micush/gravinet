@@ -265,7 +265,7 @@ func TestSettingsGroupCoversSettingsPage(t *testing.T) {
 	// settingsGroup's doc comment. Listed explicitly so adding a third
 	// exemption is a visible decision rather than a quiet edit to a map.
 	noCLIForm := map[string]string{
-		"dark-mode":       "per-browser preference; nothing in config.json behind it",
+		"theme":           "per-browser preference; nothing in config.json behind it",
 		"tls-cert-upload": "two PEM blobs for the cert your own browser is trusting",
 		"tls-cert-reset":  "paired with tls-cert-upload",
 	}

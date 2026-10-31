@@ -2,6 +2,21 @@
 
 ---
 
+## v1027 — 2026-10-31
+
+**The web admin's theme follows the device's light or dark setting, live. Settings › General › Theme is now Auto, Light or Dark, defaulting to Auto.**
+
+The page did read `prefers-color-scheme`, but only once. On first load it wrote whatever it detected into `localStorage` as `gravinet-theme`, and from then on that value read back as a choice, so the theme was pinned to whatever the device was set to the first time the admin was opened. Switching macOS (or any OS) between light and dark never reached the page, and the only control was a Dark mode on/off switch.
+
+- **Auto** (the default, nothing stored) applies the OS setting and listens for it changing (`matchMedia(...).addEventListener('change', ...)`, with `addListener` for Safari before 14), so the page switches the moment the OS does. **Light** and **Dark** pin it, stored as `gravinet-theme-mode`; choosing Auto again clears that.
+- **The old `gravinet-theme` key is dropped unread.** Every browser that ever opened the admin has one, written by the detection above rather than chosen, so honouring it would keep the theme pinned. Someone who did pick Light or Dark on purpose picks it once more.
+- The Settings row is now **Theme**, a select, with the id `theme-row` in place of `dark-mode-row`. The CLI usage text, the TUI's "not shown" note and the nav-parity exemption (`noCLIForm`) say Theme to match; it is still a per-browser preference with no CLI form, and the TUI keeps its own `t` key. `features.md` notes the default.
+- New `theme_test.go`: Auto consults the OS and listens for changes, applying never writes storage, Auto clears the stored choice, the old key is removed, and the row offers Auto/Light/Dark and shows the current choice.
+
+Verified: `go build ./...`, `go vet` on `cmd/gravinet`, `internal/webadmin` and `internal/tui`; `cmd/gravinet` (nav parity included) and `internal/tui` pass; `internal/webadmin` passes apart from the six known macOS failures (VLAN, concurrency timing, tshoot), the same as on a clean tree. The real theme code, cut out of `indexHTML`, was run in JavaScriptCore (`osascript -l JavaScript`) against stand-ins for `matchMedia`, `localStorage` and the document: 14 cases (fresh load in light, a live switch to dark and back, the old key ignored and removed, Light pinned through an OS change, back to Auto, a stored Dark winning, a junk value reading as Auto) all pass. A scratch daemon on loopback served the page with the new row. All ten release targets cross-compile with cgo off. Not verified: the page in a real browser — the in-app browser refused the scratch daemon's self-signed certificate, so the select's look and a live OS switch on screen were not seen; Safari's older `addListener` path.
+
+---
+
 ## v1026 — 2026-10-31
 
 **New `CLAUDE.md` at the top of the tree: the standing release process and house rules for Claude working on gravinet.** It was adapted from the owner's `dnsdir` file and rewritten for this project, so a future session follows the process without being told.
