@@ -2,6 +2,20 @@
 
 ---
 
+## v1028 — 2026-10-31
+
+**Monitor › Latency showed "no reply" for every peer's IPv6 address on macOS. It now pings IPv6 with `ping6` there.**
+
+`PingRTT` ran `ping` for both families. macOS's `ping` is IPv4-only: given an IPv6 literal it prints `cannot resolve …: Unknown host` and exits, and it has no `-6`. Every IPv6 probe from a Mac therefore failed before sending a packet, and the page, `gravinet latency` and the TUI (all three share `PingRTT`) read "no reply" for IPv6 while IPv4 worked.
+
+- **New `pingBinaryForOS`:** `ping6` for an IPv6 address on darwin, `ping` everywhere else. `PingArgsForOS` gives that case `-c 2` with no `-t`, which `ping6` doesn't have. IPv4 on macOS, and every family on Linux, FreeBSD, OpenBSD and Windows, keep exactly the argv they had.
+- **A 4-second deadline on every ping run** (`exec.CommandContext`). Without a timeout flag, an unanswered `ping6 -c 2` waits about 12 s; the deadline stops it, and replies printed before it are still parsed. A run cut off by the deadline reads "no reply", never "could not run ping".
+- New tests: `TestPingBinaryForOS` (program and argv per OS and family, including a scoped `fe80::…%utun0`) and `TestPingRTTIPv6OnDarwin` (on a Mac, `::1` answers through the real `ping6`, and an unanswered `2001:db8::1` gives up within the deadline).
+
+Verified: `go build ./...`, `go vet` and `gofmt` clean on the touched packages; `cmd/gravinet` passes; `internal/webadmin` passes apart from the six known macOS failures, the same as on a clean tree, and every ping test passes, the darwin one against the real `ping6` (5.0 s, the deadline included). The exact new command (`ping6 -c 2`, cut at 4 s) reached all six peers of a live mesh over their `fd00:203::/64` overlay addresses with RTTs matching their IPv4 ones (2.4–149 ms). All ten release targets cross-compile with cgo off. Not verified: the Latency page itself on the installed daemon (still 1027 until it is upgraded); FreeBSD and OpenBSD IPv6 latency (their argv is unchanged, so whether their `ping` takes IPv6 is untested here — FreeBSD before 13 needs `ping6` too).
+
+---
+
 ## v1027 — 2026-10-31
 
 **The web admin's theme follows the device's light or dark setting, live. Settings › General › Theme is now Auto, Light or Dark, defaulting to Auto.**

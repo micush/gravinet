@@ -2,6 +2,7 @@ package webadmin
 
 import (
 	"bufio"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"gravinet/internal/config"
 	"gravinet/internal/hosts"
@@ -190,6 +192,13 @@ func PingArgsForOS(goos, addr string) []string {
 	case "windows":
 		return []string{"-n", "2", "-w", "1000", addr}
 	case "darwin", "freebsd":
+		if goos == "darwin" && isIPv6Literal(addr) {
+			// macOS's ping is IPv4-only (it reports "cannot resolve" for any
+			// IPv6 literal, and has no -6), so pingBinaryForOS sends these to
+			// ping6, which has no -t either. PingRTT's own deadline bounds it
+			// instead: unanswered, ping6 -c 2 otherwise waits about 12 s.
+			return []string{"-c", "2", addr}
+		}
 		// Both are BSD ping and share -t (overall timeout, in seconds) with
 		// identical semantics. Deliberately not -W here: FreeBSD's ping -W is
 		// in milliseconds, unlike Linux's -W which is in seconds — passing
@@ -212,6 +221,29 @@ func PingArgsForOS(goos, addr string) []string {
 	}
 }
 
+// pingBinaryForOS names the ping program PingArgsForOS's argv is for: ping6
+// for an IPv6 address on macOS, whose ping cannot reach IPv6 at all — which
+// left every peer's IPv6 latency reading "no reply" on a Mac — and ping
+// everywhere else.
+func pingBinaryForOS(goos, addr string) string {
+	if goos == "darwin" && isIPv6Literal(addr) {
+		return "ping6"
+	}
+	return "ping"
+}
+
+// isIPv6Literal reports whether addr is an IPv6 address (zone allowed), not a
+// hostname or an IPv4 address.
+func isIPv6Literal(addr string) bool {
+	a, err := netip.ParseAddr(addr)
+	return err == nil && a.Is6() && !a.Is4In6()
+}
+
+// pingDeadline caps one PingRTT run. Every argv above finishes within about
+// 2–3 s on its own except macOS's ping6, which has no timeout flag; output up
+// to the deadline is still parsed, so a reply that arrived before it counts.
+const pingDeadline = 4 * time.Second
+
 // PingRTT shells out to the OS's native ping (2 probes, ~1s budget each) and
 // parses the reported round-trip time. Used instead of a raw ICMP socket
 // (golang.org/x/net/icmp) to avoid an external module dependency and the
@@ -223,7 +255,9 @@ func PingArgsForOS(goos, addr string) []string {
 //
 // Exported for cmdLatency (cmd/gravinet) — see PingArgsForOS's doc comment.
 func PingRTT(addr string) (float64, error) {
-	cmd := exec.Command("ping", PingArgsForOS(runtime.GOOS, addr)...)
+	ctx, cancel := context.WithTimeout(context.Background(), pingDeadline)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, pingBinaryForOS(runtime.GOOS, addr), PingArgsForOS(runtime.GOOS, addr)...)
 	out, runErr := cmd.CombinedOutput()
 	best := -1.0
 	for _, m := range pingTimeRe.FindAllStringSubmatch(string(out), -1) {
@@ -232,7 +266,7 @@ func PingRTT(addr string) (float64, error) {
 		}
 	}
 	if best < 0 {
-		if len(out) == 0 && runErr != nil {
+		if len(out) == 0 && runErr != nil && ctx.Err() == nil {
 			// The command itself never produced output — most likely ping
 			// isn't installed, not "peer didn't reply". Worth distinguishing:
 			// one means "check this host's setup", the other "check the peer".

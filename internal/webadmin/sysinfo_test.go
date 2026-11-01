@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"gravinet/internal/config"
 	"gravinet/internal/logx"
@@ -353,6 +354,49 @@ func TestPingArgsForOS(t *testing.T) {
 		if a == "-W" {
 			t.Fatal("openbsd ping args must not include -W; OpenBSD's ping has no such flag")
 		}
+	}
+}
+
+// macOS's ping cannot take an IPv6 address at all, so every peer's IPv6
+// latency read "no reply" on a Mac. IPv6 goes to ping6 there, without -t
+// (ping6 has none); IPv4, and IPv6 on every other OS, are unchanged.
+func TestPingBinaryForOS(t *testing.T) {
+	cases := []struct {
+		goos, addr, wantBin string
+		wantArgs            []string
+	}{
+		{"darwin", "fd00:203::1", "ping6", []string{"-c", "2", "fd00:203::1"}},
+		{"darwin", "fe80::1%utun0", "ping6", []string{"-c", "2", "fe80::1%utun0"}},
+		{"darwin", "192.168.203.1", "ping", []string{"-c", "2", "-t", "1", "192.168.203.1"}},
+		{"linux", "fd00:203::1", "ping", []string{"-c", "2", "-W", "1", "fd00:203::1"}},
+		{"freebsd", "fd00:203::1", "ping", []string{"-c", "2", "-t", "1", "fd00:203::1"}},
+		{"windows", "fd00:203::1", "ping", []string{"-n", "2", "-w", "1000", "fd00:203::1"}},
+	}
+	for _, tc := range cases {
+		if got := pingBinaryForOS(tc.goos, tc.addr); got != tc.wantBin {
+			t.Errorf("pingBinaryForOS(%q, %q) = %q, want %q", tc.goos, tc.addr, got, tc.wantBin)
+		}
+		if got := PingArgsForOS(tc.goos, tc.addr); !reflect.DeepEqual(got, tc.wantArgs) {
+			t.Errorf("PingArgsForOS(%q, %q) = %v, want %v", tc.goos, tc.addr, got, tc.wantArgs)
+		}
+	}
+}
+
+// On a Mac, the IPv6 loopback must answer through the real ping6, and an
+// unreachable IPv6 address must give up within the deadline, not ping6's 12 s.
+func TestPingRTTIPv6OnDarwin(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS-specific: ping6 only replaces ping there")
+	}
+	if _, err := PingRTT("::1"); err != nil {
+		t.Fatalf("PingRTT(::1) = %v, want a reply", err)
+	}
+	start := time.Now()
+	if _, err := PingRTT("2001:db8::1"); err == nil {
+		t.Fatal("pinging a documentation IPv6 address should not succeed")
+	}
+	if d := time.Since(start); d > pingDeadline+time.Second {
+		t.Errorf("an unanswered IPv6 ping took %v; the deadline is %v", d, pingDeadline)
 	}
 }
 
